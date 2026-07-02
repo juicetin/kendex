@@ -33,6 +33,7 @@ const MAX_RETRIES = 3;
 const BASE_DELAY_MS = 1000;
 const SSE_RESPONSE_HEADER_TIMEOUT_MS = 20_000;
 const CODEX_TOOL_CALL_PROVIDERS = new Set(["openai", "openai-codex", "opencode"]);
+const WEBSOCKET_CONNECTION_LIMIT_REACHED_CODE = "websocket_connection_limit_reached";
 const CODEX_RESPONSE_STATUSES = new Set(["completed", "incomplete", "failed", "cancelled", "queued", "in_progress"]);
 const OPENAI_BETA_RESPONSES_WEBSOCKETS = "responses_websockets=2026-02-06";
 const SESSION_WEBSOCKET_CACHE_TTL_MS = 5 * 60 * 1000;
@@ -611,6 +612,11 @@ function sleep(ms: number, signal: AbortSignal | undefined): Promise<void> {
 	});
 }
 
+export function responseHeaderTimeoutMsFromOptions(options: SimpleStreamOptions | undefined): number {
+	const value = (options as { timeoutMs?: unknown } | undefined)?.timeoutMs;
+	return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : SSE_RESPONSE_HEADER_TIMEOUT_MS;
+}
+
 export async function fetchWithResponseHeaderTimeout(
 	url: string,
 	init: RequestInit,
@@ -1131,6 +1137,12 @@ function isRetryableEarlyWebSocketError(error: unknown): boolean {
 	return /^WebSocket (error|closed)(?:\s|$)/.test(message);
 }
 
+function isWebSocketConnectionLimitReachedError(error: unknown): boolean {
+	const candidate = error as { code?: unknown; message?: unknown };
+	if (candidate?.code === WEBSOCKET_CONNECTION_LIMIT_REACHED_CODE) return true;
+	return typeof candidate?.message === "string" && candidate.message.includes(WEBSOCKET_CONNECTION_LIMIT_REACHED_CODE);
+}
+
 async function* mapCodexEvents(events: AsyncIterable<StreamEventShape>): AsyncIterable<StreamEventShape> {
 	let sawTerminalResponse = false;
 	const completedOutputItems = new Set<string>();
@@ -1145,11 +1157,16 @@ async function* mapCodexEvents(events: AsyncIterable<StreamEventShape>): AsyncIt
 		if (!type) continue;
 
 		if (type === "error") {
-			throw new Error(`Codex error: ${event.message || event.code || JSON.stringify(event)}`);
+			const error = new Error(`Codex error: ${event.message || event.code || JSON.stringify(event)}`) as Error & { code?: string };
+			if (typeof event.code === "string") error.code = event.code;
+			throw error;
 		}
 
 		if (type === "response.failed") {
-			throw new Error(event.response?.error?.message || "Codex response failed");
+			const responseError = event.response?.error as { code?: unknown; message?: unknown } | undefined;
+			const error = new Error(typeof responseError?.message === "string" ? responseError.message : "Codex response failed") as Error & { code?: string };
+			if (typeof responseError?.code === "string") error.code = responseError.code;
+			throw error;
 		}
 
 		if (type === "response.done" || type === "response.completed" || type === "response.incomplete") {
@@ -1632,46 +1649,58 @@ function createCodexStream<TApi extends Api>(
 			const sseHeaders = buildSSEHeaders(model.headers, options?.headers, accountId, apiKey, options?.sessionId);
 			const websocketHeaders = buildWebSocketHeaders(model.headers, options?.headers, accountId, apiKey, websocketRequestId);
 			const bodyJson = JSON.stringify(body);
+			const responseHeaderTimeoutMs = responseHeaderTimeoutMsFromOptions(options);
 			const transport = options?.transport || "auto";
 
 			if (transport !== "sse") {
 				let websocketStarted = false;
-				try {
-					await processWebSocketStream(
-						resolveCodexWebSocketUrl(model.baseUrl),
-						body,
-						websocketHeaders,
-						output,
-						stream,
-						model,
-						() => {
-							websocketStarted = true;
-						},
-						options,
-						deps,
-						requestCwd,
-						requestPrompt,
-					);
-					if (options?.signal?.aborted) {
-						throw new Error("Request was aborted");
-					}
-					finalizeUsage(model, output);
-					stream.push({ type: "done", reason: output.stopReason as "stop" | "length" | "toolUse", message: output });
-					stream.end();
-					return;
-				} catch (error) {
-					appendAssistantMessageDiagnostic(
-						output,
-						createAssistantMessageDiagnostic("provider_transport_failure", error, {
-							configuredTransport: transport,
-							fallbackTransport: websocketStarted ? undefined : "sse",
-							eventsEmitted: websocketStarted,
-							phase: websocketStarted ? "after_message_stream_start" : "before_message_stream_start",
-							requestBytes: new TextEncoder().encode(bodyJson).byteLength,
-						}),
-					);
-					if (transport === "websocket" || transport === "websocket-cached" || websocketStarted) {
-						throw error;
+				let retriedWebSocketConnectionLimit = false;
+				while (true) {
+					websocketStarted = false;
+					try {
+						await processWebSocketStream(
+							resolveCodexWebSocketUrl(model.baseUrl),
+							body,
+							websocketHeaders,
+							output,
+							stream,
+							model,
+							() => {
+								websocketStarted = true;
+							},
+							options,
+							deps,
+							requestCwd,
+							requestPrompt,
+						);
+						if (options?.signal?.aborted) {
+							throw new Error("Request was aborted");
+						}
+						finalizeUsage(model, output);
+						stream.push({ type: "done", reason: output.stopReason as "stop" | "length" | "toolUse", message: output });
+						stream.end();
+						return;
+					} catch (error) {
+						const aborted = options?.signal?.aborted;
+						const connectionLimitBeforeStart = !websocketStarted && isWebSocketConnectionLimitReachedError(error);
+						if (!aborted && connectionLimitBeforeStart && !retriedWebSocketConnectionLimit) {
+							retriedWebSocketConnectionLimit = true;
+							continue;
+						}
+						appendAssistantMessageDiagnostic(
+							output,
+							createAssistantMessageDiagnostic("provider_transport_failure", error, {
+								configuredTransport: transport,
+								fallbackTransport: websocketStarted ? undefined : "sse",
+								eventsEmitted: websocketStarted,
+								phase: websocketStarted ? "after_message_stream_start" : "before_message_stream_start",
+								requestBytes: new TextEncoder().encode(bodyJson).byteLength,
+							}),
+						);
+						if (transport === "websocket" || transport === "websocket-cached" || websocketStarted) {
+							throw error;
+						}
+						break;
 					}
 				}
 			}
@@ -1692,7 +1721,7 @@ function createCodexStream<TApi extends Api>(
 						headers: sseHeaders,
 						body: bodyJson,
 						...(sseDispatcher ? { dispatcher: sseDispatcher } : {}),
-					} as RequestInit, options?.signal);
+					} as RequestInit, options?.signal, responseHeaderTimeoutMs);
 
 					await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
 

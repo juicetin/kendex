@@ -1,11 +1,17 @@
 import assert from "node:assert/strict";
 import test, { afterEach } from "node:test";
-import { fetchWithResponseHeaderTimeout } from "../src/provider-shim.js";
+import { fetchWithResponseHeaderTimeout, responseHeaderTimeoutMsFromOptions } from "../src/provider-shim.js";
 
 const originalFetch = globalThis.fetch;
 
 afterEach(() => {
 	globalThis.fetch = originalFetch;
+});
+
+test("responseHeaderTimeoutMsFromOptions uses Pi HTTP timeout when provided", () => {
+	assert.equal(responseHeaderTimeoutMsFromOptions({ timeoutMs: 45_000 } as any), 45_000);
+	assert.equal(responseHeaderTimeoutMsFromOptions({ timeoutMs: 0 } as any), 20_000);
+	assert.equal(responseHeaderTimeoutMsFromOptions(undefined), 20_000);
 });
 
 test("fetchWithResponseHeaderTimeout aborts when SSE response headers stall", async () => {

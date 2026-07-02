@@ -396,6 +396,7 @@ export async function processResponsesStream<TApi extends Api>(
 	};
 	type OutputState = ReasoningState | MessageState | FunctionCallState;
 
+	let sawTerminalResponseEvent = false;
 	const outputStates = new Map<number, OutputState>();
 	const imageGenerationCallIds = new Set<string>();
 
@@ -498,6 +499,12 @@ export async function processResponsesStream<TApi extends Api>(
 				state.summaryParts.set(event.summary_index, { text: event.part.text });
 				state.block.thinking = renderReasoningSummary(state.summaryParts);
 			}
+		} else if (event.type === "response.reasoning_text.delta") {
+			const state = outputStates.get(event.output_index);
+			if (state?.kind === "reasoning") {
+				state.block.thinking += event.delta;
+				stream.push({ type: "thinking_delta", contentIndex: state.blockIndex, delta: event.delta, partial: output });
+			}
 		} else if (event.type === "response.content_part.added") {
 			const state = outputStates.get(event.output_index);
 			if (state?.kind === "message" && (event.part.type === "output_text" || event.part.type === "refusal")) {
@@ -562,7 +569,9 @@ export async function processResponsesStream<TApi extends Api>(
 					state = { kind: "reasoning", blockIndex: blockIndex(), block: currentBlock, summaryParts: new Map() };
 					outputStates.set(event.output_index, state);
 				}
-				state.block.thinking = item.summary?.map((summary) => summary.text).join("\n\n") || "";
+				const summaryText = item.summary?.map((summary) => summary.text).join("\n\n") || "";
+				const contentText = (item as { content?: Array<{ text?: string }> }).content?.map((content) => content.text ?? "").filter(Boolean).join("\n\n") || "";
+				state.block.thinking = summaryText || contentText || state.block.thinking;
 				state.block.thinkingSignature = JSON.stringify(item);
 				stream.push({ type: "thinking_end", contentIndex: state.blockIndex, content: state.block.thinking, partial: output });
 				outputStates.delete(event.output_index);
@@ -610,7 +619,8 @@ export async function processResponsesStream<TApi extends Api>(
 				appendImageGenerationCall(item);
 				outputStates.delete(event.output_index);
 			}
-		} else if (event.type === "response.completed") {
+		} else if (event.type === "response.completed" || event.type === "response.incomplete") {
+			sawTerminalResponseEvent = true;
 			const response = event.response;
 			const finalOutput = Array.isArray((response as { output?: unknown } | undefined)?.output)
 				? ((response as unknown as { output: unknown[] }).output)
@@ -621,6 +631,7 @@ export async function processResponsesStream<TApi extends Api>(
 			if (response?.id) output.responseId = response.id;
 			if (response?.usage) {
 				const cachedTokens = response.usage.input_tokens_details?.cached_tokens || 0;
+				const reasoningTokens = (response.usage as { output_tokens_details?: { reasoning_tokens?: number } }).output_tokens_details?.reasoning_tokens || 0;
 				output.usage = {
 					input: (response.usage.input_tokens || 0) - cachedTokens,
 					output: response.usage.output_tokens || 0,
@@ -629,6 +640,7 @@ export async function processResponsesStream<TApi extends Api>(
 					totalTokens: response.usage.total_tokens || 0,
 					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 				};
+				(output.usage as Usage & { reasoning?: number }).reasoning = reasoningTokens;
 			}
 			calculateCost(model, output.usage);
 			if (options?.applyServiceTierPricing) {
@@ -645,6 +657,7 @@ export async function processResponsesStream<TApi extends Api>(
 			const details = [event.code, event.message].filter(Boolean).join(": ");
 			throw new Error(details || "Unknown error");
 		} else if (event.type === "response.failed") {
+			sawTerminalResponseEvent = true;
 			const error = event.response?.error;
 			const details = (event.response as { incomplete_details?: { reason?: string } } | undefined)?.incomplete_details;
 			const msg = error
@@ -654,6 +667,9 @@ export async function processResponsesStream<TApi extends Api>(
 					: "Unknown error (no error details in response)";
 			throw new Error(msg);
 		}
+	}
+	if (!sawTerminalResponseEvent) {
+		throw new Error("OpenAI Responses stream ended before a terminal response event");
 	}
 }
 

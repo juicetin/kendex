@@ -56,7 +56,7 @@ function mockFetch(factories: FetchFactory[]): () => number {
 	return () => calls;
 }
 
-async function runCodexProvider(): Promise<any> {
+async function runCodexProvider(streamOptions: Record<string, unknown> = {}): Promise<any> {
 	const provider = createCodexProvider();
 	const stream = provider.streamSimple(
 		{
@@ -74,7 +74,7 @@ async function runCodexProvider(): Promise<any> {
 			messages: [{ role: "user", content: "hello" }],
 			tools: [],
 		},
-		{ apiKey: codexJwt(), transport: "sse" },
+		{ apiKey: codexJwt(), transport: "sse", ...streamOptions },
 	);
 	return stream.result();
 }
@@ -139,4 +139,18 @@ test("successful SSE retry hides intermediate HTTP failure", async () => {
 	assert.equal(fetchCalls(), 2);
 	assert.equal(result.stopReason, "stop");
 	assert.equal(result.errorMessage, undefined);
+});
+
+test("SSE response-header timeout uses configured stream timeout", async () => {
+	installImmediateRetryTimers();
+	globalThis.fetch = ((_url: RequestInfo | URL, init?: RequestInit) =>
+		new Promise<Response>((_resolve, reject) => {
+			init?.signal?.addEventListener("abort", () => reject((init.signal as AbortSignal).reason), { once: true });
+		})) as typeof fetch;
+
+	const result = await runCodexProvider({ timeoutMs: 1 });
+
+	assert.equal(result.stopReason, "error");
+	assert.match(result.errorMessage, /Codex Responses SSE response headers timed out after 1ms/);
+	assert.doesNotMatch(result.errorMessage, /20000ms/);
 });

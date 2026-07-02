@@ -60,3 +60,43 @@ test("processResponsesStream tolerates a null-content message item before a func
 	const textBlocks = output.content.filter((block: any) => block.type === "text");
 	assert.equal(textBlocks[0]?.text, "", "null message content collapses to empty text");
 });
+
+test("processResponsesStream records reasoning token usage and incomplete stop reason", async () => {
+	const output = createAssistantOutput();
+
+	await processResponsesStream(
+		asAsyncIterable([
+			{ type: "response.created", response: { id: "resp_2" } },
+			{ type: "response.output_item.added", output_index: 0, item: { type: "reasoning", id: "rs_1" } },
+			{ type: "response.reasoning_text.delta", output_index: 0, delta: "hidden chain" },
+			{ type: "response.output_item.done", output_index: 0, item: { type: "reasoning", id: "rs_1", summary: [], content: [{ text: "preserved reasoning" }] } },
+			{ type: "response.incomplete", response: { id: "resp_2", status: "incomplete", usage: { input_tokens: 11, output_tokens: 7, total_tokens: 18, input_tokens_details: { cached_tokens: 3 }, output_tokens_details: { reasoning_tokens: 5 } } } },
+		]),
+		output,
+		{ push() {} } as any,
+		model,
+	);
+
+	assert.equal(output.stopReason, "length");
+	assert.equal(output.usage.input, 8);
+	assert.equal((output.usage as any).reasoning, 5);
+	const thinking = output.content.find((block: any) => block.type === "thinking") as any;
+	assert.equal(thinking.thinking, "preserved reasoning");
+});
+
+test("processResponsesStream fails when stream ends before terminal response event", async () => {
+	const output = createAssistantOutput();
+	await assert.rejects(
+		() => processResponsesStream(
+			asAsyncIterable([
+				{ type: "response.created", response: { id: "resp_missing_terminal" } },
+				{ type: "response.output_item.added", output_index: 0, item: { type: "message", id: "msg_1" } },
+				{ type: "response.output_text.delta", output_index: 0, content_index: 0, delta: "partial" },
+			]),
+			output,
+			{ push() {} } as any,
+			model,
+		),
+		/OpenAI Responses stream ended before a terminal response event/,
+	);
+});
