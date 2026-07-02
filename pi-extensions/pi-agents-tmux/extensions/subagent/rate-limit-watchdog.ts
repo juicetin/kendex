@@ -39,7 +39,6 @@ import {
 	RATE_LIMIT_STEER_MESSAGE,
 	classifyRateLimitEvent,
 	decideRateLimitRetry,
-	fetchProviderQuotaSnapshotFromEnv,
 	isAssistantMessageEvent,
 	quotaSourceFailureSummary,
 	rateLimitBackoffLadderFromEnv,
@@ -73,6 +72,14 @@ export interface SubagentRateLimitWatchdog {
 	cancel(paneId: string): boolean;
 	/** Test helper: synchronously fire the pending steer for a pane. */
 	fireRetryNow(paneId: string): boolean;
+}
+
+type RateLimitQuotaModule = typeof import("./rate-limit-quota.js");
+let quotaModulePromise: Promise<RateLimitQuotaModule> | null = null;
+
+function fetchProviderQuotaSnapshotFromEnvLazy(event: unknown): Promise<unknown> {
+	quotaModulePromise ??= import("./rate-limit-quota.js");
+	return quotaModulePromise.then((quota) => quota.fetchProviderQuotaSnapshotFromEnv(event));
 }
 
 interface PaneState {
@@ -180,7 +187,7 @@ export function createSubagentRateLimitWatchdog(
 
 	function usageSnapshotFor(event: unknown, paneId: string): { snapshot?: unknown; promise?: Promise<unknown> } {
 		try {
-			const provided = (deps.getUsageSnapshot ?? ((e: unknown, _p: string) => fetchProviderQuotaSnapshotFromEnv(e)))(event, paneId);
+			const provided = (deps.getUsageSnapshot ?? ((e: unknown, _p: string) => fetchProviderQuotaSnapshotFromEnvLazy(e)))(event, paneId);
 			if (provided && typeof (provided as PromiseLike<unknown>).then === "function") {
 				return { promise: Promise.resolve(provided).catch((error) => {
 					deps.logWarn(`rate-limit-watchdog: usage endpoint lookup failed (${(error as Error)?.message ?? error})`);

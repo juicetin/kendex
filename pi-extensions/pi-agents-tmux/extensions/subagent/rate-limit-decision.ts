@@ -1,13 +1,4 @@
-/**
- * Shared rate-limit retry decision module (vstack#108). Pi extensions ship
- * as standalone npm-style packages, so this copy stays self-contained.
- *
- * Functional copy: identical inputs must produce identical decisions.
- */
-
-import { existsSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
+/** Import-free rate-limit retry decision module. */
 
 export const RATE_LIMIT_STEER_MESSAGE =
 	"API rate limit was detected. Try to continue from where you left off." as const;
@@ -87,6 +78,21 @@ export interface RateLimitWatchdogEnv {
 	enabled?: boolean;
 }
 
+type UsageResetCandidate = {
+	limitReached: boolean;
+	path: string;
+	resetAtMs: number;
+	title: string;
+	utilization: number;
+};
+
+interface RateLimitScheduleBasis {
+	delayMs: number;
+	degradedResetSource: boolean;
+	resetAtMs?: number;
+	resetSource: RateLimitResetSource;
+}
+
 export function rateLimitWatchdogEnabledFromEnv(env: NodeJS.ProcessEnv = process.env): boolean {
 	const raw = env.VSTACK_RATE_LIMIT_WATCHDOG?.trim();
 	if (raw === undefined || raw === "") return true;
@@ -111,96 +117,6 @@ export function rateLimitBackoffLadderFromEnv(env: NodeJS.ProcessEnv = process.e
 		.filter((value) => Number.isFinite(value) && value > 0)
 		.map((value) => Math.floor(value));
 	return parts.length > 0 ? parts : [...RATE_LIMIT_DEFAULT_BACKOFF_LADDER_SEC];
-}
-
-export function rateLimitUsageSnapshotFromEnv(env: NodeJS.ProcessEnv = process.env): QuotaSourceResult {
-	const raw = env.VSTACK_RATE_LIMIT_USAGE_JSON?.trim();
-	if (!raw) return null;
-	let parsed: unknown;
-	try {
-		parsed = JSON.parse(raw);
-	} catch (error) {
-		return quotaSourceFailure("unknown", "usage-endpoint", "invalid-env-json", undefined, "VSTACK_RATE_LIMIT_USAGE_JSON", error);
-	}
-	if (quotaSourceFailureSummary(parsed)) return parsed as QuotaSourceFailure;
-	const snapshot = normalizeQuotaSnapshot("unknown", "usage-endpoint", parsed, Date.now(), "env-json");
-	return snapshot.windows.length > 0
-		? snapshot
-		: quotaSourceFailure("unknown", "usage-endpoint", "unrecognized-env-schema", undefined, "VSTACK_RATE_LIMIT_USAGE_JSON");
-}
-
-type FetchLike = (input: string, init?: Record<string, unknown>) => Promise<{
-	ok: boolean;
-	status: number;
-	json: () => Promise<unknown>;
-}>;
-
-export async function fetchClaudeUsageSnapshotFromEnv(
-	env: NodeJS.ProcessEnv = process.env,
-	fetchImpl: FetchLike | undefined = (globalThis as unknown as { fetch?: FetchLike }).fetch,
-): Promise<QuotaSourceResult> {
-	const inline = rateLimitUsageSnapshotFromEnv(env);
-	if (inline) return inline;
-	if (!fetchImpl) return null;
-	const timeoutMs = parsePositiveInt(env.VSTACK_RATE_LIMIT_USAGE_FETCH_TIMEOUT_MS, 3_000);
-	const cacheMs = parsePositiveInt(env.VSTACK_RATE_LIMIT_USAGE_CACHE_MS, 60_000);
-	const oauthToken = firstNonEmptyEnv(env, [
-		"VSTACK_ANTHROPIC_OAUTH_ACCESS_TOKEN",
-		"ANTHROPIC_ACCESS_TOKEN",
-		"ANTHROPIC_AUTH_TOKEN",
-		"CLAUDE_CODE_OAUTH_TOKEN",
-		"CLAUDE_CODE_ACCESS_TOKEN",
-	]);
-	if (oauthToken) {
-		return cachedQuotaSnapshot(`claude:oauth:${oauthToken.slice(-8)}`, cacheMs, () => fetchUsageEndpoint(fetchImpl, "claude", "https://api.anthropic.com/api/oauth/usage", {
-			"anthropic-version": "2023-06-01",
-			Authorization: `Bearer ${oauthToken}`,
-		}, timeoutMs));
-	}
-	const orgId = firstNonEmptyEnv(env, ["VSTACK_CLAUDE_ORG_ID", "CLAUDE_AI_ORG_ID", "CLAUDE_ORG_ID"]);
-	const cookie = firstNonEmptyEnv(env, ["VSTACK_CLAUDE_AI_COOKIE", "CLAUDE_AI_COOKIE", "CLAUDE_COOKIE"]);
-	if (orgId && cookie) {
-		return cachedQuotaSnapshot(`claude:web:${orgId}:${hashString(cookie)}`, cacheMs, () => fetchUsageEndpoint(fetchImpl, "claude", `https://claude.ai/api/organizations/${encodeURIComponent(orgId)}/usage`, {
-			Cookie: cookie,
-		}, timeoutMs));
-	}
-	return null;
-}
-
-export async function fetchCodexUsageSnapshotFromEnv(
-	env: NodeJS.ProcessEnv = process.env,
-	fetchImpl: FetchLike | undefined = (globalThis as unknown as { fetch?: FetchLike }).fetch,
-): Promise<QuotaSourceResult> {
-	const inline = rateLimitUsageSnapshotFromEnv(env);
-	if (inline) return inline;
-	if (!fetchImpl) return null;
-	const token = codexAuthTokenFromEnv(env);
-	if (!token) return fetchCodexCliRpcQuotaSnapshotFromEnv(env);
-	const timeoutMs = parsePositiveInt(env.VSTACK_RATE_LIMIT_USAGE_FETCH_TIMEOUT_MS, 3_000);
-	const cacheMs = parsePositiveInt(env.VSTACK_RATE_LIMIT_USAGE_CACHE_MS, 60_000);
-	return cachedQuotaSnapshot(`codex:wham:${token.slice(-8)}`, cacheMs, () => fetchUsageEndpoint(fetchImpl, "codex", "https://chatgpt.com/backend-api/wham/usage", {
-		Authorization: `Bearer ${token}`,
-	}, timeoutMs));
-}
-
-export async function fetchCodexCliRpcQuotaSnapshotFromEnv(_env: NodeJS.ProcessEnv = process.env): Promise<QuotaSnapshot | null> {
-	// Source seam for a bounded `codex -s read-only -a untrusted app-server`
-	// JSON-RPC client. Intentionally not spawned in this PR; CLI lifecycle,
-	// timeout, and token/account redaction deserve separate focused coverage.
-	return null;
-}
-
-export async function fetchProviderQuotaSnapshotFromEnv(
-	event: unknown,
-	env: NodeJS.ProcessEnv = process.env,
-	fetchImpl: FetchLike | undefined = (globalThis as unknown as { fetch?: FetchLike }).fetch,
-): Promise<QuotaSourceResult> {
-	const inline = rateLimitUsageSnapshotFromEnv(env);
-	if (inline) return inline;
-	const provider = providerFromRateLimitEvent(event);
-	if (provider === "codex" || provider === "openai") return fetchCodexUsageSnapshotFromEnv(env, fetchImpl);
-	if (provider === "claude") return fetchClaudeUsageSnapshotFromEnv(env, fetchImpl);
-	return null;
 }
 
 export function classifyRateLimitEvent(event: unknown): RateLimitEventClassification {
@@ -233,21 +149,15 @@ export function extractRetryAfterMs(event: unknown): number | null {
 		for (const key of ["retry_after_ms", "retryAfterMs", "retryAfter", "retry_after"]) {
 			const value = record[key];
 			if (typeof value === "number" && Number.isFinite(value) && value > 0) {
-				// `retry_after` / `retryAfter` are conventionally seconds on
-				// HTTP 429 responses; everything ending in `_ms` / `Ms` is
-				// milliseconds. Normalise to ms.
 				if (key === "retry_after_ms" || key === "retryAfterMs") return Math.floor(value);
 				return Math.floor(value * 1000);
 			}
-			if (typeof value === "string" && /^[0-9]+(?:\.[0-9]+)?$/.test(value)) {
+			if (typeof value === "string" && value.trim()) {
 				const parsed = Number(value);
-				if (key === "retry_after_ms" || key === "retryAfterMs") return Math.floor(parsed);
-				return Math.floor(parsed * 1000);
+				if (Number.isFinite(parsed) && parsed > 0) return key.toLowerCase().includes("ms") ? Math.floor(parsed) : Math.floor(parsed * 1000);
 			}
 		}
-		for (const child of Object.values(record)) {
-			if (child && typeof child === "object") stack.push(child);
-		}
+		for (const value of Object.values(record)) if (value && typeof value === "object") stack.push(value);
 	}
 	return null;
 }
@@ -255,109 +165,9 @@ export function extractRetryAfterMs(event: unknown): number | null {
 export function extractResetAtMs(event: unknown, now: number = Date.now()): number | null {
 	const structured = extractStructuredResetAtMs(event);
 	if (structured !== null) return structured;
-
 	const message = readAssistantMessage(event);
 	if (!message) return null;
 	return extractResetAtMsFromText(extractAssistantErrorText(message), now);
-}
-
-export interface RateLimitScheduleBasis {
-	delayMs: number;
-	resetAtMs: number | null;
-	resetSource: RateLimitResetSource;
-	degradedResetSource: boolean;
-}
-
-export function chooseRateLimitScheduleBasis(input: RateLimitWatchdogInput, ladderMs: number): RateLimitScheduleBasis {
-	const usageReset = selectQuotaSnapshotReset(input.usageSnapshot, input.event, input.now);
-	if (usageReset !== null) {
-		return {
-			degradedResetSource: false,
-			delayMs: Math.max(0, usageReset.resetAtMs + RATE_LIMIT_RESET_MARGIN_MS - input.now),
-			resetAtMs: usageReset.resetAtMs,
-			resetSource: usageReset.resetSource,
-		};
-	}
-
-	const sdkResetAtMs = extractStructuredResetAtMs(input.event);
-	const explicitMs = extractRetryAfterMs(input.event);
-	if (sdkResetAtMs !== null) {
-		return {
-			degradedResetSource: false,
-			delayMs: Math.max(ladderMs, Math.max(0, sdkResetAtMs + RATE_LIMIT_RESET_MARGIN_MS - input.now), explicitMs ?? 0),
-			resetAtMs: sdkResetAtMs,
-			resetSource: "sdk-rate-limit-event",
-		};
-	}
-	if (explicitMs !== null) {
-		return {
-			degradedResetSource: false,
-			delayMs: Math.max(ladderMs, explicitMs),
-			resetAtMs: null,
-			resetSource: "sdk-rate-limit-event",
-		};
-	}
-
-	const message = readAssistantMessage(input.event);
-	const proseResetAtMs = message ? extractResetAtMsFromText(extractAssistantErrorText(message), input.now) : null;
-	if (proseResetAtMs !== null) {
-		return {
-			degradedResetSource: true,
-			delayMs: Math.max(ladderMs, Math.max(0, proseResetAtMs + RATE_LIMIT_RESET_MARGIN_MS - input.now)),
-			resetAtMs: proseResetAtMs,
-			resetSource: "prose-fallback",
-		};
-	}
-
-	return { degradedResetSource: true, delayMs: ladderMs, resetAtMs: null, resetSource: "backoff-only" };
-}
-
-export function decideRateLimitRetry(
-	input: RateLimitWatchdogInput,
-	envOverride: RateLimitWatchdogEnv = {},
-): RateLimitWatchdogDecision {
-	const classification = classifyRateLimitEvent(input.event);
-	if (!classification.isRateLimitEvent) return { kind: "not-rate-limited", reason: classification.reason };
-
-	const maxAttempts = envOverride.maxAttempts ?? rateLimitMaxAttemptsFromEnv();
-	if (input.attempt >= maxAttempts) {
-		return {
-			attempt: input.attempt,
-			kind: "exhausted",
-			reason: `rate-limit retries exhausted after ${input.attempt} attempt${input.attempt === 1 ? "" : "s"}`,
-		};
-	}
-
-	const ladder = envOverride.backoffLadderSec ?? rateLimitBackoffLadderFromEnv();
-	const ladderIndex = Math.min(input.attempt, ladder.length - 1);
-	const ladderMs = Math.max(0, Math.floor(ladder[ladderIndex]! * 1000));
-	const basis = chooseRateLimitScheduleBasis(input, ladderMs);
-	const delayMs = basis.delayMs;
-	const at = input.now + delayMs;
-	const nextAttempt = input.attempt + 1;
-	const hash = `${input.paneId}:${nextAttempt}:${at}`;
-	return {
-		at,
-		attempt: nextAttempt,
-		degradedResetSource: basis.degradedResetSource,
-		hash,
-		kind: "retry-at",
-		...(basis.resetAtMs !== null ? { resetAtMs: basis.resetAtMs } : {}),
-		resetSource: basis.resetSource,
-		steerMessage: RATE_LIMIT_STEER_MESSAGE,
-	};
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return value !== null && typeof value === "object";
-}
-
-interface UsageResetCandidate {
-	path: string;
-	title: string;
-	limitReached: boolean;
-	resetAtMs: number;
-	utilization: number;
 }
 
 export function extractUsageEndpointResetAtMs(snapshot: unknown, event: unknown, now: number = Date.now()): number | null {
@@ -394,198 +204,88 @@ export function selectQuotaSnapshotReset(
 	return selected ? { resetAtMs: selected.resetAtMs, resetSource: quota.source } : null;
 }
 
-export function normalizeQuotaSnapshot(
-	provider: string,
-	source: "usage-endpoint" | "cli-rpc",
-	raw: unknown,
-	fetchedAtMs: number = Date.now(),
-	rawShapeVersion = "provider-quota-v1",
-): QuotaSnapshot {
-	const existing = normalizeQuotaSnapshotFromUnknown(raw, fetchedAtMs, source, provider);
-	if (existing) return existing;
-	return { fetchedAtMs, provider, rawShapeVersion, source, windows: collectProviderQuotaWindows(provider, raw, fetchedAtMs) };
+function normalizeQuotaSnapshotFromUnknown(snapshot: unknown, now: number): QuotaSnapshot | null {
+	if (!isRecord(snapshot) || !Array.isArray(snapshot.windows)) return null;
+	const source = snapshot.source === "cli-rpc" ? "cli-rpc" : "usage-endpoint";
+	const provider = typeof snapshot.provider === "string" && snapshot.provider ? snapshot.provider : "unknown";
+	const windows = snapshot.windows.flatMap((window, index): QuotaWindow[] => {
+		if (!isRecord(window)) return [];
+		const id = typeof window.id === "string" && window.id ? window.id : `window_${index}`;
+		const title = typeof window.title === "string" && window.title ? window.title : id;
+		const resetAtMs = coerceResetTimestampMs(window.resetAtMs ?? window.reset_at_ms ?? window.resetsAtMs ?? window.resets_at_ms, true)
+			?? coerceResetTimestampMs(window.resetAt ?? window.reset_at ?? window.resetsAt ?? window.resets_at, false);
+		const used = coerceFiniteNumber(window.usedPercent ?? window.used_percent ?? window.utilization ?? window.percent ?? window.percentage);
+		const usedPercent = used === null ? null : (used <= 1 ? used * 100 : used);
+		const limitReached = window.limitReached === true || window.limit_reached === true ? true : window.limitReached === false || window.limit_reached === false ? false : undefined;
+		return [{ id, title, resetAtMs, usedPercent, ...(limitReached !== undefined ? { limitReached } : {}) }];
+	});
+	return { fetchedAtMs: coerceFiniteNumber(snapshot.fetchedAtMs) ?? now, provider, source, windows };
 }
 
-function normalizeQuotaSnapshotFromUnknown(
-	snapshot: unknown,
-	now: number,
-	fallbackSource: "usage-endpoint" | "cli-rpc" = "usage-endpoint",
-	fallbackProvider = "unknown",
-): QuotaSnapshot | null {
-	if (snapshot === null || snapshot === undefined) return null;
-	if (isRecord(snapshot) && Array.isArray(snapshot.windows)) {
-		const hasTrustedSource = snapshot.source === "cli-rpc" || snapshot.source === "usage-endpoint";
-		const provider = typeof snapshot.provider === "string" && snapshot.provider ? snapshot.provider : fallbackProvider;
-		const hasTrustedProvider = provider !== "unknown";
-		if (!hasTrustedSource && !hasTrustedProvider) return null;
-		const source = snapshot.source === "cli-rpc" ? "cli-rpc" : snapshot.source === "usage-endpoint" ? "usage-endpoint" : fallbackSource;
+export function chooseRateLimitScheduleBasis(input: RateLimitWatchdogInput, ladderMs: number): RateLimitScheduleBasis {
+	const usageReset = selectQuotaSnapshotReset(input.usageSnapshot, input.event, input.now);
+	if (usageReset) {
 		return {
-			fetchedAtMs: coerceFiniteNumber(snapshot.fetchedAtMs) ?? now,
-			provider,
-			rawShapeVersion: typeof snapshot.rawShapeVersion === "string" ? snapshot.rawShapeVersion : undefined,
-			source,
-			windows: snapshot.windows.flatMap((window, index) => normalizeQuotaWindow(window, index)),
+			delayMs: Math.max(0, usageReset.resetAtMs + RATE_LIMIT_RESET_MARGIN_MS - input.now),
+			degradedResetSource: false,
+			resetAtMs: usageReset.resetAtMs,
+			resetSource: usageReset.resetSource,
 		};
 	}
-	if (isRecord(snapshot) && (snapshot.source === "usage-endpoint" || snapshot.source === "cli-rpc") && "data" in snapshot) {
-		const provider = typeof snapshot.provider === "string" ? snapshot.provider : fallbackProvider;
-		return normalizeQuotaSnapshot(provider, snapshot.source, snapshot.data, coerceFiniteNumber(snapshot.fetchedAtMs) ?? now);
+	const explicitMs = extractRetryAfterMs(input.event);
+	const sdkResetAtMs = extractStructuredResetAtMs(input.event);
+	if (explicitMs !== null || sdkResetAtMs !== null) {
+		return {
+			delayMs: Math.max(ladderMs, Math.max(0, (sdkResetAtMs ?? input.now) + RATE_LIMIT_RESET_MARGIN_MS - input.now), explicitMs ?? 0),
+			degradedResetSource: false,
+			...(sdkResetAtMs !== null ? { resetAtMs: sdkResetAtMs } : {}),
+			resetSource: "sdk-rate-limit-event",
+		};
 	}
-	const windows = collectProviderQuotaWindows(fallbackProvider, snapshot, now);
-	return windows.length > 0
-		? { fetchedAtMs: now, provider: fallbackProvider, rawShapeVersion: "provider-quota-v1", source: fallbackSource, windows }
-		: null;
-}
-
-function normalizeQuotaWindow(window: unknown, index: number): QuotaWindow[] {
-	if (!isRecord(window)) return [];
-	const directResetAtMs = window.resetAtMs !== undefined || window.reset_at_ms !== undefined || window.resetsAtMs !== undefined || window.resets_at_ms !== undefined
-		? coerceResetTimestampMs(window.resetAtMs ?? window.reset_at_ms ?? window.resetsAtMs ?? window.resets_at_ms, true)
-		: coerceResetTimestampMs(window.resetAt ?? window.reset_at ?? window.resetsAt ?? window.resets_at, false);
-	const resetAfterMs = coerceFiniteNumber(window.resetAfterMs ?? window.reset_after_ms);
-	const resetAfterSeconds = coerceFiniteNumber(window.resetAfterSeconds ?? window.reset_after_seconds);
-	const resetAtMs = directResetAtMs ?? (resetAfterMs !== null ? Date.now() + resetAfterMs : resetAfterSeconds !== null ? Date.now() + resetAfterSeconds * 1000 : null);
-	const usedPercentRaw = coerceFiniteNumber(window.usedPercent ?? window.used_percent ?? window.utilization ?? window.percent ?? window.percentage);
-	const usedPercent = usedPercentRaw === null ? null : (usedPercentRaw <= 1 ? usedPercentRaw * 100 : usedPercentRaw);
-	const id = typeof window.id === "string" && window.id ? window.id : `window_${index}`;
-	const title = typeof window.title === "string" && window.title ? window.title : id;
-	const windowSeconds = coerceFiniteNumber(window.windowSeconds ?? window.window_seconds ?? window.limit_window_seconds) ?? undefined;
-	const limitReached = readLimitReached(window);
-	if (resetAtMs === null || !quotaWindowHasContext(id, title, usedPercent, limitReached, windowSeconds)) return [];
-	return [{ id, limitReached: limitReached ?? undefined, resetAtMs, title, usedPercent, ...(windowSeconds ? { windowSeconds } : {}) }];
-}
-
-function quotaWindowHasContext(
-	id: string,
-	title: string,
-	usedPercent: number | null,
-	limitReached: boolean | null | undefined,
-	windowSeconds: number | undefined,
-): boolean {
-	return usedPercent !== null
-		|| limitReached !== null && limitReached !== undefined
-		|| windowSeconds !== undefined;
-}
-
-function collectProviderQuotaWindows(provider: string, snapshot: unknown, now: number): QuotaWindow[] {
-	const normalized = provider.toLowerCase();
-	if (normalized.includes("claude") || normalized.includes("anthropic")) return collectClaudeQuotaWindows(snapshot, now);
-	if (normalized.includes("codex") || normalized.includes("openai")) return collectCodexQuotaWindows(snapshot, now);
-	return [];
-}
-
-function collectClaudeQuotaWindows(snapshot: unknown, now: number): QuotaWindow[] {
-	const out: QuotaWindow[] = [];
-	const seen = new Set<unknown>();
-	const stack: Array<{ node: unknown; path: string }> = [{ node: snapshot, path: "" }];
-	while (stack.length > 0) {
-		const { node, path } = stack.pop()!;
-		if (!isRecord(node) || seen.has(node)) continue;
-		seen.add(node);
-		if (isClaudeQuotaWindowPath(path)) {
-			const resetAtMs = readResetTimestampFromRecord(node, now);
-			const utilization = readUsageUtilization(node);
-			if (resetAtMs !== null && utilization !== null) {
-				out.push({
-					id: path,
-					limitReached: readLimitReached(node) ?? utilization >= 1,
-					resetAtMs,
-					title: path.replace(/[._-]+/g, " "),
-					usedPercent: utilization * 100,
-				});
-			}
-		}
-		for (const [key, value] of Object.entries(node)) {
-			if (value && typeof value === "object") stack.push({ node: value, path: path ? `${path}.${key}` : key });
-		}
+	const proseResetAtMs = extractResetAtMs(input.event, input.now);
+	if (proseResetAtMs !== null) {
+		return {
+			delayMs: Math.max(ladderMs, Math.max(0, proseResetAtMs + RATE_LIMIT_RESET_MARGIN_MS - input.now)),
+			degradedResetSource: true,
+			resetAtMs: proseResetAtMs,
+			resetSource: "prose-fallback",
+		};
 	}
-	return out;
+	return { delayMs: ladderMs, degradedResetSource: true, resetSource: "backoff-only" };
 }
 
-function isClaudeQuotaWindowPath(path: string): boolean {
-	const normalized = path.split(".").pop()?.toLowerCase() ?? path.toLowerCase();
-	return /^five_hour(?:_|$)|^seven_day(?:_|$)/.test(normalized);
-}
+export function decideRateLimitRetry(
+	input: RateLimitWatchdogInput,
+	envOverride: RateLimitWatchdogEnv = {},
+): RateLimitWatchdogDecision {
+	const classification = classifyRateLimitEvent(input.event);
+	if (!classification.isRateLimitEvent) return { kind: "not-rate-limited", reason: classification.reason };
 
-function collectCodexQuotaWindows(snapshot: unknown, now: number): QuotaWindow[] {
-	if (!isRecord(snapshot)) return [];
-	const out: QuotaWindow[] = [];
-	const rootRateLimit = snapshot.rate_limit;
-	if (isRecord(rootRateLimit)) out.push(...codexRateLimitWindows("rate_limit", "Codex", rootRateLimit, now));
-	const additional = snapshot.additional_rate_limits;
-	if (Array.isArray(additional)) {
-		for (const [index, item] of additional.entries()) {
-			if (!isRecord(item)) continue;
-			const nested = item.rate_limit;
-			if (!isRecord(nested)) continue;
-			const label = [item.limit_name, item.metered_feature]
-				.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
-				.join(" ") || `additional ${index}`;
-			out.push(...codexRateLimitWindows(`additional_rate_limits.${index}.rate_limit`, label, nested, now));
-		}
+	const maxAttempts = envOverride.maxAttempts ?? rateLimitMaxAttemptsFromEnv();
+	if (input.attempt >= maxAttempts) {
+		return {
+			attempt: input.attempt,
+			kind: "exhausted",
+			reason: `rate-limit retries exhausted after ${input.attempt} attempt${input.attempt === 1 ? "" : "s"}`,
+		};
 	}
-	return out;
-}
 
-function codexRateLimitWindows(prefix: string, titlePrefix: string, rateLimit: Record<string, unknown>, now: number): QuotaWindow[] {
-	const out: QuotaWindow[] = [];
-	const parentLimitReached = readLimitReached(rateLimit);
-	for (const key of ["primary_window", "secondary_window"] as const) {
-		const window = rateLimit[key];
-		if (!isRecord(window)) continue;
-		const resetAtMs = readResetTimestampFromRecord(window, now);
-		if (resetAtMs === null) continue;
-		const utilization = readUsageUtilization(window);
-		const limitReached = readLimitReached(window) ?? parentLimitReached ?? undefined;
-		out.push({
-			id: `${prefix}.${key}`,
-			limitReached,
-			resetAtMs,
-			title: `${titlePrefix} ${key.replace("_", " ")}`,
-			usedPercent: utilization === null ? null : utilization * 100,
-			...(firstFiniteRecordNumber(window, ["windowSeconds", "window_seconds", "limit_window_seconds"]) !== null
-				? { windowSeconds: firstFiniteRecordNumber(window, ["windowSeconds", "window_seconds", "limit_window_seconds"])! }
-				: {}),
-		});
-	}
-	return out;
-}
-
-function collectQuotaWindows(snapshot: unknown, now: number): QuotaWindow[] {
-	const out: QuotaWindow[] = [];
-	const seen = new Set<unknown>();
-	const stack: Array<{ node: unknown; path: string; title: string }> = [{ node: snapshot, path: "", title: "" }];
-	while (stack.length > 0) {
-		const { node, path, title } = stack.pop()!;
-		if (!isRecord(node) || seen.has(node)) continue;
-		seen.add(node);
-		const resetAtMs = readResetTimestampFromRecord(node, now);
-		if (resetAtMs !== null) {
-			const utilization = readUsageUtilization(node);
-			const windowSeconds = firstFiniteRecordNumber(node, ["windowSeconds", "window_seconds", "limit_window_seconds"]);
-			out.push({
-				id: path || `window_${out.length}`,
-				limitReached: readLimitReached(node) ?? undefined,
-				resetAtMs,
-				title: title || path || `window ${out.length + 1}`,
-				usedPercent: utilization === null ? null : utilization * 100,
-				...(windowSeconds !== null ? { windowSeconds } : {}),
-			});
-		}
-		for (const [key, value] of Object.entries(node)) {
-			if (value && typeof value === "object") {
-				const label = typeof node.limit_name === "string"
-					? node.limit_name
-					: typeof node.metered_feature === "string"
-						? node.metered_feature
-						: typeof node.name === "string"
-							? node.name
-							: title;
-				stack.push({ node: value, path: path ? `${path}.${key}` : key, title: [label, key].filter(Boolean).join(" ") });
-			}
-		}
-	}
-	return out;
+	const ladder = envOverride.backoffLadderSec ?? rateLimitBackoffLadderFromEnv();
+	const ladderIndex = Math.min(input.attempt, ladder.length - 1);
+	const ladderMs = Math.max(0, Math.floor(ladder[ladderIndex]! * 1000));
+	const basis = chooseRateLimitScheduleBasis(input, ladderMs);
+	const at = input.now + basis.delayMs;
+	const nextAttempt = input.attempt + 1;
+	return {
+		kind: "retry-at",
+		at,
+		attempt: nextAttempt,
+		degradedResetSource: basis.degradedResetSource,
+		hash: `${input.paneId}:${nextAttempt}:${at}`,
+		...(basis.resetAtMs !== undefined ? { resetAtMs: basis.resetAtMs } : {}),
+		resetSource: basis.resetSource,
+		steerMessage: RATE_LIMIT_STEER_MESSAGE,
+	};
 }
 
 function chooseUsageResetCandidate(candidates: UsageResetCandidate[]): UsageResetCandidate | null {
@@ -628,8 +328,7 @@ function quotaCandidateMatchesType(candidate: UsageResetCandidate, typeHint: str
 
 function quotaCandidateMatchesModel(candidate: UsageResetCandidate, modelHint: string | null): boolean {
 	const path = normalizeQuotaHint(`${candidate.path} ${candidate.title}`) ?? "";
-	if (modelHint && path.includes(modelHint)) return true;
-	return false;
+	return Boolean(modelHint && path.includes(modelHint));
 }
 
 function normalizeQuotaHint(value: unknown): string | null {
@@ -652,241 +351,15 @@ function extractRateLimitType(event: unknown): string | null {
 			const value = node[key];
 			if (typeof value === "string" && value.trim()) return value;
 		}
-		for (const value of Object.values(node)) {
-			if (value && typeof value === "object") stack.push(value);
-		}
+		for (const value of Object.values(node)) if (value && typeof value === "object") stack.push(value);
 	}
 	return null;
-}
-
-function readResetTimestampFromRecord(record: Record<string, unknown>, now: number): number | null {
-	for (const [key, value] of Object.entries(record)) {
-		if (RESET_AT_MS_KEYS.has(key)) {
-			const parsed = coerceResetTimestampMs(value, true);
-			if (parsed !== null) return parsed;
-		}
-		if (RESET_AT_KEYS.has(key)) {
-			const parsed = coerceResetTimestampMs(value, false);
-			if (parsed !== null) return parsed;
-		}
-		if (key === "reset_after_ms" || key === "resetAfterMs") {
-			const parsed = coerceFiniteNumber(value);
-			if (parsed !== null && parsed > 0) return now + parsed;
-		}
-		if (key === "reset_after_seconds" || key === "resetAfterSeconds") {
-			const parsed = coerceFiniteNumber(value);
-			if (parsed !== null && parsed > 0) return now + parsed * 1000;
-		}
-	}
-	return null;
-}
-
-function readUsageUtilization(record: Record<string, unknown>): number | null {
-	for (const key of ["utilization", "usage", "used_fraction", "usedFraction"]) {
-		const parsed = coerceFiniteNumber(record[key]);
-		if (parsed !== null) return normalizeUtilization(parsed);
-	}
-	for (const key of ["percent", "percentage", "used_percent", "usedPercent", "percent_used", "percentUsed", "usage_percent", "usagePercent"]) {
-		const parsed = coerceFiniteNumber(record[key]);
-		if (parsed !== null) return normalizeUtilization(parsed > 1 ? parsed / 100 : parsed);
-	}
-	const used = firstFiniteRecordNumber(record, ["used", "used_tokens", "usedTokens", "consumed", "current"]);
-	const limit = firstFiniteRecordNumber(record, ["limit", "max", "quota", "allowed", "total"]);
-	if (used !== null && limit !== null && limit > 0) return Math.max(0, used / limit);
-	const remaining = firstFiniteRecordNumber(record, ["remaining", "remaining_tokens", "remainingTokens"]);
-	if (remaining !== null && limit !== null && limit > 0) return Math.max(0, 1 - remaining / limit);
-	if (readLimitReached(record) === true) return 1;
-	return null;
-}
-
-function readLimitReached(record: Record<string, unknown>): boolean | null {
-	for (const key of ["exceeded", "is_exceeded", "isExceeded", "limit_reached", "limitReached", "isLimitReached", "saturated"] as const) {
-		if (record[key] === true) return true;
-		if (record[key] === false) return false;
-	}
-	return null;
-}
-
-function firstFiniteRecordNumber(record: Record<string, unknown>, keys: readonly string[]): number | null {
-	for (const key of keys) {
-		const parsed = coerceFiniteNumber(record[key]);
-		if (parsed !== null) return parsed;
-	}
-	return null;
-}
-
-function coerceFiniteNumber(value: unknown): number | null {
-	if (typeof value === "number" && Number.isFinite(value)) return value;
-	if (typeof value === "string" && /^[0-9]+(?:\.[0-9]+)?$/.test(value.trim())) {
-		const parsed = Number(value);
-		return Number.isFinite(parsed) ? parsed : null;
-	}
-	return null;
-}
-
-function normalizeUtilization(value: number): number {
-	if (!Number.isFinite(value)) return 0;
-	return Math.max(0, value);
-}
-
-function parsePositiveInt(raw: string | undefined, fallback: number): number {
-	const parsed = raw ? Number(raw) : Number.NaN;
-	return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
-}
-
-function firstNonEmptyEnv(env: NodeJS.ProcessEnv, keys: readonly string[]): string | null {
-	for (const key of keys) {
-		const value = env[key]?.trim();
-		if (value) return value;
-	}
-	return null;
-}
-
-const quotaSnapshotCache = new Map<string, { expiresAt: number; promise: Promise<QuotaSourceResult> }>();
-
-function cachedQuotaSnapshot(
-	key: string,
-	cacheMs: number,
-	fetcher: () => Promise<QuotaSourceResult>,
-): Promise<QuotaSourceResult> {
-	const now = Date.now();
-	const cached = quotaSnapshotCache.get(key);
-	if (cached && cached.expiresAt > now) return cached.promise;
-	const promise = fetcher().catch((error) => quotaSourceFailure("unknown", "usage-endpoint", "exception", undefined, undefined, error));
-	quotaSnapshotCache.set(key, { expiresAt: now + Math.max(0, cacheMs), promise });
-	return promise;
-}
-
-function hashString(value: string): string {
-	let hash = 2166136261;
-	for (let i = 0; i < value.length; i += 1) {
-		hash ^= value.charCodeAt(i);
-		hash = Math.imul(hash, 16777619);
-	}
-	return (hash >>> 0).toString(16);
-}
-
-function providerFromRateLimitEvent(event: unknown): string {
-	const message = readAssistantMessage(event);
-	const haystack = [message?.api, message?.provider, message?.model]
-		.filter((value): value is string => typeof value === "string")
-		.join(" ")
-		.toLowerCase();
-	if (haystack.includes("claude") || haystack.includes("anthropic")) return "claude";
-	if (haystack.includes("codex")) return "codex";
-	if (haystack.includes("openai") || haystack.includes("gpt")) return "openai";
-	return "unknown";
-}
-
-function codexAuthTokenFromEnv(env: NodeJS.ProcessEnv): string | null {
-	const envToken = firstNonEmptyEnv(env, ["VSTACK_CODEX_ACCESS_TOKEN", "CODEX_ACCESS_TOKEN", "OPENAI_CHATGPT_ACCESS_TOKEN"]);
-	if (envToken) return envToken;
-	for (const file of codexAuthFiles(env)) {
-		try {
-			if (!existsSync(file)) continue;
-			const parsed = JSON.parse(readFileSync(file, "utf8"));
-			const token = findAccessToken(parsed);
-			if (token) return token;
-		} catch {
-			continue;
-		}
-	}
-	return null;
-}
-
-function codexAuthFiles(env: NodeJS.ProcessEnv): string[] {
-	const out: string[] = [];
-	const codexHome = env.CODEX_HOME?.trim();
-	if (codexHome) out.push(join(codexHome, "auth.json"));
-	out.push(join(homedir(), ".codex", "auth.json"));
-	return [...new Set(out)];
-}
-
-function findAccessToken(value: unknown): string | null {
-	const seen = new Set<unknown>();
-	const stack: unknown[] = [value];
-	while (stack.length > 0) {
-		const node = stack.pop();
-		if (!isRecord(node) || seen.has(node)) continue;
-		seen.add(node);
-		for (const key of ["accessToken", "access_token", "bearerToken", "bearer_token"] as const) {
-			const token = node[key];
-			if (typeof token === "string" && token.length > 20) return token;
-		}
-		for (const child of Object.values(node)) {
-			if (child && typeof child === "object") stack.push(child);
-		}
-	}
-	return null;
-}
-
-async function fetchUsageEndpoint(
-	fetchImpl: FetchLike,
-	provider: string,
-	endpoint: string,
-	headers: Record<string, string>,
-	timeoutMs: number,
-): Promise<QuotaSourceResult> {
-	const abortController = typeof AbortController !== "undefined" ? new AbortController() : null;
-	const timer = abortController ? setTimeout(() => abortController.abort(), timeoutMs) : null;
-	try {
-		const response = await fetchImpl(endpoint, {
-			headers: { Accept: "application/json", ...headers },
-			method: "GET",
-			...(abortController ? { signal: abortController.signal } : {}),
-		});
-		if (!response.ok) return quotaSourceFailure(provider, "usage-endpoint", `http-${response.status}`, response.status, endpoint);
-		let body: unknown;
-		try {
-			body = await response.json();
-		} catch (error) {
-			return quotaSourceFailure(provider, "usage-endpoint", "invalid-json", undefined, endpoint, error);
-		}
-		const snapshot = normalizeQuotaSnapshot(provider, "usage-endpoint", body, Date.now(), endpoint);
-		return snapshot.windows.length > 0 ? snapshot : quotaSourceFailure(provider, "usage-endpoint", "unrecognized-schema", undefined, endpoint);
-	} catch (error) {
-		return quotaSourceFailure(provider, "usage-endpoint", "fetch-failed", undefined, endpoint, error);
-	} finally {
-		if (timer) clearTimeout(timer);
-	}
-}
-
-function quotaSourceFailure(
-	provider: string,
-	resetSource: "usage-endpoint" | "cli-rpc",
-	reason: string,
-	status?: number,
-	endpoint?: string,
-	_error?: unknown,
-): QuotaSourceFailure {
-	return {
-		...(endpoint ? { endpoint } : {}),
-		provider,
-		reason: sanitizeQuotaFailureReason(reason),
-		resetSource,
-		source: "quota-source-error",
-		...(status !== undefined ? { status } : {}),
-	};
-}
-
-function sanitizeQuotaFailureReason(reason: string): string {
-	return reason.replace(/bearer\s+[A-Za-z0-9._~+/-]+/gi, "bearer [redacted]").replace(/[A-Za-z0-9._~+/-]{24,}/g, "[redacted]");
-}
-
-export function quotaSourceFailureSummary(value: unknown): string | null {
-	if (!isRecord(value) || value.source !== "quota-source-error") return null;
-	const provider = typeof value.provider === "string" ? value.provider : "unknown";
-	const resetSource = typeof value.resetSource === "string" ? value.resetSource : "unknown";
-	const reason = typeof value.reason === "string" ? sanitizeQuotaFailureReason(value.reason) : "unknown";
-	const status = typeof value.status === "number" ? ` status=${value.status}` : "";
-	const endpoint = typeof value.endpoint === "string" ? ` endpoint=${value.endpoint}` : "";
-	return `provider=${provider} source=${resetSource} reason=${reason}${status}${endpoint}`;
 }
 
 const RESET_AT_MS_KEYS = new Set(["resetAtMs", "reset_at_ms", "resetsAtMs", "resets_at_ms"]);
 const RESET_AT_KEYS = new Set(["resetAt", "reset_at", "resetsAt", "resets_at"]);
 
-function extractStructuredResetAtMs(event: unknown): number | null {
+export function extractStructuredResetAtMs(event: unknown): number | null {
 	const seen = new Set<unknown>();
 	const stack: unknown[] = [event];
 	while (stack.length > 0) {
@@ -947,9 +420,7 @@ function parseAbsoluteResetTail(tail: string): number | null {
 		.replace(/[.;]\s*$/, "")
 		.replace(/\s*\([A-Za-z_][A-Za-z0-9_+\-/.]+\)\s*$/, "")
 		.trim();
-	if (!/(\d{4}|\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b|[+-]\d{2}:?\d{2}\b|\b(?:UTC|GMT|[A-Z]{2,4})\b)/i.test(withoutIanaZone)) {
-		return null;
-	}
+	if (/(\d{4}|\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b|[+-]\d{2}:?\d{2}\b|\b(?:UTC|GMT|[A-Z]{2,4})\b)/i.test(withoutIanaZone) === false) return null;
 	const parsed = Date.parse(withoutIanaZone);
 	return Number.isFinite(parsed) ? parsed : null;
 }
@@ -967,16 +438,11 @@ function parseClockTime(raw: string): { hour: number; minute: number; second: nu
 		if (hour < 1 || hour > 12) return null;
 		if (hour === 12) hour = 0;
 		if (meridiem === "pm") hour += 12;
-	} else if (hour < 0 || hour > 23) {
-		return null;
-	}
+	} else if (hour < 0 || hour > 23) return null;
 	return { hour, minute, second };
 }
 
-function nextClockOccurrenceInLocalTime(
-	clock: { hour: number; minute: number; second: number },
-	now: number,
-): number {
+function nextClockOccurrenceInLocalTime(clock: { hour: number; minute: number; second: number }, now: number): number {
 	const candidate = new Date(now);
 	candidate.setHours(clock.hour, clock.minute, clock.second, 0);
 	if (candidate.getTime() > now) {
@@ -985,45 +451,21 @@ function nextClockOccurrenceInLocalTime(
 		if (now - previous.getTime() <= RATE_LIMIT_CLOCK_RESET_PAST_TOLERANCE_MS) return previous.getTime();
 		return candidate.getTime();
 	}
-	if (candidate.getTime() <= now) {
-		const elapsedMs = now - candidate.getTime();
-		if (elapsedMs <= RATE_LIMIT_CLOCK_RESET_PAST_TOLERANCE_MS) return candidate.getTime();
-		candidate.setDate(candidate.getDate() + 1);
-	}
+	const elapsedMs = now - candidate.getTime();
+	if (elapsedMs <= RATE_LIMIT_CLOCK_RESET_PAST_TOLERANCE_MS) return candidate.getTime();
+	candidate.setDate(candidate.getDate() + 1);
 	return candidate.getTime();
 }
 
-function nextClockOccurrenceInTimeZone(
-	clock: { hour: number; minute: number; second: number },
-	timeZone: string,
-	now: number,
-): number | null {
+function nextClockOccurrenceInTimeZone(clock: { hour: number; minute: number; second: number }, timeZone: string, now: number): number | null {
 	const nowParts = zonedDateParts(now, timeZone);
 	if (!nowParts) return null;
 	const previousDate = new Date(Date.UTC(nowParts.year, nowParts.month - 1, nowParts.day - 1));
-	const previousCandidate = zonedLocalTimeToUtcMs(
-		previousDate.getUTCFullYear(),
-		previousDate.getUTCMonth() + 1,
-		previousDate.getUTCDate(),
-		clock.hour,
-		clock.minute,
-		clock.second,
-		timeZone,
-	);
-	if (previousCandidate !== null && previousCandidate <= now && now - previousCandidate <= RATE_LIMIT_CLOCK_RESET_PAST_TOLERANCE_MS) {
-		return previousCandidate;
-	}
+	const previousCandidate = zonedLocalTimeToUtcMs(previousDate.getUTCFullYear(), previousDate.getUTCMonth() + 1, previousDate.getUTCDate(), clock.hour, clock.minute, clock.second, timeZone);
+	if (previousCandidate !== null && previousCandidate <= now && now - previousCandidate <= RATE_LIMIT_CLOCK_RESET_PAST_TOLERANCE_MS) return previousCandidate;
 	for (let dayOffset = 0; dayOffset < 3; dayOffset += 1) {
 		const date = new Date(Date.UTC(nowParts.year, nowParts.month - 1, nowParts.day + dayOffset));
-		const candidate = zonedLocalTimeToUtcMs(
-			date.getUTCFullYear(),
-			date.getUTCMonth() + 1,
-			date.getUTCDate(),
-			clock.hour,
-			clock.minute,
-			clock.second,
-			timeZone,
-		);
+		const candidate = zonedLocalTimeToUtcMs(date.getUTCFullYear(), date.getUTCMonth() + 1, date.getUTCDate(), clock.hour, clock.minute, clock.second, timeZone);
 		if (candidate === null) continue;
 		if (candidate > now) return candidate;
 		if (now - candidate <= RATE_LIMIT_CLOCK_RESET_PAST_TOLERANCE_MS) return candidate;
@@ -1033,19 +475,10 @@ function nextClockOccurrenceInTimeZone(
 
 function zonedDateParts(utcMs: number, timeZone: string): { year: number; month: number; day: number } | null {
 	const parts = formatZonedParts(utcMs, timeZone);
-	if (!parts) return null;
-	return { day: parts.day, month: parts.month, year: parts.year };
+	return parts ? { day: parts.day, month: parts.month, year: parts.year } : null;
 }
 
-function zonedLocalTimeToUtcMs(
-	year: number,
-	month: number,
-	day: number,
-	hour: number,
-	minute: number,
-	second: number,
-	timeZone: string,
-): number | null {
+function zonedLocalTimeToUtcMs(year: number, month: number, day: number, hour: number, minute: number, second: number, timeZone: string): number | null {
 	const localAsUtc = Date.UTC(year, month - 1, day, hour, minute, second);
 	const firstOffset = timeZoneOffsetMs(timeZone, localAsUtc);
 	if (firstOffset === null) return null;
@@ -1063,33 +496,39 @@ function timeZoneOffsetMs(timeZone: string, utcMs: number): number | null {
 	return zonedAsUtc - utcMs;
 }
 
-function formatZonedParts(
-	utcMs: number,
-	timeZone: string,
-): { year: number; month: number; day: number; hour: number; minute: number; second: number } | null {
+function formatZonedParts(utcMs: number, timeZone: string): { year: number; month: number; day: number; hour: number; minute: number; second: number } | null {
 	try {
-		const formatter = new Intl.DateTimeFormat("en-US", {
-			day: "2-digit",
-			hour: "2-digit",
-			hourCycle: "h23",
-			minute: "2-digit",
-			month: "2-digit",
-			second: "2-digit",
-			timeZone,
-			year: "numeric",
-		});
-		const values = Object.fromEntries(
-			formatter
-				.formatToParts(new Date(utcMs))
-				.filter((part) => part.type !== "literal")
-				.map((part) => [part.type, Number(part.value)]),
-		) as Record<string, number>;
+		const formatter = new Intl.DateTimeFormat("en-US", { day: "2-digit", hour: "2-digit", hourCycle: "h23", minute: "2-digit", month: "2-digit", second: "2-digit", timeZone, year: "numeric" });
+		const values = Object.fromEntries(formatter.formatToParts(new Date(utcMs)).filter((part) => part.type !== "literal").map((part) => [part.type, Number(part.value)])) as Record<string, number>;
 		const { day, hour, minute, month, second, year } = values;
 		if (![day, hour, minute, month, second, year].every((value) => Number.isFinite(value))) return null;
 		return { day, hour, minute, month, second, year };
 	} catch {
 		return null;
 	}
+}
+
+function coerceFiniteNumber(value: unknown): number | null {
+	if (typeof value === "number" && Number.isFinite(value)) return value;
+	if (typeof value === "string" && /^[0-9]+(?:\.[0-9]+)?$/.test(value.trim())) {
+		const parsed = Number(value);
+		return Number.isFinite(parsed) ? parsed : null;
+	}
+	return null;
+}
+
+export function quotaSourceFailureSummary(value: unknown): string | null {
+	if (!isRecord(value) || value.source !== "quota-source-error") return null;
+	const provider = typeof value.provider === "string" ? value.provider : "unknown";
+	const resetSource = typeof value.resetSource === "string" ? value.resetSource : "unknown";
+	const reason = typeof value.reason === "string" ? sanitizeQuotaFailureReason(value.reason) : "unknown";
+	const status = typeof value.status === "number" ? ` status=${value.status}` : "";
+	const endpoint = typeof value.endpoint === "string" ? ` endpoint=${value.endpoint}` : "";
+	return `provider=${provider} source=${resetSource} reason=${reason}${status}${endpoint}`;
+}
+
+function sanitizeQuotaFailureReason(reason: string): string {
+	return reason.replace(/bearer\s+[A-Za-z0-9._~+/-]+/gi, "bearer [redacted]").replace(/[A-Za-z0-9._~+/-]{24,}/g, "[redacted]");
 }
 
 function readAssistantMessage(event: unknown): Record<string, unknown> | null {
@@ -1126,53 +565,6 @@ function readAssistantStopReason(message: Record<string, unknown>): string | nul
 	return typeof value === "string" ? value : null;
 }
 
-// CLI entry: `printf '%s' "$event_json" | bun rate-limit-watchdog.ts decide --pane <id> --attempt <n> [--now <ms>]`
-// Used by the bash pi subscriber (Layer B) so it can route rate-limit
-// events through the same decision module without re-implementing the
-// ladder math. Outputs the decision as JSON on stdout, exits 0.
-// `--event` remains accepted for manual debugging; production callers
-// should omit it so event JSON is read from stdin instead of process argv.
-if (import.meta.main) {
-	const args = process.argv.slice(2);
-	const action = args.shift();
-	if (action !== "decide") {
-		process.stderr.write("Usage: rate-limit-watchdog.ts decide --pane <id> --attempt <n> [--now <ms>] < event.json\n");
-		process.exit(2);
-	}
-	let eventJson = "";
-	let paneId = "";
-	let attempt = 0;
-	let now = Date.now();
-	for (let i = 0; i < args.length; i += 1) {
-		const flag = args[i];
-		switch (flag) {
-			case "--event": eventJson = args[++i] ?? ""; break;
-			case "--pane": paneId = args[++i] ?? ""; break;
-			case "--attempt": attempt = Number(args[++i] ?? "0") || 0; break;
-			case "--now": now = Number(args[++i] ?? `${Date.now()}`) || Date.now(); break;
-			default:
-				process.stderr.write(`Unknown flag: ${flag}\n`);
-				process.exit(2);
-		}
-	}
-	if (!eventJson) {
-		eventJson = await Bun.stdin.text();
-	}
-	let event: unknown;
-	try {
-		event = JSON.parse(eventJson);
-	} catch (error) {
-		process.stderr.write(`invalid --event JSON: ${(error as Error).message}\n`);
-		process.exit(2);
-	}
-	const usageSnapshot = classifyRateLimitEvent(event).isRateLimitEvent
-		? await fetchProviderQuotaSnapshotFromEnv(event).catch(() => null)
-		: null;
-	const quotaFailureSummary = quotaSourceFailureSummary(usageSnapshot);
-	if (quotaFailureSummary) {
-		process.stderr.write(`quota-source-error ${quotaFailureSummary}\n`);
-	}
-	const decision = decideRateLimitRetry({ attempt, event, lastRetryAt: null, now, paneId, usageSnapshot });
-	process.stdout.write(`${JSON.stringify(quotaFailureSummary ? { ...decision, quotaSourceFailureSummary: quotaFailureSummary } : decision)}\n`);
-	process.exit(0);
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }

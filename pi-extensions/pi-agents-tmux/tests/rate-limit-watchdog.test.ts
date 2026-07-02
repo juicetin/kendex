@@ -10,7 +10,8 @@ import {
 	type RateLimitOutcome,
 	type SubagentRateLimitWatchdogDeps,
 } from "../extensions/subagent/rate-limit-watchdog.js";
-import { RATE_LIMIT_RESET_MARGIN_MS, normalizeQuotaSnapshot } from "../extensions/subagent/rate-limit-decision.js";
+import { RATE_LIMIT_RESET_MARGIN_MS } from "../extensions/subagent/rate-limit-decision.js";
+import { normalizeQuotaSnapshot } from "../extensions/subagent/rate-limit-quota-normalize.js";
 import { buildSubagentActivity } from "../extensions/subagent/activity.js";
 
 const CANONICAL_RATE_LIMIT_MESSAGE_END = {
