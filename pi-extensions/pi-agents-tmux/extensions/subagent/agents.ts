@@ -46,7 +46,7 @@ export interface AgentDiscoveryResult {
 function normalizeModel(model: unknown): string | undefined {
 	if (typeof model !== "string" || model.trim().length === 0) return undefined;
 	const trimmed = model.trim();
-	if (trimmed === "sonnet") return "claude-sonnet-4-5";
+	if (trimmed === "sonnet") return "claude-sonnet-5";
 	if (trimmed.startsWith("opus")) return "claude-opus-4-5";
 	if (trimmed === "haiku") return "claude-haiku-4-5";
 	return trimmed;
