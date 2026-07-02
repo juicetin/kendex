@@ -72,7 +72,7 @@ function applyPromptZoneMarkers(lines: string[], markers: PromptZoneMarkers): st
 	return marked;
 }
 
-function renderUserMessageBorder(lines: string[], width: number, theme: any, cwd?: string): string[] {
+function renderUserMessageBorder(lines: string[], width: number, theme: any, cwd?: string, forcePromptZone = false): string[] {
 	if (lines.length === 0 || width < 4) return lines;
 	// Pi wraps user messages with OSC 133 prompt-zone markers. With compact
 	// padding, a single-line message can carry start/end/final markers on the
@@ -80,6 +80,11 @@ function renderUserMessageBorder(lines: string[], width: number, theme: any, cwd
 	// as prompt chrome. Strip those markers from the body and rewrap the whole
 	// framed card so the terminal sees one stable prompt zone.
 	const unwrapped = stripPromptZoneMarkers(lines);
+	if (forcePromptZone) {
+		unwrapped.markers.start = true;
+		unwrapped.markers.end = true;
+		unwrapped.markers.final = true;
+	}
 	const innerWidth = Math.max(1, width - 2);
 	const frame = frameGlyphs(cwd);
 	const prompt = glyphs(cwd).prompt;
@@ -128,7 +133,7 @@ function safeCtxTheme(ctx?: ExtensionContext): any {
 	}
 }
 
-export const __test = { applyPromptZoneMarkers, renderStyledCodeBlock, renderUserMessageBorder, safeCtxCwd, safeCtxHasUI, safeCtxTheme, stripPromptZoneMarkers };
+export const __test = { applyPromptZoneMarkers, renderRawUserMessageLines, renderStyledCodeBlock, renderUserMessageBorder, safeCtxCwd, safeCtxHasUI, safeCtxTheme, stripPromptZoneMarkers };
 
 function appendUserMessageBreak(lines: string[], width: number, cwd?: string): string[] {
 	if (lines.length === 0 || !settingBoolean("userMessageTrailingBlankLine", true, cwd)) return lines;
@@ -144,6 +149,20 @@ interface UserMessagePatchState {
 	originalRender: (width: number) => string[];
 }
 
+function renderRawUserMessageLines(component: any, width: number, theme: any): string[] | undefined {
+	const text = typeof component?.text === "string" ? component.text : undefined;
+	if (text === undefined) return undefined;
+	const markdownTheme = component?.markdownTheme ?? getMarkdownTheme();
+	return new Markdown(
+		text,
+		0,
+		0,
+		markdownTheme,
+		{ color: (content: string) => theme.fg("userMessageText", content) },
+		{ preserveOrderedListMarkers: true, preserveBackslashEscapes: true },
+	).render(width);
+}
+
 export function installUserMessageRenderer(pi: ExtensionAPI, UserMessageComponent: any): void {
 	const prototype = UserMessageComponent?.prototype as Record<PropertyKey, unknown> | undefined;
 	if (!prototype || typeof prototype.render !== "function") return;
@@ -155,11 +174,22 @@ export function installUserMessageRenderer(pi: ExtensionAPI, UserMessageComponen
 		};
 		prototype[USER_MESSAGE_PATCH_SYMBOL] = state;
 		prototype.render = function compactUserMessageRender(this: any, width: number): string[] {
-			const box = this?.contentBox;
 			const ctx = state?.activeCtx;
 			const cwd = safeCtxCwd(ctx);
-			if (box && safeCtxHasUI(ctx)) {
-				const compact = settingBoolean("compactUserMessages", true, cwd);
+			const hasUI = safeCtxHasUI(ctx);
+			const compact = hasUI && settingBoolean("compactUserMessages", true, cwd);
+
+			if (compact && width >= 4) {
+				const theme = safeCtxTheme(ctx);
+				const frameWidth = stableRenderWidth(width, cwd);
+				const rawLines = renderRawUserMessageLines(this, Math.max(1, frameWidth - 2), theme);
+				if (rawLines) {
+					return appendUserMessageBreak(renderUserMessageBorder(rawLines, frameWidth, theme, cwd, true), width, cwd);
+				}
+			}
+
+			const box = this?.contentBox;
+			if (box && hasUI) {
 				const paddingY = compact ? 0 : 1;
 				const boxState = compact ? `${paddingY}:border:ansi-green:text:pi-red:left` : `${paddingY}:background:userMessageBg`;
 

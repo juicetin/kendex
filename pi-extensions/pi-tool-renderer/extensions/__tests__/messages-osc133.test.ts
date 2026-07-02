@@ -15,6 +15,12 @@ const theme = {
 	},
 };
 
+const markdownTheme = {
+	codeBlock(text: string) { return text; },
+	fg(_token: string, text: string) { return text; },
+	highlightCode(code: string) { return code.split("\n"); },
+};
+
 function stripControl(text: string): string {
 	return text.replace(ANSI_RE, "");
 }
@@ -48,5 +54,17 @@ describe("compact user-message OSC 133 prompt zones", () => {
 
 		expect(stripped.lines).toEqual(["first", "middle", "last"]);
 		expect(stripped.markers).toEqual({ start: true, end: true, final: true });
+	});
+
+	test("new outputPad user-message component can be framed without contentBox", () => {
+		const raw = __test.renderRawUserMessageLines({ markdownTheme, text: "hello" }, 18, theme);
+		expect(raw?.[0]?.trimEnd()).toBe("hello");
+		const rendered = __test.renderUserMessageBorder(raw!, 20, theme, undefined, true);
+
+		expect(rendered[0]!.startsWith(OSC133_ZONE_START)).toBe(true);
+		expect(rendered[1]!).toContain("hello");
+		expect(rendered[1]!).not.toContain("userMessageBg");
+		expect(rendered[2]!.startsWith(`${OSC133_ZONE_END}${OSC133_ZONE_FINAL}`)).toBe(true);
+		expect(visibleWidth(rendered[0]!)).toBe(20);
 	});
 });
