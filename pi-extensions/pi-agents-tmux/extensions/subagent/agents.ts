@@ -46,7 +46,10 @@ export interface AgentDiscoveryResult {
 function normalizeModel(model: unknown): string | undefined {
 	if (typeof model !== "string" || model.trim().length === 0) return undefined;
 	const trimmed = model.trim();
-	if (trimmed === "sonnet") return "claude-sonnet-5";
+	// "anthropic/<alias>" (not a bare id) so Pi's own model resolver keeps
+	// picking the newest non-dated alias in that provider as Anthropic ships
+	// new generations, instead of drifting stale like the old hardcoded id.
+	if (trimmed === "sonnet") return "anthropic/sonnet";
 	if (trimmed.startsWith("opus")) return "claude-opus-4-5";
 	if (trimmed === "haiku") return "claude-haiku-4-5";
 	return trimmed;
