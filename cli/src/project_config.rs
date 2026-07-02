@@ -592,21 +592,6 @@ fn is_legacy_pi_extra_deny_tools(tools: &[String]) -> bool {
     tools == ["get_subagent_result", "steer_subagent", "stop_subagent"]
 }
 
-fn should_replace_generated_model_default(section: &str, existing: &str, default: &str) -> bool {
-    let default = toml_scalar_string_value(default).to_ascii_lowercase();
-    if default != "inherit" {
-        return false;
-    }
-    let existing = toml_scalar_string_value(existing).to_ascii_lowercase();
-    match section {
-        "[agent-frontmatter.claude]" => existing == "opus[1m]",
-        "[agent-frontmatter.pi]" => {
-            existing == "openai-codex/gpt-5.5" || existing.starts_with("openai-codex/gpt-5.5:")
-        }
-        _ => false,
-    }
-}
-
 fn render_inline_table_fields(fields: &[(String, String)]) -> String {
     let preferred = [
         "color",
@@ -1449,13 +1434,7 @@ fn upsert_missing_inline_table_fields(
                     continue;
                 }
                 if key == "model" {
-                    if let Some((_, existing_value)) =
-                        fields.iter_mut().find(|(field, _)| field == key)
-                    {
-                        if should_replace_generated_model_default(section, existing_value, value) {
-                            *existing_value = value.clone();
-                        }
-                    } else {
+                    if !existing_keys.contains(key) {
                         fields.push((key.clone(), value.clone()));
                     }
                     continue;
@@ -3024,7 +3003,7 @@ tpm = { subagent_agents = ["scout"] }
     }
 
     #[test]
-    fn write_agent_frontmatter_defaults_migrates_generated_heavy_model_defaults_to_inherit() {
+    fn write_agent_frontmatter_defaults_preserves_existing_model_overrides() {
         let dir = std::env::temp_dir().join(format!(
             "vstack_test_agent_frontmatter_model_inherit_{}",
             std::process::id()
@@ -3075,12 +3054,15 @@ rust = { model = "openai-codex/gpt-5.5:xhigh", allowed-subagents = ["scout"], pa
             .lines()
             .find(|line| line.starts_with("rust =") && line.contains("background"))
             .expect("rust claude frontmatter line");
-        assert!(claude_line.contains("model = \"inherit\""), "{claude_line}");
+        assert!(claude_line.contains("model = \"opus[1m]\""), "{claude_line}");
         let pi_line = updated
             .lines()
             .find(|line| line.starts_with("rust =") && line.contains("allowed-subagents"))
             .expect("rust pi frontmatter line");
-        assert!(pi_line.contains("model = \"inherit\""), "{pi_line}");
+        assert!(
+            pi_line.contains("model = \"openai-codex/gpt-5.5:xhigh\""),
+            "{pi_line}"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
