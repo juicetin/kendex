@@ -5,7 +5,7 @@
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { FABLE_FALLBACK_MODEL_ID, FABLE_MODEL_ID, MODEL_IDS_IN_ORDER, buildModels, fallbackModelForPrimaryModel, resolveModelId } from "../src/models.js";
+import { FABLE_FALLBACK_MODEL_ID, FABLE_MODEL_ID, MODEL_IDS_IN_ORDER, SONNET_5_MODEL_ID, buildModels, fallbackModelForPrimaryModel, resolveModelId } from "../src/models.js";
 
 // Simulated pi-ai registry entry — extra fields mimic the ones pi-ai exposes
 // that must not leak into the provider-registered MODELS array.
@@ -42,10 +42,12 @@ describe("MODELS projection", () => {
 
 	it("fills bridge-owned future IDs missing from pi-ai and drops unknown missing IDs", () => {
 		const models = buildModels([mockPiAiModel("claude-haiku-4-5")]);
-		assert.deepEqual(models.map((m) => m.id), ["claude-fable-5", "claude-opus-4-8", "claude-haiku-4-5"]);
+		assert.deepEqual(models.map((m) => m.id), ["claude-fable-5", "claude-opus-4-8", "claude-sonnet-5", "claude-haiku-4-5"]);
 		assert.equal(models.find((m) => m.id === "claude-fable-5")?.name, "Claude Fable 5");
 		assert.equal(models.find((m) => m.id === "claude-fable-5")?.contextWindow, 1000000);
 		assert.equal(models.find((m) => m.id === "claude-opus-4-8")?.maxTokens, 128000);
+		assert.equal(models.find((m) => m.id === "claude-sonnet-5")?.name, "Claude Sonnet 5");
+		assert.equal(models.find((m) => m.id === "claude-sonnet-5")?.contextWindow, 1000000);
 	});
 
 	it("prefers pi-ai metadata over bridge fallback metadata", () => {
@@ -87,6 +89,10 @@ describe("resolveModelId", () => {
 		assert.equal(resolveModelId(models, "fable"), "claude-fable-5");
 	});
 
+	it("sonnet shortcut resolves to claude-sonnet-5", () => {
+		assert.equal(resolveModelId(models, "sonnet"), SONNET_5_MODEL_ID);
+	});
+
 	it("haiku shortcut resolves to claude-haiku-4-5", () => {
 		assert.equal(resolveModelId(models, "haiku"), "claude-haiku-4-5");
 	});
@@ -102,6 +108,7 @@ describe("resolveModelId", () => {
 	it("configures Opus 4.8 availability fallback for Fable 5 only", () => {
 		assert.equal(fallbackModelForPrimaryModel(FABLE_MODEL_ID), FABLE_FALLBACK_MODEL_ID);
 		assert.equal(fallbackModelForPrimaryModel(FABLE_FALLBACK_MODEL_ID), undefined);
+		assert.equal(fallbackModelForPrimaryModel(SONNET_5_MODEL_ID), undefined);
 		assert.equal(fallbackModelForPrimaryModel("claude-sonnet-4-6"), undefined);
 	});
 });
