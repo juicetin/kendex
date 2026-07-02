@@ -96,14 +96,16 @@ function renderUserMessageBorder(lines: string[], width: number, theme: any, cwd
 		const right = ` ${frame.h.repeat(Math.max(0, innerWidth - visibleWidth(left) - visibleWidth(prompt) - 1))}`;
 		return `${border(left)}${marker(prompt)}${border(right)}`;
 	};
+	const bodyLeftPadding = " ";
+	const bodyContentWidth = Math.max(1, innerWidth - visibleWidth(bodyLeftPadding));
 	const fitLine = (line: string) => {
-		const clipped = truncateAnsi(line, innerWidth);
-		return applyBaseTextFg(clipped, theme) + " ".repeat(Math.max(0, innerWidth - visibleWidth(clipped)));
+		const clipped = truncateAnsi(line, bodyContentWidth);
+		return applyBaseTextFg(clipped, theme) + " ".repeat(Math.max(0, bodyContentWidth - visibleWidth(clipped)));
 	};
 
 	return applyPromptZoneMarkers([
 		`${border(frame.tl)}${topBorder()}${border(frame.tr)}`,
-		...unwrapped.lines.map((line) => `${border(frame.v)}${fitLine(line)}${border(frame.v)}`),
+		...unwrapped.lines.map((line) => `${border(frame.v)}${bodyLeftPadding}${fitLine(line)}${border(frame.v)}`),
 		`${border(frame.bl)}${border(frame.h.repeat(innerWidth))}${border(frame.br)}`,
 	], unwrapped.markers);
 }

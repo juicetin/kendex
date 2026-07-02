@@ -39,7 +39,7 @@ describe("compact user-message OSC 133 prompt zones", () => {
 		expect(rendered.join("").match(/\]133;[ABC]\x07/g)).toHaveLength(3);
 
 		const middle = stripControl(rendered[1]!);
-		expect(middle).toMatch(/^┃hello +┃$/);
+		expect(middle).toMatch(/^┃ hello +┃$/);
 		expect(visibleWidth(rendered[0]!)).toBe(20);
 		expect(visibleWidth(rendered[1]!)).toBe(20);
 		expect(visibleWidth(rendered[2]!)).toBe(20);
@@ -62,7 +62,7 @@ describe("compact user-message OSC 133 prompt zones", () => {
 		const rendered = __test.renderUserMessageBorder(raw!, 20, theme, undefined, true);
 
 		expect(rendered[0]!.startsWith(OSC133_ZONE_START)).toBe(true);
-		expect(rendered[1]!).toContain("hello");
+		expect(stripControl(rendered[1]!)).toMatch(/^┃ hello +┃$/);
 		expect(rendered[1]!).not.toContain("userMessageBg");
 		expect(rendered[2]!.startsWith(`${OSC133_ZONE_END}${OSC133_ZONE_FINAL}`)).toBe(true);
 		expect(visibleWidth(rendered[0]!)).toBe(20);
