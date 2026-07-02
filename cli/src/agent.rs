@@ -101,7 +101,7 @@ pub fn model_id_for(provider: &str, model: &str) -> String {
     match provider {
         "anthropic" => match base.as_str() {
             "opus" => "anthropic/claude-opus-4-20250514".into(),
-            "sonnet" => "anthropic/claude-sonnet-4-20250514".into(),
+            "sonnet" => "anthropic/claude-sonnet-5".into(),
             "haiku" => "anthropic/claude-haiku-4-5-20251001".into(),
             other => other.into(),
         },
@@ -528,6 +528,26 @@ pub fn insert_after_intro(body: &str, section: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_id_for_maps_canonical_tiers_per_provider() {
+        assert_eq!(model_id_for("claude-code", "sonnet"), "sonnet");
+        assert_eq!(model_id_for("claude-code", "opus"), "opus[1m]");
+        assert_eq!(model_id_for("openai", "sonnet"), "openai/gpt-5.5");
+        assert_eq!(
+            model_id_for("anthropic", "sonnet"),
+            "anthropic/claude-sonnet-5"
+        );
+        // Exact ids and slash-qualified ids always pass through unchanged.
+        assert_eq!(
+            model_id_for("anthropic", "claude-sonnet-4-6"),
+            "claude-sonnet-4-6"
+        );
+        assert_eq!(
+            model_id_for("openai", "openai-codex/gpt-5.5"),
+            "openai-codex/gpt-5.5"
+        );
+    }
 
     #[test]
     fn parse_agent() {
