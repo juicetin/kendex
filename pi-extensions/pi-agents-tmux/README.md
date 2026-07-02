@@ -90,7 +90,6 @@ Agents with `pane: true` use a visible tmux pane:
 name: iced
 description: Iced UI specialist
 deny-tools: bash
-model: openai-codex/gpt-5.5:xhigh
 color: cyan
 pane: true
 ---
@@ -104,7 +103,7 @@ Frontmatter fields:
 | `description` | yes | Short description shown in `/agents` and completions. |
 | `deny-tools` | no | Comma-separated Pi tools to deny. Future parent tools are inherited unless explicitly denied. |
 | `allowed-subagents` | no | Comma-separated or array of agent names this agent may call via `delegate_subagent`. Engineer agents installed by vstack default to `scout`. Set `[]` to disable delegation. Aliases: `allowedSubagents`, `subagent-agents`, `subagent_agents`. |
-| `model` | no | Pi model id; shorthands: `sonnet`, `opus*`, `haiku`. Other ids pass through. |
+| `model` | no | Pi model id; omit to inherit the parent session model. Shorthands: `sonnet`, `opus*`, `haiku`. Other ids pass through. |
 | `pane` | no | `true` for a visible persistent pane; omit for bg. |
 | `color` | no | Pane badge color: `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`. Aliases: `orange`, `purple`/`violet`, `teal`. |
 
@@ -161,7 +160,7 @@ There is one execution-concurrency knob — `maxConcurrency` — and it caps con
 | Enable agents | Master toggle for the subagent tools, dashboard, and pane helpers. |
 | Max concurrency | Cap on concurrent one-shot/background agent executions in the parallel dispatch queue; persistent pane agents only occupy the queue until launch/enqueue. |
 | Background task timeout | Deadline in milliseconds for bg one-shot agents. Set `0` to disable. |
-| Subagent model source | Use the agent's `model:` or inherit the parent session model. |
+| Subagent model source | Use the agent's `model:` or inherit the parent session model. vstack `opus` agents omit `model:` by default; cheaper agents such as `scout` may pin one. |
 | Subagent thinking source | Use the model `:effort` suffix or inherit the parent thinking level. |
 | Reused session budget threshold | Fraction of model context allowed before an explicit `sessionKey` lane is considered too full. |
 | Reused session budget policy | `refuse-and-warn` (default) blocks near-limit reused lanes with a warning; `warn` logs and continues; `compact-then-resume` archives/truncates the lane before launch. |

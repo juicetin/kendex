@@ -378,7 +378,7 @@ mod tests {
         };
         let path = generate_agent(&agent, &dir, &[], &[], &extras).expect("generate ok");
         let content = std::fs::read_to_string(&path).unwrap();
-        assert!(content.contains("model: opus[1m]"));
+        assert!(content.contains("model: inherit"));
         assert!(content.contains("effort: max"));
         assert!(content.contains("background: false"));
         assert!(!content.contains("isolation:"));

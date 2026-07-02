@@ -35,13 +35,7 @@ pub fn generate_agent(
     let path = dir.join(format!("{}.md", agent.name));
 
     let frontmatter = extras.frontmatter_for("pi");
-    let model = frontmatter
-        .model
-        .as_deref()
-        .map(|model| pi_model_for_with_effort(model, pi_effort_for(agent, &frontmatter)))
-        .unwrap_or_else(|| {
-            pi_model_for_with_effort(&agent.model, pi_effort_for(agent, &frontmatter))
-        });
+    let model = pi_model_for_agent(agent, &frontmatter);
     let allowed_subagents = pi_allowed_subagents_for(agent, &frontmatter);
     let deny_tools = pi_deny_tools_for(agent, &frontmatter, &allowed_subagents);
 
@@ -60,7 +54,9 @@ pub fn generate_agent(
             allowed_subagents.join(", ")
         ));
     }
-    output.push_str(&format!("model: {}\n", model));
+    if let Some(model) = model {
+        output.push_str(&format!("model: {}\n", model));
+    }
     if let Some(color) = frontmatter
         .color
         .as_ref()
@@ -97,12 +93,38 @@ pub fn generate_agent(
     Ok(path)
 }
 
-/// Map vstack canonical model names to Pi model identifiers.
+/// Resolve the Pi model frontmatter to emit.
 ///
-/// Pi defaults to OpenAI models for vstack-managed agents. Pi accepts
-/// `provider/model` and an optional `:thinking` shorthand (per the Pi
-/// `--model` flag), so when an effort is configured we encode it alongside
-/// the model id.
+/// Heavy canonical vstack agents (`model: opus`) omit `model:` so
+/// pi-agents-tmux inherits the parent session model. Cheaper canonical
+/// agents (`sonnet`/`haiku`, currently scout) still emit an explicit Pi
+/// model with the configured effort suffix.
+fn pi_model_for_agent(
+    agent: &Agent,
+    frontmatter: &agent::AgentFrontmatterOverrides,
+) -> Option<String> {
+    let effort = pi_effort_for(agent, frontmatter);
+    if let Some(model) = frontmatter.model.as_deref() {
+        return pi_model_for_override(model, effort);
+    }
+    pi_model_for_source_default(&agent.model, effort)
+}
+
+fn pi_model_for_source_default(model: &str, effort: Option<String>) -> Option<String> {
+    match model.to_lowercase().as_str() {
+        "opus" => None,
+        "sonnet" | "haiku" => Some(pi_openai_model_with_effort(effort)),
+        other => Some(other.into()),
+    }
+}
+
+fn pi_model_for_override(model: &str, effort: Option<String>) -> Option<String> {
+    if is_inherit_model(model) {
+        return None;
+    }
+    Some(pi_model_for_with_effort(model, effort))
+}
+
 fn pi_model_for_with_effort(model: &str, effort: Option<String>) -> String {
     let effort_suffix = effort
         .filter(|effort| !is_none_value(effort))
@@ -112,6 +134,17 @@ fn pi_model_for_with_effort(model: &str, effort: Option<String>) -> String {
         "opus" | "sonnet" | "haiku" => format!("openai-codex/gpt-5.5{effort_suffix}"),
         other => other.into(),
     }
+}
+
+fn pi_openai_model_with_effort(effort: Option<String>) -> String {
+    pi_model_for_with_effort("sonnet", effort)
+}
+
+fn is_inherit_model(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "inherit" | "current" | "parent"
+    )
 }
 
 fn pi_effort_for(agent: &Agent, frontmatter: &agent::AgentFrontmatterOverrides) -> Option<String> {
@@ -247,22 +280,22 @@ mod tests {
     #[test]
     fn pi_model_mapping() {
         assert_eq!(
-            pi_model_for_with_effort("opus", Some("xhigh".into())),
-            "openai-codex/gpt-5.5:xhigh"
+            pi_model_for_source_default("opus", Some("xhigh".into())),
+            None
         );
         assert_eq!(
-            pi_model_for_with_effort("sonnet", Some("high".into())),
-            "openai-codex/gpt-5.5:high"
+            pi_model_for_source_default("sonnet", Some("high".into())),
+            Some("openai-codex/gpt-5.5:high".into())
         );
         assert_eq!(
-            pi_model_for_with_effort("haiku", Some("medium".into())),
-            "openai-codex/gpt-5.5:medium"
+            pi_model_for_source_default("haiku", Some("medium".into())),
+            Some("openai-codex/gpt-5.5:medium".into())
         );
+        assert_eq!(pi_model_for_override("inherit", Some("xhigh".into())), None);
         assert_eq!(
-            pi_model_for_with_effort("opus", None),
-            "openai-codex/gpt-5.5"
+            pi_model_for_override("custom-id", None),
+            Some("custom-id".into())
         );
-        assert_eq!(pi_model_for_with_effort("custom-id", None), "custom-id");
     }
 
     #[test]
@@ -287,7 +320,7 @@ mod tests {
 
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains("name: rust"));
-        assert!(content.contains("model: openai-codex/gpt-5.5:xhigh"));
+        assert!(!content.lines().any(|line| line.starts_with("model:")));
         assert!(content.contains("color: magenta"));
         assert!(!content.lines().any(|line| line.starts_with("tools:")));
         // Engineer default: subagent-family stays denied, but delegate_subagent
@@ -512,8 +545,7 @@ mod tests {
             generate_agent(&agent, &dir, &[], &[], &AgentExtras::default()).expect("generate ok");
 
         let content = std::fs::read_to_string(&path).unwrap();
-        assert!(content.contains("model: openai-codex/gpt-5.5\n"));
-        assert!(!content.contains("model: openai-codex/gpt-5.5:"));
+        assert!(!content.lines().any(|line| line.starts_with("model:")));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

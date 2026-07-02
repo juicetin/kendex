@@ -112,7 +112,7 @@ pub fn model_id_for(provider: &str, model: &str) -> String {
             other => format!("openai/{other}"),
         },
         "claude-code" => match base.as_str() {
-            "opus" => "opus[1m]".into(),
+            "opus" => "inherit".into(),
             "sonnet" => "sonnet".into(),
             "haiku" => "haiku".into(),
             other => other.into(),
@@ -532,7 +532,7 @@ mod tests {
     #[test]
     fn model_id_for_maps_canonical_tiers_per_provider() {
         assert_eq!(model_id_for("claude-code", "sonnet"), "sonnet");
-        assert_eq!(model_id_for("claude-code", "opus"), "opus[1m]");
+        assert_eq!(model_id_for("claude-code", "opus"), "inherit");
         assert_eq!(model_id_for("openai", "sonnet"), "openai/gpt-5.5");
         assert_eq!(
             model_id_for("anthropic", "sonnet"),

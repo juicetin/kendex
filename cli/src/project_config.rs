@@ -579,8 +579,32 @@ fn parse_toml_array_strings(value: &str) -> Vec<String> {
         .collect()
 }
 
+fn toml_scalar_string_value(value: &str) -> String {
+    value
+        .trim()
+        .trim_matches('"')
+        .trim_matches('\'')
+        .trim()
+        .to_string()
+}
+
 fn is_legacy_pi_extra_deny_tools(tools: &[String]) -> bool {
     tools == ["get_subagent_result", "steer_subagent", "stop_subagent"]
+}
+
+fn should_replace_generated_model_default(section: &str, existing: &str, default: &str) -> bool {
+    let default = toml_scalar_string_value(default).to_ascii_lowercase();
+    if default != "inherit" {
+        return false;
+    }
+    let existing = toml_scalar_string_value(existing).to_ascii_lowercase();
+    match section {
+        "[agent-frontmatter.claude]" => existing == "opus[1m]",
+        "[agent-frontmatter.pi]" => {
+            existing == "openai-codex/gpt-5.5" || existing.starts_with("openai-codex/gpt-5.5:")
+        }
+        _ => false,
+    }
 }
 
 fn render_inline_table_fields(fields: &[(String, String)]) -> String {
@@ -1039,10 +1063,7 @@ fn claude_frontmatter_defaults(
     push_color_field(&mut fields, agent, frontmatter, false);
     fields.push((
         "model".into(),
-        toml_inline_string(&crate::agent::model_id_for(
-            "claude-code",
-            frontmatter.model.as_deref().unwrap_or(&agent.model),
-        )),
+        toml_inline_string(&claude_model_default(agent, frontmatter)),
     ));
     let effort = frontmatter.effort.clone().or_else(|| agent.effort.clone());
     if let Some(effort) = effort.filter(|effort| !is_none_value(effort)) {
@@ -1266,12 +1287,40 @@ fn codex_model_name(model: &str) -> String {
     }
 }
 
+fn claude_model_default(
+    agent: &crate::agent::Agent,
+    frontmatter: &crate::agent::AgentFrontmatterOverrides,
+) -> String {
+    let model = frontmatter.model.as_deref().unwrap_or(&agent.model);
+    if agent.model.trim().eq_ignore_ascii_case("opus")
+        && model.trim().eq_ignore_ascii_case("opus[1m]")
+    {
+        return crate::agent::model_id_for("claude-code", &agent.model);
+    }
+    crate::agent::model_id_for("claude-code", model)
+}
+
 fn pi_model_default(
     agent: &crate::agent::Agent,
     frontmatter: &crate::agent::AgentFrontmatterOverrides,
 ) -> String {
     let model = frontmatter.model.as_deref().unwrap_or(&agent.model);
     let effort = openai_reasoning_effort(agent, frontmatter);
+    if matches!(
+        model.trim().to_ascii_lowercase().as_str(),
+        "inherit" | "current" | "parent"
+    ) {
+        return "inherit".into();
+    }
+    if agent.model.trim().eq_ignore_ascii_case("opus") {
+        let model = model.trim().to_ascii_lowercase();
+        if model == "opus"
+            || model == "openai-codex/gpt-5.5"
+            || model.starts_with("openai-codex/gpt-5.5:")
+        {
+            return "inherit".into();
+        }
+    }
     match model.trim().to_ascii_lowercase().as_str() {
         "opus" | "sonnet" | "haiku" => effort
             .map(|effort| format!("openai-codex/gpt-5.5:{effort}"))
@@ -1392,6 +1441,18 @@ fn upsert_missing_inline_table_fields(
                     {
                         let existing_tools = parse_toml_array_strings(existing_value);
                         if is_legacy_pi_extra_deny_tools(&existing_tools) {
+                            *existing_value = value.clone();
+                        }
+                    } else {
+                        fields.push((key.clone(), value.clone()));
+                    }
+                    continue;
+                }
+                if key == "model" {
+                    if let Some((_, existing_value)) =
+                        fields.iter_mut().find(|(field, _)| field == key)
+                    {
+                        if should_replace_generated_model_default(section, existing_value, value) {
                             *existing_value = value.clone();
                         }
                     } else {
@@ -2760,6 +2821,7 @@ planner = { background = true }
             rust_line.contains("allowed-subagents = [\"scout\"]"),
             "{rust_line}"
         );
+        assert!(rust_line.contains("model = \"inherit\""), "{rust_line}");
         assert!(
             !rust_line.contains("delegate_subagent"),
             "engineer with allowed-subagents must not deny delegate_subagent: {rust_line}"
@@ -2864,6 +2926,10 @@ planner = { background = true }
             "scout should record empty allowed-subagents: {scout_line}"
         );
         assert!(
+            scout_line.contains("model = \"openai-codex/gpt-5.5:medium\""),
+            "scout should keep an explicit cheaper Pi model: {scout_line}"
+        );
+        assert!(
             scout_line.contains("delegate_subagent"),
             "non-engineer must deny delegate_subagent: {scout_line}"
         );
@@ -2953,6 +3019,68 @@ tpm = { subagent_agents = ["scout"] }
             .find(|line| line.starts_with("reviewer-test =") && line.contains("deny-tools"))
             .expect("reviewer pi frontmatter line");
         assert!(deny_line.contains("tasks_write"), "{deny_line}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_agent_frontmatter_defaults_migrates_generated_heavy_model_defaults_to_inherit() {
+        let dir = std::env::temp_dir().join(format!(
+            "vstack_test_agent_frontmatter_model_inherit_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("vstack.toml");
+        std::fs::write(
+            &path,
+            r#"
+[agent-frontmatter.claude]
+rust = { model = "opus[1m]", effort = "xhigh", background = false }
+
+[agent-frontmatter.pi]
+rust = { model = "openai-codex/gpt-5.5:xhigh", allowed-subagents = ["scout"], pane = true }
+"#,
+        )
+        .unwrap();
+
+        let rust = crate::agent::Agent {
+            name: "rust".into(),
+            description: "Rust agent".into(),
+            model: "opus".into(),
+            role: crate::agent::AgentRole::Engineer,
+            color: None,
+            effort: Some("xhigh".into()),
+            body: String::new(),
+            source_path: std::path::PathBuf::new(),
+        };
+        let mut harnesses = HashMap::new();
+        harnesses.insert(
+            "rust".into(),
+            vec![
+                crate::harness::Harness::ClaudeCode,
+                crate::harness::Harness::Pi,
+            ],
+        );
+
+        write_agent_frontmatter_defaults(
+            &dir,
+            &[rust],
+            &harnesses,
+            &crate::mapping::MappingConfig::default(),
+        );
+
+        let updated = std::fs::read_to_string(&path).unwrap();
+        let claude_line = updated
+            .lines()
+            .find(|line| line.starts_with("rust =") && line.contains("background"))
+            .expect("rust claude frontmatter line");
+        assert!(claude_line.contains("model = \"inherit\""), "{claude_line}");
+        let pi_line = updated
+            .lines()
+            .find(|line| line.starts_with("rust =") && line.contains("allowed-subagents"))
+            .expect("rust pi frontmatter line");
+        assert!(pi_line.contains("model = \"inherit\""), "{pi_line}");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
