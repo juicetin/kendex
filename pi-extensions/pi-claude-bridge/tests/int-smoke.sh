@@ -46,7 +46,7 @@ run() {
 
 run "provider: print mode responds" \
   pi --no-session -ne -e "$DIR" \
-  --model "claude-bridge/claude-sonnet-4-6" \
+  --model "claude-bridge/claude-sonnet-5" \
   -p "Reply with just the word 'yes'"
 
 run "provider: --provider flag works" \
