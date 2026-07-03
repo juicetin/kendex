@@ -3054,7 +3054,10 @@ rust = { model = "openai-codex/gpt-5.5:xhigh", allowed-subagents = ["scout"], pa
             .lines()
             .find(|line| line.starts_with("rust =") && line.contains("background"))
             .expect("rust claude frontmatter line");
-        assert!(claude_line.contains("model = \"opus[1m]\""), "{claude_line}");
+        assert!(
+            claude_line.contains("model = \"opus[1m]\""),
+            "{claude_line}"
+        );
         let pi_line = updated
             .lines()
             .find(|line| line.starts_with("rust =") && line.contains("allowed-subagents"))

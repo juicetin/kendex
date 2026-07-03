@@ -1217,6 +1217,72 @@ fn prune_broken_skill_symlinks(global: bool) -> bool {
     prune_broken_skill_symlinks_in_dirs(&dirs, &roots)
 }
 
+fn harness_skill_dirs_with_ids(global: bool) -> Vec<(String, PathBuf)> {
+    crate::harness::Harness::ALL
+        .iter()
+        .map(|harness| (harness.id().to_string(), harness.skills_dir(global)))
+        .collect()
+}
+
+fn is_managed_skill_symlink(path: &Path, managed_roots: &[PathBuf]) -> bool {
+    if !path.is_symlink() {
+        return false;
+    }
+    let Ok(target) = std::fs::read_link(path) else {
+        return false;
+    };
+    let target = if target.is_absolute() {
+        target
+    } else {
+        path.parent().unwrap_or_else(|| Path::new(".")).join(target)
+    };
+    let target = normalize_path_lexical(&target);
+    let managed_roots: Vec<PathBuf> = managed_roots
+        .iter()
+        .map(|root| normalize_path_lexical(root))
+        .collect();
+    managed_roots.iter().any(|root| target.starts_with(root))
+}
+
+fn migrate_copy_skill_lock_entries_with_symlink_mirrors(
+    lock: &mut LockFile,
+    harness_skill_dirs: &[(String, PathBuf)],
+    managed_roots: &[PathBuf],
+) -> bool {
+    let mut modified = false;
+    for entry in lock.entries.values_mut() {
+        if entry.kind != ItemKind::Skill || entry.method != InstallMethod::Copy {
+            continue;
+        }
+        let has_managed_symlink = entry.harnesses.iter().any(|harness_id| {
+            harness_skill_dirs
+                .iter()
+                .filter(|(id, _)| id == harness_id)
+                .any(|(_, dir)| is_managed_skill_symlink(&dir.join(&entry.name), managed_roots))
+        });
+        if !has_managed_symlink {
+            continue;
+        }
+        entry.method = InstallMethod::Symlink;
+        entry.source_hash = compute_source_hash(entry);
+        eprintln!(
+            "  Migrated skill lock entry to symlink mode: {}",
+            entry.name
+        );
+        modified = true;
+    }
+    modified
+}
+
+fn migrate_copy_skill_lock_entries_with_symlink_mirrors_for_scope(
+    lock: &mut LockFile,
+    global: bool,
+) -> bool {
+    let harness_skill_dirs = harness_skill_dirs_with_ids(global);
+    let managed_roots = managed_skill_roots(global);
+    migrate_copy_skill_lock_entries_with_symlink_mirrors(lock, &harness_skill_dirs, &managed_roots)
+}
+
 // Recover only concrete hook artifacts with stable vstack-generated identity.
 // Scripts must carry matching hook frontmatter; wrapper/prose artifacts must
 // carry the exact safety header line plus the event/matcher-derived action
@@ -1303,6 +1369,9 @@ pub fn reconcile_lock_with_disk(lock: &mut LockFile, global: bool, source: &str)
     let mut modified = false;
 
     if prune_broken_skill_symlinks(global) {
+        modified = true;
+    }
+    if migrate_copy_skill_lock_entries_with_symlink_mirrors_for_scope(lock, global) {
         modified = true;
     }
 
@@ -2374,6 +2443,93 @@ echo foreign
         assert!(
             live_managed.is_symlink() && live_managed.exists(),
             "live generated symlinks must be preserved"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn migrates_copy_skill_lock_entry_when_existing_mirror_is_managed_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let dir = sandbox("migrate_copy_skill_lock_symlink_mirror");
+        let claude_skills = dir.join(".claude").join("skills");
+        let managed_root = dir.join(".agents").join("skills");
+        fs::create_dir_all(&claude_skills).unwrap();
+        fs::create_dir_all(managed_root.join("reviewer")).unwrap();
+        symlink(
+            "../../.agents/skills/reviewer",
+            claude_skills.join("reviewer"),
+        )
+        .unwrap();
+
+        let mut lock = LockFile::default();
+        lock.add(LockEntry {
+            name: "reviewer".into(),
+            kind: ItemKind::Skill,
+            source: "source".into(),
+            harnesses: vec!["claude-code".into()],
+            method: InstallMethod::Copy,
+            installed_at: "2026-07-03T00:00:00Z".into(),
+            source_hash: String::new(),
+        });
+
+        let modified = migrate_copy_skill_lock_entries_with_symlink_mirrors(
+            &mut lock,
+            &[("claude-code".into(), claude_skills)],
+            &[managed_root],
+        );
+
+        assert!(modified, "copy lock should migrate for managed symlink");
+        let entry = lock.entries.get("reviewer").unwrap();
+        assert_eq!(entry.method, InstallMethod::Symlink);
+        assert!(
+            !entry.source_hash.is_empty(),
+            "migration must refresh source hash"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn leaves_copy_skill_lock_entry_for_external_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let dir = sandbox("migrate_copy_skill_lock_external_symlink");
+        let claude_skills = dir.join(".claude").join("skills");
+        let managed_root = dir.join(".agents").join("skills");
+        let external_root = dir.join("external").join("skills");
+        fs::create_dir_all(&claude_skills).unwrap();
+        fs::create_dir_all(external_root.join("reviewer")).unwrap();
+        symlink(
+            "../../external/skills/reviewer",
+            claude_skills.join("reviewer"),
+        )
+        .unwrap();
+
+        let mut lock = LockFile::default();
+        lock.add(LockEntry {
+            name: "reviewer".into(),
+            kind: ItemKind::Skill,
+            source: "source".into(),
+            harnesses: vec!["claude-code".into()],
+            method: InstallMethod::Copy,
+            installed_at: "2026-07-03T00:00:00Z".into(),
+            source_hash: String::new(),
+        });
+
+        let modified = migrate_copy_skill_lock_entries_with_symlink_mirrors(
+            &mut lock,
+            &[("claude-code".into(), claude_skills)],
+            &[managed_root],
+        );
+
+        assert!(!modified, "external symlink must not migrate lock mode");
+        assert_eq!(
+            lock.entries.get("reviewer").unwrap().method,
+            InstallMethod::Copy
         );
 
         let _ = fs::remove_dir_all(&dir);

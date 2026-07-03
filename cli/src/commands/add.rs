@@ -350,6 +350,40 @@ mod auto_include_agent_skills_tests {
         assert!(added.is_empty());
         assert!(selected.is_empty());
     }
+
+    #[test]
+    fn preserves_existing_method_for_auto_included_skills() {
+        let mut lock = LockFile::default();
+        lock.add(config::LockEntry {
+            name: "reviewer".into(),
+            kind: config::ItemKind::Skill,
+            source: "source".into(),
+            harnesses: vec!["claude-code".into()],
+            method: InstallMethod::Symlink,
+            installed_at: "2026-07-03T00:00:00Z".into(),
+            source_hash: String::new(),
+        });
+        lock.add(config::LockEntry {
+            name: "rust".into(),
+            kind: config::ItemKind::Agent,
+            source: "source".into(),
+            harnesses: vec!["claude-code".into()],
+            method: InstallMethod::Copy,
+            installed_at: "2026-07-03T00:00:00Z".into(),
+            source_hash: String::new(),
+        });
+
+        let auto = ["reviewer".to_string(), "rust".to_string()]
+            .into_iter()
+            .collect();
+        let preserved = preserved_auto_skill_methods(&auto, &lock);
+
+        assert_eq!(preserved.get("reviewer"), Some(&InstallMethod::Symlink));
+        assert!(
+            !preserved.contains_key("rust"),
+            "agent entries must not be treated as auto-installed skills"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -465,6 +499,22 @@ pub fn auto_include_agent_skills(
     added.sort();
     added.dedup();
     added
+}
+
+fn preserved_auto_skill_methods(
+    auto_included_skill_names: &std::collections::HashSet<String>,
+    pre_lock: &LockFile,
+) -> std::collections::HashMap<String, InstallMethod> {
+    auto_included_skill_names
+        .iter()
+        .filter_map(|name| {
+            let entry = pre_lock.entries.get(name)?;
+            if entry.kind != config::ItemKind::Skill {
+                return None;
+            }
+            Some((name.clone(), entry.method))
+        })
+        .collect()
 }
 
 fn resolve_source_for_app(
@@ -867,6 +917,7 @@ source (e.g. switching vstack repos, or starting clean), pass --clobber:
 
     let source_dir = resolved_source.dir.clone();
     let mapping = crate::mapping::MappingConfig::load(&source_dir);
+    let mut auto_included_skill_names = std::collections::HashSet::new();
 
     // vstack#71: auto-install skills referenced by selected agents.
     // Without this, `vstack add --agent reviewer-error` produces a
@@ -887,6 +938,7 @@ source (e.g. switching vstack repos, or starting clean), pass --clobber:
         if !added.is_empty() {
             eprintln!("Auto-installed dependent skills: {}", added.join(", "));
         }
+        auto_included_skill_names.extend(added);
     }
 
     // Whether we should write/update the project-level vstack.toml.
@@ -1007,6 +1059,8 @@ source (e.g. switching vstack repos, or starting clean), pass --clobber:
     let pre_lock = config::LockFile::load(&config::lock_file_path(global)).unwrap_or_default();
     let previously_installed: std::collections::HashSet<String> =
         pre_lock.entries.keys().cloned().collect();
+    let preserved_auto_skill_methods =
+        preserved_auto_skill_methods(&auto_included_skill_names, &pre_lock);
 
     // Perform installation
     let mut results = Vec::new();
@@ -1094,7 +1148,11 @@ source (e.g. switching vstack repos, or starting clean), pass --clobber:
 
         for s in &selected_skills {
             let skill_instr = project_config.skill_instructions_for(&s.name);
-            let result = installer::install_skill(s, *harness, global, method, skill_instr)?;
+            let skill_method = preserved_auto_skill_methods
+                .get(&s.name)
+                .copied()
+                .unwrap_or(method);
+            let result = installer::install_skill(s, *harness, global, skill_method, skill_instr)?;
             log_lines.push(result.detail.clone());
             results.push(result);
         }
@@ -1164,6 +1222,15 @@ source (e.g. switching vstack repos, or starting clean), pass --clobber:
         lock.remove(legacy);
     }
     installer::record_install(&mut lock, &results, &resolved_source.source, method);
+    for (name, preserved_method) in &preserved_auto_skill_methods {
+        let Some(entry) = lock.entries.get_mut(name) else {
+            continue;
+        };
+        if entry.kind == config::ItemKind::Skill && entry.method != *preserved_method {
+            entry.method = *preserved_method;
+            entry.source_hash = config::compute_source_hash(entry);
+        }
+    }
 
     // Also record hooks in the lock file. Only record harnesses that the
     // hook actually applies to — a hook with `harnesses: [claude-code]` is
