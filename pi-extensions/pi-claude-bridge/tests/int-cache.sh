@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Prompt cache efficiency test for pi-claude-bridge.
 # Runs a multi-turn conversation and verifies Anthropic prompt caching is working.
-# Expects: cacheRead grows across turns (system prompt + history are cache-hit),
-#   cacheWrite is small after the first turn (only new content is written).
+# Expects: cacheRead stays nonzero after the first cached turn and cache hit
+#   rate stays high. Claude Code may report smaller cacheRead on short tool
+#   sub-turns even when the session is reused correctly.
 #
 # Also checks session sync correctness: consecutive same-provider turns must
 # resume the session (Case 3), not rebuild it (Case 4). A rebuild would reset
@@ -61,8 +62,6 @@ EXPECTED_CASE1=1
 
 TURN=0
 FAIL=0
-PREV_CACHE_READ=0
-
 while IFS= read -r line; do
   TURN=$((TURN + 1))
   INPUT=$(echo "$line" | jq -r '.input')
@@ -81,20 +80,19 @@ while IFS= read -r line; do
 
   # Assertions
   if [ "$TURN" -ge 3 ]; then
-    # Turn 3+: cache read should be >= turn 2's (system prompt + history cached).
-    # It can stay flat when the prior turn's response was short.
-    if [ "$CACHE_READ" -lt "$PREV_CACHE_READ" ]; then
-      echo "  FAIL: Turn $TURN cacheRead ($CACHE_READ) decreased from turn $((TURN - 1)) ($PREV_CACHE_READ)"
+    # Turn 3+: cached prompt tokens should be present and hit rate should be
+    # high. Do not require monotonic cacheRead: Claude Code usage accounting can
+    # report smaller cached context on short tool sub-turns while preserving the
+    # same session and high cache hit rate.
+    if [ "$CACHE_READ" -le 0 ]; then
+      echo "  FAIL: Turn $TURN cacheRead ($CACHE_READ) did not report cached tokens"
       FAIL=$((FAIL + 1))
     fi
-    # Cache hit rate should be high
     if [ "$HIT_PCT" -lt $MIN_CACHE_HIT_PCT ]; then
       echo "  FAIL: Turn $TURN cache hit rate ${HIT_PCT}% < ${MIN_CACHE_HIT_PCT}%"
       FAIL=$((FAIL + 1))
     fi
   fi
-
-  PREV_CACHE_READ=$CACHE_READ
 done < <(jq -c 'select(.type == "turn_end") | .message.usage | {input, cacheRead, cacheWrite, output}' "$LOGFILE")
 
 echo "---"
