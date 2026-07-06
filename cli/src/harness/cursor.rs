@@ -16,7 +16,7 @@ pub fn generate_agent(
 ) -> Result<PathBuf> {
     std::fs::create_dir_all(dir)?;
 
-    let path = dir.join(format!("{}.mdc", agent.name));
+    let path = super::checked_agent_path(dir, &agent.name, "mdc")?;
 
     let mut output = String::new();
     output.push_str("---\n");
@@ -42,6 +42,6 @@ pub fn generate_agent(
         output.push('\n');
     }
 
-    std::fs::write(&path, &output)?;
+    crate::path_safety::write_file_no_follow(&path, &output)?;
     Ok(path)
 }

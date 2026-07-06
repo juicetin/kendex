@@ -16,6 +16,9 @@ use std::io;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use super::disk_mutations::{
+    DiskMutationReport, perform_inline_update, perform_move_plans, perform_remove_plans,
+};
 use super::multiselect::{
     ActionButton, ConfirmAction, ConfirmDialog, MovePlan, ProgressOverlay, RemovePlan, RepoOption,
     Scope, SelectItem, TabKind, TabbedSelect,
@@ -57,24 +60,24 @@ struct PendingWork {
 /// closure and the main thread owns every mutation that touches the TUI
 /// state, terminal, or process lifetime.
 enum PostWork {
-    /// Reload installed-state tabs and set a flash message.
-    Done(String),
-    /// As Done, but also drop a source registry entry. Used by RemoveSource.
-    DoneForgetSource { source: String, flash: String },
-    /// As Done, but afterwards leave the alt screen and run the CLI binary
-    /// updater (which exits the process). Used when an update batch mixes
-    /// content items with the vstack (cli) row.
-    DoneThenCliUpdate(String),
+    /// Worker-side install/remove/move/update mutation result.
+    DiskMutation {
+        action: String,
+        suffix: String,
+        then_cli_update: bool,
+        forget_source: Option<String>,
+        result: std::sync::Arc<std::sync::Mutex<Option<DiskMutationReport>>>,
+    },
     /// Apply-picker outcome: leave the picker open, mark the just-applied
     /// theme as active, and flash success or the error message.
-    ApplyPickerResult {
+    ApplyPicker {
         extra_name: String,
         theme_id: String,
         result: std::sync::Arc<
             std::sync::Mutex<Option<anyhow::Result<crate::commands::apply::ApplyOutcome>>>,
         >,
     },
-    RevertPickerResult {
+    RevertPicker {
         extra_name: String,
         result: std::sync::Arc<
             std::sync::Mutex<Option<anyhow::Result<crate::commands::apply::ApplyOutcome>>>,
@@ -1366,7 +1369,7 @@ fn handle_apply_picker_key(
     }
     if let Some(action) = action {
         // Picker intentionally stays open so the user can switch themes in
-        // quick succession; PostWork::ApplyPickerResult updates the active
+        // quick succession; PostWork::ApplyPicker updates the active
         // marker on the still-open dialog and flashes the result.
         return execute_action(state, action);
     }
@@ -1997,7 +2000,7 @@ fn execute_action(
             spawn_work(
                 state,
                 label,
-                PostWork::ApplyPickerResult {
+                PostWork::ApplyPicker {
                     extra_name: extra_for_post,
                     theme_id: theme_for_post,
                     result: result_slot,
@@ -2023,7 +2026,7 @@ fn execute_action(
             spawn_work(
                 state,
                 label,
-                PostWork::RevertPickerResult {
+                PostWork::RevertPicker {
                     extra_name: extra_for_post,
                     result: result_slot,
                 },
@@ -2054,22 +2057,26 @@ fn execute_action(
             let n = content_names.len();
             let items_clone = state.items.clone();
             let label = format!("Updating {n} item(s)…");
-            let post = if has_cli {
-                PostWork::DoneThenCliUpdate(format!("Updated {n} item(s)"))
-            } else {
-                PostWork::Done(format!("Updated {n} item(s)"))
-            };
-            spawn_work(state, label, post, move || {
-                perform_inline_update(&content_names, &items_clone);
-            });
+            spawn_disk_work(
+                state,
+                label,
+                "Updated".into(),
+                String::new(),
+                has_cli,
+                None,
+                move || perform_inline_update(&content_names, &items_clone),
+            );
             Ok(None)
         }
         ConfirmAction::RemoveMarked(plans) => {
             let n = plans.len();
-            spawn_work(
+            spawn_disk_work(
                 state,
                 format!("Removing {n} item(s)…"),
-                PostWork::Done(format!("Removed {n} item(s)")),
+                "Removed".into(),
+                String::new(),
+                false,
+                None,
                 move || perform_remove_plans(&plans),
             );
             Ok(None)
@@ -2081,20 +2088,26 @@ fn execute_action(
             let kept_global = plans.first().is_some_and(|p| p.from_project);
             let kept = if kept_global { "global" } else { "project" };
             let n = plans.len();
-            spawn_work(
+            spawn_disk_work(
                 state,
                 format!("Resolving {n} duplicate(s)…"),
-                PostWork::Done(format!("Resolved {n} dup(s) — kept {kept}")),
+                "Resolved".into(),
+                format!(" duplicate(s) — kept {kept}"),
+                false,
+                None,
                 move || perform_remove_plans(&plans),
             );
             Ok(None)
         }
         ConfirmAction::RemoveAll(plans) => {
             let n = plans.len();
-            spawn_work(
+            spawn_disk_work(
                 state,
                 format!("Uninstalling {n} item(s)…"),
-                PostWork::Done(format!("Uninstalled all {n} item(s)")),
+                "Uninstalled".into(),
+                String::new(),
+                false,
+                None,
                 move || perform_remove_plans(&plans),
             );
             Ok(None)
@@ -2103,10 +2116,13 @@ fn execute_action(
             let n = items.len();
             let target = if to_global { "global" } else { "project" };
             let items_clone = state.items.clone();
-            spawn_work(
+            spawn_disk_work(
                 state,
                 format!("Moving {n} item(s) to {target}…"),
-                PostWork::Done(format!("Moved {n} item(s) to {target}")),
+                "Moved".into(),
+                format!(" to {target}"),
+                false,
+                None,
                 move || perform_move_plans(&items_clone, &items, to_global),
             );
             Ok(None)
@@ -2128,13 +2144,13 @@ fn execute_action(
                 })
                 .collect();
             let n = plans.len();
-            spawn_work(
+            spawn_disk_work(
                 state,
                 format!("Removing source ({n} package(s))…"),
-                PostWork::DoneForgetSource {
-                    source: source.clone(),
-                    flash: format!("Removed source and uninstalled {n} package(s)"),
-                },
+                "Removed source and uninstalled".into(),
+                String::new(),
+                false,
+                Some(source.clone()),
                 move || perform_remove_plans(&plans),
             );
             Ok(None)
@@ -2158,11 +2174,69 @@ where
     state.pending_work = Some(PendingWork { join, post });
 }
 
+fn spawn_disk_work<F>(
+    state: &mut FlowState<'_>,
+    label: String,
+    action: String,
+    suffix: String,
+    then_cli_update: bool,
+    forget_source: Option<String>,
+    work: F,
+) where
+    F: FnOnce() -> DiskMutationReport + Send + 'static,
+{
+    let result = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let writer = std::sync::Arc::clone(&result);
+    spawn_work(
+        state,
+        label,
+        PostWork::DiskMutation {
+            action,
+            suffix,
+            then_cli_update,
+            forget_source,
+            result,
+        },
+        move || {
+            let report = work();
+            if let Ok(mut guard) = writer.lock() {
+                *guard = Some(report);
+            }
+        },
+    );
+}
+
+fn format_disk_mutation_flash(report: &DiskMutationReport, action: &str, suffix: &str) -> String {
+    if report.failed.is_empty() {
+        return format!("{action} {} item(s){suffix}", report.completed);
+    }
+
+    let first_failure = report
+        .failed
+        .first()
+        .map(String::as_str)
+        .unwrap_or("unknown failure");
+    if report.completed > 0 {
+        format!(
+            "Partial: {action} {}/{} item(s){suffix}; {} failed: {first_failure}",
+            report.completed,
+            report.attempted,
+            report.failed.len()
+        )
+    } else {
+        format!(
+            "Failed: {action} 0/{} item(s){suffix}; {} failed: {first_failure}",
+            report.attempted,
+            report.failed.len()
+        )
+    }
+}
+
 /// Apply a finished worker's outcome on the main thread. Owns every
 /// mutation that touches TUI state, the terminal, or process lifetime.
 fn apply_post_work(state: &mut FlowState<'_>, post: PostWork) -> Result<Option<InstallFlowResult>> {
     match post {
-        PostWork::ApplyPickerResult {
+        PostWork::ApplyPicker {
             extra_name,
             theme_id,
             result,
@@ -2199,7 +2273,7 @@ fn apply_post_work(state: &mut FlowState<'_>, post: PostWork) -> Result<Option<I
             }
             Ok(None)
         }
-        PostWork::RevertPickerResult { extra_name, result } => {
+        PostWork::RevertPicker { extra_name, result } => {
             let outcome = result.lock().ok().and_then(|mut g| g.take());
             match outcome {
                 Some(Ok(revert_outcome)) => {
@@ -2230,22 +2304,34 @@ fn apply_post_work(state: &mut FlowState<'_>, post: PostWork) -> Result<Option<I
             }
             Ok(None)
         }
-        PostWork::Done(flash) => {
+        PostWork::DiskMutation {
+            action,
+            suffix,
+            then_cli_update,
+            forget_source: source_to_forget,
+            result,
+        } => {
+            let outcome = result.lock().ok().and_then(|mut g| g.take());
             rebuild_tabs(state);
-            state.select.flash_message = Some(flash);
-            Ok(None)
-        }
-        PostWork::DoneForgetSource { source, flash } => {
-            forget_source(&mut state.select, &source);
-            rebuild_tabs(state);
-            state.select.flash_message = Some(flash);
-            Ok(None)
-        }
-        PostWork::DoneThenCliUpdate(flash) => {
-            rebuild_tabs(state);
-            state.select.flash_message = Some(flash);
-            run_cli_update_inline()?;
-            // run_cli_update_inline exits the process; this line is unreachable.
+            match outcome {
+                Some(report) => {
+                    if report.failed.is_empty()
+                        && let Some(source) = source_to_forget
+                    {
+                        forget_source(&mut state.select, &source);
+                        rebuild_tabs(state);
+                    }
+                    state.select.flash_message =
+                        Some(format_disk_mutation_flash(&report, &action, &suffix));
+                    if then_cli_update && report.failed.is_empty() {
+                        run_cli_update_inline()?;
+                    }
+                }
+                None => {
+                    state.select.flash_message =
+                        Some(format!("{action} finished but produced no mutation result"));
+                }
+            }
             Ok(None)
         }
     }
@@ -2326,287 +2412,6 @@ fn enabled_harnesses(select: &TabbedSelect) -> Vec<Harness> {
             !disabled && select.harness_selection.get(id).copied().unwrap_or(false)
         })
         .collect()
-}
-
-// ── Disk mutations ──────────────────────────────
-
-/// Resolve a lock entry's harness id list to the set that actually supports
-/// the move's destination scope. When moving to global, harnesses without
-/// global support (currently just Cursor) are dropped — installing them at
-/// global would either fail outright or silently skip, leaving the lock
-/// entry claiming an install that never landed.
-fn filter_harnesses_for_target(harness_ids: &[String], to_global: bool) -> Vec<Harness> {
-    harness_ids
-        .iter()
-        .filter_map(|h| Harness::from_id(h))
-        .filter(|h| !to_global || h.supports_global_scope())
-        .collect()
-}
-
-fn perform_remove_plans(plans: &[RemovePlan]) {
-    for plan in plans {
-        if plan.from_project {
-            remove_one(&plan.name, false);
-        }
-        if plan.from_global {
-            remove_one(&plan.name, true);
-        }
-    }
-}
-
-fn remove_one(name: &str, scope_global: bool) {
-    let lock_path = crate::config::lock_file_path(scope_global);
-    let Ok(mut lock) = crate::config::LockFile::load(&lock_path) else {
-        return;
-    };
-    let Some(entry) = lock.entries.get(name).cloned() else {
-        return;
-    };
-    if entry.kind == crate::config::ItemKind::PiExtension {
-        let _ = crate::pi_extension::remove_pi_extension(name, scope_global);
-    } else {
-        let harnesses: Vec<Harness> = entry
-            .harnesses
-            .iter()
-            .filter_map(|h| Harness::from_id(h))
-            .collect();
-        let _ = crate::installer::remove_item(name, &harnesses, scope_global);
-    }
-    lock.remove(name);
-    let _ = lock.save(&lock_path);
-}
-
-/// Move plans = install at the destination scope, then remove from the
-/// source scope. Uses each item's existing source-scope lock entry to
-/// preserve harness list and install method.
-///
-/// Safety: a plan's source scope is removed ONLY after at least one
-/// destination harness install succeeded for that plan. If every install
-/// fails (or every harness was filtered out as scope-incompatible), the
-/// plan is skipped — the user keeps their working copy at the source scope
-/// rather than losing it to a half-completed move. The destination lock
-/// entry tracks the harnesses that actually succeeded, not the source's
-/// original list.
-fn perform_move_plans(items: &DiscoveredItems, plans: &[MovePlan], to_global: bool) {
-    let from_global = !to_global;
-
-    let src_lock_path = crate::config::lock_file_path(from_global);
-    let Ok(src_lock) = crate::config::LockFile::load(&src_lock_path) else {
-        return;
-    };
-    let dst_lock_path = crate::config::lock_file_path(to_global);
-    let mut dst_lock = crate::config::LockFile::load(&dst_lock_path).unwrap_or_default();
-    dst_lock.version = 1;
-
-    let project_root = crate::config::project_root();
-    let mut project_config = crate::project_config::ProjectConfig::load(&project_root);
-
-    let installed_skills_dst: Vec<String> = dst_lock
-        .entries
-        .iter()
-        .filter(|(_, e)| e.kind == crate::config::ItemKind::Skill)
-        .map(|(n, _)| n.clone())
-        .collect();
-
-    let source_dir = items
-        .agents
-        .first()
-        .and_then(|a| a.source_path.parent().and_then(|p| p.parent()))
-        .or_else(|| items.skills.first().and_then(|s| s.source_dir.parent()));
-    let mapping = source_dir
-        .map(crate::mapping::MappingConfig::load)
-        .unwrap_or_default();
-    project_config.overlay_source_frontmatter(&mapping);
-
-    // Plans that succeeded at the destination — only these are eligible
-    // for source removal at the end.
-    let mut moved_names: Vec<String> = Vec::new();
-
-    for plan in plans {
-        let Some(entry) = src_lock.entries.get(&plan.name).cloned() else {
-            continue;
-        };
-        // Cursor (project-only) silently dropped from a move-to-global
-        // would leave a lock entry claiming it was installed there.
-        let target_harnesses = filter_harnesses_for_target(&entry.harnesses, to_global);
-        if target_harnesses.is_empty() {
-            // Nothing can be moved for this item — keep the source in place.
-            continue;
-        }
-
-        let mut succeeded: Vec<Harness> = Vec::new();
-        match entry.kind {
-            crate::config::ItemKind::Agent => {
-                let Some(agent) = items.agents.iter().find(|a| a.name == plan.name) else {
-                    continue;
-                };
-                let source_skills =
-                    mapping.skills_for_agent(&agent.name, &agent.role, &installed_skills_dst);
-                let skill_pairs =
-                    crate::resolve::resolve_skill_pairs(&source_skills, &items.skills);
-                let installed_hooks_dst: Vec<crate::hook::Hook> = items
-                    .hooks
-                    .iter()
-                    .filter(|h| {
-                        dst_lock
-                            .entries
-                            .get(&h.name)
-                            .is_some_and(|e| e.kind == crate::config::ItemKind::Hook)
-                    })
-                    .cloned()
-                    .collect();
-                let matched_hooks: Vec<crate::hook::Hook> = mapping
-                    .hooks_for_agent(&agent.role, &installed_hooks_dst)
-                    .into_iter()
-                    .cloned()
-                    .collect();
-                let extras = crate::resolve::build_agent_extras(
-                    &project_config,
-                    &agent.name,
-                    &agent.role,
-                    None,
-                );
-                for harness in &target_harnesses {
-                    if harness
-                        .generate_agent(agent, to_global, &skill_pairs, &matched_hooks, &extras)
-                        .is_ok()
-                    {
-                        succeeded.push(*harness);
-                    }
-                }
-            }
-            crate::config::ItemKind::Skill => {
-                let Some(skill) = items.skills.iter().find(|s| s.name == plan.name) else {
-                    continue;
-                };
-                let instr = project_config.skill_instructions_for(&skill.name);
-                for harness in &target_harnesses {
-                    if crate::installer::install_skill(
-                        skill,
-                        *harness,
-                        to_global,
-                        entry.method,
-                        instr,
-                    )
-                    .is_ok()
-                    {
-                        succeeded.push(*harness);
-                    }
-                }
-            }
-            crate::config::ItemKind::Hook => {
-                let Some(hook) = items.hooks.iter().find(|h| h.name == plan.name) else {
-                    continue;
-                };
-                let agents_for_hook: Vec<Agent> = items
-                    .agents
-                    .iter()
-                    .filter(|a| {
-                        dst_lock
-                            .entries
-                            .get(&a.name)
-                            .is_some_and(|e| e.kind == crate::config::ItemKind::Agent)
-                    })
-                    .cloned()
-                    .collect();
-                for harness in &target_harnesses {
-                    if crate::installer::install_hook(hook, *harness, to_global, &agents_for_hook)
-                        .is_ok()
-                    {
-                        succeeded.push(*harness);
-                    }
-                }
-            }
-            crate::config::ItemKind::PiExtension => {
-                let Some(ext) = items.pi_extensions.iter().find(|e| e.name == plan.name) else {
-                    continue;
-                };
-                if crate::pi_extension::install_pi_extension(ext, to_global).is_ok() {
-                    // Pi packages aren't per-harness; mirror src list so the
-                    // entry round-trips cleanly.
-                    succeeded = target_harnesses.clone();
-                }
-            }
-            crate::config::ItemKind::Extra => {}
-        }
-
-        if succeeded.is_empty() {
-            // Every destination install failed. Don't remove the source.
-            continue;
-        }
-
-        let mut new_entry = entry.clone();
-        new_entry.harnesses = succeeded.iter().map(|h| h.id().to_string()).collect();
-        new_entry.installed_at = crate::config::now_iso();
-        new_entry.source_hash = crate::config::compute_source_hash(&new_entry);
-        dst_lock.add(new_entry);
-        moved_names.push(plan.name.clone());
-    }
-
-    if dst_lock.save(&dst_lock_path).is_err() {
-        // Couldn't persist the destination lock. Don't remove anything at
-        // the source — the install succeeded on disk but we couldn't
-        // record it, so leaving the source intact lets a retry recover.
-        return;
-    }
-
-    // Remove files + lock entries at the source scope only for items that
-    // actually made it to the destination.
-    for name in &moved_names {
-        remove_one(name, from_global);
-    }
-}
-
-fn perform_inline_update(names: &[String], items: &DiscoveredItems) {
-    let project_root = crate::config::project_root();
-    let source_dir = items
-        .agents
-        .first()
-        .and_then(|a| a.source_path.parent().and_then(|p| p.parent()))
-        .or_else(|| items.skills.first().and_then(|s| s.source_dir.parent()));
-    let mapping = source_dir
-        .map(crate::mapping::MappingConfig::load)
-        .unwrap_or_default();
-
-    for scope_global in [false, true] {
-        let lock_path = crate::config::lock_file_path(scope_global);
-        let Ok(lock) = crate::config::LockFile::load(&lock_path) else {
-            continue;
-        };
-        if !names.iter().any(|n| lock.entries.contains_key(n)) {
-            continue;
-        }
-
-        let mut project_config = crate::project_config::ProjectConfig::load(&project_root);
-        project_config.overlay_source_frontmatter(&mapping);
-
-        let stats = crate::commands::refresh::refresh_items_in_scope(
-            scope_global,
-            &lock,
-            &items.agents,
-            &items.skills,
-            &items.hooks,
-            &items.pi_extensions,
-            &mapping,
-            &mut project_config,
-            &project_root,
-            Some(names),
-        );
-
-        if !scope_global {
-            stats.persist_upstream(&project_root);
-        }
-
-        let mut lock = crate::config::LockFile::load(&lock_path).unwrap_or_default();
-        let now = crate::config::now_iso();
-        for name in names {
-            if let Some(entry) = lock.entries.get_mut(name) {
-                entry.installed_at = now.clone();
-                entry.source_hash = crate::config::compute_source_hash(entry);
-            }
-        }
-        let _ = lock.save(&lock_path);
-    }
 }
 
 // ── Source registry helpers ──────────────────────────────
@@ -2802,41 +2607,5 @@ mod tests {
             Some(&false)
         );
         assert_eq!(state.select.harness_selection.get("pi"), Some(&true));
-    }
-
-    #[test]
-    fn filter_harnesses_drops_cursor_when_moving_to_global() {
-        // Regression: Cursor is project-only. A move-to-global plan must
-        // not pretend it can land at global, otherwise the destination
-        // lock entry would claim Cursor was installed there and the source
-        // copy would be deleted with no working replacement on disk.
-        let ids = vec!["cursor".to_string(), "claude-code".to_string()];
-
-        let to_global = filter_harnesses_for_target(&ids, true);
-        assert_eq!(to_global, vec![Harness::ClaudeCode]);
-
-        let to_project = filter_harnesses_for_target(&ids, false);
-        assert!(to_project.contains(&Harness::Cursor));
-        assert!(to_project.contains(&Harness::ClaudeCode));
-    }
-
-    #[test]
-    fn filter_harnesses_returns_empty_for_global_only_cursor_entry() {
-        // If the only harness on a plan is project-only, the move target
-        // has no eligible harness — perform_move_plans skips the plan and
-        // leaves the source intact.
-        let ids = vec!["cursor".to_string()];
-        assert!(filter_harnesses_for_target(&ids, true).is_empty());
-        assert_eq!(
-            filter_harnesses_for_target(&ids, false),
-            vec![Harness::Cursor]
-        );
-    }
-
-    #[test]
-    fn filter_harnesses_skips_unknown_ids() {
-        let ids = vec!["claude-code".to_string(), "made-up-harness".to_string()];
-        let result = filter_harnesses_for_target(&ids, true);
-        assert_eq!(result, vec![Harness::ClaudeCode]);
     }
 }

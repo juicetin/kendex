@@ -23,7 +23,7 @@ pub fn generate_agent(
 ) -> Result<PathBuf> {
     std::fs::create_dir_all(dir)?;
 
-    let path = dir.join(format!("{}.toml", agent.name));
+    let path = super::checked_agent_path(dir, &agent.name, "toml")?;
 
     let frontmatter = extras.frontmatter_for("codex");
 
@@ -100,7 +100,7 @@ pub fn generate_agent(
     }
     output.push_str("'''\n");
 
-    std::fs::write(&path, &output)?;
+    crate::path_safety::write_file_no_follow(&path, &output)?;
     Ok(path)
 }
 

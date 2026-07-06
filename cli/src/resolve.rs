@@ -20,6 +20,127 @@ pub fn resolve_skill_pairs(names: &[String], available: &[Skill]) -> Vec<(String
         .collect()
 }
 
+/// Return source hooks that are actually installed for a specific harness.
+///
+/// Source `vstack.toml` hook mappings describe where hooks should attach once
+/// installed; they must not cause agent frontmatter to reference hooks absent
+/// from the scope lock or from the harness-specific hook install set.
+pub fn hooks_installed_for_harness(
+    lock: &crate::config::LockFile,
+    hooks: &[crate::hook::Hook],
+    harness_id: &str,
+) -> Vec<crate::hook::Hook> {
+    lock.entries
+        .iter()
+        .filter(|(_, entry)| {
+            entry.kind == crate::config::ItemKind::Hook
+                && entry.harnesses.iter().any(|h| h == harness_id)
+        })
+        .filter_map(|(_, entry)| source_hook_for_lock_entry(hooks, entry))
+        .filter(|hook| hook.applies_to(harness_id))
+        .cloned()
+        .collect()
+}
+
+/// Return installed Codex fallback hooks from the lock using lock-entry source
+/// ownership, harness allowlists, and Codex native-event mapping.
+pub(crate) fn installed_codex_fallback_hooks(
+    lock: &crate::config::LockFile,
+    source_hooks: &[crate::hook::Hook],
+) -> Vec<crate::hook::Hook> {
+    lock.entries
+        .values()
+        .filter(|entry| entry.kind == crate::config::ItemKind::Hook)
+        .filter(|entry| entry.harnesses.iter().any(|h| h == Harness::Codex.id()))
+        .filter_map(|entry| source_hook_for_lock_entry(source_hooks, entry))
+        .filter(|hook| hook.applies_to(Harness::Codex.id()))
+        .filter(|hook| crate::installer::codex_event_for(&hook.event).is_none())
+        .cloned()
+        .collect()
+}
+
+/// Return the source hook matching a hook lock entry's recorded source.
+///
+/// Aggregated source discovery can contain same-named hooks from multiple
+/// sources. The lock entry source decides which one is authoritative for
+/// refresh/prune/reinstall/agent-frontmatter matching.
+pub fn source_hook_for_lock_entry<'a>(
+    source_hooks: &'a [crate::hook::Hook],
+    entry: &crate::config::LockEntry,
+) -> Option<&'a crate::hook::Hook> {
+    if should_match_entry_source(&entry.source)
+        && let Some(root) = crate::config::resolve_source_path(&entry.source)
+    {
+        for hook in source_hooks.iter().filter(|hook| hook.name == entry.name) {
+            if hook_path_is_from_source(hook, &root) {
+                return Some(hook);
+            }
+        }
+        return None;
+    }
+
+    for hook in source_hooks.iter().filter(|hook| hook.name == entry.name) {
+        if hook.source_path.as_os_str().is_empty() {
+            return Some(hook);
+        }
+    }
+
+    source_hooks.iter().find(|hook| hook.name == entry.name)
+}
+
+fn should_match_entry_source(source: &str) -> bool {
+    let path = Path::new(source);
+    source == "." || path.is_absolute() || (source.contains('/') && !source.starts_with('.'))
+}
+
+fn hook_path_is_from_source(hook: &crate::hook::Hook, source_root: &Path) -> bool {
+    let root = source_root
+        .canonicalize()
+        .unwrap_or_else(|_| source_root.to_path_buf());
+    let hook_path = hook
+        .source_path
+        .canonicalize()
+        .unwrap_or_else(|_| hook.source_path.clone());
+    hook_path.starts_with(root.join("hooks")) || hook_path.starts_with(root)
+}
+
+/// Return hooks from a selected/pre-lock set that apply to an agent on a
+/// specific harness.
+pub fn matched_selected_hooks_for_agent_harness(
+    mapping: &crate::mapping::MappingConfig,
+    agent_role: &AgentRole,
+    hooks: &[crate::hook::Hook],
+    harness_id: &str,
+) -> Vec<crate::hook::Hook> {
+    let applicable_hooks: Vec<crate::hook::Hook> = hooks
+        .iter()
+        .filter(|hook| hook.applies_to(harness_id))
+        .cloned()
+        .collect();
+    mapping
+        .hooks_for_agent(agent_role, &applicable_hooks)
+        .into_iter()
+        .cloned()
+        .collect()
+}
+
+/// Return hooks from the scope lock that apply to an agent on a specific
+/// harness.
+pub fn matched_installed_hooks_for_agent_harness(
+    lock: &crate::config::LockFile,
+    hooks: &[crate::hook::Hook],
+    mapping: &crate::mapping::MappingConfig,
+    agent_role: &AgentRole,
+    harness_id: &str,
+) -> Vec<crate::hook::Hook> {
+    let installed_hooks = hooks_installed_for_harness(lock, hooks, harness_id);
+    mapping
+        .hooks_for_agent(agent_role, &installed_hooks)
+        .into_iter()
+        .cloned()
+        .collect()
+}
+
 /// Read guidance/instructions from an existing agent file on disk.
 /// Returns empty extras if the file doesn't exist.
 pub fn read_existing_extras(path: &Path, harness: Harness) -> AgentExtras {
@@ -92,4 +213,227 @@ pub fn is_vstack_source(dir: &Path) -> bool {
     .filter(|&&b| b)
     .count();
     count >= 2
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{InstallMethod, ItemKind, LockEntry, LockFile};
+    use crate::mapping::{HookTarget, MappingConfig};
+    use std::path::PathBuf;
+
+    fn hook(name: &str, harnesses: Option<Vec<&str>>) -> crate::hook::Hook {
+        hook_from_path(name, harnesses, PathBuf::new())
+    }
+
+    fn hook_from_path(
+        name: &str,
+        harnesses: Option<Vec<&str>>,
+        source_path: PathBuf,
+    ) -> crate::hook::Hook {
+        crate::hook::Hook {
+            name: name.into(),
+            event: "PreToolUse".into(),
+            matcher: Some("Bash".into()),
+            description: String::new(),
+            safety: None,
+            timeout: None,
+            harnesses: harnesses.map(|items| items.into_iter().map(String::from).collect()),
+            script: String::new(),
+            source_path,
+        }
+    }
+
+    fn hook_with_event(name: &str, event: &str, harnesses: Option<Vec<&str>>) -> crate::hook::Hook {
+        let mut hook = hook(name, harnesses);
+        hook.event = event.into();
+        hook
+    }
+
+    fn lock_hook(name: &str, source: &Path, harnesses: Vec<&str>) -> LockEntry {
+        LockEntry {
+            name: name.into(),
+            kind: ItemKind::Hook,
+            source: source.to_string_lossy().into_owned(),
+            harnesses: harnesses.into_iter().map(String::from).collect(),
+            method: InstallMethod::Copy,
+            installed_at: "2026-07-03T00:00:00Z".into(),
+            source_hash: String::new(),
+        }
+    }
+
+    fn tmpdir(label: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock before epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "vstack-resolve-{label}-{}-{nanos}",
+            std::process::id()
+        ))
+    }
+
+    fn mapping_all_bash_hooks() -> MappingConfig {
+        let mut mapping = MappingConfig::default();
+        mapping
+            .hook_events
+            .insert("PreToolUse:Bash".into(), HookTarget::All("all".into()));
+        mapping
+    }
+
+    #[test]
+    fn matched_installed_hooks_are_scoped_to_harness_lock_entries() {
+        let mut lock = LockFile::default();
+        lock.add(LockEntry {
+            name: "guard".into(),
+            kind: ItemKind::Hook,
+            source: "source".into(),
+            harnesses: vec!["codex".into()],
+            method: InstallMethod::Copy,
+            installed_at: "2026-07-03T00:00:00Z".into(),
+            source_hash: String::new(),
+        });
+        let hooks = vec![hook("guard", None)];
+        let mapping = mapping_all_bash_hooks();
+
+        assert!(
+            matched_installed_hooks_for_agent_harness(
+                &lock,
+                &hooks,
+                &mapping,
+                &AgentRole::Engineer,
+                "claude-code",
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            matched_installed_hooks_for_agent_harness(
+                &lock,
+                &hooks,
+                &mapping,
+                &AgentRole::Engineer,
+                "codex",
+            )
+            .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn matched_selected_hooks_respect_source_harness_allowlist_before_lock_exists() {
+        let hooks = vec![hook("guard", Some(vec!["claude-code"]))];
+        let mapping = mapping_all_bash_hooks();
+
+        assert_eq!(
+            matched_selected_hooks_for_agent_harness(
+                &mapping,
+                &AgentRole::Engineer,
+                &hooks,
+                "claude-code",
+            )
+            .len(),
+            1
+        );
+        assert!(
+            matched_selected_hooks_for_agent_harness(
+                &mapping,
+                &AgentRole::Engineer,
+                &hooks,
+                "codex",
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn matched_installed_hooks_use_lock_entry_source_when_names_collide() {
+        let root = tmpdir("hook-source");
+        let source_a = root.join("source-a");
+        let source_b = root.join("source-b");
+        std::fs::create_dir_all(source_a.join("agents")).unwrap();
+        std::fs::create_dir_all(source_a.join("hooks")).unwrap();
+        std::fs::create_dir_all(source_b.join("agents")).unwrap();
+        std::fs::create_dir_all(source_b.join("hooks")).unwrap();
+        let mut lock = LockFile::default();
+        lock.add(lock_hook("guard", &source_b, vec!["claude-code"]));
+        let hooks = vec![
+            hook_from_path(
+                "guard",
+                Some(vec!["codex"]),
+                source_a.join("hooks/guard.sh"),
+            ),
+            hook_from_path(
+                "guard",
+                Some(vec!["claude-code"]),
+                source_b.join("hooks/guard.sh"),
+            ),
+        ];
+        let mapping = mapping_all_bash_hooks();
+
+        assert_eq!(
+            matched_installed_hooks_for_agent_harness(
+                &lock,
+                &hooks,
+                &mapping,
+                &AgentRole::Engineer,
+                "claude-code",
+            )
+            .len(),
+            1
+        );
+        assert!(
+            matched_installed_hooks_for_agent_harness(
+                &lock,
+                &hooks,
+                &mapping,
+                &AgentRole::Engineer,
+                "codex",
+            )
+            .is_empty()
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn installed_codex_fallback_hooks_filters_native_and_non_codex_entries() {
+        let mut lock = LockFile::default();
+        lock.add(LockEntry {
+            name: "fallback".into(),
+            kind: ItemKind::Hook,
+            source: "source".into(),
+            harnesses: vec!["codex".into()],
+            method: InstallMethod::Copy,
+            installed_at: "2026-07-03T00:00:00Z".into(),
+            source_hash: String::new(),
+        });
+        lock.add(LockEntry {
+            name: "native".into(),
+            kind: ItemKind::Hook,
+            source: "source".into(),
+            harnesses: vec!["codex".into()],
+            method: InstallMethod::Copy,
+            installed_at: "2026-07-03T00:00:00Z".into(),
+            source_hash: String::new(),
+        });
+        lock.add(LockEntry {
+            name: "claude-only".into(),
+            kind: ItemKind::Hook,
+            source: "source".into(),
+            harnesses: vec!["claude-code".into()],
+            method: InstallMethod::Copy,
+            installed_at: "2026-07-03T00:00:00Z".into(),
+            source_hash: String::new(),
+        });
+        let hooks = vec![
+            hook_with_event("fallback", "TaskCompleted", Some(vec!["codex"])),
+            hook_with_event("native", "PreToolUse", Some(vec!["codex"])),
+            hook_with_event("claude-only", "TaskCompleted", Some(vec!["claude-code"])),
+        ];
+
+        let fallback = installed_codex_fallback_hooks(&lock, &hooks);
+
+        assert_eq!(fallback.len(), 1);
+        assert_eq!(fallback[0].name, "fallback");
+    }
 }

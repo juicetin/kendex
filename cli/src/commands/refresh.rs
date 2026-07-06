@@ -3,24 +3,16 @@ use crate::config::{self, ItemKind};
 use crate::harness::Harness;
 use crate::hook::Hook;
 use crate::installer;
-use crate::mapping::MappingConfig;
-use crate::pi_extension::PiExtension;
 use crate::project_config::ProjectConfig;
+use crate::refresh_sources::{
+    RefreshSource, all_source_hooks, all_source_pi_extensions, load_refresh_sources,
+    refresh_source_for_entry, resolve_skill_pairs_from_sources, resolve_source_records,
+    source_pi_extension_for_lock_name,
+};
 use crate::skill::Skill;
 use anyhow::Result;
-
-fn source_pi_extension_for_lock_name<'a>(
-    pi_extensions: &'a [PiExtension],
-    name: &str,
-) -> Option<&'a PiExtension> {
-    pi_extensions.iter().find(|e| e.name == name).or_else(|| {
-        pi_extensions
-            .iter()
-            .find(|e| crate::pi_extension::legacy_names_for(&e.name).contains(&name))
-    })
-}
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::collections::{HashMap, HashSet};
+use std::path::Path;
 
 /// Result counts from one invocation of [`refresh_items_in_scope`].
 #[derive(Default)]
@@ -29,8 +21,17 @@ pub struct RefreshStats {
     pub skills_refreshed: usize,
     pub hooks_refreshed: usize,
     pub pi_refreshed: usize,
+    pub successful_items: HashSet<String>,
+    pub failures: Vec<RefreshFailure>,
     /// Map of agent_name → (full merged required-skills list, newly added skill names).
     pub upstream_skill_updates: HashMap<String, (Vec<String>, Vec<String>)>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RefreshFailure {
+    pub item: String,
+    pub harness: Option<String>,
+    pub error: String,
 }
 
 impl RefreshStats {
@@ -45,6 +46,22 @@ impl RefreshStats {
                 .collect();
             crate::project_config::merge_upstream_agent_skills(project_root, &merged);
         }
+    }
+
+    fn mark_success(&mut self, name: &str) {
+        self.successful_items.insert(name.to_string());
+    }
+
+    fn fail(&mut self, item: &str, harness: Option<Harness>, err: impl std::fmt::Display) {
+        self.failures.push(RefreshFailure {
+            item: item.to_string(),
+            harness: harness.map(|harness| harness.name().to_string()),
+            error: err.to_string(),
+        });
+    }
+
+    pub fn has_failures(&self) -> bool {
+        !self.failures.is_empty()
     }
 }
 
@@ -75,26 +92,22 @@ fn merge_upstream<T: Clone>(
 /// `name_filter`) using the supplied source data.
 ///
 /// Both `vstack refresh` and the TUI's inline-update path go through this
-/// helper. Caller is responsible for: source discovery (filling in
-/// `agents`/`skills`/`hooks`/`pi_extensions` and `mapping`), project-config
-/// loading, lock loading, lock-disk reconciliation, and writing the
-/// upstream-additions back to disk via
+/// helper. Caller is responsible for: source discovery (filling `sources`),
+/// project-config loading, lock loading, lock-disk reconciliation, hook-harness pruning via
+/// [`prune_hook_harnesses`], and writing the upstream-additions back to disk via
 /// [`crate::project_config::merge_upstream_agent_skills`].
 #[allow(clippy::too_many_arguments)]
 pub fn refresh_items_in_scope(
     global: bool,
     lock: &config::LockFile,
-    agents: &[Agent],
-    skills: &[Skill],
-    hooks: &[Hook],
-    pi_extensions: &[PiExtension],
-    mapping: &MappingConfig,
+    sources: &[RefreshSource],
     project_config: &mut ProjectConfig,
     project_root: &Path,
     name_filter: Option<&[String]>,
 ) -> RefreshStats {
     let mut stats = RefreshStats::default();
     let pass = |name: &str| name_filter.is_none_or(|f| f.iter().any(|n| n == name));
+    let all_hooks = all_source_hooks(sources);
 
     if lock
         .entries
@@ -111,19 +124,7 @@ pub fn refresh_items_in_scope(
         .filter(|(_, e)| e.kind == ItemKind::Skill)
         .map(|(name, _)| name.clone())
         .collect();
-
-    let installed_hook_names: std::collections::HashSet<String> = lock
-        .entries
-        .iter()
-        .filter(|(_, e)| e.kind == ItemKind::Hook)
-        .map(|(name, _)| name.clone())
-        .collect();
-
-    let installed_hooks: Vec<Hook> = hooks
-        .iter()
-        .filter(|h| installed_hook_names.contains(&h.name))
-        .cloned()
-        .collect();
+    let mut regenerated_codex_agents = Vec::new();
 
     // ── Agents ───────────────────────────────────────────────
     for (name, entry) in lock
@@ -132,7 +133,17 @@ pub fn refresh_items_in_scope(
         .filter(|(_, e)| e.kind == ItemKind::Agent)
         .filter(|(n, _)| pass(n))
     {
-        let Some(agent) = agents.iter().find(|a| &a.name == name) else {
+        if let Err(err) = crate::path_safety::validate_item_name(name) {
+            stats.fail(name, None, format!("invalid agent name: {err:#}"));
+            continue;
+        }
+        let Some(source) = refresh_source_for_entry(sources, entry) else {
+            if name_filter.is_none() {
+                eprintln!("  ! {} — source not found, skipped", name);
+            }
+            continue;
+        };
+        let Some(agent) = source.agents.iter().find(|a| &a.name == name) else {
             if name_filter.is_none() {
                 eprintln!("  ! {} — source not found, skipped", name);
             }
@@ -140,7 +151,10 @@ pub fn refresh_items_in_scope(
         };
 
         // Required skills: project list (if present) merged with source additions.
-        let source_skills = mapping.skills_for_agent(&agent.name, &agent.role, &installed_skills);
+        let source_skills =
+            source
+                .mapping
+                .skills_for_agent(&agent.name, &agent.role, &installed_skills);
         let project_required = project_config.agent_skills_for(&agent.name);
         let (skill_names, added) =
             merge_upstream(project_required.map(|v| &v[..]), &source_skills, |s| {
@@ -155,13 +169,7 @@ pub fn refresh_items_in_scope(
                 .insert(agent.name.clone(), (skill_names.clone(), added));
         }
 
-        let skill_pairs = crate::resolve::resolve_skill_pairs(&skill_names, skills);
-
-        let matched_hooks: Vec<Hook> = mapping
-            .hooks_for_agent(&agent.role, &installed_hooks)
-            .into_iter()
-            .cloned()
-            .collect();
+        let skill_pairs = resolve_skill_pairs_from_sources(&skill_names, lock, sources);
 
         for harness_id in &entry.harnesses {
             if let Some(harness) = Harness::from_id(harness_id) {
@@ -176,16 +184,63 @@ pub fn refresh_items_in_scope(
             }
         }
 
-        let extras =
-            crate::resolve::build_agent_extras(project_config, &agent.name, &agent.role, None);
+        let mut effective_project_config = project_config.clone();
+        effective_project_config.overlay_source_frontmatter(&source.mapping);
+        let extras = crate::resolve::build_agent_extras(
+            &effective_project_config,
+            &agent.name,
+            &agent.role,
+            None,
+        );
 
+        let mut succeeded = 0usize;
+        let mut failed = false;
         for harness_id in &entry.harnesses {
             if let Some(harness) = Harness::from_id(harness_id) {
-                let _ =
-                    harness.generate_agent(agent, global, &skill_pairs, &matched_hooks, &extras);
+                let matched_hooks = crate::resolve::matched_installed_hooks_for_agent_harness(
+                    lock,
+                    &all_hooks,
+                    &source.mapping,
+                    &agent.role,
+                    harness.id(),
+                );
+                match harness.generate_agent(agent, global, &skill_pairs, &matched_hooks, &extras) {
+                    Ok(_) => {
+                        succeeded += 1;
+                        if matches!(harness, Harness::Codex) {
+                            regenerated_codex_agents.push(agent.clone());
+                        }
+                    }
+                    Err(err) => {
+                        failed = true;
+                        stats.fail(name, Some(harness), err);
+                    }
+                }
             }
         }
-        stats.agents_refreshed += 1;
+        if succeeded > 0 && !failed {
+            stats.agents_refreshed += 1;
+            stats.mark_success(name);
+        }
+    }
+
+    if !regenerated_codex_agents.is_empty() {
+        let fallback_hooks = crate::resolve::installed_codex_fallback_hooks(lock, &all_hooks);
+        if !fallback_hooks.is_empty()
+            && let Err(err) = crate::installer::install_codex_fallback_hooks_for_agents(
+                &fallback_hooks,
+                global,
+                &regenerated_codex_agents,
+            )
+        {
+            let error = format!("failed to install Codex hook prose: {err:#}");
+            for agent in &regenerated_codex_agents {
+                stats.fail(&agent.name, Some(Harness::Codex), &error);
+                if stats.successful_items.remove(&agent.name) && stats.agents_refreshed > 0 {
+                    stats.agents_refreshed -= 1;
+                }
+            }
+        }
     }
 
     // ── Skills ───────────────────────────────────────────────
@@ -195,17 +250,31 @@ pub fn refresh_items_in_scope(
         .filter(|(_, e)| e.kind == ItemKind::Skill)
         .filter(|(n, _)| pass(n))
     {
-        let Some(skill) = skills.iter().find(|s| &s.name == name) else {
+        let Some(source) = refresh_source_for_entry(sources, entry) else {
+            continue;
+        };
+        let Some(skill) = source.skills.iter().find(|s| &s.name == name) else {
             continue;
         };
 
+        let mut succeeded = 0usize;
+        let mut failed = false;
         for harness_id in &entry.harnesses {
             if let Some(harness) = Harness::from_id(harness_id) {
                 let skill_instr = project_config.skill_instructions_for(&skill.name);
-                let _ = installer::install_skill(skill, harness, global, entry.method, skill_instr);
+                match installer::install_skill(skill, harness, global, entry.method, skill_instr) {
+                    Ok(_) => succeeded += 1,
+                    Err(err) => {
+                        failed = true;
+                        stats.fail(name, Some(harness), err);
+                    }
+                }
             }
         }
-        stats.skills_refreshed += 1;
+        if succeeded > 0 && !failed {
+            stats.skills_refreshed += 1;
+            stats.mark_success(name);
+        }
     }
 
     // ── Hooks ─────────────────────────────────────────────
@@ -217,7 +286,11 @@ pub fn refresh_items_in_scope(
         .entries
         .iter()
         .filter(|(_, e)| e.kind == ItemKind::Agent)
-        .filter_map(|(name, _)| agents.iter().find(|a| &a.name == name).cloned())
+        .filter_map(|(name, entry)| {
+            refresh_source_for_entry(sources, entry)
+                .and_then(|source| source.agents.iter().find(|agent| &agent.name == name))
+                .cloned()
+        })
         .collect();
 
     for (name, entry) in lock
@@ -226,35 +299,173 @@ pub fn refresh_items_in_scope(
         .filter(|(_, e)| e.kind == ItemKind::Hook)
         .filter(|(n, _)| pass(n))
     {
-        let Some(hook) = hooks.iter().find(|h| &h.name == name) else {
+        let Some(source) = refresh_source_for_entry(sources, entry) else {
             continue;
         };
+        let Some(hook) = source.hooks.iter().find(|hook| hook.name == entry.name) else {
+            continue;
+        };
+        let mut succeeded = 0usize;
+        let mut failed = false;
         for harness_id in &entry.harnesses {
             if !hook.applies_to(harness_id) {
                 continue;
             }
             if let Some(harness) = Harness::from_id(harness_id) {
-                let _ = installer::install_hook(hook, harness, global, &agent_entries);
+                match installer::install_hook(hook, harness, global, &agent_entries) {
+                    Ok(_) => succeeded += 1,
+                    Err(err) => {
+                        failed = true;
+                        stats.fail(name, Some(harness), err);
+                    }
+                }
             }
         }
-        stats.hooks_refreshed += 1;
+        if succeeded > 0 && !failed {
+            stats.hooks_refreshed += 1;
+            stats.mark_success(name);
+        }
     }
 
     // ── Pi packages ──────────────────────────────────────
-    for (name, _) in lock
+    for (name, entry) in lock
         .entries
         .iter()
         .filter(|(_, e)| e.kind == ItemKind::PiExtension)
         .filter(|(n, _)| pass(n))
     {
-        let Some(ext) = source_pi_extension_for_lock_name(pi_extensions, name) else {
+        let Some(source) = refresh_source_for_entry(sources, entry) else {
             continue;
         };
-        let _ = crate::pi_extension::install_pi_extension(ext, global);
-        stats.pi_refreshed += 1;
+        let Some(ext) = source_pi_extension_for_lock_name(&source.pi_extensions, name) else {
+            continue;
+        };
+        match crate::pi_extension::install_pi_extension(ext, global) {
+            Ok(_) => {
+                stats.pi_refreshed += 1;
+                stats.mark_success(name);
+            }
+            Err(err) => stats.fail(name, Some(Harness::Pi), err),
+        }
     }
 
     stats
+}
+
+/// Drop hook harness ids that no longer satisfy the source hook `harnesses:`
+/// allowlist, removing the stale harness artifacts/settings before mutating the
+/// lock. Returns true when the lock changed.
+pub fn prune_hook_harnesses(
+    global: bool,
+    lock: &mut config::LockFile,
+    source_hooks: &[Hook],
+    name_filter: Option<&[String]>,
+) -> bool {
+    let pass = |name: &str| name_filter.is_none_or(|names| names.iter().any(|n| n == name));
+    let mut pruned_any = false;
+    let mut remove_hook_entries = Vec::new();
+
+    for entry in lock
+        .entries
+        .values_mut()
+        .filter(|entry| entry.kind == ItemKind::Hook && pass(&entry.name))
+    {
+        let Some(hook) = crate::resolve::source_hook_for_lock_entry(source_hooks, entry) else {
+            continue;
+        };
+        let mut new_harnesses = Vec::new();
+        for harness_id in &entry.harnesses {
+            if hook.applies_to(harness_id) {
+                new_harnesses.push(harness_id.clone());
+                continue;
+            }
+
+            let Some(harness) = Harness::from_id(harness_id) else {
+                pruned_any = true;
+                continue;
+            };
+            match installer::remove_hook_install(&entry.name, harness, global) {
+                Ok(_) => pruned_any = true,
+                Err(err) => {
+                    eprintln!(
+                        "Warning: failed to remove hook {} from {} during refresh: {err}",
+                        entry.name,
+                        harness.name()
+                    );
+                    new_harnesses.push(harness_id.clone());
+                }
+            }
+        }
+        if new_harnesses != entry.harnesses {
+            entry.harnesses = new_harnesses;
+            pruned_any = true;
+        }
+        if entry.harnesses.is_empty() {
+            remove_hook_entries.push(entry.name.clone());
+        }
+    }
+
+    for name in remove_hook_entries {
+        lock.remove(&name);
+        pruned_any = true;
+    }
+
+    pruned_any
+}
+
+pub fn regenerate_agents_after_hook_removal(
+    global: bool,
+    lock: &config::LockFile,
+    removed_hook_harnesses: &[String],
+) -> Result<()> {
+    if removed_hook_harnesses.is_empty() {
+        return Ok(());
+    }
+
+    let agent_names: Vec<String> = lock
+        .entries
+        .iter()
+        .filter(|(_, entry)| entry.kind == ItemKind::Agent)
+        .filter(|(_, entry)| {
+            entry.harnesses.iter().any(|harness| {
+                removed_hook_harnesses
+                    .iter()
+                    .any(|removed| removed == harness)
+            })
+        })
+        .map(|(name, _)| name.clone())
+        .collect();
+    if agent_names.is_empty() {
+        return Ok(());
+    }
+
+    let source_records = resolve_source_records(lock);
+    let sources = load_refresh_sources(&source_records);
+    if sources.is_empty() {
+        return Ok(());
+    }
+
+    let project_root = config::project_root();
+    let mut project_config = ProjectConfig::load(&project_root);
+    let stats = refresh_items_in_scope(
+        global,
+        lock,
+        &sources,
+        &mut project_config,
+        &project_root,
+        Some(&agent_names),
+    );
+    if !global {
+        stats.persist_upstream(&project_root);
+    }
+    if stats.has_failures() {
+        anyhow::bail!(
+            "failed to regenerate agents after hook removal: {} failure(s)",
+            stats.failures.len()
+        );
+    }
+
+    Ok(())
 }
 
 /// Reinstall every item recorded in the selected scopes from current source:
@@ -298,36 +509,23 @@ fn run_one(global: bool, verbose: bool) -> Result<()> {
         lock.save(&lock_path)?;
     }
 
+    // Resolve source directories once per refresh. Cached remote sources update
+    // during resolution; reusing this list avoids duplicate git fetch/reset
+    // cycles for pruning and aggregation.
+    let source_records = resolve_source_records(&lock);
+    let source_dirs: Vec<_> = source_records
+        .iter()
+        .map(|source| source.root.clone())
+        .collect();
+    let sources = load_refresh_sources(&source_records);
+
     // Self-heal hook lock entries: drop harness ids the hook no longer
     // applies to (the `harnesses:` allowlist in source may have changed
     // since install). Done up-front so all downstream passes see the
     // pruned state.
     {
-        let source_hooks_for_prune: Vec<crate::hook::Hook> = resolve_sources(&lock)
-            .iter()
-            .flat_map(|dir| crate::hook::discover_hooks(&dir.join("hooks")).unwrap_or_default())
-            .collect();
-        let mut pruned_any = false;
-        for entry in lock
-            .entries
-            .values_mut()
-            .filter(|e| e.kind == ItemKind::Hook)
-        {
-            let Some(hook) = source_hooks_for_prune.iter().find(|h| h.name == entry.name) else {
-                continue;
-            };
-            let new_harnesses: Vec<String> = entry
-                .harnesses
-                .iter()
-                .filter(|h| hook.applies_to(h))
-                .cloned()
-                .collect();
-            if new_harnesses != entry.harnesses {
-                entry.harnesses = new_harnesses;
-                pruned_any = true;
-            }
-        }
-        if pruned_any {
+        let source_hooks_for_prune = all_source_hooks(&sources);
+        if prune_hook_harnesses(global, &mut lock, &source_hooks_for_prune, None) {
             lock.save(&lock_path)?;
         }
     }
@@ -356,39 +554,11 @@ fn run_one(global: bool, verbose: bool) -> Result<()> {
     }
     let mut project_config = crate::project_config::ProjectConfig::load(&project_root);
 
-    // After mapping is loaded below we overlay its frontmatter defaults so
-    // source-level `[agent-frontmatter.<harness>]` entries feed regeneration.
-
-    // Resolve source directories from lock file entries
-    let source_dirs = resolve_sources(&lock);
-    if source_dirs.is_empty() {
+    if sources.is_empty() {
         eprintln!("Could not locate any package sources. Run `vstack add` to reinstall.");
         return Ok(());
     }
-
-    // Aggregate source data from all resolved sources
-    let mut all_source_agents = Vec::new();
-    let mut all_source_skills = Vec::new();
-    let mut all_source_hooks = Vec::new();
-    let mut mapping = crate::mapping::MappingConfig::default();
-
-    for dir in &source_dirs {
-        mapping = crate::mapping::MappingConfig::load(dir);
-        all_source_agents
-            .extend(crate::agent::discover_agents(&dir.join("agents")).unwrap_or_default());
-        all_source_skills
-            .extend(crate::skill::discover_skills(&dir.join("skills")).unwrap_or_default());
-        all_source_hooks
-            .extend(crate::hook::discover_hooks(&dir.join("hooks")).unwrap_or_default());
-    }
-
-    let mut all_pi_extensions = Vec::new();
-    for dir in &source_dirs {
-        all_pi_extensions.extend(
-            crate::pi_extension::discover_pi_extensions(&dir.join("pi-extensions"))
-                .unwrap_or_default(),
-        );
-    }
+    let all_pi_extensions = all_source_pi_extensions(&sources);
 
     if !global {
         let project_canon = project_root
@@ -398,14 +568,19 @@ fn run_one(global: bool, verbose: bool) -> Result<()> {
             .iter()
             .any(|dir| dir.canonicalize().unwrap_or_else(|_| dir.clone()) == project_canon);
         if !project_is_source {
-            let installed_settings_skills: Vec<Skill> = all_source_skills
+            let installed_settings_skills: Vec<Skill> = lock
+                .entries
                 .iter()
-                .filter(|skill| {
-                    lock.entries
-                        .get(&skill.name)
-                        .is_some_and(|entry| entry.kind == ItemKind::Skill)
+                .filter(|(_, entry)| entry.kind == ItemKind::Skill)
+                .filter_map(|(name, entry)| {
+                    refresh_source_for_entry(&sources, entry).and_then(|source| {
+                        source
+                            .skills
+                            .iter()
+                            .find(|skill| &skill.name == name)
+                            .cloned()
+                    })
                 })
-                .cloned()
                 .collect();
             if let Some(result) = crate::project_settings::ensure_skill_settings(
                 &project_root,
@@ -430,29 +605,37 @@ fn run_one(global: bool, verbose: bool) -> Result<()> {
                 )
             })
             .collect();
-        let installed_agents: Vec<Agent> = all_source_agents
-            .iter()
-            .filter(|agent| lock.entries.contains_key(&agent.name))
-            .cloned()
-            .collect();
-        crate::project_config::write_agent_frontmatter_defaults(
-            &project_root,
-            &installed_agents,
-            &harnesses_by_agent,
-            &mapping,
-        );
+        for source in &sources {
+            let installed_agents: Vec<Agent> = lock
+                .entries
+                .iter()
+                .filter(|(_, entry)| entry.kind == ItemKind::Agent)
+                .filter(|(_, entry)| {
+                    refresh_source_for_entry(&sources, entry)
+                        .is_some_and(|owner| owner.root == source.root)
+                })
+                .filter_map(|(name, _)| {
+                    source
+                        .agents
+                        .iter()
+                        .find(|agent| &agent.name == name)
+                        .cloned()
+                })
+                .collect();
+            crate::project_config::write_agent_frontmatter_defaults(
+                &project_root,
+                &installed_agents,
+                &harnesses_by_agent,
+                &source.mapping,
+            );
+        }
         project_config = crate::project_config::ProjectConfig::load(&project_root);
     }
-    project_config.overlay_source_frontmatter(&mapping);
 
     let stats = refresh_items_in_scope(
         global,
         &lock,
-        &all_source_agents,
-        &all_source_skills,
-        &all_source_hooks,
-        &all_pi_extensions,
-        &mapping,
+        &sources,
         &mut project_config,
         &project_root,
         None,
@@ -493,7 +676,10 @@ fn run_one(global: bool, verbose: bool) -> Result<()> {
     }
     let mut changes: Vec<(ItemKind, String, String, String, String)> = Vec::new();
     for entry in lock.entries.values_mut() {
-        if resolve_single_source(&entry.source).is_none()
+        let source_resolved = source_records
+            .iter()
+            .any(|source| source.aliases.iter().any(|alias| alias == &entry.source));
+        if !source_resolved
             && let Some(replacement) = &fallback_source
             && &entry.source != replacement
         {
@@ -501,8 +687,10 @@ fn run_one(global: bool, verbose: bool) -> Result<()> {
             repaired_sources += 1;
         }
         let old_hash = entry.source_hash.clone();
-        entry.installed_at = now.clone();
-        entry.source_hash = config::compute_source_hash(entry);
+        if stats.successful_items.contains(&entry.name) {
+            entry.installed_at = now.clone();
+            entry.source_hash = config::compute_source_hash(entry);
+        }
         changes.push((
             entry.kind,
             entry.kind.label_short().to_string(),
@@ -594,112 +782,22 @@ fn run_one(global: bool, verbose: bool) -> Result<()> {
         stats.pi_refreshed,
         count_updated(ItemKind::PiExtension),
     );
+    if stats.has_failures() {
+        for failure in &stats.failures {
+            let harness = failure
+                .harness
+                .as_ref()
+                .map(|harness| format!(" ({harness})"))
+                .unwrap_or_default();
+            eprintln!("  ! {}{} — {}", failure.item, harness, failure.error);
+        }
+        anyhow::bail!(
+            "failed to refresh {} item/harness install(s)",
+            stats.failures.len()
+        );
+    }
     Ok(())
 }
 
-/// Resolve source directories from lock file entries.
-/// Handles local paths, "." (walks up from CWD), and remote shorthand (cached clones).
-fn resolve_sources(lock: &config::LockFile) -> Vec<PathBuf> {
-    let mut sources: Vec<PathBuf> = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-
-    for entry in lock.entries.values() {
-        if seen.contains(&entry.source) {
-            continue;
-        }
-        seen.insert(entry.source.clone());
-
-        if let Some(dir) = resolve_single_source(&entry.source)
-            && !sources.contains(&dir)
-        {
-            sources.push(dir);
-        }
-    }
-
-    // Fallback: walk up from CWD to find a vstack source repo
-    if sources.is_empty()
-        && let Ok(mut dir) = std::env::current_dir()
-    {
-        loop {
-            if crate::resolve::is_vstack_source(&dir) {
-                sources.push(dir);
-                break;
-            }
-            if !dir.pop() {
-                break;
-            }
-        }
-    }
-
-    // Fallback: try the source registry (cached remote repos)
-    if sources.is_empty() {
-        let reg_path = config::source_registry_path();
-        if let Ok(registry) = config::SourceRegistry::load(&reg_path) {
-            for entry in registry.current.iter().chain(registry.entries.iter()) {
-                if let Some(dir) = resolve_single_source(entry)
-                    && !sources.contains(&dir)
-                {
-                    sources.push(dir);
-                }
-            }
-        }
-    }
-
-    sources
-}
-
-fn resolve_single_source(source: &str) -> Option<PathBuf> {
-    // Absolute or relative path that exists
-    let p = std::path::Path::new(source);
-    if p.is_absolute() && p.is_dir() && crate::resolve::is_vstack_source(p) {
-        return Some(p.to_path_buf());
-    }
-
-    // "." — walk up from CWD
-    if source == "." {
-        let mut dir = std::env::current_dir().ok()?;
-        loop {
-            if crate::resolve::is_vstack_source(&dir) {
-                return Some(dir);
-            }
-            if !dir.pop() {
-                break;
-            }
-        }
-        return None;
-    }
-
-    // Remote shorthand (owner/repo) — update and use cached clone
-    let cache_dir = config::global_base_dir().join(".vstack").join("cache");
-    let key = source.replace('/', "_");
-    let cached = cache_dir.join(&key);
-    if cached.join(".git").exists() {
-        update_cached_repo(&cached);
-        return Some(cached);
-    }
-
-    None
-}
-
-/// Pull latest changes for a cached remote repo.
-fn update_cached_repo(repo_dir: &std::path::Path) {
-    eprintln!("Updating cached repo...");
-    let fetch = std::process::Command::new("git")
-        .args(["fetch", "origin", "--quiet"])
-        .current_dir(repo_dir)
-        .status();
-    match fetch {
-        Ok(s) if s.success() => {
-            let reset = std::process::Command::new("git")
-                .args(["reset", "--hard", "origin/HEAD"])
-                .current_dir(repo_dir)
-                .stderr(std::process::Stdio::null())
-                .status();
-            if !reset.is_ok_and(|s| s.success()) {
-                eprintln!("  Warning: git reset failed — cached repo may be stale");
-            }
-        }
-        Ok(_) => eprintln!("  Warning: git fetch failed — using cached version"),
-        Err(_) => eprintln!("  Warning: git not available — using cached version"),
-    }
-}
+#[cfg(test)]
+mod tests;

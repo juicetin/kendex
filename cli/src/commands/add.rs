@@ -1113,11 +1113,12 @@ source (e.g. switching vstack repos, or starting clean), pass --clobber:
                 .entry(a.name.clone())
                 .or_insert_with(|| skill_names.clone());
 
-            let matched_hooks: Vec<hook::Hook> = mapping
-                .hooks_for_agent(&a.role, &selected_hooks)
-                .into_iter()
-                .cloned()
-                .collect();
+            let matched_hooks = crate::resolve::matched_selected_hooks_for_agent_harness(
+                &mapping,
+                &a.role,
+                &selected_hooks,
+                harness.id(),
+            );
 
             let existing_path = harness
                 .agents_dir(global)
@@ -1555,7 +1556,7 @@ fn reconcile_agents(
         .filter(|(_, e)| e.kind == config::ItemKind::Agent)
         .collect();
 
-    if agent_entries.is_empty() || installed_skills.is_empty() {
+    if agent_entries.is_empty() {
         return Ok(());
     }
 
@@ -1567,6 +1568,8 @@ fn reconcile_agents(
     let source_agents = crate::agent::discover_agents(&agents_dir).unwrap_or_default();
     let source_skills = crate::skill::discover_skills(&skills_dir).unwrap_or_default();
     let source_hooks = crate::hook::discover_hooks(&hooks_dir).unwrap_or_default();
+    let mut regenerated_codex_agents: Vec<crate::agent::Agent> = Vec::new();
+    let mut regenerated_codex_agent_names = std::collections::HashSet::new();
 
     for (name, entry) in &agent_entries {
         let Some(agent) = source_agents.iter().find(|a| &a.name == *name) else {
@@ -1582,12 +1585,6 @@ fn reconcile_agents(
             };
 
         let skill_pairs = crate::resolve::resolve_skill_pairs(&skill_names, &source_skills);
-
-        let matched_hooks: Vec<crate::hook::Hook> = mapping
-            .hooks_for_agent(&agent.role, &source_hooks)
-            .into_iter()
-            .cloned()
-            .collect();
 
         for harness_id in &entry.harnesses {
             if let Some(harness) = Harness::from_id(harness_id)
@@ -1615,16 +1612,34 @@ fn reconcile_agents(
             if let Some(harness) = Harness::from_id(harness_id) {
                 // Only reconcile harnesses that were part of this install
                 if harnesses.contains(&harness) {
-                    let _ = harness.generate_agent(
-                        agent,
-                        global,
-                        &skill_pairs,
-                        &matched_hooks,
-                        &extras,
+                    let matched_hooks = crate::resolve::matched_installed_hooks_for_agent_harness(
+                        &lock,
+                        &source_hooks,
+                        &mapping,
+                        &agent.role,
+                        harness.id(),
                     );
+                    if harness
+                        .generate_agent(agent, global, &skill_pairs, &matched_hooks, &extras)
+                        .is_ok()
+                        && matches!(harness, Harness::Codex)
+                        && regenerated_codex_agent_names.insert(agent.name.clone())
+                    {
+                        regenerated_codex_agents.push(agent.clone());
+                    }
                 }
             }
         }
+    }
+
+    if !regenerated_codex_agents.is_empty() {
+        let codex_fallback_hooks =
+            crate::resolve::installed_codex_fallback_hooks(&lock, &source_hooks);
+        installer::install_codex_fallback_hooks_for_agents(
+            &codex_fallback_hooks,
+            global,
+            &regenerated_codex_agents,
+        )?;
     }
 
     Ok(())

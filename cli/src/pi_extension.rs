@@ -319,12 +319,93 @@ pub fn legacy_names_for(name: &str) -> &'static [&'static str] {
         .unwrap_or(&[])
 }
 
+fn validate_safe_component(kind: &str, value: &str) -> Result<()> {
+    if value.is_empty()
+        || value == "."
+        || value == ".."
+        || value.contains('/')
+        || value.contains('\\')
+        || value.starts_with('-')
+        || !value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '~'))
+    {
+        anyhow::bail!("invalid {kind} `{value}`");
+    }
+    Ok(())
+}
+
+fn validate_pi_package_name(name: &str) -> Result<()> {
+    if name.is_empty() || name.contains('\\') || name.starts_with('/') || name.contains("//") {
+        anyhow::bail!("invalid Pi package name `{name}`");
+    }
+    if let Some(rest) = name.strip_prefix('@') {
+        let Some((scope, package)) = rest.split_once('/') else {
+            anyhow::bail!("invalid Pi package name `{name}`");
+        };
+        if package.contains('/') {
+            anyhow::bail!("invalid Pi package name `{name}`");
+        }
+        validate_safe_component("Pi package scope", scope)?;
+        validate_safe_component("Pi package name", package)?;
+        return Ok(());
+    }
+    if name.contains('/') {
+        anyhow::bail!("invalid Pi package name `{name}`");
+    }
+    validate_safe_component("Pi package name", name)
+}
+
+fn checked_pi_package_path(name: &str, global: bool) -> Result<PathBuf> {
+    validate_pi_package_name(name)?;
+    let base = crate::config::pi_packages_dir(global);
+    let dest = base.join(name);
+    if !dest.starts_with(&base) {
+        anyhow::bail!("Pi package path escapes package directory: `{name}`");
+    }
+    Ok(dest)
+}
+
+fn checked_package_child_path(base: &Path, rel: &str, kind: &str) -> Result<PathBuf> {
+    let rel_path = Path::new(rel);
+    if rel_path.is_absolute() {
+        anyhow::bail!("invalid {kind} path `{rel}`");
+    }
+    for component in rel_path.components() {
+        match component {
+            std::path::Component::Normal(_) | std::path::Component::CurDir => {}
+            _ => anyhow::bail!("invalid {kind} path `{rel}`"),
+        }
+    }
+    let target = base.join(rel_path);
+    if !target.starts_with(base) {
+        anyhow::bail!("{kind} path escapes package directory: `{rel}`");
+    }
+    Ok(target)
+}
+
+fn checked_existing_package_child_path(base: &Path, rel: &str, kind: &str) -> Result<PathBuf> {
+    let target = checked_package_child_path(base, rel, kind)?;
+    let base_canon = base
+        .canonicalize()
+        .with_context(|| format!("canonicalizing package dir {}", base.display()))?;
+    let target_canon = target
+        .canonicalize()
+        .with_context(|| format!("canonicalizing {kind} path {}", target.display()))?;
+    if !target_canon.starts_with(&base_canon) {
+        anyhow::bail!("{kind} path escapes package directory: `{rel}`");
+    }
+    Ok(target_canon)
+}
+
 /// Does the package appear to be installed in the given Pi scope?
 ///
 /// This checks both the deployed package directory and `settings.json`, so it
 /// also catches stale settings entries left after manual deletion.
 pub fn is_pi_extension_installed(name: &str, global: bool) -> bool {
-    let dest = crate::config::pi_packages_dir(global).join(name);
+    let Ok(dest) = checked_pi_package_path(name, global) else {
+        return false;
+    };
     dest.exists()
         || dest.is_symlink()
         || settings_references_package(name, &dest, global).unwrap_or(false)
@@ -401,6 +482,22 @@ fn remove_same_scope_legacy_packages(name: &str, global: bool) -> Result<()> {
 /// duplicate; callers can use this to omit the entry from the lock file
 /// summary so vstack's view of state stays accurate.
 pub fn install_pi_extension(ext: &PiExtension, global: bool) -> Result<Option<PathBuf>> {
+    install_pi_extension_inner(ext, global, false)
+}
+
+pub(crate) fn install_pi_extension_for_move(
+    ext: &PiExtension,
+    global: bool,
+) -> Result<Option<PathBuf>> {
+    install_pi_extension_inner(ext, global, true)
+}
+
+fn install_pi_extension_inner(
+    ext: &PiExtension,
+    global: bool,
+    allow_opposite_scope_duplicate: bool,
+) -> Result<Option<PathBuf>> {
+    validate_pi_package_name(&ext.name)?;
     // Step 1: same-scope legacy migration for package renames. This is safe to
     // do automatically because these are vstack-owned package names and the new
     // package supersedes the old one.
@@ -409,7 +506,7 @@ pub fn install_pi_extension(ext: &PiExtension, global: bool) -> Result<Option<Pa
     // Step 2a: cross-scope guard for the same current package name. Pi loads
     // from both scopes — duplicate registration would crash startup. Existing
     // scope is authoritative.
-    if is_pi_extension_installed(&ext.name, !global) {
+    if !allow_opposite_scope_duplicate && is_pi_extension_installed(&ext.name, !global) {
         let this_label = if global { "global" } else { "project" };
         let other_label = if global { "project" } else { "global" };
         eprintln!(
@@ -425,7 +522,7 @@ pub fn install_pi_extension(ext: &PiExtension, global: bool) -> Result<Option<Pa
     // selected scope automatically, but do not delete packages from the other
     // scope as a side effect of this install.
     for legacy in legacy_names_for(&ext.name) {
-        if is_pi_extension_installed(legacy, !global) {
+        if !allow_opposite_scope_duplicate && is_pi_extension_installed(legacy, !global) {
             let this_label = if global { "global" } else { "project" };
             let other_label = if global { "project" } else { "global" };
             eprintln!(
@@ -439,7 +536,7 @@ pub fn install_pi_extension(ext: &PiExtension, global: bool) -> Result<Option<Pa
 
     let dest_dir = crate::config::pi_packages_dir(global);
     std::fs::create_dir_all(&dest_dir)?;
-    let dest = dest_dir.join(&ext.name);
+    let dest = checked_pi_package_path(&ext.name, global)?;
 
     // Idempotent reinstall: clear any prior copy. NotFound is fine; other
     // errors (EACCES etc.) propagate so we don't copy onto a broken state.
@@ -447,10 +544,12 @@ pub fn install_pi_extension(ext: &PiExtension, global: bool) -> Result<Option<Pa
 
     copy_dir(&ext.source_dir, &dest)?;
     install_production_dependencies_if_needed(&ext.name, &dest)?;
+    let append_system_action = append_system_install_action(ext, &dest)?;
     install_bin_links(ext, &dest, global)?;
+    crate::path_safety::ensure_file_write_target_safe(&append_system_path(global))?;
     register_in_pi_settings(&ext.name, &dest, global)?;
+    apply_append_system_action(&ext.name, append_system_action, global)?;
     let _ = update_source_index(ext, global);
-    let _ = install_append_system_for(ext, &dest, global);
 
     Ok(Some(dest))
 }
@@ -532,15 +631,31 @@ fn remove_from_source_index(name: &str, global: bool) -> Result<()> {
 /// Remove a Pi package, its bin symlinks, and its settings entry.
 pub fn remove_pi_extension(name: &str, global: bool) -> Result<Vec<PathBuf>> {
     let mut removed = Vec::new();
-    let dest = crate::config::pi_packages_dir(global).join(name);
+    let dest = checked_pi_package_path(name, global)?;
+    let append_path = append_system_path(global);
+
+    crate::path_safety::ensure_file_write_target_safe(&append_path).with_context(|| {
+        format!(
+            "checking APPEND_SYSTEM.md before removing {name}: {}",
+            append_path.display()
+        )
+    })?;
+
+    let append_plan = append_system_remove_plan(&append_path, name).with_context(|| {
+        format!(
+            "removing appendSystem block for {name} from {}",
+            append_path.display()
+        )
+    })?;
 
     // Read package.json BEFORE deleting the dir so we know which bin
     // symlinks to clean up. Best-effort: if the package.json is gone or
     // unreadable, skip bin cleanup rather than failing the whole remove.
-    if dest.is_dir()
+    if std::fs::symlink_metadata(&dest).is_ok_and(|meta| meta.is_dir())
         && let Ok(ext) = PiExtension::from_dir(&dest)
     {
         for cli_name in ext.bin.keys() {
+            validate_safe_component("Pi bin name", cli_name)?;
             let link = crate::config::pi_bin_dir(global).join(cli_name);
             match std::fs::remove_file(&link) {
                 Ok(()) => removed.push(link),
@@ -557,13 +672,18 @@ pub fn remove_pi_extension(name: &str, global: bool) -> Result<Vec<PathBuf>> {
     if unregister_from_pi_settings(name, &dest, global)? {
         removed.push(crate::config::pi_settings_path(global));
     }
-    let _ = remove_from_source_index(name, global);
-    match remove_append_system_for(name, global) {
-        Ok(AppendSystemRemoveOutcome::Updated | AppendSystemRemoveOutcome::Deleted) => {
-            removed.push(append_system_path(global));
+    match apply_append_system_remove_plan(&append_path, append_plan).with_context(|| {
+        format!(
+            "removing appendSystem block for {name} from {}",
+            append_path.display()
+        )
+    })? {
+        AppendSystemRemoveOutcome::Updated | AppendSystemRemoveOutcome::Deleted => {
+            removed.push(append_path.clone());
         }
-        Ok(AppendSystemRemoveOutcome::NoOp) | Err(_) => {}
+        AppendSystemRemoveOutcome::NoOp => {}
     }
+    let _ = remove_from_source_index(name, global);
     Ok(removed)
 }
 
@@ -578,7 +698,8 @@ fn install_bin_links(ext: &PiExtension, package_dest: &Path, global: bool) -> Re
     let bin_dir = crate::config::pi_bin_dir(global);
     std::fs::create_dir_all(&bin_dir)?;
     for (cli_name, rel_target) in &ext.bin {
-        let target = package_dest.join(rel_target);
+        validate_safe_component("Pi bin name", cli_name)?;
+        let target = checked_package_child_path(package_dest, rel_target, "Pi bin target")?;
         if !target.exists() {
             eprintln!(
                 "  Warning: skip bin link {cli_name} → {} (target missing)",
@@ -769,16 +890,14 @@ const NPM_PRODUCTION_INSTALL_ARGS: &[&str] = &[
 ];
 
 #[cfg(test)]
-static NPM_COMMAND_OVERRIDE: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+thread_local! {
+    static NPM_COMMAND_OVERRIDE: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
 
 fn npm_command() -> PathBuf {
     #[cfg(test)]
     {
-        let guard = match NPM_COMMAND_OVERRIDE.lock() {
-            Ok(g) => g,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        if let Some(command) = guard.as_ref() {
+        if let Some(command) = NPM_COMMAND_OVERRIDE.with(|slot| slot.borrow().clone()) {
             return command.clone();
         }
     }
@@ -918,6 +1037,7 @@ fn append_system_strip_block(existing: &str, begin: &str, end: &str) -> String {
 /// file changed. Block boundaries use HTML comment markers so the file
 /// stays valid markdown. Creates the file (and parent dir) if missing.
 pub fn append_system_upsert(target: &Path, name: &str, content: &str) -> Result<bool> {
+    crate::path_safety::ensure_file_write_target_safe(target)?;
     let trimmed = content.trim();
     if trimmed.is_empty() {
         return Ok(matches!(
@@ -942,10 +1062,8 @@ pub fn append_system_upsert(target: &Path, name: &str, content: &str) -> Result<
     if next == existing {
         return Ok(false);
     }
-    if let Some(parent) = target.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(target, &next).with_context(|| format!("writing {}", target.display()))?;
+    crate::path_safety::write_file_no_follow(target, &next)
+        .with_context(|| format!("writing {}", target.display()))?;
     Ok(true)
 }
 
@@ -960,43 +1078,77 @@ pub enum AppendSystemRemoveOutcome {
     Deleted,
 }
 
+enum AppendSystemRemovePlan {
+    NoOp,
+    Write(String),
+    Delete,
+}
+
 /// Remove the named block from `target` if present. Missing file is a
 /// no-op. When removing the block leaves an empty file, delete the file
 /// rather than leaving an empty placeholder behind.
 pub fn append_system_remove(target: &Path, name: &str) -> Result<AppendSystemRemoveOutcome> {
+    let plan = append_system_remove_plan(target, name)?;
+    apply_append_system_remove_plan(target, plan)
+}
+
+fn append_system_remove_plan(target: &Path, name: &str) -> Result<AppendSystemRemovePlan> {
+    crate::path_safety::ensure_file_write_target_safe(target)?;
     let existing = match std::fs::read_to_string(target) {
         Ok(s) => s,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(AppendSystemRemoveOutcome::NoOp);
+            return Ok(AppendSystemRemovePlan::NoOp);
         }
         Err(e) => return Err(e.into()),
     };
     let (begin, end) = append_system_block_markers(name);
     if !existing.contains(&begin) {
-        return Ok(AppendSystemRemoveOutcome::NoOp);
+        return Ok(AppendSystemRemovePlan::NoOp);
     }
     let stripped = append_system_strip_block(&existing, &begin, &end);
     if stripped.is_empty() {
-        match std::fs::remove_file(target) {
+        Ok(AppendSystemRemovePlan::Delete)
+    } else {
+        let next = format!("{stripped}\n");
+        if next == existing {
+            return Ok(AppendSystemRemovePlan::NoOp);
+        }
+        Ok(AppendSystemRemovePlan::Write(next))
+    }
+}
+
+fn apply_append_system_remove_plan(
+    target: &Path,
+    plan: AppendSystemRemovePlan,
+) -> Result<AppendSystemRemoveOutcome> {
+    match plan {
+        AppendSystemRemovePlan::NoOp => Ok(AppendSystemRemoveOutcome::NoOp),
+        AppendSystemRemovePlan::Write(next) => {
+            crate::path_safety::write_file_no_follow(target, &next)
+                .with_context(|| format!("writing {}", target.display()))?;
+            Ok(AppendSystemRemoveOutcome::Updated)
+        }
+        AppendSystemRemovePlan::Delete => match std::fs::remove_file(target) {
             Ok(()) => Ok(AppendSystemRemoveOutcome::Deleted),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 Ok(AppendSystemRemoveOutcome::Deleted)
             }
             Err(e) => Err(e.into()),
-        }
-    } else {
-        let next = format!("{stripped}\n");
-        if next == existing {
-            return Ok(AppendSystemRemoveOutcome::NoOp);
-        }
-        std::fs::write(target, &next).with_context(|| format!("writing {}", target.display()))?;
-        Ok(AppendSystemRemoveOutcome::Updated)
+        },
     }
+}
+
+enum AppendSystemInstallAction {
+    Remove,
+    Upsert(String),
 }
 
 /// Run `append_system_upsert` for a Pi extension, reading the markdown body
 /// from `<package_dir>/<pi.appendSystem>`. Returns `Ok(true)` if the file
-/// changed.
+/// changed. Invalid `pi.appendSystem` metadata is an install error; callers
+/// that install a package should run this only after other fallible package
+/// registration steps or use the internal append-system action helper to defer the
+/// file mutation until the install is ready to commit.
 ///
 /// When the extension does not declare `pi.appendSystem` (or the referenced
 /// file is missing/empty), any previously-installed block for this extension
@@ -1007,21 +1159,79 @@ pub fn install_append_system_for(
     package_dir: &Path,
     global: bool,
 ) -> Result<bool> {
+    let action = append_system_install_action(ext, package_dir)?;
+    apply_append_system_action(&ext.name, action, global)
+}
+
+fn append_system_install_action(
+    ext: &PiExtension,
+    package_dir: &Path,
+) -> Result<AppendSystemInstallAction> {
     let Some(rel) = ext.append_system.as_deref() else {
-        return remove_append_system_if_present(&ext.name, global);
+        return Ok(AppendSystemInstallAction::Remove);
     };
-    let source = package_dir.join(rel);
+    let source =
+        checked_package_child_path(package_dir, rel, "appendSystem").with_context(|| {
+            format!(
+                "invalid pi.appendSystem path for package {}: `{rel}`",
+                ext.name
+            )
+        })?;
+    match std::fs::symlink_metadata(&source) {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(AppendSystemInstallAction::Remove);
+        }
+        Err(e) => {
+            return Err(e).with_context(|| {
+                format!(
+                    "checking pi.appendSystem path for package {}: {}",
+                    ext.name,
+                    source.display()
+                )
+            });
+        }
+    };
+    let source = checked_existing_package_child_path(package_dir, rel, "appendSystem")
+        .with_context(|| {
+            format!(
+                "invalid pi.appendSystem path for package {}: `{rel}`",
+                ext.name
+            )
+        })?;
     let content = match std::fs::read_to_string(&source) {
         Ok(s) => s,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return remove_append_system_if_present(&ext.name, global);
+            return Ok(AppendSystemInstallAction::Remove);
         }
-        Err(e) => return Err(e.into()),
+        Err(e) => {
+            return Err(e).with_context(|| {
+                format!(
+                    "reading pi.appendSystem for package {}: {}",
+                    ext.name,
+                    source.display()
+                )
+            });
+        }
     };
     if content.trim().is_empty() {
-        return remove_append_system_if_present(&ext.name, global);
+        return Ok(AppendSystemInstallAction::Remove);
     }
-    append_system_upsert(&append_system_path(global), &ext.name, &content)
+    Ok(AppendSystemInstallAction::Upsert(content))
+}
+
+fn apply_append_system_action(
+    name: &str,
+    action: AppendSystemInstallAction,
+    global: bool,
+) -> Result<bool> {
+    crate::path_safety::ensure_file_write_target_safe(&append_system_path(global))?;
+    match action {
+        AppendSystemInstallAction::Remove => remove_append_system_if_present(name, global),
+        AppendSystemInstallAction::Upsert(content) => {
+            append_system_upsert(&append_system_path(global), name, &content)
+        }
+    }
 }
 
 fn remove_append_system_if_present(name: &str, global: bool) -> Result<bool> {
@@ -1301,20 +1511,12 @@ printf 'module.exports = 1;\n' > node_modules/left-pad/index.js
 
     #[cfg(test)]
     fn with_npm_command_override<R>(command: &Path, body: impl FnOnce() -> R) -> R {
-        let mut guard = match NPM_COMMAND_OVERRIDE.lock() {
-            Ok(g) => g,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        let previous = guard.replace(command.to_path_buf());
-        drop(guard);
-
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body));
-
-        let mut guard = match NPM_COMMAND_OVERRIDE.lock() {
-            Ok(g) => g,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        *guard = previous;
+        let result = NPM_COMMAND_OVERRIDE.with(|slot| {
+            let previous = slot.replace(Some(command.to_path_buf()));
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body));
+            slot.replace(previous);
+            result
+        });
 
         match result {
             Ok(value) => value,
@@ -1704,6 +1906,432 @@ printf 'module.exports = 1;\n' > node_modules/left-pad/index.js
     }
 
     #[test]
+    fn remove_pi_extension_removes_append_system_after_package_and_settings_cleanup() {
+        let sandbox = std::env::temp_dir().join(format!(
+            "vstack_pi_remove_append_success_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&sandbox);
+        let source = sandbox.join("src").join("pi-append-success");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("instructions.md"), "REMOVE ME\n").unwrap();
+        std::fs::write(
+            source.join("package.json"),
+            r#"{ "name": "pi-append-success", "pi": { "extensions": [], "appendSystem": "instructions.md" } }"#,
+        )
+        .unwrap();
+        let pi_dir = sandbox.join("agent");
+
+        with_pi_dir(&pi_dir, || {
+            let ext = PiExtension::from_dir(&source).unwrap();
+            let dest = install_pi_extension(&ext, true).unwrap().unwrap();
+            let settings_path = crate::config::pi_settings_path(true);
+            let append_path = append_system_path(true);
+            append_system_upsert(&append_path, "other", "KEEP").unwrap();
+
+            let removed = remove_pi_extension("pi-append-success", true).unwrap();
+            assert!(removed.iter().any(|path| path == &dest));
+            assert!(removed.iter().any(|path| path == &settings_path));
+            assert!(removed.iter().any(|path| path == &append_path));
+            assert!(!dest.exists());
+            let settings = std::fs::read_to_string(&settings_path).unwrap();
+            assert!(!settings.contains("pi-append-success"));
+            let append = std::fs::read_to_string(&append_path).unwrap();
+            assert!(!append.contains("pi-append-success"));
+            assert!(!append.contains("REMOVE ME"));
+            assert!(append.contains("other"));
+            assert!(append.contains("KEEP"));
+        });
+
+        let _ = std::fs::remove_dir_all(&sandbox);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remove_pi_extension_errors_on_unsafe_append_system_without_removing_package_or_settings() {
+        use std::os::unix::fs::symlink;
+
+        let sandbox = std::env::temp_dir().join(format!(
+            "vstack_pi_remove_append_symlink_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&sandbox);
+        let source = sandbox.join("src").join("pi-append-remove");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("instructions.md"), "REMOVE ME\n").unwrap();
+        std::fs::write(
+            source.join("package.json"),
+            r#"{ "name": "pi-append-remove", "pi": { "extensions": [], "appendSystem": "instructions.md" } }"#,
+        )
+        .unwrap();
+        let pi_dir = sandbox.join("agent");
+
+        with_pi_dir(&pi_dir, || {
+            let ext = PiExtension::from_dir(&source).unwrap();
+            let dest = install_pi_extension(&ext, true).unwrap().unwrap();
+            let settings_path = crate::config::pi_settings_path(true);
+            let append_path = append_system_path(true);
+            let append_before = std::fs::read_to_string(&append_path).unwrap();
+            let outside = sandbox.join("outside-append.md");
+            std::fs::write(&outside, &append_before).unwrap();
+            std::fs::remove_file(&append_path).unwrap();
+            symlink(&outside, &append_path).unwrap();
+
+            let err = remove_pi_extension("pi-append-remove", true).unwrap_err();
+            let message = format!("{err:#}");
+            assert!(message.contains("APPEND_SYSTEM.md"), "{message}");
+            assert!(
+                message.contains("refusing to write through symlink"),
+                "{message}"
+            );
+            assert!(dest.is_dir(), "package dir should remain on failure");
+            let settings = std::fs::read_to_string(&settings_path).unwrap();
+            assert!(settings.contains("pi-append-remove"));
+            assert_eq!(std::fs::read_to_string(&outside).unwrap(), append_before);
+            assert!(append_path.is_symlink());
+        });
+
+        let _ = std::fs::remove_dir_all(&sandbox);
+    }
+
+    #[test]
+    fn remove_pi_extension_errors_on_invalid_utf8_append_system_before_package_or_settings() {
+        let sandbox = std::env::temp_dir().join(format!(
+            "vstack_pi_remove_append_utf8_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&sandbox);
+        let source = sandbox.join("src").join("pi-append-invalid");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("instructions.md"), "REMOVE ME\n").unwrap();
+        std::fs::write(
+            source.join("package.json"),
+            r#"{ "name": "pi-append-invalid", "pi": { "extensions": [], "appendSystem": "instructions.md" } }"#,
+        )
+        .unwrap();
+        let pi_dir = sandbox.join("agent");
+
+        with_pi_dir(&pi_dir, || {
+            let ext = PiExtension::from_dir(&source).unwrap();
+            let dest = install_pi_extension(&ext, true).unwrap().unwrap();
+            let settings_path = crate::config::pi_settings_path(true);
+            let append_path = append_system_path(true);
+            let invalid = vec![0xff, 0xfe, 0xfd];
+            std::fs::write(&append_path, &invalid).unwrap();
+
+            let err = remove_pi_extension("pi-append-invalid", true).unwrap_err();
+            let message = format!("{err:#}");
+            assert!(message.contains("APPEND_SYSTEM.md"), "{message}");
+            assert!(
+                message.contains("stream did not contain valid UTF-8"),
+                "{message}"
+            );
+            assert!(dest.is_dir(), "package dir should remain on failure");
+            let settings = std::fs::read_to_string(&settings_path).unwrap();
+            assert!(settings.contains("pi-append-invalid"));
+            assert_eq!(std::fs::read(&append_path).unwrap(), invalid);
+        });
+
+        let _ = std::fs::remove_dir_all(&sandbox);
+    }
+
+    #[test]
+    fn remove_pi_extension_keeps_append_system_when_later_cleanup_fails() {
+        let sandbox = std::env::temp_dir().join(format!(
+            "vstack_pi_remove_append_later_failure_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&sandbox);
+        let source = sandbox.join("src").join("pi-append-later");
+        std::fs::create_dir_all(source.join("bin")).unwrap();
+        std::fs::write(source.join("instructions.md"), "KEEP ME\n").unwrap();
+        std::fs::write(source.join("bin/tool.js"), "#!/usr/bin/env node\n").unwrap();
+        std::fs::write(
+            source.join("package.json"),
+            r#"{ "name": "pi-append-later", "pi": { "extensions": [], "appendSystem": "instructions.md" }, "bin": { "later-bin": "bin/tool.js" } }"#,
+        )
+        .unwrap();
+        let pi_dir = sandbox.join("agent");
+
+        with_pi_dir(&pi_dir, || {
+            let ext = PiExtension::from_dir(&source).unwrap();
+            let dest = install_pi_extension(&ext, true).unwrap().unwrap();
+            let settings_path = crate::config::pi_settings_path(true);
+            let append_path = append_system_path(true);
+            let append_before = std::fs::read_to_string(&append_path).unwrap();
+            let bin_link = crate::config::pi_bin_dir(true).join("later-bin");
+            std::fs::remove_file(&bin_link).unwrap();
+            std::fs::create_dir_all(&bin_link).unwrap();
+
+            let err = remove_pi_extension("pi-append-later", true).unwrap_err();
+            let message = format!("{err:#}");
+            assert!(message.contains("Is a directory"), "{message}");
+            assert!(dest.is_dir(), "package dir should remain on failure");
+            let settings = std::fs::read_to_string(&settings_path).unwrap();
+            assert!(settings.contains("pi-append-later"));
+            assert_eq!(
+                std::fs::read_to_string(&append_path).unwrap(),
+                append_before
+            );
+        });
+
+        let _ = std::fs::remove_dir_all(&sandbox);
+    }
+
+    #[test]
+    fn remove_pi_extension_keeps_append_system_when_settings_cleanup_fails_after_bin_cleanup() {
+        let sandbox = std::env::temp_dir().join(format!(
+            "vstack_pi_remove_append_settings_failure_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&sandbox);
+        let source = sandbox.join("src").join("pi-append-settings");
+        std::fs::create_dir_all(source.join("bin")).unwrap();
+        std::fs::write(source.join("instructions.md"), "KEEP ME\n").unwrap();
+        std::fs::write(source.join("bin/tool.js"), "#!/usr/bin/env node\n").unwrap();
+        std::fs::write(
+            source.join("package.json"),
+            r#"{ "name": "pi-append-settings", "pi": { "extensions": [], "appendSystem": "instructions.md" }, "bin": { "settings-bin": "bin/tool.js" } }"#,
+        )
+        .unwrap();
+        let pi_dir = sandbox.join("agent");
+
+        with_pi_dir(&pi_dir, || {
+            let ext = PiExtension::from_dir(&source).unwrap();
+            let dest = install_pi_extension(&ext, true).unwrap().unwrap();
+            let settings_path = crate::config::pi_settings_path(true);
+            let append_path = append_system_path(true);
+            let append_before = std::fs::read_to_string(&append_path).unwrap();
+            let bin_link = crate::config::pi_bin_dir(true).join("settings-bin");
+            assert!(bin_link.is_symlink());
+            std::fs::remove_file(&settings_path).unwrap();
+            std::fs::create_dir_all(&settings_path).unwrap();
+
+            let err = remove_pi_extension("pi-append-settings", true).unwrap_err();
+            let message = format!("{err:#}");
+            assert!(message.contains("settings.json"), "{message}");
+            assert!(!bin_link.exists(), "bin cleanup should have already run");
+            assert!(!dest.exists(), "package cleanup should have already run");
+            assert_eq!(
+                std::fs::read_to_string(&append_path).unwrap(),
+                append_before
+            );
+        });
+
+        let _ = std::fs::remove_dir_all(&sandbox);
+    }
+
+    #[test]
+    fn remove_pi_extension_rejects_path_traversal_name() {
+        let sandbox =
+            std::env::temp_dir().join(format!("vstack_pi_reject_traversal_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&sandbox);
+        let pi_dir = sandbox.join("agent");
+        let victim = sandbox.join("victim");
+        std::fs::create_dir_all(&victim).unwrap();
+        std::fs::write(victim.join("keep.txt"), "do not delete").unwrap();
+
+        with_pi_dir(&pi_dir, || {
+            let err = remove_pi_extension("../../victim", true).unwrap_err();
+            assert!(err.to_string().contains("invalid Pi package name"));
+            assert!(!is_pi_extension_installed("../../victim", true));
+        });
+
+        assert!(victim.join("keep.txt").exists());
+        let _ = std::fs::remove_dir_all(&sandbox);
+    }
+
+    #[test]
+    fn install_pi_extension_rejects_invalid_package_name() {
+        let sandbox = std::env::temp_dir().join(format!(
+            "vstack_pi_invalid_install_name_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&sandbox);
+        let source = sandbox.join("src").join("bad");
+        write_mini_source(&source, "../../victim");
+        let pi_dir = sandbox.join("agent");
+        let victim = sandbox.join("victim");
+        std::fs::create_dir_all(&victim).unwrap();
+        std::fs::write(victim.join("keep.txt"), "do not delete").unwrap();
+
+        with_pi_dir(&pi_dir, || {
+            let ext = PiExtension::from_dir(&source).unwrap();
+            let err = install_pi_extension(&ext, true).unwrap_err();
+            assert!(err.to_string().contains("invalid Pi package name"));
+        });
+
+        assert!(victim.join("keep.txt").exists());
+        assert!(!pi_dir.join("packages").exists());
+        let _ = std::fs::remove_dir_all(&sandbox);
+    }
+
+    #[test]
+    fn install_pi_extension_rejects_invalid_bin_name() {
+        let sandbox =
+            std::env::temp_dir().join(format!("vstack_pi_invalid_bin_name_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&sandbox);
+        let source = sandbox.join("src").join("pi-bad-bin");
+        std::fs::create_dir_all(source.join("bin")).unwrap();
+        std::fs::write(source.join("bin/tool.js"), "#!/usr/bin/env node\n").unwrap();
+        std::fs::write(
+            source.join("package.json"),
+            r#"{ "name": "pi-bad-bin", "pi": { "extensions": [] }, "bin": { "../evil": "./bin/tool.js" } }"#,
+        )
+        .unwrap();
+        let pi_dir = sandbox.join("agent");
+        let victim = sandbox.join("victim");
+        std::fs::create_dir_all(&victim).unwrap();
+        std::fs::write(victim.join("keep.txt"), "do not delete").unwrap();
+
+        with_pi_dir(&pi_dir, || {
+            let ext = PiExtension::from_dir(&source).unwrap();
+            let err = install_pi_extension(&ext, true).unwrap_err();
+            assert!(err.to_string().contains("invalid Pi bin name"));
+            assert!(!pi_dir.join("bin/../evil").exists());
+        });
+
+        assert!(victim.join("keep.txt").exists());
+        let _ = std::fs::remove_dir_all(&sandbox);
+    }
+
+    #[test]
+    fn install_pi_extension_rejects_escaping_bin_target() {
+        let sandbox = std::env::temp_dir().join(format!(
+            "vstack_pi_escaping_bin_target_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&sandbox);
+        let source = sandbox.join("src").join("pi-bad-target");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(
+            source.join("package.json"),
+            r#"{ "name": "pi-bad-target", "pi": { "extensions": [] }, "bin": { "safe-bin": "../victim" } }"#,
+        )
+        .unwrap();
+        let pi_dir = sandbox.join("agent");
+        let victim = sandbox.join("victim");
+        std::fs::create_dir_all(&victim).unwrap();
+        std::fs::write(victim.join("keep.txt"), "do not delete").unwrap();
+
+        with_pi_dir(&pi_dir, || {
+            let ext = PiExtension::from_dir(&source).unwrap();
+            let err = install_pi_extension(&ext, true).unwrap_err();
+            assert!(err.to_string().contains("invalid Pi bin target path"));
+            assert!(!pi_dir.join("bin/safe-bin").exists());
+        });
+
+        assert!(victim.join("keep.txt").exists());
+        let _ = std::fs::remove_dir_all(&sandbox);
+    }
+
+    #[test]
+    fn failed_pi_install_does_not_mutate_append_system_settings_or_index() {
+        let sandbox = std::env::temp_dir().join(format!(
+            "vstack_pi_failed_append_transaction_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&sandbox);
+        let source = sandbox.join("src").join("pi-append-bin");
+        std::fs::create_dir_all(source.join("bin")).unwrap();
+        std::fs::write(source.join("instructions.md"), "APPEND ME\n").unwrap();
+        std::fs::write(source.join("bin/tool.js"), "#!/usr/bin/env node\n").unwrap();
+        std::fs::write(
+            source.join("package.json"),
+            r#"{ "name": "pi-append-bin", "pi": { "extensions": [], "appendSystem": "instructions.md" }, "bin": { "safe-bin": "../victim" } }"#,
+        )
+        .unwrap();
+        let pi_dir = sandbox.join("agent");
+
+        with_pi_dir(&pi_dir, || {
+            append_system_upsert(&append_system_path(true), "other", "KEEP").unwrap();
+            let before = std::fs::read_to_string(append_system_path(true)).unwrap();
+            let ext = PiExtension::from_dir(&source).unwrap();
+            let err = install_pi_extension(&ext, true).unwrap_err();
+            assert!(err.to_string().contains("invalid Pi bin target path"));
+            assert_eq!(
+                std::fs::read_to_string(append_system_path(true)).unwrap(),
+                before
+            );
+            let settings_path = crate::config::pi_settings_path(true);
+            if settings_path.exists() {
+                let settings = std::fs::read_to_string(settings_path).unwrap();
+                assert!(!settings.contains("pi-append-bin"));
+            }
+            assert!(!crate::config::pi_source_index_path(true).exists());
+        });
+
+        let _ = std::fs::remove_dir_all(&sandbox);
+    }
+
+    #[test]
+    fn append_system_rejects_parent_path_without_reading_secret() {
+        let sandbox =
+            std::env::temp_dir().join(format!("vstack_pi_append_parent_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&sandbox);
+        let package = sandbox.join("pkg");
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::write(sandbox.join("secret.md"), "SECRET\n").unwrap();
+        std::fs::write(
+            package.join("package.json"),
+            r#"{ "name": "pi-append", "pi": { "extensions": [], "appendSystem": "../secret.md" } }"#,
+        )
+        .unwrap();
+        let pi_dir = sandbox.join("agent");
+
+        with_pi_dir(&pi_dir, || {
+            append_system_upsert(&append_system_path(true), "pi-append", "OLD").unwrap();
+            let ext = PiExtension::from_dir(&package).unwrap();
+            let err = install_pi_extension(&ext, true).unwrap_err();
+            assert!(
+                err.to_string().contains("invalid pi.appendSystem path"),
+                "unexpected error: {err:#}"
+            );
+            let append = std::fs::read_to_string(append_system_path(true)).unwrap();
+            assert!(append.contains("OLD"));
+            assert!(!append.contains("SECRET"));
+        });
+
+        let _ = std::fs::remove_dir_all(&sandbox);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn append_system_rejects_symlink_escape_without_reading_secret() {
+        use std::os::unix::fs::symlink;
+
+        let sandbox =
+            std::env::temp_dir().join(format!("vstack_pi_append_symlink_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&sandbox);
+        let package = sandbox.join("pkg");
+        std::fs::create_dir_all(&package).unwrap();
+        let secret = sandbox.join("secret.md");
+        std::fs::write(&secret, "SECRET\n").unwrap();
+        symlink(&secret, package.join("instructions.md")).unwrap();
+        std::fs::write(
+            package.join("package.json"),
+            r#"{ "name": "pi-append", "pi": { "extensions": [], "appendSystem": "instructions.md" } }"#,
+        )
+        .unwrap();
+        let pi_dir = sandbox.join("agent");
+
+        with_pi_dir(&pi_dir, || {
+            append_system_upsert(&append_system_path(true), "pi-append", "OLD").unwrap();
+            let ext = PiExtension::from_dir(&package).unwrap();
+            let err = install_append_system_for(&ext, &package, true).unwrap_err();
+            assert!(
+                err.to_string().contains("invalid pi.appendSystem path"),
+                "unexpected error: {err:#}"
+            );
+            let append = std::fs::read_to_string(append_system_path(true)).unwrap();
+            assert!(append.contains("OLD"));
+            assert!(!append.contains("SECRET"));
+        });
+
+        let _ = std::fs::remove_dir_all(&sandbox);
+    }
+
+    #[test]
     fn install_two_pi_extensions_coexist_and_preserve_other_settings() {
         let sandbox =
             std::env::temp_dir().join(format!("vstack_pi_two_install_{}", std::process::id()));
@@ -1999,6 +2627,32 @@ printf 'module.exports = 1;\n' > node_modules/left-pad/index.js
         let outcome = append_system_remove(&target, "@scope/only").unwrap();
         assert_eq!(outcome, AppendSystemRemoveOutcome::Deleted);
         assert!(!target.exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn append_system_upsert_rejects_target_symlink_without_overwriting_target() {
+        use std::os::unix::fs::symlink;
+
+        let dir = std::env::temp_dir().join(format!(
+            "vstack_append_sys_target_symlink_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let outside = dir.join("outside.md");
+        let target = dir.join("APPEND_SYSTEM.md");
+        std::fs::write(&outside, "KEEP\n").unwrap();
+        symlink(&outside, &target).unwrap();
+
+        let err = append_system_upsert(&target, "@scope/pkg", "NEW").unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("refusing to write through symlink")
+        );
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "KEEP\n");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

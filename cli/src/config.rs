@@ -322,10 +322,18 @@ pub fn lock_file_path(global: bool) -> PathBuf {
 }
 
 pub fn user_home_dir() -> PathBuf {
+    #[cfg(test)]
+    if let Some(path) = crate::test_util::home_dir_override() {
+        return path;
+    }
     dirs::home_dir().unwrap_or_else(|| PathBuf::from("~"))
 }
 
 pub fn user_config_dir() -> PathBuf {
+    #[cfg(test)]
+    if let Some(path) = crate::test_util::config_dir_override() {
+        return path;
+    }
     dirs::config_dir().unwrap_or_else(|| user_home_dir().join(".config"))
 }
 
@@ -394,6 +402,11 @@ pub fn opencode_project_config_path() -> PathBuf {
 }
 
 pub fn codex_home_dir() -> PathBuf {
+    #[cfg(test)]
+    if let Some(path) = crate::test_util::codex_home_override() {
+        return path;
+    }
+
     std::env::var_os("CODEX_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| user_home_dir().join(".codex"))
@@ -404,6 +417,11 @@ pub fn codex_home_dir() -> PathBuf {
 /// Honors `PI_CODING_AGENT_DIR` so tests can redirect to a sandbox dir
 /// without touching the real `~/.pi/agent`.
 pub fn pi_global_dir() -> PathBuf {
+    #[cfg(test)]
+    if let Some(path) = crate::test_util::pi_dir_override() {
+        return path;
+    }
+
     std::env::var_os("PI_CODING_AGENT_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| user_home_dir().join(".pi").join("agent"))
@@ -456,6 +474,10 @@ pub fn pi_source_index_path(global: bool) -> PathBuf {
 /// Find the project root by walking up from CWD.
 /// Looks for `.vstack-lock.json` or harness config dirs.
 pub fn project_root() -> PathBuf {
+    #[cfg(test)]
+    if let Some(root) = crate::test_util::project_root_override() {
+        return root;
+    }
     static ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
     ROOT.get_or_init(find_project_root).clone()
 }
@@ -740,32 +762,7 @@ pub fn refresh_remote_caches(lock: &LockFile) {
 /// Handles "." by walking up from CWD to find a vstack source repo,
 /// and absolute paths directly.
 pub fn resolve_source_path(source: &str) -> Option<PathBuf> {
-    let p = Path::new(source);
-    if p.is_absolute() && p.is_dir() {
-        return Some(p.to_path_buf());
-    }
-    // Check cached repo (owner/repo → ~/.vstack/cache/owner_repo)
-    if source.contains('/') && !source.starts_with('.') && !source.starts_with('/') {
-        let cache_key = source.replace('/', "_");
-        let cache_dir = global_base_dir()
-            .join(".vstack")
-            .join("cache")
-            .join(&cache_key);
-        if cache_dir.is_dir() {
-            return Some(cache_dir);
-        }
-    }
-    // "." or relative — walk up from CWD to find vstack source
-    let mut dir = std::env::current_dir().ok()?;
-    loop {
-        if crate::resolve::is_vstack_source(&dir) {
-            return Some(dir);
-        }
-        if !dir.pop() {
-            break;
-        }
-    }
-    None
+    crate::refresh_sources::resolve_source_path(source)
 }
 
 /// Compute source hash for a lock entry based on its kind.
