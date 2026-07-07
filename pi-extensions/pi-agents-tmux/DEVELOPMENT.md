@@ -27,7 +27,7 @@ Do not confuse normalized record `sessionMode` (`fresh|resumed|new`) with runtim
 
 Where the UI surfaces each layer:
 
-- **Mini dashboard widget** — one row per dispatched task (current state + usage rollup). Resumed pane work can share a row when transcript identity matches; task-centric detail surfaces expose individual `taskId`s.
+- **Mini dashboard widget** — one row per dispatched task (current state + usage rollup). Resumed pane work can share a row when transcript identity matches; task-centric detail surfaces expose individual `taskId`s. When a pane row is collapsed this way, registry sync keeps the newest task for that pane session so historical records from completion polling cannot temporarily rewind the row and reshuffle the completed list.
 - **`/agents` popup → Agents tab** — agent profiles only: static frontmatter/config, source path, and system prompt. No task children, task ids, transcripts, completion summaries, or latest-message surfaces. The Inspector is intentionally static; execution data lives on Monitor.
 - **`/agents` popup → Monitor tab** — session-grouped tree of active + completed tasks. Session is the primary grouping: pane, bg-lane (`sessionKey`), or bg-one-shot. Repeated same-agent sessions get session numbers; task numbers reset inside each session. Selecting a session shows aggregate metadata/usage/status counts; selecting a task shows Summary, Completion, and Task detail.
 - **Tool output rendering** — per-task status rows (`● Agent <name> <status> · bg|pane · ctrl+o to expand`) with a `Task: <prompt>` body line when echoing the prompt and a JSON/markdown-aware preview when showing the result.

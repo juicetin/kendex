@@ -75,6 +75,39 @@ export function sortDashboardItems(items: SubagentDashboardItem[]): SubagentDash
 	});
 }
 
+function timestampValue(value: string | undefined): number {
+	const parsed = Date.parse(value ?? "");
+	return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function taskIdTimestampValue(taskId: string | undefined): number {
+	const raw = taskId?.match(/-(\d{10,})-/)?.[1];
+	if (!raw) return 0;
+	const parsed = Number.parseInt(raw, 10);
+	return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function dashboardTaskStartValue(item: SubagentDashboardItem): number {
+	return timestampValue(item.startedAt) || taskIdTimestampValue(item.taskId) || timestampValue(item.completedAt) || timestampValue(item.updatedAt);
+}
+
+export function shouldReplaceDashboardItem(existing: SubagentDashboardItem | undefined, next: SubagentDashboardItem): boolean {
+	if (!existing) return true;
+	if (existing.kind !== "pane" || next.kind !== "pane") return true;
+	if (existing.taskId === next.taskId) return true;
+
+	// A persistent pane can carry many completed tasks in one transcript, but the
+	// mini dashboard intentionally collapses that pane session to one row. Full
+	// registry syncs iterate historical records from oldest to newest; without
+	// this guard, every poll briefly rewinds the collapsed row to an old task and
+	// the row jumps down the completed list before the newest task restores it.
+	const existingStart = dashboardTaskStartValue(existing);
+	const nextStart = dashboardTaskStartValue(next);
+	if (existingStart > 0 && nextStart > 0 && nextStart < existingStart) return false;
+	if (existingStart > 0 && nextStart > 0 && nextStart === existingStart && next.taskId < existing.taskId) return false;
+	return true;
+}
+
 const WORKING_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 function workingSpinnerFrame(): string {

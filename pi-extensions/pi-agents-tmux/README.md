@@ -15,7 +15,7 @@ Delegate work to specialized agents from a running Pi session. Agents run either
 - Task detail shows Summary and Completion tabs; Summary contains task metadata, artifacts, and task text, while Completion contains result summary, files changed, and validation.
 - Bg one-shot transcripts keep enough history to inspect results without creating oversized session files.
 - When a task needs manual completion, result views include useful repository context when available.
-- Dashboard widget shows live state, turns, tokens, and cost for every spawned agent; working agents stay above attention/completed agents, newest invocations lead each bucket, and activity updates do not reshuffle rows. Once you hide it, lifecycle updates do not reopen it until you toggle it back in.
+- Dashboard widget shows live state, turns, tokens, and cost for every spawned agent; working agents stay above attention/completed agents, newest invocations lead each bucket, and activity updates or completion polling do not reshuffle rows. Once you hide it, lifecycle updates do not reopen it until you toggle it back in.
 - Dashboard and Monitor refreshes recover gracefully if another Pi process is updating agent state.
 - Grouped completion notifications batch multiple agents finishing together.
 - When `pi-session-bridge` is loaded, other tools can subscribe to agent lifecycle updates without adding chat messages.

@@ -26,6 +26,7 @@ import {
 	dashboardStatusFor,
 	isDashboardWorkingStatus,
 	renderDashboardWidgetLines,
+	shouldReplaceDashboardItem,
 	sortDashboardItems,
 } from "./dashboard.js";
 import { sanitizeCwdSnapshot, sanitizeCwdSnapshotText } from "./cwd-snapshot.js";
@@ -771,6 +772,7 @@ export default function (pi: ExtensionAPI) {
 			})
 			.map(([existingKey]) => existingKey);
 		const existing = dashboardState.items[key] ?? (duplicateKeys[0] ? dashboardState.items[duplicateKeys[0]] : undefined);
+		if (!shouldReplaceDashboardItem(existing, item)) return;
 		for (const duplicateKey of duplicateKeys) delete dashboardState.items[duplicateKey];
 		// Carry lifecycle timestamps forward when the caller omitted them. Bg
 		// updaters in parallel/single/chain mode (updateOneshotDashboard, the

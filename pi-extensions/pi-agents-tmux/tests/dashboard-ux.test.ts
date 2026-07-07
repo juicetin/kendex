@@ -23,7 +23,7 @@ import {
 	taskNumberById,
 	traceViewerItems,
 } from "../extensions/subagent/browser.js";
-import { latestDashboardActivity, renderDashboardWidgetLines, sortDashboardItems } from "../extensions/subagent/dashboard.js";
+import { latestDashboardActivity, renderDashboardWidgetLines, shouldReplaceDashboardItem, sortDashboardItems } from "../extensions/subagent/dashboard.js";
 import { COMPLETION_SUMMARY_UNAVAILABLE, extractLastAssistantTextFromTranscriptContent, highlightInlinePreview, oneLinePreview, parseTranscriptUsage } from "../extensions/subagent/format.js";
 import { oneShotTranscriptPath } from "../extensions/subagent/paths.js";
 import { formatTaskRecordResult } from "../extensions/subagent/renderers.js";
@@ -179,6 +179,30 @@ test("subagent renderer shows session-mode chips", () => {
 	assert.match(renderSubagentSingle(singleResult({ sessionMode: "resumed", sessionKey: "very-long-session-key", sessionKeyExplicit: true })), /completed · bg · lane:very-l…-key/);
 	assert.match(renderSubagentSingle(singleResult({ paneId: "%1", paneSessionMode: "new", sessionMode: "new" })), /Queued task · pane · new/);
 	assert.match(renderSubagentSingle(singleResult({ paneId: "%1", paneSessionMode: "live", sessionMode: "resumed" })), /Queued task · pane · resumed/);
+});
+
+test("dashboard keeps collapsed pane row on newest task during registry sync", () => {
+	const transcriptPath = "/tmp/pi-agents-tmux/sessions/rust.jsonl";
+	const older = dashboardItem({
+		agent: "rust",
+		kind: "pane",
+		startedAt: "2026-07-05T00:22:19.571Z",
+		status: "completed",
+		taskId: "rust-1783210939571-15037f22b196ea06",
+		transcriptPath,
+	});
+	const newer = dashboardItem({
+		agent: "rust",
+		kind: "pane",
+		startedAt: "2026-07-06T07:17:30.697Z",
+		status: "completed",
+		taskId: "rust-1783322250697-13a5f30687e99d16",
+		transcriptPath,
+	});
+
+	assert.equal(shouldReplaceDashboardItem(newer, older), false);
+	assert.equal(shouldReplaceDashboardItem(older, newer), true);
+	assert.equal(shouldReplaceDashboardItem(newer, { ...newer, usage: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4, cost: 5, contextTokens: 6, turns: 7 } }), true);
 });
 
 test("quiet dashboard suppresses single bg call preview", () => {
