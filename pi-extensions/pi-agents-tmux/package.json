@@ -1,6 +1,6 @@
 {
   "name": "@vanillagreen/pi-agents-tmux",
-  "version": "2.6.6",
+  "version": "2.6.7",
   "description": "Pi extension for delegating work to project or user agents, including persistent tmux agent panes.",
   "license": "MIT",
   "keywords": [
@@ -212,18 +212,18 @@
         {
           "key": "resultMaxBytes",
           "label": "Result max bytes",
-          "description": "Maximum inline bytes kept for each agent result before truncation.",
+          "description": "Base inline byte budget for agent result output before truncation; parallel dispatch divides this budget across returned agents subject to 1 KiB per-agent floor, and stores oversized full output as artifacts when preserveFullOutput is enabled.",
           "type": "number",
-          "default": 102400,
+          "default": 32768,
           "category": "Output",
           "apply": "live"
         },
         {
           "key": "resultMaxLines",
           "label": "Result max lines",
-          "description": "Maximum inline lines kept for each agent result before truncation.",
+          "description": "Base inline line budget for agent result output before truncation; parallel dispatch divides this budget across returned agents subject to 40-line per-agent floor, and stores oversized full output as artifacts when preserveFullOutput is enabled.",
           "type": "number",
-          "default": 4000,
+          "default": 1200,
           "category": "Output",
           "apply": "live"
         },

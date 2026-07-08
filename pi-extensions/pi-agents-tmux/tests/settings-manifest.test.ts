@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { bgTaskTimeoutMs, DEFAULT_BG_TASK_TIMEOUT_MS, recordProjectTrust, settingNumber } from "../extensions/subagent/settings.js";
 import { DEFAULT_MODEL_CONTEXT_LIMIT_TOKENS } from "../extensions/subagent/sessions.js";
-import { MAX_CONCURRENCY } from "../extensions/subagent/types.js";
+import { DEFAULT_RESULT_MAX_BYTES, DEFAULT_RESULT_MAX_LINES, MAX_CONCURRENCY } from "../extensions/subagent/types.js";
 
 type ManifestSetting = {
 	apply?: string;
@@ -72,6 +72,28 @@ test("settings metadata keeps reused session context limit aligned with runtime 
 	assert.equal(limit.type, "number");
 	assert.equal(limit.category, "Execution");
 	assert.equal(limit.apply, "live");
+});
+
+test("settings metadata keeps artifact-first result caps aligned with runtime defaults", () => {
+	const maxBytes = manifestSettings().find((item) => item.key === "resultMaxBytes");
+	assert.ok(maxBytes, "resultMaxBytes setting remains visible");
+	assert.equal(maxBytes.default, DEFAULT_RESULT_MAX_BYTES);
+	assert.equal(maxBytes.type, "number");
+	assert.equal(maxBytes.category, "Output");
+	assert.equal(maxBytes.apply, "live");
+	assert.match(maxBytes.description ?? "", /base inline byte budget/i);
+	assert.match(maxBytes.description ?? "", /parallel dispatch divides/i);
+	assert.match(maxBytes.description ?? "", /preserveFullOutput/i);
+
+	const maxLines = manifestSettings().find((item) => item.key === "resultMaxLines");
+	assert.ok(maxLines, "resultMaxLines setting remains visible");
+	assert.equal(maxLines.default, DEFAULT_RESULT_MAX_LINES);
+	assert.equal(maxLines.type, "number");
+	assert.equal(maxLines.category, "Output");
+	assert.equal(maxLines.apply, "live");
+	assert.match(maxLines.description ?? "", /base inline line budget/i);
+	assert.match(maxLines.description ?? "", /parallel dispatch divides/i);
+	assert.match(maxLines.description ?? "", /preserveFullOutput/i);
 });
 
 test("legacy maxParallelTasks setting does not affect maxConcurrency", () => {

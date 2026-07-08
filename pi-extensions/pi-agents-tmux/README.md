@@ -182,10 +182,10 @@ There is one execution-concurrency knob — `maxConcurrency` — and it caps con
 
 | Setting | What it does |
 | --- | --- |
-| Truncate agent results | Apply Pi-sized inline caps to tool output. |
-| Result max bytes | Inline byte cap per agent result. |
-| Result max lines | Inline line cap per agent result. |
-| Preserve full agent output | Save oversized output and include a path to retrieve it. |
+| Truncate agent results | Apply Pi-sized inline caps to tool output so long subagent results stay artifact-first. |
+| Result max bytes | Base inline byte budget for returned agent output before truncation (default 32 KiB); parallel dispatch divides it across returned agents with a 1 KiB per-agent floor. |
+| Result max lines | Base inline line budget for returned agent output before truncation (default 1200); parallel dispatch divides it across returned agents with a 40-line per-agent floor. |
+| Preserve full agent output | Save oversized output and include a path to retrieve it (enabled by default). |
 
 ### Persistent panes
 

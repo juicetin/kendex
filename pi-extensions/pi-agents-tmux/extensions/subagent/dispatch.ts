@@ -11,12 +11,12 @@ import {
 	type OnUpdateCallback,
 } from "./runner.js";
 import { createOneShotSessionKey } from "./sessions.js";
-import { settingNumber } from "./settings.js";
+import { resultLimits, settingNumber, splitResultLimits } from "./settings.js";
 import { readTaskRegistry } from "./tasks.js";
 import {
-	DEFAULT_RESULT_MAX_BYTES,
-	DEFAULT_RESULT_MAX_LINES,
 	MAX_CONCURRENCY,
+	type PreparedSingleResult,
+	type ResultLimits,
 	type SingleResult,
 	type SubagentDashboardItem,
 	type SubagentDetails,
@@ -174,6 +174,24 @@ async function dashboardMessageForCompletedOneShotResult(runtimeRoot: string, re
 function needsCompletionMessage(result: SingleResult): string {
 	const reason = result.needsCompletionReason ? ` (${result.needsCompletionReason})` : "";
 	return result.errorMessage || `Agent needs completion${reason}; inspect result details and worker cwd state.`;
+}
+
+export function parallelResultLimits(cwd: string, count: number): ResultLimits {
+	return splitResultLimits(resultLimits(cwd), count);
+}
+
+export function formatPreparedParallelSection(prepared: PreparedSingleResult): string {
+	const r = prepared.result;
+	const status = singleResultStatus(r);
+	const text = singleResultNeedsCompletion(r) ? prepared.text || needsCompletionMessage(r) : prepared.text || "(no output)";
+	const metadata = [
+		r.taskId ? `Task: ${r.taskId}` : undefined,
+		r.transcriptPath ? `Transcript: ${r.transcriptPath}` : undefined,
+		r.fullOutputPath ? `Full output: ${r.fullOutputPath}` : undefined,
+		r.fullOutputError ? `Full output preservation failed: ${r.fullOutputError}` : undefined,
+		r.truncation ? `Inline output: truncated; full output stored above when available.` : undefined,
+	].filter(Boolean).join("\n");
+	return `## ${r.agent} (${status})${metadata ? `\n${metadata}` : ""}\n${text}`;
 }
 
 export async function runChainDispatch(
@@ -453,11 +471,7 @@ export async function runParallelDispatch(
 
 	const successCount = results.filter((r) => singleResultStatus(r) === "completed").length;
 	const needsCompletionCount = results.filter(singleResultNeedsCompletion).length;
-	const perResultLimits = (() => {
-		const total = { maxBytes: Math.max(1, Math.floor(settingNumber("resultMaxBytes", DEFAULT_RESULT_MAX_BYTES, flow.cwd))), maxLines: Math.max(1, Math.floor(settingNumber("resultMaxLines", DEFAULT_RESULT_MAX_LINES, flow.cwd))) };
-		const count = Math.max(1, results.length);
-		return { maxBytes: Math.max(1024, Math.floor(total.maxBytes / count)), maxLines: Math.max(40, Math.floor(total.maxLines / count)) };
-	})();
+	const perResultLimits = parallelResultLimits(flow.cwd, results.length);
 	const preparedResults = await Promise.all(
 		results.map((result, index) =>
 			prepareSingleResultForReturn(
@@ -470,12 +484,7 @@ export async function runParallelDispatch(
 			),
 		),
 	);
-	const sections = preparedResults.map((prepared) => {
-		const r = prepared.result;
-		const status = singleResultStatus(r);
-		const text = singleResultNeedsCompletion(r) ? prepared.text || needsCompletionMessage(r) : prepared.text || "(no output)";
-		return `## ${r.agent} (${status})\n${text}`;
-	});
+	const sections = preparedResults.map(formatPreparedParallelSection);
 	const needsCompletionSuffix = needsCompletionCount > 0 ? `, ${needsCompletionCount} needs completion` : "";
 	return {
 		content: [{ type: "text", text: `Parallel: ${successCount}/${results.length} succeeded${needsCompletionSuffix}\n\n${sections.join("\n\n")}` }],
