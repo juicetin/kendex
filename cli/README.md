@@ -18,7 +18,7 @@ Unit + integration tests:
 cargo test
 ```
 
-Integration check — installs everything from this repo into a throwaway temp project and verifies the printed `Scope:` line points there:
+Integration check — installs everything from this repo into a throwaway downstream project, verifies the printed `Scope:` line, refreshes twice, checks generated orch workflow byte identity and markdownlint, and runs the refreshed installed orch suite from an external working directory:
 
 ```bash
 scripts/integration-check.sh
@@ -28,7 +28,7 @@ Do not validate by running `cargo run -- add .. --all --copy` from inside this c
 
 ## Skill / Pi extension test surfaces
 
-The CLI does not run skill or extension tests. Each test surface lives next to the code it covers:
+The CLI does not run skill or extension tests during ordinary commands. Each test surface lives next to the code it covers, except source-only cross-boundary installation checks, which stay in `scripts/integration-check.sh` so they are not shipped in an installed skill:
 
 - Orch shell tests: [`../skills/orch/DEVELOPMENT.md#tests`](../skills/orch/DEVELOPMENT.md#tests)
 - Pi extension Bun tests: each `pi-extensions/<name>/tests/` directory
