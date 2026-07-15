@@ -16,6 +16,9 @@
     ],
     "image": "https://raw.githubusercontent.com/vanillagreencom/vstack/main/pi-extensions/pi-session-manager/assets/session-manager.png"
   },
+  "scripts": {
+    "test": "bun test ./tests"
+  },
   "vstack": {
     "extensionManager": {
       "displayName": "Session Manager",
