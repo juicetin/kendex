@@ -25,12 +25,16 @@ CLI wrapper for GitHub API operations used in PR workflows.
 ./scripts/git-https-auth -C . fetch --prune origin
 ```
 
-`label-add` checks live repository metadata before it mutates a PR or issue. Its
-default `--required` policy fails before mutation when the label is absent or
-the authenticated identity cannot write labels. Use `--optional` only when
-project policy explicitly permits that label to be skipped; this returns a
-structured `optional_unsupported` outcome for missing label/write capability.
-Authentication and lookup failures remain errors in either mode.
+`label-add` checks the live label inventory, resolves the target, and lets
+GitHub authorize the selected token's effective label-write grant. It does not
+infer token access from the authenticated user's repository role, which may
+differ for GitHub App and fine-grained tokens. The default `--required` policy
+reports a missing label as configuration error and a known GitHub permission
+denial as a capability error. Use `--optional` only when project policy permits
+the label to be skipped; missing-label and permission failures then return a
+structured `optional_unsupported` outcome. Those failures do not successfully
+mutate the target. Authentication, lookup, rate-limit, server, and unexpected
+API failures remain errors in either mode.
 
 ## Configuration
 

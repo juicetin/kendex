@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # GitHub label add wrapper.
-# Runs `gh pr edit --add-label` or `gh issue edit --add-label`.
+# Uses the shared issues label endpoint for both PRs and issues.
 
 set -euo pipefail
 
@@ -40,14 +40,13 @@ EOF
 
 emit_preflight_result() {
     local status="$1" policy="$2" reason="$3" repository="$4" label="$5"
-    local permission="${6:-}" detail="${7:-}"
+    local detail="${6:-}"
     jq -cn \
         --arg status "$status" \
         --arg policy "$policy" \
         --arg reason "$reason" \
         --arg repository "$repository" \
         --arg label "$label" \
-        --arg viewer_permission "$permission" \
         --arg detail "$detail" \
         '{
            status:$status,
@@ -59,51 +58,41 @@ emit_preflight_result() {
              if $status == "configuration_error" then
                "Required label \"\($label)\" is not configured in \($repository)"
              elif $status == "capability_error" then
-               "Required label \"\($label)\" cannot be applied with \($viewer_permission) repository permission"
+               "Required label \"\($label)\" was not applied because GitHub denied label-write permission"
              elif $reason == "label_missing" then
                "Optional label \"\($label)\" is not configured; mutation skipped"
              elif $reason == "insufficient_permission" then
-               "Optional label \"\($label)\" cannot be applied with \($viewer_permission) repository permission; mutation skipped"
+               "Optional label \"\($label)\" was not applied because GitHub denied label-write permission"
              else
                "Label capability preflight failed before mutation"
              end
            )
          }
-         + (if $viewer_permission == "" then {} else {viewer_permission:$viewer_permission} end)
+         + (if $reason == "insufficient_permission" then
+              {required_permission:"issues=write or pull_requests=write"}
+            else {} end)
          + (if $detail == "" then {} else {detail:$detail} end)'
 }
 
+LABEL_ADD_REPOSITORY=""
+
 preflight_label_add() {
     local label="$1" policy="$2"
-    local repo_json="" repo_rc=0 repository="" permission=""
-    repo_json="$(gh repo view --json nameWithOwner,viewerPermission 2>&1)" || repo_rc=$?
+    local repo_json="" repo_rc=0 repository=""
+    repo_json="$(gh repo view --json nameWithOwner 2>&1)" || repo_rc=$?
     if [ "$repo_rc" -ne 0 ]; then
         emit_preflight_result \
-            "preflight_failed" "$policy" "repository_lookup_failed" "" "$label" "" "$repo_json" >&2
+            "preflight_failed" "$policy" "repository_lookup_failed" "" "$label" "$repo_json" >&2
         return "$repo_rc"
     fi
 
     repository="$(printf '%s' "$repo_json" | jq -r '.nameWithOwner // empty')"
-    permission="$(printf '%s' "$repo_json" | jq -r '.viewerPermission // empty')"
-    if [ -z "$repository" ] || [ -z "$permission" ]; then
+    if [ -z "$repository" ]; then
         emit_preflight_result \
-            "preflight_failed" "$policy" "invalid_repository_metadata" "$repository" "$label" "$permission" "$repo_json" >&2
+            "preflight_failed" "$policy" "invalid_repository_metadata" "" "$label" "$repo_json" >&2
         return 1
     fi
-
-    case "$permission" in
-        ADMIN|MAINTAIN|WRITE|TRIAGE) ;;
-        *)
-            if [ "$policy" = "optional" ]; then
-                emit_preflight_result \
-                    "optional_unsupported" "$policy" "insufficient_permission" "$repository" "$label" "$permission"
-                return 10
-            fi
-            emit_preflight_result \
-                "capability_error" "$policy" "insufficient_permission" "$repository" "$label" "$permission" >&2
-            return 77
-            ;;
-    esac
+    LABEL_ADD_REPOSITORY="$repository"
 
     local encoded_label="" lookup_output="" lookup_rc=0
     encoded_label="$(jq -nr --arg label "$label" '$label | @uri')"
@@ -115,17 +104,83 @@ preflight_label_add() {
     if printf '%s' "$lookup_output" | grep -Eq 'HTTP 404|"status"[[:space:]]*:[[:space:]]*"?404"?|Not Found'; then
         if [ "$policy" = "optional" ]; then
             emit_preflight_result \
-                "optional_unsupported" "$policy" "label_missing" "$repository" "$label" "$permission"
+                "optional_unsupported" "$policy" "label_missing" "$repository" "$label"
             return 10
         fi
         emit_preflight_result \
-            "configuration_error" "$policy" "label_missing" "$repository" "$label" "$permission" >&2
+            "configuration_error" "$policy" "label_missing" "$repository" "$label" >&2
         return 78
     fi
 
     emit_preflight_result \
-        "preflight_failed" "$policy" "label_lookup_failed" "$repository" "$label" "$permission" "$lookup_output" >&2
+        "preflight_failed" "$policy" "label_lookup_failed" "$repository" "$label" "$lookup_output" >&2
     return "$lookup_rc"
+}
+
+resolve_target_number() {
+    local kind="$1" ref="$2" policy="$3" repository="$4" label="$5"
+    local target_json="" target_rc=0 number=""
+
+    if [ "$kind" = "issue" ]; then
+        if [ -n "$ref" ]; then
+            target_json="$(gh issue view "$ref" --json number 2>&1)" || target_rc=$?
+        else
+            target_json="$(gh issue view --json number 2>&1)" || target_rc=$?
+        fi
+    else
+        if [ -n "$ref" ]; then
+            target_json="$(gh pr view "$ref" --json number 2>&1)" || target_rc=$?
+        else
+            target_json="$(gh pr view --json number 2>&1)" || target_rc=$?
+        fi
+    fi
+
+    if [ "$target_rc" -ne 0 ]; then
+        emit_preflight_result \
+            "preflight_failed" "$policy" "target_lookup_failed" "$repository" "$label" "$target_json" >&2
+        return "$target_rc"
+    fi
+
+    number="$(printf '%s' "$target_json" | jq -r '.number // empty')"
+    if [ -z "$number" ]; then
+        emit_preflight_result \
+            "preflight_failed" "$policy" "invalid_target_metadata" "$repository" "$label" "$target_json" >&2
+        return 1
+    fi
+
+    printf '%s\n' "$number"
+}
+
+is_label_write_permission_denial() {
+    local output="$1"
+    printf '%s' "$output" | grep -Eiq \
+        'Resource not accessible by (integration|personal access token)|must have (admin|push) (rights|access)|requires? (repository )?write (access|permission)|write access to (the )?repository not granted|HTTP 404|"status"[[:space:]]*:[[:space:]]*"?404"?|Not Found'
+}
+
+apply_label() {
+    local number="$1" label="$2" policy="$3" repository="$4"
+    local mutation_output="" mutation_rc=0
+
+    mutation_output="$(gh api "repos/$repository/issues/$number/labels" \
+        --method POST --field "labels[]=$label" 2>&1)" || mutation_rc=$?
+    if [ "$mutation_rc" -eq 0 ]; then
+        [ -z "$mutation_output" ] || printf '%s\n' "$mutation_output"
+        return 0
+    fi
+
+    if is_label_write_permission_denial "$mutation_output"; then
+        if [ "$policy" = "optional" ]; then
+            emit_preflight_result \
+                "optional_unsupported" "$policy" "insufficient_permission" "$repository" "$label" "$mutation_output"
+            return 10
+        fi
+        emit_preflight_result \
+            "capability_error" "$policy" "insufficient_permission" "$repository" "$label" "$mutation_output" >&2
+        return 77
+    fi
+
+    printf '%s\n' "$mutation_output" >&2
+    return "$mutation_rc"
 }
 
 main() {
@@ -185,14 +240,18 @@ main() {
         exit "$preflight_rc"
     fi
 
-    local rc=0
-    if [ "$kind" = "issue" ]; then
-        gh issue edit "$ref" --add-label "$label" || rc=$?
-    else
-        gh pr edit "$ref" --add-label "$label" || rc=$?
+    local number="" target_rc=0 mutation_rc=0
+    number="$(resolve_target_number "$kind" "$ref" "$policy" "$LABEL_ADD_REPOSITORY" "$label")" || target_rc=$?
+    if [ "$target_rc" -ne 0 ]; then
+        exit "$target_rc"
     fi
-    if [ "$rc" -ne 0 ]; then
-        exit "$rc"
+
+    apply_label "$number" "$label" "$policy" "$LABEL_ADD_REPOSITORY" || mutation_rc=$?
+    if [ "$mutation_rc" -eq 10 ]; then
+        exit 0
+    fi
+    if [ "$mutation_rc" -ne 0 ]; then
+        exit "$mutation_rc"
     fi
 
     emit_label_activity add "$kind" "$ref" "$label" "$reason" || true

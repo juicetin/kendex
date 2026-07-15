@@ -79,11 +79,16 @@ case "${1:-}" in
       echo '{"name":"test-label"}'
       exit 0
     fi
+    if [[ "${2:-}" == "repos/test-owner/test-repo/issues/42/labels" ]]; then
+      _token_ok || { echo "HTTP 401: Bad credentials" >&2; exit 1; }
+      echo "updated"
+      exit 0
+    fi
     ;;
   repo)
     if [[ "${2:-}" == "view" ]]; then
       _token_ok || { echo "HTTP 401: Bad credentials" >&2; exit 1; }
-      echo '{"nameWithOwner":"test-owner/test-repo","viewerPermission":"WRITE"}'
+      echo '{"nameWithOwner":"test-owner/test-repo"}'
       exit 0
     fi
     ;;
@@ -100,6 +105,11 @@ case "${1:-}" in
     fi
     ;;
   issue)
+    if [[ "${2:-}" == "view" ]]; then
+      _token_ok || { echo "HTTP 401: Bad credentials" >&2; exit 1; }
+      echo '{"number":42}'
+      exit 0
+    fi
     if [[ "${2:-}" == "edit" ]]; then
       _token_ok || { echo "HTTP 401: Bad credentials" >&2; exit 1; }
       echo "updated"

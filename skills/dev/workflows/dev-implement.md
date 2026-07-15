@@ -326,7 +326,8 @@ Development-only feature exception: do not apply `needs-perf-test` for work isol
 Every label selected by this table is required policy, not an optional
 repository capability. When this workflow is responsible for applying a label
 to an existing GitHub PR or issue, use the GitHub helper's required mode so it
-preflights live label inventory and label-write permission before mutation:
+checks the live label inventory and uses GitHub's authoritative label endpoint
+to verify the selected token's effective write capability:
 
 ```bash
 .agents/skills/github/scripts/github.sh -C [WORKTREE_PATH] label-add [PR_OR_ISSUE] [QA_LABEL] --required
