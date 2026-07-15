@@ -15,7 +15,7 @@
     "extensions": [
       "./bundle/index.js"
     ],
-    "image": "https://raw.githubusercontent.com/vanillagreencom/vstack/main/pi-extensions/pi-claude-bridge/assets/claude-bridge1.png"
+    "image": "https://raw.githubusercontent.com/vanillagreencom/vstack/main/pi-extensions/pi-claude-bridge/assets/bridge-demo.png"
   },
   "vstack": {
     "extensionManager": {
