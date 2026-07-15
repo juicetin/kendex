@@ -37566,7 +37566,8 @@ function jsonSchemaToZodShape(schema) {
 }
 
 // src/pi-ai-compat.ts
-async function resolveGetModels(root, loadCompat = () => import("@earendil-works/pi-ai/compat")) {
+var dynamicImport = (specifier) => import(specifier);
+async function resolveGetModels(root, loadCompat = () => dynamicImport("@earendil-works/pi-ai/compat")) {
   if (typeof root?.getModels === "function") return root.getModels;
   const compat = await loadCompat();
   if (typeof compat?.getModels !== "function") throw new Error("pi-ai getModels API is unavailable");
