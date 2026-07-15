@@ -85,6 +85,146 @@ git_with_github_https_auth() {
   fi
 }
 
+restack_state_get() {
+  local wt="$1" key="$2"
+  git -C "$wt" config --worktree --get "vstack-restack.$key" 2>/dev/null || true
+}
+
+clear_restack_push_authorization() {
+  local wt="$1" key=""
+  for key in remote branch expectedRemoteOid originalHead baseOid authorizedHead; do
+    git -C "$wt" config --worktree --unset-all "vstack-restack.$key" >/dev/null 2>&1 || true
+  done
+}
+
+record_pending_restack_authorization() {
+  local wt="$1" remote="$2" branch="$3" expected_oid="$4"
+  local original_head="$5" base_oid="$6"
+  local previous_remote="" previous_branch="" previous_expected="" previous_authorized=""
+
+  # Per-worktree config makes the authorization durable across a paused rebase
+  # while tying it to this exact checkout. Partial writes fail closed because
+  # authorization is valid only when every field and authorizedHead agree.
+  git -C "$PROJECT_ROOT" config extensions.worktreeConfig true
+  previous_remote="$(restack_state_get "$wt" remote)"
+  previous_branch="$(restack_state_get "$wt" branch)"
+  previous_expected="$(restack_state_get "$wt" expectedRemoteOid)"
+  previous_authorized="$(restack_state_get "$wt" authorizedHead)"
+  if [[ "$previous_remote" != "$remote" || "$previous_branch" != "$branch" || "$previous_expected" != "$expected_oid" ]] || \
+     [[ -z "$previous_authorized" ]] || \
+     ! git -C "$wt" merge-base --is-ancestor "$previous_authorized" "$original_head"; then
+    previous_authorized=""
+  fi
+  clear_restack_push_authorization "$wt"
+  git -C "$wt" config --worktree vstack-restack.remote "$remote"
+  git -C "$wt" config --worktree vstack-restack.branch "$branch"
+  git -C "$wt" config --worktree vstack-restack.expectedRemoteOid "$expected_oid"
+  git -C "$wt" config --worktree vstack-restack.originalHead "$original_head"
+  git -C "$wt" config --worktree vstack-restack.baseOid "$base_oid"
+  if [[ -n "$previous_authorized" ]]; then
+    git -C "$wt" config --worktree vstack-restack.authorizedHead "$previous_authorized"
+  fi
+}
+
+cancel_pending_restack_authorization() {
+  local wt="$1" authorized_head=""
+  authorized_head="$(restack_state_get "$wt" authorizedHead)"
+  if [[ -z "$authorized_head" ]]; then
+    clear_restack_push_authorization "$wt"
+    return
+  fi
+  git -C "$wt" config --worktree --unset-all vstack-restack.originalHead >/dev/null 2>&1 || true
+  git -C "$wt" config --worktree --unset-all vstack-restack.baseOid >/dev/null 2>&1 || true
+}
+
+restack_push_authorization_matches() {
+  local wt="$1" remote="$2" branch="$3" expected_oid="$4"
+  local stored_remote="" stored_branch="" stored_expected="" authorized_head=""
+
+  stored_remote="$(restack_state_get "$wt" remote)"
+  stored_branch="$(restack_state_get "$wt" branch)"
+  stored_expected="$(restack_state_get "$wt" expectedRemoteOid)"
+  authorized_head="$(restack_state_get "$wt" authorizedHead)"
+
+  [[ -n "$authorized_head" ]] || return 1
+  [[ "$stored_remote" == "$remote" && "$stored_branch" == "$branch" ]] || return 1
+  [[ "$stored_expected" == "$expected_oid" ]] || return 1
+  git -C "$wt" cat-file -e "${authorized_head}^{commit}" 2>/dev/null || return 1
+  git -C "$wt" merge-base --is-ancestor "$authorized_head" HEAD
+}
+
+finalize_pending_restack_authorization() {
+  local wt="$1" remote="$2" branch="$3" live_expected_oid="$4"
+  local stored_remote="" stored_branch="" stored_expected="" original_head="" base_oid=""
+  local authorized_head="" current_head="" original_head_authorized=false
+
+  stored_expected="$(restack_state_get "$wt" expectedRemoteOid)"
+  [[ -n "$stored_expected" ]] || return 0
+  stored_remote="$(restack_state_get "$wt" remote)"
+  stored_branch="$(restack_state_get "$wt" branch)"
+  original_head="$(restack_state_get "$wt" originalHead)"
+  base_oid="$(restack_state_get "$wt" baseOid)"
+  authorized_head="$(restack_state_get "$wt" authorizedHead)"
+  if [[ -z "$original_head" && -z "$base_oid" ]]; then
+    return 0
+  fi
+
+  if [[ "$stored_remote" != "$remote" || "$stored_branch" != "$branch" || "$stored_expected" != "$live_expected_oid" ]]; then
+    clear_restack_push_authorization "$wt"
+    echo "Error: Remote '$remote/$branch' changed while the supported restack was in progress; refusing to authorize a rewritten push." >&2
+    echo "Fetch and rebase/merge '$remote/$branch' before retrying." >&2
+    return 1
+  fi
+  if rebase_in_progress "$wt"; then
+    echo "Error: Rebase is still in progress for $wt; finish or abort it before completing worktree setup." >&2
+    return 1
+  fi
+  if [[ -n "$original_head" ]]; then
+    if git -C "$wt" merge-base --is-ancestor "$stored_expected" "$original_head"; then
+      original_head_authorized=true
+    elif [[ -n "$authorized_head" ]] && \
+         git -C "$wt" cat-file -e "${authorized_head}^{commit}" 2>/dev/null && \
+         git -C "$wt" merge-base --is-ancestor "$authorized_head" "$original_head"; then
+      # record_pending_restack_authorization preserves authorizedHead only when
+      # its remote, branch, and expected OID exactly match the pending restack.
+      original_head_authorized=true
+    fi
+  fi
+  if [[ -z "$original_head" || -z "$base_oid" ]] || \
+     [[ "$original_head_authorized" != true ]] || \
+     ! git -C "$wt" merge-base --is-ancestor "$base_oid" HEAD; then
+    clear_restack_push_authorization "$wt"
+    echo "Error: Could not verify that '$branch' was rewritten by the supported restack; refusing force-push authorization." >&2
+    return 1
+  fi
+
+  current_head="$(git -C "$wt" rev-parse HEAD)"
+  git -C "$wt" config --worktree vstack-restack.authorizedHead "$current_head"
+  git -C "$wt" config --worktree --unset-all vstack-restack.originalHead >/dev/null 2>&1 || true
+  git -C "$wt" config --worktree --unset-all vstack-restack.baseOid >/dev/null 2>&1 || true
+}
+
+prepare_restack_authorization() {
+  local wt="$1" remote="$2" branch="$3" expected_oid="$4" base_oid="$5"
+  local original_head=""
+
+  if [[ -z "$expected_oid" ]]; then
+    clear_restack_push_authorization "$wt"
+    return 0
+  fi
+
+  original_head="$(git -C "$wt" rev-parse HEAD)"
+  if ! git -C "$wt" merge-base --is-ancestor "$expected_oid" "$original_head" && \
+     ! restack_push_authorization_matches "$wt" "$remote" "$branch" "$expected_oid"; then
+    clear_restack_push_authorization "$wt"
+    echo "Error: Remote '$remote/$branch' points at $expected_oid, which is not contained in local branch '$branch'." >&2
+    echo "Fetch and rebase/merge '$remote/$branch' before using create --reuse/--restack." >&2
+    return 1
+  fi
+
+  record_pending_restack_authorization "$wt" "$remote" "$branch" "$expected_oid" "$original_head" "$base_oid"
+}
+
 remote_ref_lease_arg() {
   local wt="$1" remote="$2" branch="$3"
   local remote_head_ref="refs/heads/$branch"
@@ -123,7 +263,8 @@ remote_ref_lease_arg() {
     return 0
   fi
 
-  if ! git -C "$wt" merge-base --is-ancestor "$expected_oid" HEAD; then
+  if ! git -C "$wt" merge-base --is-ancestor "$expected_oid" HEAD && \
+     ! restack_push_authorization_matches "$wt" "$remote" "$branch" "$expected_oid"; then
     echo "Error: Remote '$remote/$branch' points at $expected_oid, which is not contained in local branch '$branch'." >&2
     echo "Fetch and rebase/merge '$remote/$branch' before using worktree push." >&2
     return 1
@@ -623,6 +764,18 @@ remote_branch_discovered() {
   return 1
 }
 
+remote_branch_oid_discovered() {
+  local remote="$1" branch="$2" heads="" oid="" ref=""
+  heads="$(ownership_heads_for_remote "$remote" || true)"
+  while read -r oid ref; do
+    if [[ -n "$oid" && "$ref" == "refs/heads/$branch" ]]; then
+      printf '%s\n' "$oid"
+      return 0
+    fi
+  done <<<"$heads"
+  return 1
+}
+
 scan_candidate_ownership() {
   local issue="$1" branch="" existing_wt="" remote_ref="" pr_details="" pr_number=""
   for branch in "${CANDIDATE_BRANCHES[@]}"; do
@@ -816,51 +969,65 @@ case "${1:-}" in
       fetch_origin || exit 1
       CURRENT_BRANCH=$(git -C "$WT_PATH" branch --show-current 2>/dev/null)
       if [[ -n "$CURRENT_BRANCH" ]]; then
+        REUSE_REMOTE="${BOT_REMOTE_NAME:-origin}"
+        if ! git -C "$WT_PATH" remote get-url "$REUSE_REMOTE" >/dev/null 2>&1; then
+          REUSE_REMOTE="origin"
+        fi
+        REUSE_EXPECTED_OID="$(remote_branch_oid_discovered "$REUSE_REMOTE" "$CURRENT_BRANCH" 2>/dev/null || true)"
+        finalize_pending_restack_authorization "$WT_PATH" "$REUSE_REMOTE" "$CURRENT_BRANCH" "$REUSE_EXPECTED_OID" || exit 1
         if git -C "$WT_PATH" merge-base --is-ancestor "origin/$DEFAULT_BRANCH" HEAD; then
           : # origin/$DEFAULT_BRANCH already contained — nothing to rebase
-        elif ! REBASE_OUTPUT="$(git -C "$WT_PATH" rebase "origin/$DEFAULT_BRANCH" 2>&1)"; then
-          # Capture conflict details before any abort erases the rebase state.
-          CONFLICT_FILES="$(git -C "$WT_PATH" diff --name-only --diff-filter=U 2>/dev/null || true)"
-          if ! rebase_in_progress "$WT_PATH"; then
-            # Rebase never started (e.g. uncommitted changes) — nothing to
-            # abort or resolve; surface git's own message.
-            echo "Error: Rebase onto origin/$DEFAULT_BRANCH failed for $WT_PATH before it could start:" >&2
-            sed 's/^/  /' <<<"$REBASE_OUTPUT" >&2
-            exit 1
-          fi
-          if [[ "$RESTACK" == true ]]; then
-            echo "Error: Rebase onto origin/$DEFAULT_BRANCH stopped on conflicts in $WT_PATH." >&2
+        else
+          REUSE_BASE_OID="$(git -C "$WT_PATH" rev-parse "origin/$DEFAULT_BRANCH")"
+          prepare_restack_authorization "$WT_PATH" "$REUSE_REMOTE" "$CURRENT_BRANCH" "$REUSE_EXPECTED_OID" "$REUSE_BASE_OID" || exit 1
+          if REBASE_OUTPUT="$(git -C "$WT_PATH" rebase "origin/$DEFAULT_BRANCH" 2>&1)"; then
+            finalize_pending_restack_authorization "$WT_PATH" "$REUSE_REMOTE" "$CURRENT_BRANCH" "$REUSE_EXPECTED_OID" || exit 1
+          else
+            # Capture conflict details before any abort erases the rebase state.
+            CONFLICT_FILES="$(git -C "$WT_PATH" diff --name-only --diff-filter=U 2>/dev/null || true)"
+            if ! rebase_in_progress "$WT_PATH"; then
+              # Rebase never started (e.g. uncommitted changes) — nothing to
+              # abort or resolve; surface git's own message.
+              cancel_pending_restack_authorization "$WT_PATH"
+              echo "Error: Rebase onto origin/$DEFAULT_BRANCH failed for $WT_PATH before it could start:" >&2
+              sed 's/^/  /' <<<"$REBASE_OUTPUT" >&2
+              exit 1
+            fi
+            if [[ "$RESTACK" == true ]]; then
+              echo "Error: Rebase onto origin/$DEFAULT_BRANCH stopped on conflicts in $WT_PATH." >&2
+              if [[ -n "$CONFLICT_FILES" ]]; then
+                echo "Conflicting files:" >&2
+                sed 's/^/  /' <<<"$CONFLICT_FILES" >&2
+              fi
+              echo "The rebase is paused in the worktree so the conflicts can be resolved:" >&2
+              echo "  1. Edit each conflicting file to remove the conflict markers." >&2
+              echo "  2. git -C \"$WT_PATH\" add <file>    (each resolved file)" >&2
+              echo "  3. GIT_EDITOR=true git -C \"$WT_PATH\" rebase --continue    (repeat if it stops again)" >&2
+              echo "  4. $0 create $ISSUE --reuse    (finish worktree setup)" >&2
+              echo "To back out instead: git -C \"$WT_PATH\" rebase --abort" >&2
+              exit 1
+            fi
+            cancel_pending_restack_authorization "$WT_PATH"
+            ABORT_OK=true
+            git -C "$WT_PATH" rebase --abort >/dev/null 2>&1 || ABORT_OK=false
+            echo "Error: Rebase onto origin/$DEFAULT_BRANCH failed for $WT_PATH (conflicts)." >&2
             if [[ -n "$CONFLICT_FILES" ]]; then
               echo "Conflicting files:" >&2
               sed 's/^/  /' <<<"$CONFLICT_FILES" >&2
             fi
-            echo "The rebase is paused in the worktree so the conflicts can be resolved:" >&2
-            echo "  1. Edit each conflicting file to remove the conflict markers." >&2
-            echo "  2. git -C \"$WT_PATH\" add <file>    (each resolved file)" >&2
-            echo "  3. GIT_EDITOR=true git -C \"$WT_PATH\" rebase --continue    (repeat if it stops again)" >&2
-            echo "  4. $0 create $ISSUE --reuse    (finish worktree setup)" >&2
-            echo "To back out instead: git -C \"$WT_PATH\" rebase --abort" >&2
+            if [[ "$ABORT_OK" == true ]] && ! rebase_in_progress "$WT_PATH"; then
+              echo "The rebase was aborted; the worktree is back on its pre-rebase state with no conflicts left to resolve." >&2
+            else
+              echo "Automatic abort of the failed rebase did NOT complete; the worktree may still hold rebase state." >&2
+              echo "Back it out manually first: git -C \"$WT_PATH\" rebase --abort" >&2
+            fi
+            echo "Recovery options:" >&2
+            echo "  1. Redo the rebase and stop in the conflict state to resolve it:" >&2
+            echo "       $0 create $ISSUE --restack" >&2
+            echo "  2. Discard local divergence and recreate fresh from origin/$DEFAULT_BRANCH:" >&2
+            echo "       $0 remove $ISSUE && $0 create $ISSUE" >&2
             exit 1
           fi
-          ABORT_OK=true
-          git -C "$WT_PATH" rebase --abort >/dev/null 2>&1 || ABORT_OK=false
-          echo "Error: Rebase onto origin/$DEFAULT_BRANCH failed for $WT_PATH (conflicts)." >&2
-          if [[ -n "$CONFLICT_FILES" ]]; then
-            echo "Conflicting files:" >&2
-            sed 's/^/  /' <<<"$CONFLICT_FILES" >&2
-          fi
-          if [[ "$ABORT_OK" == true ]] && ! rebase_in_progress "$WT_PATH"; then
-            echo "The rebase was aborted; the worktree is back on its pre-rebase state with no conflicts left to resolve." >&2
-          else
-            echo "Automatic abort of the failed rebase did NOT complete; the worktree may still hold rebase state." >&2
-            echo "Back it out manually first: git -C \"$WT_PATH\" rebase --abort" >&2
-          fi
-          echo "Recovery options:" >&2
-          echo "  1. Redo the rebase and stop in the conflict state to resolve it:" >&2
-          echo "       $0 create $ISSUE --restack" >&2
-          echo "  2. Discard local divergence and recreate fresh from origin/$DEFAULT_BRANCH:" >&2
-          echo "       $0 remove $ISSUE && $0 create $ISSUE" >&2
-          exit 1
         fi
       fi
       # Refresh setup (rebase may have replaced symlinks with tracked content)
@@ -1079,7 +1246,7 @@ case "${1:-}" in
       echo "Usage: $0 push [ID|/path] [--set-upstream|-u] [--no-rebase]"
       echo ""
       echo "Push worktree branch to remote. Auto-rebases onto origin/$DEFAULT_BRANCH first."
-      echo "Auto-rebased pushes use --force-with-lease pinned to the pre-rebase target branch OID."
+      echo "Auto-rebased and supported create --reuse/--restack pushes use --force-with-lease pinned to the pre-rewrite target branch OID."
       echo "Uses BOT_REMOTE_NAME from project config if set, otherwise falls back to origin."
       echo ""
       echo "Options:"
@@ -1169,6 +1336,7 @@ case "${1:-}" in
         exit 1
       fi
     fi
+    clear_restack_push_authorization "$WT_PATH"
     ;;
 
   fix-links)

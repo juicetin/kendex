@@ -7,8 +7,10 @@
 # truthful and actionable: list the conflicting files (captured before the
 # abort) and name the two supported recovery paths (`--restack` or
 # delete/recreate). `--restack` must redo the rebase and stop IN the conflict
-# state with continue/abort guidance. Clean-rebase reuse must keep working
-# unchanged.
+# state with continue/abort guidance. A completed supported rewrite must carry
+# an exact, one-worktree push authorization without weakening remote-movement
+# or unexpected-local-divergence rejection. Clean-rebase reuse must keep
+# working unchanged.
 set -euo pipefail
 
 TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -162,6 +164,24 @@ make_conflict_pair() {
   git -C "$root/main" push -q origin main
 }
 
+make_published_clean_pair() {
+  local root="$1" issue="$2"
+  make_repo "$root/main"
+  git init -q --bare "$root/origin.git"
+  git -C "$root/main" remote add origin "$root/origin.git"
+  git -C "$root/main" push -q -u origin main
+  (cd "$root/main" && "$WORKTREE_SCRIPT" create "$issue" >/dev/null 2>&1)
+  local wt="$root/trees/$issue"
+  printf 'feature\n' > "$wt/feature.txt"
+  git -C "$wt" add feature.txt
+  git -C "$wt" commit -q -m 'feature edit'
+  git -C "$wt" push -q origin "HEAD:refs/heads/$issue"
+  printf 'advanced\n' > "$root/main/main-advanced.txt"
+  git -C "$root/main" add main-advanced.txt
+  git -C "$root/main" commit -q -m 'advance main'
+  git -C "$root/main" push -q origin main
+}
+
 echo "=== worktree create reuse rebase-conflict recovery ==="
 
 # --- Default path: abort, truthful and actionable error ------------------------
@@ -192,6 +212,8 @@ assert_eq "$(git -C "$DEFAULT_WT" status --porcelain)" "" "default reuse leaves 
 RESTACK_ROOT="$TMP_ROOT/restack"
 make_conflict_pair "$RESTACK_ROOT" issue-restack
 RESTACK_WT="$RESTACK_ROOT/trees/issue-restack"
+git -C "$RESTACK_WT" push -q origin HEAD:refs/heads/issue-restack
+restack_remote_before="$(git --git-dir="$RESTACK_ROOT/origin.git" rev-parse refs/heads/issue-restack)"
 set +e
 (
   cd "$RESTACK_ROOT/main" && \
@@ -216,6 +238,122 @@ resolved_out=$(cd "$RESTACK_ROOT/main" && "$WORKTREE_SCRIPT" create issue-restac
 assert_eq "$resolved_out" "$RESTACK_WT" "create after resolved restack finishes setup and prints the path"
 assert_is_ancestor "$RESTACK_WT" origin/main HEAD "resolved restack branch contains origin/main"
 assert_eq "$(cat "$RESTACK_WT/file.txt")" "resolved" "resolved restack keeps the manual resolution"
+assert_eq "$(git -C "$RESTACK_WT" config --worktree --get vstack-restack.expectedRemoteOid)" "$restack_remote_before" "resolved restack preserves the exact pre-rewrite remote lease"
+assert_eq "$(git -C "$RESTACK_WT" config --worktree --get vstack-restack.authorizedHead)" "$(git -C "$RESTACK_WT" rev-parse HEAD)" "resolved restack authorizes only its exact rewritten head"
+
+set +e
+(
+  cd "$RESTACK_ROOT/main" && \
+    "$WORKTREE_SCRIPT" push issue-restack >"$RESTACK_ROOT/push.out" 2>"$RESTACK_ROOT/push.err"
+)
+restack_push_code=$?
+set -e
+assert_eq "$restack_push_code" "0" "resolved supported restack pushes with its exact force-with-lease"
+assert_eq "$(git --git-dir="$RESTACK_ROOT/origin.git" rev-parse refs/heads/issue-restack)" "$(git -C "$RESTACK_WT" rev-parse HEAD)" "resolved restack push publishes the rewritten head"
+assert_eq "$(git -C "$RESTACK_WT" config --worktree --get vstack-restack.authorizedHead 2>/dev/null || true)" "" "successful push consumes restack authorization"
+
+# --- Consecutive clean restacks preserve the exact authorization chain -------
+CHAINED_ROOT="$TMP_ROOT/chained-restack"
+make_published_clean_pair "$CHAINED_ROOT" issue-chained-restack
+CHAINED_WT="$CHAINED_ROOT/trees/issue-chained-restack"
+chained_remote_before="$(git --git-dir="$CHAINED_ROOT/origin.git" rev-parse refs/heads/issue-chained-restack)"
+(cd "$CHAINED_ROOT/main" && "$WORKTREE_SCRIPT" create issue-chained-restack --restack >/dev/null 2>"$CHAINED_ROOT/first-restack.err")
+chained_first_head="$(git -C "$CHAINED_WT" rev-parse HEAD)"
+assert_eq "$(git -C "$CHAINED_WT" config --worktree --get vstack-restack.authorizedHead)" "$chained_first_head" "first clean restack authorizes its rewritten head"
+
+printf 'advanced twice\n' > "$CHAINED_ROOT/main/main-advanced-twice.txt"
+git -C "$CHAINED_ROOT/main" add main-advanced-twice.txt
+git -C "$CHAINED_ROOT/main" commit -q -m 'advance main again'
+git -C "$CHAINED_ROOT/main" push -q origin main
+set +e
+(
+  cd "$CHAINED_ROOT/main" && \
+    "$WORKTREE_SCRIPT" create issue-chained-restack --restack >"$CHAINED_ROOT/second-restack.out" 2>"$CHAINED_ROOT/second-restack.err"
+)
+chained_second_code=$?
+set -e
+chained_second_head="$(git -C "$CHAINED_WT" rev-parse HEAD)"
+assert_eq "$chained_second_code" "0" "second clean restack accepts the preserved exact-match authorization"
+assert_ne "$chained_second_head" "$chained_first_head" "second clean restack rewrites the previously authorized head"
+assert_is_ancestor "$CHAINED_WT" origin/main HEAD "second clean restack contains the latest origin/main"
+assert_eq "$(git -C "$CHAINED_WT" config --worktree --get vstack-restack.expectedRemoteOid)" "$chained_remote_before" "consecutive restacks retain the original exact remote lease"
+assert_eq "$(git -C "$CHAINED_WT" config --worktree --get vstack-restack.authorizedHead)" "$chained_second_head" "second clean restack authorizes only its rewritten head"
+
+set +e
+(
+  cd "$CHAINED_ROOT/main" && \
+    "$WORKTREE_SCRIPT" push issue-chained-restack >"$CHAINED_ROOT/push.out" 2>"$CHAINED_ROOT/push.err"
+)
+chained_push_code=$?
+set -e
+assert_eq "$chained_push_code" "0" "consecutive clean restacks push with the original exact lease"
+assert_eq "$(git --git-dir="$CHAINED_ROOT/origin.git" rev-parse refs/heads/issue-chained-restack)" "$chained_second_head" "consecutive restack push publishes the final rewritten head"
+assert_eq "$(git -C "$CHAINED_WT" config --worktree --get vstack-restack.authorizedHead 2>/dev/null || true)" "" "consecutive restack push consumes authorization"
+
+# --- Remote movement while conflict resolution is pending fails closed -------
+PENDING_MOVE_ROOT="$TMP_ROOT/pending-move"
+make_conflict_pair "$PENDING_MOVE_ROOT" issue-pending-move
+PENDING_MOVE_WT="$PENDING_MOVE_ROOT/trees/issue-pending-move"
+git -C "$PENDING_MOVE_WT" push -q origin HEAD:refs/heads/issue-pending-move
+set +e
+(cd "$PENDING_MOVE_ROOT/main" && "$WORKTREE_SCRIPT" create issue-pending-move --restack >/dev/null 2>"$PENDING_MOVE_ROOT/restack.err")
+pending_restack_code=$?
+set -e
+assert_eq "$pending_restack_code" "1" "pending-movement setup pauses the supported restack"
+printf 'resolved\n' > "$PENDING_MOVE_WT/file.txt"
+git -C "$PENDING_MOVE_WT" add file.txt
+GIT_EDITOR=true git -C "$PENDING_MOVE_WT" rebase --continue >/dev/null 2>&1
+pending_move_old_oid="$(git --git-dir="$PENDING_MOVE_ROOT/origin.git" rev-parse refs/heads/issue-pending-move)"
+pending_move_old_tree="$(git --git-dir="$PENDING_MOVE_ROOT/origin.git" rev-parse "${pending_move_old_oid}^{tree}")"
+pending_move_external="$(GIT_AUTHOR_NAME=External GIT_AUTHOR_EMAIL=external@example.com GIT_COMMITTER_NAME=External GIT_COMMITTER_EMAIL=external@example.com git --git-dir="$PENDING_MOVE_ROOT/origin.git" commit-tree "$pending_move_old_tree" -p "$pending_move_old_oid" -m 'external pending movement')"
+git --git-dir="$PENDING_MOVE_ROOT/origin.git" update-ref refs/heads/issue-pending-move "$pending_move_external"
+set +e
+(cd "$PENDING_MOVE_ROOT/main" && "$WORKTREE_SCRIPT" create issue-pending-move --reuse >/dev/null 2>"$PENDING_MOVE_ROOT/reuse.err")
+pending_move_code=$?
+set -e
+assert_eq "$pending_move_code" "1" "remote movement during conflict resolution refuses restack authorization"
+assert_contains "$(cat "$PENDING_MOVE_ROOT/reuse.err")" "changed while the supported restack was in progress" "pending remote movement reports the invalidated authorization"
+assert_eq "$(git --git-dir="$PENDING_MOVE_ROOT/origin.git" rev-parse refs/heads/issue-pending-move)" "$pending_move_external" "pending remote movement remains untouched"
+
+# --- Remote movement after authorization still fails the exact lease ---------
+REMOTE_MOVE_ROOT="$TMP_ROOT/remote-move"
+make_published_clean_pair "$REMOTE_MOVE_ROOT" issue-remote-move
+REMOTE_MOVE_WT="$REMOTE_MOVE_ROOT/trees/issue-remote-move"
+(cd "$REMOTE_MOVE_ROOT/main" && "$WORKTREE_SCRIPT" create issue-remote-move --reuse >/dev/null 2>"$REMOTE_MOVE_ROOT/create.err")
+remote_move_old_oid="$(git --git-dir="$REMOTE_MOVE_ROOT/origin.git" rev-parse refs/heads/issue-remote-move)"
+remote_move_old_tree="$(git --git-dir="$REMOTE_MOVE_ROOT/origin.git" rev-parse "${remote_move_old_oid}^{tree}")"
+remote_move_external="$(GIT_AUTHOR_NAME=External GIT_AUTHOR_EMAIL=external@example.com GIT_COMMITTER_NAME=External GIT_COMMITTER_EMAIL=external@example.com git --git-dir="$REMOTE_MOVE_ROOT/origin.git" commit-tree "$remote_move_old_tree" -p "$remote_move_old_oid" -m 'external movement')"
+git --git-dir="$REMOTE_MOVE_ROOT/origin.git" update-ref refs/heads/issue-remote-move "$remote_move_external"
+set +e
+(
+  cd "$REMOTE_MOVE_ROOT/main" && \
+    "$WORKTREE_SCRIPT" push issue-remote-move >"$REMOTE_MOVE_ROOT/push.out" 2>"$REMOTE_MOVE_ROOT/push.err"
+)
+remote_move_code=$?
+set -e
+assert_eq "$remote_move_code" "1" "remote movement after restack authorization rejects the push"
+assert_eq "$(git --git-dir="$REMOTE_MOVE_ROOT/origin.git" rev-parse refs/heads/issue-remote-move)" "$remote_move_external" "exact lease preserves the externally advanced remote"
+assert_contains "$(cat "$REMOTE_MOVE_ROOT/push.err")" "force-with-lease expectation" "remote movement reports exact-lease rejection"
+
+# --- An unrelated local rewrite cannot reuse prior restack authorization ------
+LOCAL_MOVE_ROOT="$TMP_ROOT/local-move"
+make_published_clean_pair "$LOCAL_MOVE_ROOT" issue-local-move
+LOCAL_MOVE_WT="$LOCAL_MOVE_ROOT/trees/issue-local-move"
+(cd "$LOCAL_MOVE_ROOT/main" && "$WORKTREE_SCRIPT" create issue-local-move --reuse >/dev/null 2>"$LOCAL_MOVE_ROOT/create.err")
+local_move_tree="$(git -C "$LOCAL_MOVE_WT" rev-parse "origin/main^{tree}")"
+local_move_unexpected="$(git -C "$LOCAL_MOVE_WT" commit-tree "$local_move_tree" -p origin/main -m 'unexpected local rewrite')"
+git -C "$LOCAL_MOVE_WT" reset -q --hard "$local_move_unexpected"
+local_move_remote_before="$(git --git-dir="$LOCAL_MOVE_ROOT/origin.git" rev-parse refs/heads/issue-local-move)"
+set +e
+(
+  cd "$LOCAL_MOVE_ROOT/main" && \
+    "$WORKTREE_SCRIPT" push issue-local-move >"$LOCAL_MOVE_ROOT/push.out" 2>"$LOCAL_MOVE_ROOT/push.err"
+)
+local_move_code=$?
+set -e
+assert_eq "$local_move_code" "1" "unexpected local rewrite is not covered by prior restack authorization"
+assert_eq "$(git --git-dir="$LOCAL_MOVE_ROOT/origin.git" rev-parse refs/heads/issue-local-move)" "$local_move_remote_before" "unexpected local rewrite leaves remote unchanged"
+assert_contains "$(cat "$LOCAL_MOVE_ROOT/push.err")" "not contained in local branch" "unexpected local rewrite reports divergence"
 
 # --- Clean-rebase reuse unchanged ----------------------------------------------
 CLEAN_ROOT="$TMP_ROOT/clean"
