@@ -1,4 +1,4 @@
-use super::opencode::remove_hook_from_opencode_json_at_path;
+use super::opencode::{install_hook_opencode_at_path, remove_hook_from_opencode_json_at_path};
 use super::*;
 
 fn hook_fixture(name: &str, event: &str, matcher: Option<&str>) -> Hook {
@@ -537,6 +537,8 @@ fn remove_hook_from_opencode_removes_instruction() {
 
     let result = std::fs::read_to_string(&config_path).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+    assert!(result.ends_with('\n'));
+    assert!(!result.ends_with("\n\n"));
 
     // instructions and permission should be gone
     assert!(
@@ -554,6 +556,40 @@ fn remove_hook_from_opencode_removes_instruction() {
 
     // Cleanup
     let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn install_hook_opencode_normalizes_trailing_newlines_and_is_idempotent() {
+    for (label, trailing) in [("none", ""), ("one", "\n"), ("multiple", "\n\n\n")] {
+        let base = tmpdir(&format!("opencode_newline_{label}"));
+        let config_path = base.join("opencode.json");
+        let instruction_path = base.join("instructions").join("vstack-hook-guard.md");
+        let instruction_ref = "instructions/vstack-hook-guard.md";
+        let hook = hook_fixture("guard", "PreToolUse", Some("Bash"));
+        std::fs::write(&config_path, format!("{{\"custom\":true}}{trailing}")).unwrap();
+
+        install_hook_opencode_at_path(&hook, &config_path, &instruction_path, instruction_ref)
+            .unwrap();
+
+        let first = std::fs::read(&config_path).unwrap();
+        assert!(first.ends_with(b"\n"), "{label}: missing trailing newline");
+        assert!(
+            !first.ends_with(b"\n\n"),
+            "{label}: emitted multiple trailing newlines"
+        );
+        let parsed: serde_json::Value = serde_json::from_slice(&first).unwrap();
+        assert_eq!(parsed.get("custom"), Some(&serde_json::json!(true)));
+
+        install_hook_opencode_at_path(&hook, &config_path, &instruction_path, instruction_ref)
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read(&config_path).unwrap(),
+            first,
+            "{label}: second install changed the rendered config"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }
 
 #[test]

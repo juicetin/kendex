@@ -50,7 +50,7 @@ pub(crate) fn opencode_hook_instruction_contents(hook: &Hook) -> String {
     format!("# Safety: {}\n\n{}", hook.name, hook.safety_prose())
 }
 
-fn install_hook_opencode_at_path(
+pub(super) fn install_hook_opencode_at_path(
     hook: &Hook,
     config_path: &Path,
     instruction_path: &Path,
@@ -110,7 +110,7 @@ fn install_hook_opencode_at_path(
         instructions.push(serde_json::Value::String(instruction_ref.to_string()));
     }
 
-    let output = serde_json::to_string_pretty(&config)?;
+    let output = serialize_opencode_config(&config)?;
     std::fs::write(config_path, output)?;
 
     Ok(())
@@ -221,11 +221,17 @@ pub(super) fn remove_hook_from_opencode_json_at_path(
     }
 
     if changed {
-        let output = serde_json::to_string_pretty(&config)?;
+        let output = serialize_opencode_config(&config)?;
         std::fs::write(config_path, output)?;
     }
     if remove_instruction {
         let _ = std::fs::remove_file(instruction_path);
     }
     Ok(())
+}
+
+fn serialize_opencode_config(config: &serde_json::Value) -> Result<String> {
+    let mut output = serde_json::to_string_pretty(config)?;
+    output.push('\n');
+    Ok(output)
 }

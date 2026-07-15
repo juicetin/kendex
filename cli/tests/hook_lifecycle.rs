@@ -175,6 +175,53 @@ fn agent_frontmatter(content: &str) -> &str {
         .expect("frontmatter present")
 }
 
+fn assert_single_trailing_newline(bytes: &[u8], context: &str) {
+    assert!(bytes.ends_with(b"\n"), "{context} has no trailing newline");
+    assert!(
+        !bytes.ends_with(b"\n\n"),
+        "{context} has multiple trailing newlines"
+    );
+    serde_json::from_slice::<serde_json::Value>(bytes)
+        .unwrap_or_else(|error| panic!("{context} is not valid JSON: {error}"));
+}
+
+#[test]
+fn opencode_project_config_is_newline_terminated_across_refreshes() {
+    let sandbox = Sandbox::new("opencode-config-newline");
+
+    let output = sandbox
+        .vstack()
+        .arg("add")
+        .arg(&sandbox.source)
+        .args(["--hook", "guard", "--harness", "opencode", "--copy", "-y"])
+        .output()
+        .unwrap();
+    assert_success(output, "vstack add");
+
+    let config_path = sandbox.project.join("opencode.json");
+    let installed = fs::read(&config_path).unwrap();
+    assert_single_trailing_newline(&installed, "installed OpenCode project config");
+
+    for refresh_number in 1..=2 {
+        let output = sandbox
+            .vstack()
+            .args(["refresh", "--scope", "project", "-v"])
+            .output()
+            .unwrap();
+        assert_success(output, &format!("vstack refresh {refresh_number}"));
+
+        let refreshed = fs::read(&config_path).unwrap();
+        assert_single_trailing_newline(
+            &refreshed,
+            &format!("OpenCode project config after refresh {refresh_number}"),
+        );
+        assert_eq!(
+            refreshed, installed,
+            "refresh {refresh_number} changed the rendered OpenCode project config"
+        );
+    }
+}
+
 #[test]
 fn agent_install_without_hooks_does_not_emit_claude_hook_frontmatter() {
     let sandbox = Sandbox::new("add-no-hooks");
