@@ -32,13 +32,15 @@ Start one work item. Never watches or manages other sessions.
 3. Pick one recommended work item. If multiple items exist, convert them into Linear/GitHub issues first; do not spawn a controller session.
 
 <output_format>
+
 ### Milestone: Work Selected
 
 | Field | Value |
 |-------|-------|
-| Tracker | [linear|github] |
+| Tracker | [linear\|github] |
 | Work item | [ID or OWNER/REPO#N] |
 | Reason | [why this is next] |
+
 </output_format>
 
 ## 3. Resolve Work Item
@@ -95,6 +97,7 @@ Ask one action:
 | Manual | Print worktree path and exact `/orch start ...` command. For GitHub, use `/orch start github [OWNER/REPO]#[N]`; the worktree workflow normalizes it to `issue-[N]`. |
 
 <output_format>
+
 ### Milestone: Worktree Ready
 
 | Field | Value |
@@ -102,7 +105,8 @@ Ask one action:
 | Work item | [ID or OWNER/REPO#N] |
 | Worktree | [WT_PATH] |
 | Branch | [BRANCH] |
-| Next | [continue-here|handoff|codex-app|manual] |
+| Next | [continue-here\|handoff\|codex-app\|manual] |
+
 </output_format>
 
 ## 6. End
