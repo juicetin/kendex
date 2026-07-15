@@ -252,6 +252,44 @@ assert_eq "$restack_push_code" "0" "resolved supported restack pushes with its e
 assert_eq "$(git --git-dir="$RESTACK_ROOT/origin.git" rev-parse refs/heads/issue-restack)" "$(git -C "$RESTACK_WT" rev-parse HEAD)" "resolved restack push publishes the rewritten head"
 assert_eq "$(git -C "$RESTACK_WT" config --worktree --get vstack-restack.authorizedHead 2>/dev/null || true)" "" "successful push consumes restack authorization"
 
+# --- Consecutive clean restacks preserve the exact authorization chain -------
+CHAINED_ROOT="$TMP_ROOT/chained-restack"
+make_published_clean_pair "$CHAINED_ROOT" issue-chained-restack
+CHAINED_WT="$CHAINED_ROOT/trees/issue-chained-restack"
+chained_remote_before="$(git --git-dir="$CHAINED_ROOT/origin.git" rev-parse refs/heads/issue-chained-restack)"
+(cd "$CHAINED_ROOT/main" && "$WORKTREE_SCRIPT" create issue-chained-restack --restack >/dev/null 2>"$CHAINED_ROOT/first-restack.err")
+chained_first_head="$(git -C "$CHAINED_WT" rev-parse HEAD)"
+assert_eq "$(git -C "$CHAINED_WT" config --worktree --get vstack-restack.authorizedHead)" "$chained_first_head" "first clean restack authorizes its rewritten head"
+
+printf 'advanced twice\n' > "$CHAINED_ROOT/main/main-advanced-twice.txt"
+git -C "$CHAINED_ROOT/main" add main-advanced-twice.txt
+git -C "$CHAINED_ROOT/main" commit -q -m 'advance main again'
+git -C "$CHAINED_ROOT/main" push -q origin main
+set +e
+(
+  cd "$CHAINED_ROOT/main" && \
+    "$WORKTREE_SCRIPT" create issue-chained-restack --restack >"$CHAINED_ROOT/second-restack.out" 2>"$CHAINED_ROOT/second-restack.err"
+)
+chained_second_code=$?
+set -e
+chained_second_head="$(git -C "$CHAINED_WT" rev-parse HEAD)"
+assert_eq "$chained_second_code" "0" "second clean restack accepts the preserved exact-match authorization"
+assert_ne "$chained_second_head" "$chained_first_head" "second clean restack rewrites the previously authorized head"
+assert_is_ancestor "$CHAINED_WT" origin/main HEAD "second clean restack contains the latest origin/main"
+assert_eq "$(git -C "$CHAINED_WT" config --worktree --get vstack-restack.expectedRemoteOid)" "$chained_remote_before" "consecutive restacks retain the original exact remote lease"
+assert_eq "$(git -C "$CHAINED_WT" config --worktree --get vstack-restack.authorizedHead)" "$chained_second_head" "second clean restack authorizes only its rewritten head"
+
+set +e
+(
+  cd "$CHAINED_ROOT/main" && \
+    "$WORKTREE_SCRIPT" push issue-chained-restack >"$CHAINED_ROOT/push.out" 2>"$CHAINED_ROOT/push.err"
+)
+chained_push_code=$?
+set -e
+assert_eq "$chained_push_code" "0" "consecutive clean restacks push with the original exact lease"
+assert_eq "$(git --git-dir="$CHAINED_ROOT/origin.git" rev-parse refs/heads/issue-chained-restack)" "$chained_second_head" "consecutive restack push publishes the final rewritten head"
+assert_eq "$(git -C "$CHAINED_WT" config --worktree --get vstack-restack.authorizedHead 2>/dev/null || true)" "" "consecutive restack push consumes authorization"
+
 # --- Remote movement while conflict resolution is pending fails closed -------
 PENDING_MOVE_ROOT="$TMP_ROOT/pending-move"
 make_conflict_pair "$PENDING_MOVE_ROOT" issue-pending-move

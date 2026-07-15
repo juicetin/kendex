@@ -155,7 +155,8 @@ restack_push_authorization_matches() {
 
 finalize_pending_restack_authorization() {
   local wt="$1" remote="$2" branch="$3" live_expected_oid="$4"
-  local stored_remote="" stored_branch="" stored_expected="" original_head="" base_oid="" current_head=""
+  local stored_remote="" stored_branch="" stored_expected="" original_head="" base_oid=""
+  local authorized_head="" current_head="" original_head_authorized=false
 
   stored_expected="$(restack_state_get "$wt" expectedRemoteOid)"
   [[ -n "$stored_expected" ]] || return 0
@@ -163,6 +164,7 @@ finalize_pending_restack_authorization() {
   stored_branch="$(restack_state_get "$wt" branch)"
   original_head="$(restack_state_get "$wt" originalHead)"
   base_oid="$(restack_state_get "$wt" baseOid)"
+  authorized_head="$(restack_state_get "$wt" authorizedHead)"
   if [[ -z "$original_head" && -z "$base_oid" ]]; then
     return 0
   fi
@@ -177,8 +179,19 @@ finalize_pending_restack_authorization() {
     echo "Error: Rebase is still in progress for $wt; finish or abort it before completing worktree setup." >&2
     return 1
   fi
+  if [[ -n "$original_head" ]]; then
+    if git -C "$wt" merge-base --is-ancestor "$stored_expected" "$original_head"; then
+      original_head_authorized=true
+    elif [[ -n "$authorized_head" ]] && \
+         git -C "$wt" cat-file -e "${authorized_head}^{commit}" 2>/dev/null && \
+         git -C "$wt" merge-base --is-ancestor "$authorized_head" "$original_head"; then
+      # record_pending_restack_authorization preserves authorizedHead only when
+      # its remote, branch, and expected OID exactly match the pending restack.
+      original_head_authorized=true
+    fi
+  fi
   if [[ -z "$original_head" || -z "$base_oid" ]] || \
-     ! git -C "$wt" merge-base --is-ancestor "$stored_expected" "$original_head" || \
+     [[ "$original_head_authorized" != true ]] || \
      ! git -C "$wt" merge-base --is-ancestor "$base_oid" HEAD; then
     clear_restack_push_authorization "$wt"
     echo "Error: Could not verify that '$branch' was rewritten by the supported restack; refusing force-push authorization." >&2
