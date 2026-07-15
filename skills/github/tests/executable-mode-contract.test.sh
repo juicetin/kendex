@@ -50,6 +50,20 @@ assert_fixture_contract() {
     fi
 }
 
+assert_fixture_index_mode() {
+    local expected="$1"
+    local label="$2"
+    local actual
+
+    actual="$(git -C "$FIXTURE_REPO" ls-files -s -- "$FIXTURE_RELATIVE" | awk 'NR == 1 { print $1 }')"
+    if [ "$actual" = "$expected" ]; then
+        printf 'ok - %s\n' "$label"
+    else
+        printf 'FAIL: %s (expected %s, got %s)\n' "$label" "$expected" "${actual:-missing}" >&2
+        FAIL=$((FAIL + 1))
+    fi
+}
+
 while IFS= read -r test_script; do
     COUNT=$((COUNT + 1))
     mode="$(effective_tracked_mode "$REPO_ROOT" "$test_script")"
@@ -70,6 +84,8 @@ trap 'rm -rf "$FIXTURE_ROOT"' EXIT
 FIXTURE_REPO="$FIXTURE_ROOT/repo"
 FIXTURE_RELATIVE="skills/github/tests/fixture.sh"
 FIXTURE_SCRIPT="$FIXTURE_REPO/$FIXTURE_RELATIVE"
+FIXTURE_INDEX_BEFORE="$FIXTURE_ROOT/index-before.diff"
+FIXTURE_INDEX_AFTER="$FIXTURE_ROOT/index-after.diff"
 
 git init -q "$FIXTURE_REPO"
 git -C "$FIXTURE_REPO" config core.fileMode true
@@ -77,13 +93,23 @@ mkdir -p "$(dirname "$FIXTURE_SCRIPT")"
 printf '#!/usr/bin/env bash\nexit 0\n' >"$FIXTURE_SCRIPT"
 chmod 0644 "$FIXTURE_SCRIPT"
 git -C "$FIXTURE_REPO" add -- "$FIXTURE_RELATIVE"
+git -C "$FIXTURE_REPO" diff --cached --binary -- "$FIXTURE_RELATIVE" >"$FIXTURE_INDEX_BEFORE"
 
 assert_fixture_contract "reject" "tracked non-executable mode remains a contract failure"
 
 chmod 0755 "$FIXTURE_SCRIPT"
 assert_fixture_contract "accept" "unstaged 100644 to 100755 mode change is accepted"
+assert_fixture_index_mode "100644" "unstaged executable validation preserves the 100644 index mode"
+git -C "$FIXTURE_REPO" diff --cached --binary -- "$FIXTURE_RELATIVE" >"$FIXTURE_INDEX_AFTER"
+if cmp -s "$FIXTURE_INDEX_BEFORE" "$FIXTURE_INDEX_AFTER"; then
+    printf 'ok - unstaged executable validation leaves the cached diff byte-identical\n'
+else
+    printf 'FAIL: unstaged executable validation changed the cached diff\n' >&2
+    FAIL=$((FAIL + 1))
+fi
 
 git -C "$FIXTURE_REPO" add -- "$FIXTURE_RELATIVE"
+assert_fixture_index_mode "100755" "explicit staging records the executable mode transition"
 chmod 0644 "$FIXTURE_SCRIPT"
 assert_fixture_contract "reject" "unstaged 100755 to 100644 mode change is rejected"
 
