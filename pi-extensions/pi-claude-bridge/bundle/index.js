@@ -37565,13 +37565,15 @@ function jsonSchemaToZodShape(schema) {
   return shape;
 }
 
-// src/index.ts
-var resolveGetModels = async (root, loadCompat = () => import("@earendil-works/pi-ai/compat")) => {
+// src/pi-ai-compat.ts
+async function resolveGetModels(root, loadCompat = () => import("@earendil-works/pi-ai/compat")) {
   if (typeof root?.getModels === "function") return root.getModels;
   const compat = await loadCompat();
   if (typeof compat?.getModels !== "function") throw new Error("pi-ai getModels API is unavailable");
   return compat.getModels;
-};
+}
+
+// src/index.ts
 var _piAi = piAi;
 var getModels = await resolveGetModels(_piAi);
 var newAssistantMessageEventStream = typeof _piAi.createAssistantMessageEventStream === "function" ? _piAi.createAssistantMessageEventStream : () => new _piAi.AssistantMessageEventStream();
