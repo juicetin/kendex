@@ -323,6 +323,22 @@ Based on FINAL validated code:
 Full triggers: see the project label application guide.
 Development-only feature exception: do not apply `needs-perf-test` for work isolated behind a development-only feature gate. Run the feature-gated checks locally and only add the label if shared or feature-off paths are affected.
 
+Every label selected by this table is required policy, not an optional
+repository capability. When this workflow is responsible for applying a label
+to an existing GitHub PR or issue, use the GitHub helper's required mode so it
+preflights live label inventory and label-write permission before mutation:
+
+```bash
+.agents/skills/github/scripts/github.sh -C [WORKTREE_PATH] label-add [PR_OR_ISSUE] [QA_LABEL] --required
+```
+
+Add `--issue` when the target is a GitHub issue. If preflight reports
+`configuration_error` (required label missing) or `capability_error`
+(insufficient permission), stop and report that supported outcome; do not
+silently omit the QA gate, substitute `--optional`, or return `QA Labels: none`.
+`--optional` is reserved for a label that project policy explicitly declares
+non-gating.
+
 ---
 
 ## 9. Post Completion Summary

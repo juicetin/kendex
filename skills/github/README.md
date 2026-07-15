@@ -21,8 +21,16 @@ CLI wrapper for GitHub API operations used in PR workflows.
 ```bash
 ./scripts/github.sh pr-view 123 --json number,title,state
 ./scripts/github.sh bot-token
+./scripts/github.sh label-add 123 needs-review --required
 ./scripts/git-https-auth -C . fetch --prune origin
 ```
+
+`label-add` checks live repository metadata before it mutates a PR or issue. Its
+default `--required` policy fails before mutation when the label is absent or
+the authenticated identity cannot write labels. Use `--optional` only when
+project policy explicitly permits that label to be skipped; this returns a
+structured `optional_unsupported` outcome for missing label/write capability.
+Authentication and lookup failures remain errors in either mode.
 
 ## Configuration
 
