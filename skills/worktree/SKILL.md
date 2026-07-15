@@ -3,7 +3,7 @@ name: worktree
 description: "Git worktree management: create, list, remove isolated working copies with env/config symlinks."
 license: MIT
 user-invocable: true
-argument-hint: "create <ID> [--base <branch>] [--from <ref>] [--pr <N>] [--reuse|--restack] | list | remove <ID|path>"
+argument-hint: "create <ID> [--base <branch>] [--from <ref>] [--pr <N>] [--reuse|--restack] | restack continue|skip|abort <ID|path> | list | remove <ID|path>"
 metadata:
   author: vanillagreen
   source: vstack
@@ -27,6 +27,7 @@ Resolves project root via `git rev-parse`, detects default branch automatically,
 | Command | Description |
 |---------|-------------|
 | `create` | Claim a new issue worktree. Refuses implicit reuse when a worktree, branch, or PR already exists. |
+| `restack` | Guardedly continue, skip, or abort a tool-created paused restack. |
 | `list` | List all worktrees |
 | `remove` | Remove worktree, clean symlinks, prune branches |
 | `cleanup` | Remove worktrees whose branches are merged |
@@ -91,10 +92,10 @@ For issue workflows, run `codex-branch ISSUE_ID "$CODEX_WORKTREE_PATH"` before o
 
 Bare `create` never rebases an existing worktree. After the owning session opts in with `--reuse`, the branch rebases onto `origin/<default>`. If that rebase conflicts, the run aborts the rebase and exits 1 — the worktree is left clean on its pre-rebase state, so there is no conflict left to resolve in place. The error lists the conflicting files (captured before the abort) and the two supported recovery paths:
 
-1. **Resolve in place:** re-run `create <ID> --restack`. The rebase re-runs and pauses in the conflict state. Resolve the listed files, stage each with `git -C <path> add <file>`, run `GIT_EDITOR=true git -C <path> rebase --continue` (repeat if it stops again), then re-run `create <ID> --reuse` to finish worktree setup and authorize the exact rewritten head for `worktree push <ID>`. `git -C <path> rebase --abort` backs out to the clean pre-rebase state. This is the supported exception to the no-raw-`git rebase` rule: only `--continue`/`--abort` on the paused rebase, never starting one by hand.
+1. **Resolve in place:** re-run `create <ID> --restack`. The rebase re-runs and pauses in the conflict state. Resolve the listed files, stage each with `git -C <path> add <file>`, then run `worktree restack continue <ID>`; repeat if it stops again. If the current commit is already represented by the new base and should be omitted, use `worktree restack skip <ID>`. Use `worktree restack abort <ID>` to restore the pre-restack branch.
 2. **Discard divergence:** `remove <ID>` then `create <ID>` recreates the worktree fresh from `origin/<default>`, losing the local commits that conflicted.
 
-With no conflict, `--restack` completes the same intentional rebase as `--reuse`.
+The guarded actions accept only a registered worktree whose worktree-local restack authorization, tool-created state token, and Git sequencer metadata agree on the exact remote, branch, observed remote OID, original head, and target base. `continue` and `skip` re-check the remote before and after replay, finalize the exact rewritten-head lease when complete, and fail closed on missing, stale, or unrelated state. `abort` requires the same matching local state, restores the recorded original head, and clears only the pending authorization; remote movement does not make that restorative action unsafe. Published paused states created by the pre-token tool remain recoverable when all legacy authorization and sequencer fields match exactly. With no conflict, `--restack` completes the same intentional rebase as `--reuse`.
 
 ## System Dependencies
 

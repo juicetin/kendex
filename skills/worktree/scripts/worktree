@@ -1,6 +1,6 @@
 #!/bin/bash
 # Portable git worktree manager
-# Usage: worktree create|list|remove|cleanup|path|exists|check|push|fix-links|codex-setup|codex-branch|codex-cleanup [ID] [options]
+# Usage: worktree create|restack|list|remove|cleanup|path|exists|check|push|fix-links|codex-setup|codex-branch|codex-cleanup [ID] [options]
 #   create options:
 #     --base BRANCH   Checkout an existing remote branch into the worktree
 #     --from REF      Create a new branch starting from REF (branch, tag, or commit)
@@ -9,6 +9,10 @@
 #     --restack       When reusing an existing worktree and the rebase onto
 #                     origin/<default> conflicts, stop in the conflict state
 #                     for resolution instead of aborting the rebase
+#   restack actions:
+#     continue        Continue an exact tool-created, paused restack
+#     skip            Skip the current commit in that paused restack
+#     abort           Abort that paused restack and clear pending authorization
 #
 # Layout: project/main (repo) + project/trees/{id} (worktrees by default)
 # Config: reads .env, vstack.settings.toml, then .env.local for optional settings (see below)
@@ -92,7 +96,7 @@ restack_state_get() {
 
 clear_restack_push_authorization() {
   local wt="$1" key=""
-  for key in remote branch expectedRemoteOid originalHead baseOid authorizedHead; do
+  for key in remote branch expectedRemoteOid originalHead baseOid authorizedHead pending stateToken; do
     git -C "$wt" config --worktree --unset-all "vstack-restack.$key" >/dev/null 2>&1 || true
   done
 }
@@ -100,7 +104,7 @@ clear_restack_push_authorization() {
 record_pending_restack_authorization() {
   local wt="$1" remote="$2" branch="$3" expected_oid="$4"
   local original_head="$5" base_oid="$6"
-  local previous_remote="" previous_branch="" previous_expected="" previous_authorized=""
+  local previous_remote="" previous_branch="" previous_expected="" previous_authorized="" state_token=""
 
   # Per-worktree config makes the authorization durable across a paused rebase
   # while tying it to this exact checkout. Partial writes fail closed because
@@ -121,6 +125,9 @@ record_pending_restack_authorization() {
   git -C "$wt" config --worktree vstack-restack.expectedRemoteOid "$expected_oid"
   git -C "$wt" config --worktree vstack-restack.originalHead "$original_head"
   git -C "$wt" config --worktree vstack-restack.baseOid "$base_oid"
+  git -C "$wt" config --worktree vstack-restack.pending true
+  state_token="$(git -C "$wt" hash-object --stdin <<<"$remote:$branch:$expected_oid:$original_head:$base_oid:$$:$RANDOM")"
+  git -C "$wt" config --worktree vstack-restack.stateToken "$state_token"
   if [[ -n "$previous_authorized" ]]; then
     git -C "$wt" config --worktree vstack-restack.authorizedHead "$previous_authorized"
   fi
@@ -135,6 +142,25 @@ cancel_pending_restack_authorization() {
   fi
   git -C "$wt" config --worktree --unset-all vstack-restack.originalHead >/dev/null 2>&1 || true
   git -C "$wt" config --worktree --unset-all vstack-restack.baseOid >/dev/null 2>&1 || true
+  git -C "$wt" config --worktree --unset-all vstack-restack.pending >/dev/null 2>&1 || true
+  git -C "$wt" config --worktree --unset-all vstack-restack.stateToken >/dev/null 2>&1 || true
+}
+
+restack_original_head_authorized() {
+  local wt="$1" expected_oid="$2" original_head="$3" pending="$4"
+  local authorized_head=""
+
+  if [[ -z "$expected_oid" ]]; then
+    [[ "$pending" == true ]]
+    return
+  fi
+  if git -C "$wt" merge-base --is-ancestor "$expected_oid" "$original_head"; then
+    return 0
+  fi
+  authorized_head="$(restack_state_get "$wt" authorizedHead)"
+  [[ -n "$authorized_head" ]] || return 1
+  git -C "$wt" cat-file -e "${authorized_head}^{commit}" 2>/dev/null || return 1
+  git -C "$wt" merge-base --is-ancestor "$authorized_head" "$original_head"
 }
 
 restack_push_authorization_matches() {
@@ -156,16 +182,23 @@ restack_push_authorization_matches() {
 finalize_pending_restack_authorization() {
   local wt="$1" remote="$2" branch="$3" live_expected_oid="$4"
   local stored_remote="" stored_branch="" stored_expected="" original_head="" base_oid=""
-  local authorized_head="" current_head="" original_head_authorized=false
+  local current_head="" pending=""
 
   stored_expected="$(restack_state_get "$wt" expectedRemoteOid)"
-  [[ -n "$stored_expected" ]] || return 0
+  pending="$(restack_state_get "$wt" pending)"
+  if [[ -z "$stored_expected" && "$pending" != true ]]; then
+    return 0
+  fi
   stored_remote="$(restack_state_get "$wt" remote)"
   stored_branch="$(restack_state_get "$wt" branch)"
   original_head="$(restack_state_get "$wt" originalHead)"
   base_oid="$(restack_state_get "$wt" baseOid)"
-  authorized_head="$(restack_state_get "$wt" authorizedHead)"
   if [[ -z "$original_head" && -z "$base_oid" ]]; then
+    if [[ "$pending" == true ]]; then
+      clear_restack_push_authorization "$wt"
+      echo "Error: Pending restack authorization is incomplete; refusing to authorize a rewritten push." >&2
+      return 1
+    fi
     return 0
   fi
 
@@ -179,19 +212,8 @@ finalize_pending_restack_authorization() {
     echo "Error: Rebase is still in progress for $wt; finish or abort it before completing worktree setup." >&2
     return 1
   fi
-  if [[ -n "$original_head" ]]; then
-    if git -C "$wt" merge-base --is-ancestor "$stored_expected" "$original_head"; then
-      original_head_authorized=true
-    elif [[ -n "$authorized_head" ]] && \
-         git -C "$wt" cat-file -e "${authorized_head}^{commit}" 2>/dev/null && \
-         git -C "$wt" merge-base --is-ancestor "$authorized_head" "$original_head"; then
-      # record_pending_restack_authorization preserves authorizedHead only when
-      # its remote, branch, and expected OID exactly match the pending restack.
-      original_head_authorized=true
-    fi
-  fi
   if [[ -z "$original_head" || -z "$base_oid" ]] || \
-     [[ "$original_head_authorized" != true ]] || \
+     ! restack_original_head_authorized "$wt" "$stored_expected" "$original_head" "$pending" || \
      ! git -C "$wt" merge-base --is-ancestor "$base_oid" HEAD; then
     clear_restack_push_authorization "$wt"
     echo "Error: Could not verify that '$branch' was rewritten by the supported restack; refusing force-push authorization." >&2
@@ -199,22 +221,25 @@ finalize_pending_restack_authorization() {
   fi
 
   current_head="$(git -C "$wt" rev-parse HEAD)"
-  git -C "$wt" config --worktree vstack-restack.authorizedHead "$current_head"
+  if [[ -n "$stored_expected" ]]; then
+    git -C "$wt" config --worktree vstack-restack.authorizedHead "$current_head"
+  else
+    clear_restack_push_authorization "$wt"
+    return 0
+  fi
   git -C "$wt" config --worktree --unset-all vstack-restack.originalHead >/dev/null 2>&1 || true
   git -C "$wt" config --worktree --unset-all vstack-restack.baseOid >/dev/null 2>&1 || true
+  git -C "$wt" config --worktree --unset-all vstack-restack.pending >/dev/null 2>&1 || true
+  git -C "$wt" config --worktree --unset-all vstack-restack.stateToken >/dev/null 2>&1 || true
 }
 
 prepare_restack_authorization() {
   local wt="$1" remote="$2" branch="$3" expected_oid="$4" base_oid="$5"
   local original_head=""
 
-  if [[ -z "$expected_oid" ]]; then
-    clear_restack_push_authorization "$wt"
-    return 0
-  fi
-
   original_head="$(git -C "$wt" rev-parse HEAD)"
-  if ! git -C "$wt" merge-base --is-ancestor "$expected_oid" "$original_head" && \
+  if [[ -n "$expected_oid" ]] && \
+     ! git -C "$wt" merge-base --is-ancestor "$expected_oid" "$original_head" && \
      ! restack_push_authorization_matches "$wt" "$remote" "$branch" "$expected_oid"; then
     clear_restack_push_authorization "$wt"
     echo "Error: Remote '$remote/$branch' points at $expected_oid, which is not contained in local branch '$branch'." >&2
@@ -652,6 +677,155 @@ rebase_in_progress() {
   return 1
 }
 
+restack_rebase_state_dir() {
+  local wt="$1" state="" path=""
+  for state in rebase-merge rebase-apply; do
+    path="$(git -C "$wt" rev-parse --git-path "$state" 2>/dev/null)" || continue
+    [[ "$path" == /* ]] || path="$wt/$path"
+    if [[ -d "$path" ]]; then
+      printf '%s\n' "$path"
+      return 0
+    fi
+  done
+  return 1
+}
+
+mark_pending_restack_state() {
+  local wt="$1" state_dir="" state_token=""
+  state_dir="$(restack_rebase_state_dir "$wt")" || return 1
+  state_token="$(restack_state_get "$wt" stateToken)"
+  [[ -n "$state_token" ]] || return 1
+  printf '%s\n' "$state_token" >"$state_dir/vstack-restack-token"
+}
+
+restack_state_refusal() {
+  local wt="$1" reason="$2"
+  echo "Error: Restack state for $wt is $reason; refusing to run a rebase control command." >&2
+  echo "Only an exact paused state created by 'worktree create <ID> --restack' can be continued, skipped, or aborted." >&2
+}
+
+validate_pending_restack_state() {
+  local wt="$1" state_dir="" stored_remote="" stored_branch="" stored_expected=""
+  local original_head="" base_oid="" pending="" state_token="" marker_token=""
+  local head_name="" rebase_original="" rebase_onto=""
+
+  if ! is_registered_project_worktree "$wt"; then
+    restack_state_refusal "$wt" "not a registered worktree of this repository"
+    return 1
+  fi
+  state_dir="$(restack_rebase_state_dir "$wt" 2>/dev/null || true)"
+  if [[ -z "$state_dir" ]]; then
+    restack_state_refusal "$wt" "missing a paused rebase"
+    return 1
+  fi
+
+  stored_remote="$(restack_state_get "$wt" remote)"
+  stored_branch="$(restack_state_get "$wt" branch)"
+  stored_expected="$(restack_state_get "$wt" expectedRemoteOid)"
+  original_head="$(restack_state_get "$wt" originalHead)"
+  base_oid="$(restack_state_get "$wt" baseOid)"
+  pending="$(restack_state_get "$wt" pending)"
+  state_token="$(restack_state_get "$wt" stateToken)"
+  if [[ -z "$stored_remote" || -z "$stored_branch" || -z "$original_head" || -z "$base_oid" ]]; then
+    restack_state_refusal "$wt" "missing its tool-created authorization"
+    return 1
+  fi
+  # Published restacks created before vstack#591 have the same exact fields but
+  # no pending marker. Unpublished restacks require the new marker because an
+  # empty expectedRemoteOid cannot otherwise be distinguished from no state.
+  if [[ -z "$stored_expected" && "$pending" != true ]]; then
+    restack_state_refusal "$wt" "missing its tool-created pending marker"
+    return 1
+  fi
+  if [[ -n "$state_token" ]]; then
+    marker_token="$(head -n 1 "$state_dir/vstack-restack-token" 2>/dev/null || true)"
+    if [[ "$marker_token" != "$state_token" ]]; then
+      restack_state_refusal "$wt" "missing its matching tool-created state token"
+      return 1
+    fi
+  elif [[ "$pending" == true ]]; then
+    restack_state_refusal "$wt" "missing its tool-created state token"
+    return 1
+  fi
+  if ! git -C "$wt" remote get-url "$stored_remote" >/dev/null 2>&1; then
+    restack_state_refusal "$wt" "bound to a missing remote '$stored_remote'"
+    return 1
+  fi
+  if [[ ! -f "$state_dir/head-name" || ! -f "$state_dir/orig-head" || ! -f "$state_dir/onto" ]]; then
+    restack_state_refusal "$wt" "missing required Git rebase metadata"
+    return 1
+  fi
+
+  head_name="$(head -n 1 "$state_dir/head-name" 2>/dev/null || true)"
+  rebase_original="$(head -n 1 "$state_dir/orig-head" 2>/dev/null || true)"
+  rebase_onto="$(head -n 1 "$state_dir/onto" 2>/dev/null || true)"
+  if [[ "$head_name" != "refs/heads/$stored_branch" || "$rebase_original" != "$original_head" || "$rebase_onto" != "$base_oid" ]]; then
+    restack_state_refusal "$wt" "not the rebase recorded by the worktree tool"
+    return 1
+  fi
+  if ! git -C "$wt" cat-file -e "${original_head}^{commit}" 2>/dev/null || \
+     ! git -C "$wt" cat-file -e "${base_oid}^{commit}" 2>/dev/null || \
+     ! git -C "$wt" merge-base --is-ancestor "$base_oid" HEAD; then
+    restack_state_refusal "$wt" "stale or no longer based on its recorded commits"
+    return 1
+  fi
+  if [[ -n "$stored_expected" ]] && ! git -C "$wt" cat-file -e "${stored_expected}^{commit}" 2>/dev/null; then
+    restack_state_refusal "$wt" "bound to an unavailable remote commit"
+    return 1
+  fi
+  if ! restack_original_head_authorized "$wt" "$stored_expected" "$original_head" "$pending"; then
+    restack_state_refusal "$wt" "not authorized by its recorded remote branch state"
+    return 1
+  fi
+}
+
+RESTACK_LIVE_EXPECTED_OID=""
+validate_pending_restack_remote() {
+  local wt="$1" stored_remote="" stored_branch="" stored_expected="" live_expected=""
+  stored_remote="$(restack_state_get "$wt" remote)"
+  stored_branch="$(restack_state_get "$wt" branch)"
+  stored_expected="$(restack_state_get "$wt" expectedRemoteOid)"
+
+  discover_ownership_remote_heads || return 1
+  if ! ownership_heads_for_remote "$stored_remote" >/dev/null 2>&1; then
+    echo "Error: Could not verify the recorded restack remote '$stored_remote'; refusing to continue or skip." >&2
+    return 1
+  fi
+  live_expected="$(remote_branch_oid_discovered "$stored_remote" "$stored_branch" 2>/dev/null || true)"
+  if [[ "$live_expected" != "$stored_expected" ]]; then
+    echo "Error: Remote '$stored_remote/$stored_branch' changed while the supported restack was paused; refusing to continue or skip." >&2
+    echo "Abort the guarded restack before reconciling the moved remote." >&2
+    return 1
+  fi
+  RESTACK_LIVE_EXPECTED_OID="$live_expected"
+}
+
+resolve_restack_worktree() {
+  local arg="$1"
+  if [[ -z "$arg" ]]; then
+    printf '%s\n' "$PWD"
+  elif [[ "$arg" == */* ]]; then
+    printf '%s\n' "$arg"
+  else
+    worktree_path "$arg"
+  fi
+}
+
+report_paused_restack() {
+  local wt="$1" branch="$2" output="$3" conflict_files=""
+  [[ -n "$output" ]] && sed 's/^/  git: /' <<<"$output" >&2
+  conflict_files="$(git -C "$wt" diff --name-only --diff-filter=U 2>/dev/null || true)"
+  if [[ -n "$conflict_files" ]]; then
+    echo "Restack stopped on conflicts:" >&2
+    sed 's/^/  /' <<<"$conflict_files" >&2
+    echo "Resolve and stage each file, then run: $0 restack continue \"$wt\"" >&2
+  else
+    echo "The current replayed commit may be empty; inspect it, then run: $0 restack skip \"$wt\"" >&2
+  fi
+  echo "To restore the pre-restack branch: $0 restack abort \"$wt\"" >&2
+  echo "Recorded branch: $branch" >&2
+}
+
 open_pr_for_branch() {
   local branch="$1"
   local result="" output=""
@@ -929,6 +1103,98 @@ guard_new_target_path() {
 }
 
 case "${1:-}" in
+  restack)
+    ACTION="${2:-}"
+    ARG="${3:-}"
+    if [[ $# -gt 3 ]]; then
+      echo "Usage: $0 restack continue|skip|abort [ID|/path]" >&2
+      exit 1
+    fi
+    case "$ACTION" in
+      continue|skip|abort) ;;
+      *)
+        echo "Usage: $0 restack continue|skip|abort [ID|/path]" >&2
+        exit 1
+        ;;
+    esac
+
+    WT_PATH="$(resolve_restack_worktree "$ARG")"
+    validate_pending_restack_state "$WT_PATH" || exit 1
+    RESTACK_BRANCH="$(restack_state_get "$WT_PATH" branch)"
+    acquire_issue_claim_lock "$RESTACK_BRANCH" || exit 1
+    # The first validation gives a useful error without taking a lock. Repeat
+    # under the branch claim lock immediately before controlling the rebase.
+    validate_pending_restack_state "$WT_PATH" || exit 1
+
+    if [[ "$ACTION" == abort ]]; then
+      RESTACK_ORIGINAL_HEAD="$(restack_state_get "$WT_PATH" originalHead)"
+      if ! REBASE_OUTPUT="$(git -C "$WT_PATH" rebase --abort 2>&1)"; then
+        [[ -n "$REBASE_OUTPUT" ]] && sed 's/^/  git: /' <<<"$REBASE_OUTPUT" >&2
+        echo "Error: Guarded restack abort failed; the pending state and authorization were preserved." >&2
+        exit 1
+      fi
+      if rebase_in_progress "$WT_PATH" || \
+         [[ "$(git -C "$WT_PATH" rev-parse HEAD)" != "$RESTACK_ORIGINAL_HEAD" ]] || \
+         [[ "$(git -C "$WT_PATH" branch --show-current 2>/dev/null || true)" != "$RESTACK_BRANCH" ]]; then
+        echo "Error: Guarded restack abort did not restore the recorded branch and original HEAD; refusing to clear its state." >&2
+        exit 1
+      fi
+      cancel_pending_restack_authorization "$WT_PATH"
+      release_issue_claim_lock
+      setup_codex_worktree "$WT_PATH"
+      echo "Aborted guarded restack and restored $RESTACK_BRANCH: $WT_PATH"
+      exit 0
+    fi
+
+    validate_pending_restack_remote "$WT_PATH" || exit 1
+    REBASE_OUTPUT=""
+    REBASE_STATUS=0
+    if [[ "$ACTION" == continue ]]; then
+      if REBASE_OUTPUT="$(GIT_EDITOR=true git -C "$WT_PATH" rebase --continue 2>&1)"; then
+        :
+      else
+        REBASE_STATUS=$?
+      fi
+    else
+      if REBASE_OUTPUT="$(git -C "$WT_PATH" rebase --skip 2>&1)"; then
+        :
+      else
+        REBASE_STATUS=$?
+      fi
+    fi
+
+    if rebase_in_progress "$WT_PATH"; then
+      if ! validate_pending_restack_state "$WT_PATH"; then
+        echo "Error: Git changed the paused rebase outside the recorded restack boundary; refusing further control." >&2
+        exit 1
+      fi
+      report_paused_restack "$WT_PATH" "$RESTACK_BRANCH" "$REBASE_OUTPUT"
+      exit 1
+    fi
+    if [[ "$REBASE_STATUS" -ne 0 ]]; then
+      clear_restack_push_authorization "$WT_PATH"
+      [[ -n "$REBASE_OUTPUT" ]] && sed 's/^/  git: /' <<<"$REBASE_OUTPUT" >&2
+      echo "Error: Git ended the rebase with status $REBASE_STATUS; no rewritten push was authorized." >&2
+      exit 1
+    fi
+    if [[ "$(git -C "$WT_PATH" branch --show-current 2>/dev/null || true)" != "$RESTACK_BRANCH" ]]; then
+      clear_restack_push_authorization "$WT_PATH"
+      echo "Error: Git did not restore the recorded branch '$RESTACK_BRANCH'; no rewritten push was authorized." >&2
+      exit 1
+    fi
+
+    if ! validate_pending_restack_remote "$WT_PATH"; then
+      clear_restack_push_authorization "$WT_PATH"
+      echo "No rewritten push was authorized." >&2
+      exit 1
+    fi
+    RESTACK_REMOTE="$(restack_state_get "$WT_PATH" remote)"
+    finalize_pending_restack_authorization "$WT_PATH" "$RESTACK_REMOTE" "$RESTACK_BRANCH" "$RESTACK_LIVE_EXPECTED_OID" || exit 1
+    release_issue_claim_lock
+    setup_codex_worktree "$WT_PATH"
+    echo "Completed guarded restack for $RESTACK_BRANCH: $WT_PATH"
+    ;;
+
   create)
     ISSUE="${2:?Error: create requires an issue ID}"
     shift 2
@@ -993,6 +1259,15 @@ case "${1:-}" in
               sed 's/^/  /' <<<"$REBASE_OUTPUT" >&2
               exit 1
             fi
+            if ! mark_pending_restack_state "$WT_PATH"; then
+              MARKER_ABORT_OK=true
+              git -C "$WT_PATH" rebase --abort >/dev/null 2>&1 || MARKER_ABORT_OK=false
+              if [[ "$MARKER_ABORT_OK" == true ]] && ! rebase_in_progress "$WT_PATH"; then
+                cancel_pending_restack_authorization "$WT_PATH"
+              fi
+              echo "Error: Could not bind the paused rebase to its tool-created restack token; refusing guarded recovery." >&2
+              exit 1
+            fi
             if [[ "$RESTACK" == true ]]; then
               echo "Error: Rebase onto origin/$DEFAULT_BRANCH stopped on conflicts in $WT_PATH." >&2
               if [[ -n "$CONFLICT_FILES" ]]; then
@@ -1002,14 +1277,16 @@ case "${1:-}" in
               echo "The rebase is paused in the worktree so the conflicts can be resolved:" >&2
               echo "  1. Edit each conflicting file to remove the conflict markers." >&2
               echo "  2. git -C \"$WT_PATH\" add <file>    (each resolved file)" >&2
-              echo "  3. GIT_EDITOR=true git -C \"$WT_PATH\" rebase --continue    (repeat if it stops again)" >&2
-              echo "  4. $0 create $ISSUE --reuse    (finish worktree setup)" >&2
-              echo "To back out instead: git -C \"$WT_PATH\" rebase --abort" >&2
+              echo "  3. $0 restack continue \"$WT_PATH\"    (repeat if it stops again)" >&2
+              echo "     If the resolved commit is empty: $0 restack skip \"$WT_PATH\"" >&2
+              echo "To back out instead: $0 restack abort \"$WT_PATH\"" >&2
               exit 1
             fi
-            cancel_pending_restack_authorization "$WT_PATH"
             ABORT_OK=true
             git -C "$WT_PATH" rebase --abort >/dev/null 2>&1 || ABORT_OK=false
+            if [[ "$ABORT_OK" == true ]] && ! rebase_in_progress "$WT_PATH"; then
+              cancel_pending_restack_authorization "$WT_PATH"
+            fi
             echo "Error: Rebase onto origin/$DEFAULT_BRANCH failed for $WT_PATH (conflicts)." >&2
             if [[ -n "$CONFLICT_FILES" ]]; then
               echo "Conflicting files:" >&2
@@ -1019,7 +1296,7 @@ case "${1:-}" in
               echo "The rebase was aborted; the worktree is back on its pre-rebase state with no conflicts left to resolve." >&2
             else
               echo "Automatic abort of the failed rebase did NOT complete; the worktree may still hold rebase state." >&2
-              echo "Back it out manually first: git -C \"$WT_PATH\" rebase --abort" >&2
+              echo "Retry through the guarded tool path: $0 restack abort \"$WT_PATH\"" >&2
             fi
             echo "Recovery options:" >&2
             echo "  1. Redo the rebase and stop in the conflict state to resolve it:" >&2
@@ -1445,7 +1722,7 @@ case "${1:-}" in
     ;;
 
   *)
-    echo "Usage: $0 create|list|remove|cleanup|path|exists|check|push|fix-links|codex-setup|codex-branch|codex-cleanup [ID|/path] [options]" >&2
+    echo "Usage: $0 create|restack|list|remove|cleanup|path|exists|check|push|fix-links|codex-setup|codex-branch|codex-cleanup [ID|/path] [options]" >&2
     exit 1
     ;;
 esac
