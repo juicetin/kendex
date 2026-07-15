@@ -18,6 +18,8 @@ FILTER="${1:-}"
 
 FAIL_FILES=()
 RUN=0
+EXTERNAL_CALLER_CWD="$(mktemp -d)"
+trap 'rm -rf "$EXTERNAL_CALLER_CWD"' EXIT
 
 for test_file in "$TEST_DIR"/*.sh; do
   [[ -f "$test_file" ]] || continue
@@ -28,7 +30,16 @@ for test_file in "$TEST_DIR"/*.sh; do
   fi
   RUN=$((RUN + 1))
   printf '\n──── %s ────\n' "$base"
-  if bash "$test_file"; then
+  if [[ "$base" == "generated-start-markdownlint" ]]; then
+    # Keep this regression independent of the suite's caller. markdownlint's
+    # ignore handling rejects absolute fixture paths outside its working tree.
+    (cd "$EXTERNAL_CALLER_CWD" && bash "$test_file")
+    test_status=$?
+  else
+    bash "$test_file"
+    test_status=$?
+  fi
+  if [[ "$test_status" -eq 0 ]]; then
     :
   else
     FAIL_FILES+=("$base")

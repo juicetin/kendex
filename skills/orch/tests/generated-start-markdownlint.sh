@@ -14,6 +14,7 @@ TMP_ROOT="$(cd "$(mktemp -d)" && pwd -P)"
 trap 'rm -rf "$TMP_ROOT"' EXIT
 PROJECT="$TMP_ROOT/project"
 GENERATED="$PROJECT/.agents/skills/orch/workflows/start.md"
+GENERATED_RELATIVE=".agents/skills/orch/workflows/start.md"
 SNAPSHOT="$TMP_ROOT/start-after-add.md"
 
 PASS=0
@@ -60,7 +61,8 @@ lint_generated() {
 
   # These three style rules are intentionally disabled by the downstream
   # repository from #586. All other default rules, including MD022/55/56, run.
-  if "${runner[@]}" --disable MD013 MD031 MD060 -- "$GENERATED"; then
+  if (cd "$PROJECT" && "${runner[@]}" --disable MD013 MD031 MD060 -- \
+    "$GENERATED_RELATIVE"); then
     pass "$phase output passes markdownlint"
   else
     fail "$phase output fails markdownlint"
