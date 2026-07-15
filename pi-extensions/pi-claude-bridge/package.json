@@ -106,7 +106,7 @@
         {
           "key": "forceEffort",
           "label": "Force Claude effort",
-          "description": "Override Pi's thinking-level mapping for all claude-bridge requests. Use max to reach Claude Code max effort even though Pi has no max thinking level. none keeps Pi's selected level.",
+          "description": "Override Pi's thinking-level mapping for all claude-bridge requests. Pi 0.80.6 and newer can select max natively; none keeps Pi's selected level.",
           "type": "enum",
           "enumValues": [
             "none",
