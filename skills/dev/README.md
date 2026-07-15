@@ -6,20 +6,27 @@ Agent workflows for issue implementation and review fix processing, for speciali
 
 | Workflow | Purpose |
 |----------|---------|
-| `workflows/dev-implement.md` | Full implementation lifecycle: activate → plan → implement → validate → commit → QA labels → summary → finalize (§ 1-11) |
+| `workflows/dev-implement.md` | Full implementation lifecycle: sync/activate → plan → implement → validate → commit → QA labels → summary → finalize (§ 1-11) |
 | `workflows/dev-fix.md` | Process review fix items: evaluate → apply/skip → validate → commit → return |
 
 Code-review and QA-review workflows live in the reviewer skill: `skills/reviewer/workflows/review.md` and `skills/reviewer/workflows/qa-review.md`.
 
 ## Structure
 
-```
+```text
 skills/dev/
 ├── SKILL.md              # Skill definition for AI agents
 ├── README.md             # This file
+├── tests/                # Hermetic workflow contract regressions
 └── workflows/
     ├── dev-implement.md  # Main implementation lifecycle (§ 1-11)
     └── dev-fix.md        # Review fix workflow (§ 1-6)
+```
+
+## Tests
+
+```bash
+find skills/dev/tests -type f -name '*.test.sh' -exec bash {} \;
 ```
 
 ## Dependencies

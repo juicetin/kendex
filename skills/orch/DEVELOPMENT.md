@@ -64,7 +64,8 @@ All tests discovered by `run-all.sh` are part of the installed orch skill and
 must pass in downstream projects without access to the vstack source checkout.
 The source-only CLI/generator regression runs through
 `cli/scripts/integration-check.sh`; it validates install/refresh byte identity,
-markdownlint, idempotence, and the refreshed downstream `run-all.sh` suite.
+markdownlint, idempotence, the refreshed downstream `run-all.sh` suite, and the
+installed dev work-item cache-preflight contract.
 
 ## Codex App Worktree Routing
 
