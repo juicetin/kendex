@@ -64,6 +64,28 @@ fi
 
 declare -a candidates=()
 basis="tracked-files"
+producer_output=""
+
+cleanup() {
+  if [[ -n "$producer_output" ]]; then
+    rm -f "$producer_output"
+  fi
+}
+trap cleanup EXIT
+
+capture_git_paths() {
+  local diagnostic="$1"
+  shift
+
+  if [[ -n "$producer_output" ]]; then
+    rm -f "$producer_output"
+  fi
+  producer_output="$(mktemp "${TMPDIR:-/tmp}/verification-scope.XXXXXX")" \
+    || fail "could not create temporary file for Git output"
+  if ! git -C "$repo_root" "$@" >"$producer_output"; then
+    fail "$diagnostic"
+  fi
+}
 
 normalize_path() {
   local path="$1"
@@ -93,9 +115,12 @@ elif [[ -n "$base_ref" ]]; then
   basis="base-ref"
   git -C "$repo_root" rev-parse --verify --quiet "${base_ref}^{commit}" >/dev/null \
     || fail "base ref is not a commit: $base_ref"
+  capture_git_paths \
+    "git diff failed for base ref '$base_ref'; verify the ref and that it shares history with HEAD" \
+    diff --name-only -z "${base_ref}...HEAD" --
   while IFS= read -r -d '' path; do
     candidates+=("$path")
-  done < <(git -C "$repo_root" diff --name-only -z "${base_ref}...HEAD" --)
+  done <"$producer_output"
 fi
 
 is_doc_path() {
@@ -188,11 +213,14 @@ add_source_root() {
 }
 
 if [[ "$mode" == "repository" ]]; then
+  capture_git_paths \
+    "git ls-files failed while discovering tracked source roots" \
+    ls-files -z
   while IFS= read -r -d '' path; do
     if is_source_file "$path"; then
       add_source_root "$(source_root_for_path "$path")"
     fi
-  done < <(git -C "$repo_root" ls-files -z)
+  done <"$producer_output"
 elif [[ "$mode" == "changed" ]]; then
   for path in "${candidates[@]}"; do
     if is_source_file "$path"; then

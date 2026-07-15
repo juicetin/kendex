@@ -64,5 +64,5 @@ Before using roadmap, audit, research, or cycle-planning workflows, configure th
 - **Same-project rule**: Blocking relations and parent-child relations must be within the same project
 - **Blocking level rule**: Blocking relations go on bundle parents, not children
 - **Label preflight**: Issue creates/label updates load live issue-label inventory + project taxonomy, validate full final `labels[]`, and preserve unrelated labels on updates
-- **Repository-aware verification**: Audits prefer PR/branch changes, discover tracked source roots across monorepos, and skip code-path checks for documentation-only scope
+- **Repository-aware verification**: Audits retain a separate PR/branch/path context per issue, discover tracked source roots across monorepos, halt on Git producer failures, and skip code-path checks for documentation-only scope
 - **Workflows return JSON only**: No direct modifications to the issue tracker — recommendations are executed by the caller

@@ -23,7 +23,8 @@ require_jq() {
 
 fixture="$(mktemp -d)"
 docs_fixture="$(mktemp -d)"
-trap 'rm -rf "$fixture" "$docs_fixture"' EXIT
+history_fixture="$(mktemp -d)"
+trap 'rm -rf "$fixture" "$docs_fixture" "$history_fixture"' EXIT
 
 mkdir -p "$fixture/crate-a/src" "$fixture/crate-b/src" "$fixture/docs"
 printf '[workspace]\nmembers = ["crate-a", "crate-b"]\n' >"$fixture/Cargo.toml"
@@ -48,6 +49,26 @@ require_jq "$changed_json" '.source_roots == ["crate-b/src"]' \
   "changed-file mode did not narrow to the affected crate"
 require_jq "$changed_json" '.verification_paths == ["crate-b/src/main.rs"]' \
   "changed-file verification path was not preserved"
+
+# A multi-issue audit must retain an independent scope for each contract.
+issue_a_json="$($RESOLVER --worktree "$fixture" --changed-file crate-a/src/lib.rs)"
+issue_b_json="$($RESOLVER --worktree "$fixture" --changed-file crate-b/src/main.rs)"
+issue_contexts="$(jq -n \
+  --argjson issue_a "$issue_a_json" \
+  --argjson issue_b "$issue_b_json" \
+  '{"ISSUE-A": $issue_a, "ISSUE-B": $issue_b}')"
+require_jq "$issue_contexts" \
+  '.["ISSUE-A"].verification_paths == ["crate-a/src/lib.rs"]' \
+  "first issue did not retain its own verification scope"
+require_jq "$issue_contexts" \
+  '.["ISSUE-B"].verification_paths == ["crate-b/src/main.rs"]' \
+  "second issue did not retain its own verification scope"
+require_jq "$issue_contexts" \
+  '.["ISSUE-A"].verification_paths | index("crate-b/src/main.rs") | not' \
+  "second issue verification scope leaked into the first issue"
+require_jq "$issue_contexts" \
+  '.["ISSUE-B"].verification_paths | index("crate-a/src/lib.rs") | not' \
+  "first issue verification scope leaked into the second issue"
 
 git -C "$fixture" config user.name "Verification Scope Test"
 git -C "$fixture" config user.email "verification-scope@example.invalid"
@@ -92,6 +113,38 @@ if [[ "$no_source_output" != *"no tracked source roots found"* ]]; then
   fail "repository fallback did not explain the missing source scope"
 fi
 
+mkdir -p "$history_fixture/src"
+printf 'fn main() {}\n' >"$history_fixture/src/main.rs"
+git -C "$history_fixture" init -q
+git -C "$history_fixture" config user.name "Verification Scope Test"
+git -C "$history_fixture" config user.email "verification-scope@example.invalid"
+git -C "$history_fixture" add src/main.rs
+git -C "$history_fixture" commit -qm "fixture: first history"
+disconnected_base="$(git -C "$history_fixture" rev-parse HEAD)"
+git -C "$history_fixture" checkout -q --orphan disconnected
+git -C "$history_fixture" rm -q -rf .
+mkdir -p "$history_fixture/src"
+printf 'fn disconnected() {}\n' >"$history_fixture/src/disconnected.rs"
+git -C "$history_fixture" add src/disconnected.rs
+git -C "$history_fixture" commit -qm "fixture: disconnected history"
+if disconnected_output="$($RESOLVER --worktree "$history_fixture" \
+  --base-ref "$disconnected_base" 2>&1)"; then
+  fail "base-ref mode accepted disconnected histories"
+fi
+if [[ "$disconnected_output" != *"git diff failed for base ref"* ]]; then
+  fail "disconnected-history failure did not identify git diff"
+fi
+
+corrupt_index="$docs_fixture/corrupt-index"
+printf 'invalid index\n' >"$corrupt_index"
+if producer_output="$(GIT_INDEX_FILE="$corrupt_index" \
+  "$RESOLVER" --worktree "$fixture" 2>&1)"; then
+  fail "repository discovery ignored a git ls-files producer failure"
+fi
+if [[ "$producer_output" != *"git ls-files failed"* ]]; then
+  fail "producer failure did not identify git ls-files"
+fi
+
 if grep -Fq '${WORKTREE:-.}/src/' "$WORKFLOW"; then
   fail "tpm-audit still hardcodes a repository-root src directory"
 fi
@@ -101,5 +154,9 @@ grep -Fq 'docs-only' "$WORKFLOW" \
   || fail "tpm-audit does not document the docs-only path"
 grep -Fq 'verification_paths' "$WORKFLOW" \
   || fail "tpm-audit does not consume resolved verification paths"
+grep -Fq 'VERIFICATION_CONTEXTS[ISSUE_KEY]' "$WORKFLOW" \
+  || fail "tpm-audit does not retain verification context per issue"
+grep -Fq "reuse another issue's linked PR" "$WORKFLOW" \
+  || fail "tpm-audit does not prohibit cross-issue verification scope reuse"
 
 echo "all pass"

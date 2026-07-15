@@ -99,30 +99,65 @@ For EACH project from 1.3, extract from name + description + content:
 | **Scope** | What components/modules does this project own? |
 
 **[PROJECT only]** For the target project, note constants/APIs it modifies and
-verify them after resolving repository scope in § 1.7. Search only the resolved
-paths, starting with the most specific target path:
+verify them after resolving the owning issue's scope in § 2.1 (or the separate
+project scope in § 9.2). Search only the resolved paths, starting with the most
+specific target path:
 ```bash
 rg -n "[CONSTANT_NAME]|[API_NAME]" "[WORKTREE]/[TARGET_PATH]"
 ```
 
-### 1.7 Resolve Verification Scope
+### 1.7 Collect Verification Evidence
 
-Establish one repository-aware `VERIFICATION_CONTEXT` before any code or
-deliverable checks. A repository-root `src/` is never assumed.
+For EACH input issue, independently record any linked PR and its changed files,
+known implementation branch/base ref, concrete paths, and documentation-only
+signals. Key this evidence by the issue identifier; for a proposed item, use its
+stable input index.
 
-Choose the narrowest trustworthy input in this order:
+A linked PR or branch belongs only to the issue that identifies it (or is
+explicitly documented as implementing it). Do not infer that association from
+another input issue. Do not establish one global `VERIFICATION_CONTEXT`; scope
+resolution happens per extracted contract in § 2.1.
 
-1. **PR changed files** when an input issue links to a PR. Read the PR file list,
+---
+
+**Done/Cancelled issue rule**: Done and Cancelled issues are historical records. Never modify their labels, agent assignments, priorities, or state. They may appear in relation analysis (as sources/targets of valid historical links) and cross-project comparison (to detect duplicates of completed work), but all fix recommendations must exclude them. Only active issues (Backlog, Todo, In Progress, In Review) are candidates for changes.
+
+---
+
+## 2. Extract Contracts
+
+For each INPUT issue, extract from title + description:
+
+| Field | Extract |
+|-------|---------|
+| **Target** | Component/file being modified |
+| **Creates** | New APIs, seams, types, tests this introduces |
+| **Consumes** | Existing APIs, seams, types this uses or extends |
+| **Problem** | What bug/gap/feature it addresses |
+| **Decisions** | Use decider skill: `.agents/skills/decider/scripts/decisions search "[TARGET_KEYWORDS]"` for decisions governing the target area. Flag if proposed approach contradicts an active decision |
+
+**Build** contract table: `ID | Target | Creates | Consumes | Problem | Decision Conflict`
+
+### 2.1 Resolve Verification Scope Per Contract
+
+For EACH contract row, set `ISSUE_KEY` to its issue identifier or proposed-item
+index and resolve one repository-aware context. A repository-root `src/` is
+never assumed.
+
+Choose the narrowest trustworthy input for that issue only, in this order:
+
+1. **PR changed files** when this issue directly links to the PR or the PR is
+   explicitly documented as implementing this issue. Read that PR's file list,
    then pass each repository-relative path as `--changed-file`.
-2. **Branch diff** when the audit runs in an implementation worktree and its
-   base ref is known.
-3. **Concrete issue paths** from the contract/location fields when they cover
-   the complete implementation scope.
-4. **Repository discovery** when no reliable change set exists. The resolver
-   discovers every tracked source root; this supports monorepos and multi-crate
-   workspaces with paths such as `crate-a/src` and `crate-b/src`.
-5. **Documentation-only scope** when every deliverable and changed path is
-   documentation. Use `--docs-only` when there is no concrete change set yet.
+2. **Branch diff** when the branch is known to implement this issue and its base
+   ref is known.
+3. **Concrete issue paths** from this contract's target/location fields when
+   they cover its complete implementation scope.
+4. **Repository discovery** as this issue's fallback when no reliable change
+   set exists. The resolver discovers every tracked source root; this supports
+   monorepos and multi-crate workspaces such as `crate-a/src` and `crate-b/src`.
+5. **Documentation-only scope** when this issue's deliverables and changed paths
+   are all documentation. Use `--docs-only` when no concrete change set exists.
 
 Changed-file example (repeat `--changed-file` as needed):
 ```bash
@@ -144,12 +179,15 @@ Documentation-only example:
 .agents/skills/project-management/scripts/verification-scope --worktree "[WORKTREE]" --docs-only --changed-file "[DOC_PATH]"
 ```
 
-Store the returned JSON as `VERIFICATION_CONTEXT` and extract:
+Store each result independently as `VERIFICATION_CONTEXTS[ISSUE_KEY]`. Never
+reuse another issue's linked PR, branch diff, or resolved context. During later
+checks, `ISSUE_VERIFICATION_CONTEXT` means only the map entry for the issue
+currently being checked. Extract:
 
 - `mode`: `changed`, `repository`, or `docs-only`
 - `changed_files[]`: the explicit or diff-derived paths
 - `source_roots[]`: affected or repository-discovered source roots
-- `verification_paths[]`: exact paths every later search must use
+- `verification_paths[]`: exact paths later searches for this issue must use
 - `code_verification_required`: whether code-path checks apply
 
 All returned paths are repository-relative. Resolve them against the returned
@@ -157,9 +195,9 @@ absolute `worktree` before `rg`, `ls`, or file reads.
 
 Rules:
 
-- In `changed` mode, search the exact changed/contract target first. Expand
-  only when a creates-consumes contract or architecture reference proves a
-  second path is relevant.
+- In `changed` mode, search this issue's exact changed/contract target first.
+  Expand only when its creates-consumes contract or an architecture reference
+  proves a second path is relevant.
 - In `repository` mode, search the returned tracked source roots. Never replace
   them with `[WORKTREE]/src`.
 - In `docs-only` mode, skip code-path checks. Read the resolved documentation
@@ -167,26 +205,9 @@ Rules:
   of code evidence as a mismatch or obsolete-work signal.
 - If code verification is required but `verification_paths[]` is empty, halt
   with a clear scope-resolution error. Do not continue with a guessed path.
-
----
-
-**Done/Cancelled issue rule**: Done and Cancelled issues are historical records. Never modify their labels, agent assignments, priorities, or state. They may appear in relation analysis (as sources/targets of valid historical links) and cross-project comparison (to detect duplicates of completed work), but all fix recommendations must exclude them. Only active issues (Backlog, Todo, In Progress, In Review) are candidates for changes.
-
----
-
-## 2. Extract Contracts
-
-For each INPUT issue, extract from title + description:
-
-| Field | Extract |
-|-------|---------|
-| **Target** | Component/file being modified |
-| **Creates** | New APIs, seams, types, tests this introduces |
-| **Consumes** | Existing APIs, seams, types this uses or extends |
-| **Problem** | What bug/gap/feature it addresses |
-| **Decisions** | Use decider skill: `.agents/skills/decider/scripts/decisions search "[TARGET_KEYWORDS]"` for decisions governing the target area. Flag if proposed approach contradicts an active decision |
-
-**Build** contract table: `ID | Target | Creates | Consumes | Problem | Decision Conflict`
+- For a creates-consumes pair, load both issues' contexts independently. An
+  explicitly shared seam may be inspected for both contracts, but neither
+  issue's context replaces the other's.
 
 ---
 
@@ -331,9 +352,12 @@ For each candidate pair (A, B):
 
 ### 5.2 Verify Against Repository State
 
-**Skip code-path checks if** `VERIFICATION_CONTEXT.mode == "docs-only"`.
-Verify documentation contracts against the resolved documentation paths
-instead.
+For each issue in the pair, load only its
+`ISSUE_VERIFICATION_CONTEXT = VERIFICATION_CONTEXTS[ISSUE_KEY]`.
+
+**Skip that issue's code-path checks if**
+`ISSUE_VERIFICATION_CONTEXT.mode == "docs-only"`. Verify its documentation
+contract against its resolved documentation paths instead.
 
 Otherwise, verify contracts against actual code when target files exist. Use
 the most specific contract target first:
@@ -381,9 +405,10 @@ ls "[WORKTREE]/[TARGET_PATH]"
 rg -n "pub fn|export function|def " "[WORKTREE]/[TARGET_PATH]"
 ```
 
-If `VERIFICATION_CONTEXT.mode == "docs-only"`, infer ownership from the issue
-contract, project definition, and documented paths; do not manufacture a code
-path merely to validate an agent label.
+Load the current issue's `ISSUE_VERIFICATION_CONTEXT`. If its mode is
+`docs-only`, infer ownership from that issue's contract, project definition,
+and documented paths; do not manufacture a code path merely to validate an
+agent label.
 
 **Add** to `agent_mismatch[]`:
 ```json
@@ -441,10 +466,12 @@ Detect issues that should be canceled because work is complete.
    rg -n "pub fn [FUNCTION]|pub struct [TYPE]|export class [TYPE]|export function [FUNCTION]" "[WORKTREE]/[TARGET_PATH]"
    ```
 
-   If no concrete target exists, search the explicit
-   `VERIFICATION_CONTEXT.verification_paths[]`. For `docs-only`, read the
-   documentation paths and verify every documentation deliverable instead of
-   running code-symbol searches.
+   If no concrete target exists, search the current issue's explicit
+   `ISSUE_VERIFICATION_CONTEXT.verification_paths[]`. For `docs-only`, read
+   that issue's documentation paths and verify every documentation deliverable
+   instead of running code-symbol searches. For a comparison-set issue not yet
+   in `VERIFICATION_CONTEXTS`, first extract its contract and resolve a new map
+   entry under that issue's identifier; never borrow an input issue's entry.
 
 3. **Read resolved deliverable files** — check implementation files for stubs
    versus complete code, or documentation files for the promised content
@@ -608,18 +635,20 @@ Extract:
 
 For each repository-relative module path from 9.1, inspect that exact path. A
 module referenced by architecture documentation may extend beyond a PR's
-changed paths; add that concrete path to the verification scope rather than
-falling back to a repository-root `src/`:
+changed paths; inspect that concrete architecture path without adding it to an
+unrelated issue's context or falling back to a repository-root `src/`:
 ```bash
 ls -la "[WORKTREE]/[MODULE_PATH]"
 rg -n "pub struct|pub fn|pub trait|export class|export function" "[WORKTREE]/[MODULE_PATH]"
 rg -n "TODO|unimplemented|todo|FIXME" "[WORKTREE]/[MODULE_PATH]"
 ```
 
-If `VERIFICATION_CONTEXT.mode == "docs-only"`, classify implementation state
-only when the PROJECT audit itself requires architecture-gap analysis. Resolve
-the architecture's concrete module paths first; do not reinterpret a
-documentation-only change set as evidence that the modules are missing.
+Do not use an issue's linked PR or `ISSUE_VERIFICATION_CONTEXT` as the scope for
+the whole project. When architecture-gap analysis lacks concrete module paths,
+resolve repository discovery separately as `PROJECT_VERIFICATION_CONTEXT` and
+use it only for § 9. If an issue-specific context is `docs-only`, do not
+reinterpret that documentation-only change set as evidence that architecture
+modules are missing.
 
 Classify:
 
@@ -728,7 +757,7 @@ For each input issue, assign action based on analysis:
 
 ### 11.1 Core Checks (All Issues)
 
-- [ ] 1.7: Repository/change-aware verification scope resolved; docs-only path handled explicitly
+- [ ] 1.7/2.1: Verification evidence collected and a distinct `VERIFICATION_CONTEXTS[ISSUE_KEY]` entry resolved for every input issue/contract; no linked PR, branch, or scope reused across issues; docs-only handled explicitly
 - [ ] 2: Contract extracted (target, creates, consumes, problem)
 - [ ] 4.5: Relation violations scanned (cross-project, cross-bundle, child→standalone)
 - [ ] 5.1-5.2: Relations analyzed against the resolved code or documentation paths
