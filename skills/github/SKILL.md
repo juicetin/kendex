@@ -35,7 +35,7 @@ CLI wrapper for GitHub API operations used in PR workflows. Provides structured 
 | `pr-merge <N> [--check\|--force\|--auto]` | Merge PR. `--check`: JSON readiness only. `--auto`: queue for auto-merge if blocked now. Three exit codes — see below. |
 | `pr-cross-check [N...] [--quick\|--verify]` | Cross-PR analysis. `--verify`: full build+test (auto-detects build system). |
 | `pr-issue <N> [--format=safe\|text]` | Extract issue ID from PR branch (configurable via `GH_ISSUE_PATTERN`) |
-| `label-add <PR-or-issue> <label> [--reason TEXT] [--issue]` | Add a label through the sanitized router; direct script execution also loads current-project env. |
+| `label-add <PR-or-issue> <label> [--reason TEXT] [--issue] [--required\|--optional]` | Check the live label inventory, then add a label through an authoritative REST capability boundary; direct script execution also loads current-project env. |
 | `label-remove <PR-or-issue> <label> [--reason TEXT] [--issue]` | Remove a label through the sanitized router; direct script execution also loads current-project env. |
 | `await-mergeable <N> [--interval S] [--max-iter N] [--quiet]` | Block until GitHub resolves a PR's merge state. Polls `state` + `mergeStateStatus`. Exit 0 + JSON on resolve, 124 on timeout. |
 | `ci-logs <N> [--lines N] [--format=safe\|text]` | Get CI failure logs for PR |
@@ -52,6 +52,29 @@ CLI wrapper for GitHub API operations used in PR workflows. Provides structured 
 Most commands accept no PR number to auto-detect from the current branch.
 Exception: `post-reply` with a numeric comment ID never auto-detects — it
 requires an explicit `--pr <N>` (thread `PRRT_...` IDs need no PR number).
+
+### Label application contract
+
+`label-add` checks that the named label exists in the live repository inventory,
+resolves the target, and then uses GitHub's shared issue/PR label REST endpoint.
+The endpoint response is authoritative for the selected token's effective
+`issues=write` or `pull_requests=write` grant; repository roles are not used as
+a proxy because GitHub App and fine-grained token grants can differ from them.
+Label names are sent as literal strings, including names beginning with `@` or
+resembling booleans, integers, nulls, and repository placeholders.
+
+- `--required` is the default. A missing label is a repository configuration
+  error (exit 78); a known GitHub label-write denial is a capability error
+  (exit 77). Neither failure successfully mutates the PR or issue.
+- `--optional` is only for labels the calling project policy explicitly marks
+  non-gating. A missing label or insufficient permission emits a structured
+  `optional_unsupported` result, exits zero, and does not mutate the target.
+- Authentication, repository/target lookup, rate limits, server errors, and
+  unexpected API failures are operational errors in both modes; they never
+  become optional skips.
+
+Workflow-required QA labels must use `--required`. Do not downgrade a required
+label to `--optional` merely because a consuming repository is misconfigured.
 
 ### Git HTTPS Auth Helper
 
