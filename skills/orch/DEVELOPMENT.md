@@ -60,6 +60,12 @@ Tests stage isolated repos/worktrees with parametrized CLI stubs on `PATH`. Each
 - `session_init.sh` — worktree Linear auth diagnostic preservation.
 - `review_artifact_check.sh` — deterministic reviewer artifact acceptance (`review-artifact-check`) + review-pr wiring assertions.
 
+All tests discovered by `run-all.sh` are part of the installed orch skill and
+must pass in downstream projects without access to the vstack source checkout.
+The source-only CLI/generator regression runs through
+`cli/scripts/integration-check.sh`; it validates install/refresh byte identity,
+markdownlint, idempotence, and the refreshed downstream `run-all.sh` suite.
+
 ## Codex App Worktree Routing
 
 Codex Desktop handoff starts each child thread in an app-managed worktree, often on detached `HEAD`. App handoff must first run `codex-app-agent-preflight`; generated Codex agent TOMLs must be tracked under `.codex/agents/*.toml` in the saved project branch for generated agent types to be visible before child creation. Local ignored/generated files are not enough: setup hooks, `WORKTREE_SYMLINKS`, and `codex-setup` run too late for subagent type discovery. Missing or ignored agent TOMLs are a warning gate, not a hard blocker: show the warning and continue only after explicit user acceptance of the `worker` fallback risk.
