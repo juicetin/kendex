@@ -51,11 +51,21 @@ Determine tracker:
 Linear only:
 
 ```bash
+# Establish the worktree-local cache before any mandatory cache read. This is
+# a full sync in a fresh worktree and an incremental reconcile otherwise.
+.agents/skills/linear/scripts/linear.sh sync --reconcile
 # Activate issue (or parent if bundled), replace [AGENT_TYPE] with your agent type
 .agents/skills/linear/scripts/linear.sh issues activate [ISSUE_ID] --agent [AGENT_TYPE]
 .agents/skills/linear/scripts/linear.sh cache issues get [ISSUE_ID]
 .agents/skills/linear/scripts/linear.sh cache comments list [ISSUE_ID]
 ```
+
+The `sync --reconcile` command must succeed before activation or cache reads.
+A missing cache before that command is expected in a fresh worktree. If sync
+fails, stop and preserve its exact diagnostic: that is a sync/auth/API/config
+failure, not a missing-cache result. If a mandatory cache read reports `No
+cache found` after sync succeeded, stop and report a cache-initialization
+defect. Never run this Linear preflight for GitHub-tracked or ad-hoc work.
 
 GitHub only:
 

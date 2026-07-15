@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Source integration check: install everything from this repo into a throwaway
-# downstream project, refresh it twice, and verify the installed orch skill.
+# downstream project, refresh it twice, and verify installed workflow contracts.
 #
 # `vstack add` resolves PROJECT scope by walking up from the CWD
 # (cli/src/config.rs::find_project_root_within) looking for .vstack-lock.json or
@@ -9,14 +9,15 @@
 # runs from a seeded temp project and verifies the reported and on-disk scope.
 #
 # Generator checks live here, not in skills/orch/tests: they require both the
-# source CLI and canonical source tree. Every test shipped with the installed
-# orch skill must remain runnable without either source-only dependency.
+# source CLI and canonical source tree. Installed regressions must remain
+# runnable without either source-only dependency.
 set -euo pipefail
 
 script_dir=$(cd "$(dirname "$0")" && pwd -P)
 cli_dir=$(cd "$script_dir/.." && pwd -P)
 repo_root=$(cd "$cli_dir/.." && pwd -P)
 canonical=$repo_root/skills/orch/workflows/start.md
+canonical_dev=$repo_root/skills/dev/workflows/dev-implement.md
 markdownlint_cli_version=0.49.1
 
 cargo build --manifest-path "$cli_dir/Cargo.toml"
@@ -27,6 +28,8 @@ mkdir "$tmp_project/.claude" # project marker — .git is not one (see config.rs
 tmp_phys=$(cd "$tmp_project" && pwd -P)
 generated=$tmp_phys/.agents/skills/orch/workflows/start.md
 generated_relative=.agents/skills/orch/workflows/start.md
+generated_dev=$tmp_phys/.agents/skills/dev/workflows/dev-implement.md
+installed_dev_cache_test=$tmp_phys/.agents/skills/dev/tests/linear-cache-preflight-contract.test.sh
 installed_run_all=$tmp_phys/.agents/skills/orch/tests/run-all.sh
 obsolete_installed_test=$tmp_phys/.agents/skills/orch/tests/generated-start-markdownlint.sh
 snapshot=$tmp_phys/start-after-add.md
@@ -57,6 +60,16 @@ assert_generated_matches() {
   else
     fail "$phase output differs from canonical start workflow"
     diff -u "$canonical" "$generated" || true
+  fi
+}
+
+assert_dev_generated_matches() {
+  local phase=$1
+  if cmp -s "$canonical_dev" "$generated_dev"; then
+    pass "$phase output matches canonical dev-implement workflow"
+  else
+    fail "$phase output differs from canonical dev-implement workflow"
+    diff -u "$canonical_dev" "$generated_dev" || true
   fi
 }
 
@@ -97,7 +110,17 @@ check_generated() {
   fi
 }
 
-echo "=== downstream install and orch verification ==="
+check_dev_generated() {
+  local phase=$1
+  if [[ -f "$generated_dev" ]]; then
+    pass "$phase generated the dev-implement workflow"
+    assert_dev_generated_matches "$phase"
+  else
+    fail "$phase generated the dev-implement workflow"
+  fi
+}
+
+echo "=== downstream install and workflow verification ==="
 
 log=$tmp_phys/vstack-add.log
 if ! (cd "$tmp_phys" && "$cli_dir/target/debug/vstack" add "$repo_root" \
@@ -126,6 +149,7 @@ case $scope_line in
 esac
 
 check_generated "install"
+check_dev_generated "install"
 if [[ -f "$generated" ]]; then
   cp "$generated" "$snapshot"
 fi
@@ -149,6 +173,7 @@ else
 fi
 
 check_generated "first refresh"
+check_dev_generated "first refresh"
 if [[ ! -e "$obsolete_installed_test" ]]; then
   pass "first refresh removes the obsolete installed source-only test"
 else
@@ -172,6 +197,7 @@ else
 fi
 
 check_generated "second refresh"
+check_dev_generated "second refresh"
 if [[ -f "$snapshot" && -f "$generated" ]]; then
   if cmp -s "$snapshot" "$generated"; then
     pass "second refresh is byte-idempotent"
@@ -184,6 +210,22 @@ if grep -Eq 'skill[[:space:]]+orch.*\(unchanged\)' "$refresh_two_log"; then
   pass "second refresh reports orch unchanged"
 else
   fail "second refresh reports orch unchanged"
+fi
+if grep -Eq 'skill[[:space:]]+dev.*\(unchanged\)' "$refresh_two_log"; then
+  pass "second refresh reports dev unchanged"
+else
+  fail "second refresh reports dev unchanged"
+fi
+
+installed_dev_log=$tmp_phys/installed-dev-cache-preflight.log
+if [[ ! -f "$installed_dev_cache_test" ]]; then
+  fail "installed dev cache-preflight regression exists"
+elif (cd "$external_caller_cwd" && bash "$installed_dev_cache_test") \
+  >"$installed_dev_log" 2>&1; then
+  pass "refreshed installed dev cache-preflight regression passes externally"
+else
+  fail "refreshed installed dev cache-preflight regression passes externally"
+  indent_log "$installed_dev_log"
 fi
 
 installed_suite_log=$tmp_phys/installed-orch-suite.log
@@ -199,10 +241,10 @@ fi
 
 verify_log=$tmp_phys/verify.log
 if (cd "$tmp_phys" && "$cli_dir/target/debug/vstack" verify \
-  --scope project orch) >"$verify_log" 2>&1; then
-  pass "verify confirms the refreshed orch install"
+  --scope project orch dev) >"$verify_log" 2>&1; then
+  pass "verify confirms the refreshed orch and dev installs"
 else
-  fail "verify confirms the refreshed orch install"
+  fail "verify confirms the refreshed orch and dev installs"
   indent_log "$verify_log"
 fi
 
