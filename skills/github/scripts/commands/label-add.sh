@@ -162,7 +162,7 @@ apply_label() {
     local mutation_output="" mutation_rc=0
 
     mutation_output="$(gh api "repos/$repository/issues/$number/labels" \
-        --method POST --field "labels[]=$label" 2>&1)" || mutation_rc=$?
+        --method POST --raw-field "labels[]=$label" 2>&1)" || mutation_rc=$?
     if [ "$mutation_rc" -eq 0 ]; then
         [ -z "$mutation_output" ] || printf '%s\n' "$mutation_output"
         return 0

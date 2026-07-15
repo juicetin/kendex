@@ -28,13 +28,15 @@ CLI wrapper for GitHub API operations used in PR workflows.
 `label-add` checks the live label inventory, resolves the target, and lets
 GitHub authorize the selected token's effective label-write grant. It does not
 infer token access from the authenticated user's repository role, which may
-differ for GitHub App and fine-grained tokens. The default `--required` policy
-reports a missing label as configuration error and a known GitHub permission
-denial as a capability error. Use `--optional` only when project policy permits
-the label to be skipped; missing-label and permission failures then return a
-structured `optional_unsupported` outcome. Those failures do not successfully
-mutate the target. Authentication, lookup, rate-limit, server, and unexpected
-API failures remain errors in either mode.
+differ for GitHub App and fine-grained tokens. Label names are always treated
+as literal strings, including `@`-prefixed names and values resembling JSON
+types or repository placeholders. The default `--required` policy reports a
+missing label as configuration error and a known GitHub permission denial as a
+capability error. Use `--optional` only when project policy permits the label
+to be skipped; missing-label and permission failures then return a structured
+`optional_unsupported` outcome. Those failures do not successfully mutate the
+target. Authentication, lookup, rate-limit, server, and unexpected API failures
+remain errors in either mode.
 
 ## Configuration
 

@@ -38,7 +38,7 @@ assert_no_successful_mutation() {
 
 reset_state() {
     : >"$TMP_ROOT/gh.calls"
-    rm -f "$TMP_ROOT/mutated"
+    rm -f "$TMP_ROOT/mutated" "$TMP_ROOT/mutation-label"
 }
 
 mkdir -p "$TMP_ROOT/repo" "$TMP_ROOT/bin"
@@ -96,6 +96,18 @@ case "${1:-} ${2:-}" in
         printf '{"number":84}\n'
         ;;
     "api repos/owner/repo/issues/42/labels"|"api repos/owner/repo/issues/84/labels")
+        if [ "$#" -ne 6 ] || [ "${3:-}" != "--method" ] || [ "${4:-}" != "POST" ] || \
+            [ "${5:-}" != "--raw-field" ]; then
+            printf 'label mutation must use one literal --raw-field: %s\n' "$*" >&2
+            exit 1
+        fi
+        case "${6:-}" in
+            'labels[]='*) ;;
+            *)
+                printf 'label mutation must use labels[] payload: %s\n' "$*" >&2
+                exit 1
+                ;;
+        esac
         case "${STUB_MUTATION_RESULT:-success}" in
             app-denied)
                 printf 'gh: Resource not accessible by integration (HTTP 403)\n' >&2
@@ -115,6 +127,7 @@ case "${1:-} ${2:-}" in
                 ;;
         esac
         : >"$STUB_MUTATION_STATE"
+        printf '%s\n' "${6#labels[]=}" >"$STUB_MUTATION_LABEL"
         printf 'updated\n'
         ;;
     *)
@@ -139,6 +152,7 @@ run_label_add() {
         PATH="$TMP_ROOT/bin:$PATH" \
         STUB_CALLS="$TMP_ROOT/gh.calls" \
         STUB_MUTATION_STATE="$TMP_ROOT/mutated" \
+        STUB_MUTATION_LABEL="$TMP_ROOT/mutation-label" \
         STUB_REPO_JSON="$repo_json" \
         STUB_LABEL_EXISTS="${STUB_LABEL_EXISTS:-1}" \
         STUB_REPO_FAILURE="${STUB_REPO_FAILURE:-0}" \
@@ -161,7 +175,7 @@ output="$(
 assert_eq "$output" "updated" "GitHub App installation token can add an existing label"
 assert_eq "$(grep -c 'viewerPermission' "$TMP_ROOT/gh.calls" || true)" "0" "GitHub App flow does not query viewerPermission"
 assert_eq "$(grep -c '^api user --jq .login$' "$TMP_ROOT/gh.calls")" "1" "GitHub App user lookup may be unavailable"
-assert_eq "$(grep -c '^api repos/owner/repo/issues/42/labels --method POST --field labels\[\]=needs-review$' "$TMP_ROOT/gh.calls")" "1" "REST endpoint applies the PR label"
+assert_eq "$(grep -c '^api repos/owner/repo/issues/42/labels --method POST --raw-field labels\[\]=needs-review$' "$TMP_ROOT/gh.calls")" "1" "REST endpoint applies the PR label as a literal string"
 assert_eq "$(test -e "$TMP_ROOT/mutated" && printf yes || printf no)" "yes" "successful endpoint response records mutation"
 
 reset_state
@@ -250,11 +264,34 @@ encoded_output="$(run_label_add 42 needs/review --required)"
 assert_eq "$encoded_output" "updated" "encoded label succeeds"
 assert_eq "$(sed -n '2p' "$TMP_ROOT/gh.calls")" "api repos/owner/repo/labels/needs%2Freview" "label lookup URL-encodes the label"
 
+assert_literal_label() {
+    local label="$1" expected_encoded="$2" name="$3"
+    local literal_output=""
+
+    reset_state
+    literal_output="$(run_label_add 42 "$label" <"$TMP_ROOT/stdin-label-source")"
+    assert_eq "$literal_output" "updated" "$name succeeds"
+    assert_eq "$(cat "$TMP_ROOT/mutation-label")" "$label" "$name remains a literal string"
+    assert_eq "$(sed -n '2p' "$TMP_ROOT/gh.calls")" \
+        "api repos/owner/repo/labels/$expected_encoded" "$name preflight uses the intended label"
+    assert_eq "$(grep -c -- ' --field ' "$TMP_ROOT/gh.calls" || true)" "0" "$name never uses typed --field"
+}
+
+printf 'local-file-label-value\n' >"$TMP_ROOT/repo/path"
+printf 'stdin-label-value\n' >"$TMP_ROOT/stdin-label-source"
+assert_literal_label '@path' '%40path' '@path label'
+assert_literal_label '@-' '%40-' '@- label'
+assert_literal_label 'true' 'true' 'true label'
+assert_literal_label 'false' 'false' 'false label'
+assert_literal_label 'null' 'null' 'null label'
+assert_literal_label '12345' '12345' 'integer-like label'
+assert_literal_label '{owner}' '%7Bowner%7D' 'repository-placeholder label'
+
 reset_state
 issue_output="$(run_label_add 84 needs-review --issue)"
 assert_eq "$issue_output" "updated" "issue label uses the shared REST endpoint"
 assert_eq "$(grep -c '^issue view 84 --json number$' "$TMP_ROOT/gh.calls")" "1" "issue target is resolved"
-assert_eq "$(grep -c '^api repos/owner/repo/issues/84/labels --method POST --field labels\[\]=needs-review$' "$TMP_ROOT/gh.calls")" "1" "issue label mutation uses resolved issue number"
+assert_eq "$(grep -c '^api repos/owner/repo/issues/84/labels --method POST --raw-field labels\[\]=needs-review$' "$TMP_ROOT/gh.calls")" "1" "issue label mutation uses resolved issue number"
 
 reset_state
 set +e

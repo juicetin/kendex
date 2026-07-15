@@ -60,6 +60,8 @@ resolves the target, and then uses GitHub's shared issue/PR label REST endpoint.
 The endpoint response is authoritative for the selected token's effective
 `issues=write` or `pull_requests=write` grant; repository roles are not used as
 a proxy because GitHub App and fine-grained token grants can differ from them.
+Label names are sent as literal strings, including names beginning with `@` or
+resembling booleans, integers, nulls, and repository placeholders.
 
 - `--required` is the default. A missing label is a repository configuration
   error (exit 78); a known GitHub label-write denial is a capability error
