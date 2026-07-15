@@ -101,6 +101,19 @@ fn remove_one(name: &str, scope_global: bool) -> anyhow::Result<bool> {
         return Ok(false);
     };
     let removed_hook_harnesses = (entry.kind == ItemKind::Hook).then(|| entry.harnesses.clone());
+    let project_root = config::project_root();
+    let mut project_config = if entry.kind == ItemKind::Hook {
+        if scope_global {
+            Some(crate::project_config::ProjectConfig::load(&project_root))
+        } else {
+            crate::commands::refresh::preflight_project_refresh(&project_root)?;
+            Some(crate::project_config::ProjectConfig::load_strict(
+                &project_root,
+            )?)
+        }
+    } else {
+        None
+    };
     if entry.kind == ItemKind::PiExtension {
         crate::pi_extension::remove_pi_extension(name, scope_global)?;
     } else {
@@ -118,6 +131,10 @@ fn remove_one(name: &str, scope_global: bool) -> anyhow::Result<bool> {
             scope_global,
             &lock,
             harnesses,
+            project_config
+                .as_mut()
+                .expect("hook-removal config preloaded"),
+            &project_root,
         )?;
     }
     Ok(true)
@@ -527,6 +544,31 @@ pub(super) fn perform_inline_update(
         if !names.iter().any(|n| lock.entries.contains_key(n)) {
             continue;
         }
+        let mut project_config = if scope_global {
+            crate::project_config::ProjectConfig::load(&project_root)
+        } else {
+            match crate::project_config::ProjectConfig::load_strict(&project_root) {
+                Ok(config) => config,
+                Err(err) => {
+                    for name in names {
+                        if lock.entries.contains_key(name) {
+                            report.fail(name, format!("failed to load project config: {err:#}"));
+                        }
+                    }
+                    continue;
+                }
+            }
+        };
+        if !scope_global
+            && let Err(err) = crate::commands::refresh::preflight_project_refresh(&project_root)
+        {
+            for name in names {
+                if lock.entries.contains_key(name) {
+                    report.fail(name, format!("failed project refresh preflight: {err:#}"));
+                }
+            }
+            continue;
+        }
         let updates_hooks = names.iter().any(|name| {
             lock.entries
                 .get(name)
@@ -558,8 +600,6 @@ pub(super) fn perform_inline_update(
         } else {
             names.to_vec()
         };
-
-        let mut project_config = crate::project_config::ProjectConfig::load(&project_root);
 
         let stats = crate::commands::refresh::refresh_items_in_scope(
             scope_global,
