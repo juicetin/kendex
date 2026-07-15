@@ -98,10 +98,75 @@ For EACH project from 1.3, extract from name + description + content:
 | **Work Type** | What kind of issues belong here? |
 | **Scope** | What components/modules does this project own? |
 
-**[PROJECT only]** For target project, also grep codebase for constants/APIs it modifies:
+**[PROJECT only]** For the target project, note constants/APIs it modifies and
+verify them after resolving repository scope in § 1.7. Search only the resolved
+paths, starting with the most specific target path:
 ```bash
-grep -rn "[CONSTANT_NAME]\|[API_NAME]" ${WORKTREE:-.}/src/
+rg -n "[CONSTANT_NAME]|[API_NAME]" "[WORKTREE]/[TARGET_PATH]"
 ```
+
+### 1.7 Resolve Verification Scope
+
+Establish one repository-aware `VERIFICATION_CONTEXT` before any code or
+deliverable checks. A repository-root `src/` is never assumed.
+
+Choose the narrowest trustworthy input in this order:
+
+1. **PR changed files** when an input issue links to a PR. Read the PR file list,
+   then pass each repository-relative path as `--changed-file`.
+2. **Branch diff** when the audit runs in an implementation worktree and its
+   base ref is known.
+3. **Concrete issue paths** from the contract/location fields when they cover
+   the complete implementation scope.
+4. **Repository discovery** when no reliable change set exists. The resolver
+   discovers every tracked source root; this supports monorepos and multi-crate
+   workspaces with paths such as `crate-a/src` and `crate-b/src`.
+5. **Documentation-only scope** when every deliverable and changed path is
+   documentation. Use `--docs-only` when there is no concrete change set yet.
+
+Changed-file example (repeat `--changed-file` as needed):
+```bash
+.agents/skills/project-management/scripts/verification-scope --worktree "[WORKTREE]" --changed-file "[PATH_1]" --changed-file "[PATH_2]"
+```
+
+Branch-diff example:
+```bash
+.agents/skills/project-management/scripts/verification-scope --worktree "[WORKTREE]" --base-ref "[BASE_REF]"
+```
+
+Repository-discovery example:
+```bash
+.agents/skills/project-management/scripts/verification-scope --worktree "[WORKTREE]"
+```
+
+Documentation-only example:
+```bash
+.agents/skills/project-management/scripts/verification-scope --worktree "[WORKTREE]" --docs-only --changed-file "[DOC_PATH]"
+```
+
+Store the returned JSON as `VERIFICATION_CONTEXT` and extract:
+
+- `mode`: `changed`, `repository`, or `docs-only`
+- `changed_files[]`: the explicit or diff-derived paths
+- `source_roots[]`: affected or repository-discovered source roots
+- `verification_paths[]`: exact paths every later search must use
+- `code_verification_required`: whether code-path checks apply
+
+All returned paths are repository-relative. Resolve them against the returned
+absolute `worktree` before `rg`, `ls`, or file reads.
+
+Rules:
+
+- In `changed` mode, search the exact changed/contract target first. Expand
+  only when a creates-consumes contract or architecture reference proves a
+  second path is relevant.
+- In `repository` mode, search the returned tracked source roots. Never replace
+  them with `[WORKTREE]/src`.
+- In `docs-only` mode, skip code-path checks. Read the resolved documentation
+  paths and verify documentation deliverables directly; do not treat the lack
+  of code evidence as a mismatch or obsolete-work signal.
+- If code verification is required but `verification_paths[]` is empty, halt
+  with a clear scope-resolution error. Do not continue with a guessed path.
 
 ---
 
@@ -264,11 +329,21 @@ For each candidate pair (A, B):
 
 **Blocking level rule**: Blocking relations go on bundle parents, not children. A child issue must not block an issue under a different parent. If A is bundled under parent P1 and B is under parent P2 (or standalone), then P1 blocks P2 — never A blocks B.
 
-### 5.2 Verify with Code
+### 5.2 Verify Against Repository State
 
-**Verify** contracts against actual code when target files exist:
+**Skip code-path checks if** `VERIFICATION_CONTEXT.mode == "docs-only"`.
+Verify documentation contracts against the resolved documentation paths
+instead.
+
+Otherwise, verify contracts against actual code when target files exist. Use
+the most specific contract target first:
 ```bash
-grep -rn "consumedThing" ${WORKTREE:-.}/src/
+rg -n "consumedThing" "[WORKTREE]/[TARGET_PATH]"
+```
+
+If the contract names no concrete target, search the resolved paths explicitly:
+```bash
+rg -n "consumedThing" "[WORKTREE]/[VERIFICATION_PATH_1]" "[WORKTREE]/[VERIFICATION_PATH_2]"
 ```
 
 - Contract matches code → confidence high
@@ -300,11 +375,15 @@ For each blocking relationship (A blocks B) where both are active:
 **Code verification** (when target exists):
 ```bash
 # Check if target is in specific directory
-ls ${WORKTREE:-.}/src/[TARGET_MODULE]/
+ls "[WORKTREE]/[TARGET_PATH]"
 
 # Check for public function signatures
-grep -rn "pub fn\|export function\|def " ${WORKTREE:-.}/src/[TARGET_MODULE]/
+rg -n "pub fn|export function|def " "[WORKTREE]/[TARGET_PATH]"
 ```
+
+If `VERIFICATION_CONTEXT.mode == "docs-only"`, infer ownership from the issue
+contract, project definition, and documented paths; do not manufacture a code
+path merely to validate an agent label.
 
 **Add** to `agent_mismatch[]`:
 ```json
@@ -356,12 +435,19 @@ Detect issues that should be canceled because work is complete.
 
 1. **Extract deliverables** from issue description
 
-2. **Verify EACH deliverable** exists in codebase:
+2. **Verify EACH deliverable** in its resolved target path. For code-bearing
+   audits, search the specific implementation path first:
    ```bash
-   grep -rn "pub fn [FUNCTION]\|pub struct [TYPE]\|export class [TYPE]\|export function [FUNCTION]" ${WORKTREE:-.}/src/
+   rg -n "pub fn [FUNCTION]|pub struct [TYPE]|export class [TYPE]|export function [FUNCTION]" "[WORKTREE]/[TARGET_PATH]"
    ```
 
-3. **Read implementation files** — check for stubs vs complete code
+   If no concrete target exists, search the explicit
+   `VERIFICATION_CONTEXT.verification_paths[]`. For `docs-only`, read the
+   documentation paths and verify every documentation deliverable instead of
+   running code-symbol searches.
+
+3. **Read resolved deliverable files** — check implementation files for stubs
+   versus complete code, or documentation files for the promised content
 
 4. **Calculate confidence**:
 
@@ -520,12 +606,20 @@ Extract:
 
 ### 9.2 Analyze Implementation State
 
-For each module from 9.1:
+For each repository-relative module path from 9.1, inspect that exact path. A
+module referenced by architecture documentation may extend beyond a PR's
+changed paths; add that concrete path to the verification scope rather than
+falling back to a repository-root `src/`:
 ```bash
-ls -la ${WORKTREE:-.}/src/[MODULE]/
-grep -rn "pub struct\|pub fn\|pub trait\|export class\|export function" ${WORKTREE:-.}/src/[MODULE]/
-grep -rn "TODO\|unimplemented\|todo\|FIXME" ${WORKTREE:-.}/src/[MODULE]/
+ls -la "[WORKTREE]/[MODULE_PATH]"
+rg -n "pub struct|pub fn|pub trait|export class|export function" "[WORKTREE]/[MODULE_PATH]"
+rg -n "TODO|unimplemented|todo|FIXME" "[WORKTREE]/[MODULE_PATH]"
 ```
+
+If `VERIFICATION_CONTEXT.mode == "docs-only"`, classify implementation state
+only when the PROJECT audit itself requires architecture-gap analysis. Resolve
+the architecture's concrete module paths first; do not reinterpret a
+documentation-only change set as evidence that the modules are missing.
 
 Classify:
 
@@ -634,9 +728,10 @@ For each input issue, assign action based on analysis:
 
 ### 11.1 Core Checks (All Issues)
 
+- [ ] 1.7: Repository/change-aware verification scope resolved; docs-only path handled explicitly
 - [ ] 2: Contract extracted (target, creates, consumes, problem)
 - [ ] 4.5: Relation violations scanned (cross-project, cross-bundle, child→standalone)
-- [ ] 5.1-5.2: Relations analyzed with code verification
+- [ ] 5.1-5.2: Relations analyzed against the resolved code or documentation paths
 - [ ] 5.3: Priority alignment checked (skip if proposed without priority)
 - [ ] 5.4: Agent label verified
 - [ ] 5.5: Label co-occurrence checked
