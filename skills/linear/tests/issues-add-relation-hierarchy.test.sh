@@ -9,6 +9,13 @@
 #     ├── CC-763 ── CC-766, CC-768
 #     └── CC-764 ── CC-767
 #   CC-780 (root)
+#   CC-799 (missing parent key; fail-closed fixture)
+#   CC-800 (non-object parent; fail-closed fixture)
+#   CC-801 (non-object issue; fail-closed fixture)
+#   CC-802 (empty parent ID; fail-closed fixture)
+#   CC-830, CC-831 (same-parent P-A-P-A-P cycle; fail-closed fixture)
+#   CC-840..CC-845 (malformed project shapes; fail-closed fixtures)
+#   CC-846, CC-847 (explicit null projects; supported fixture)
 
 set -euo pipefail
 
@@ -34,14 +41,24 @@ uuid_for() { printf 'uuid-%s' "${1#CC-}"; }
 # Issue node with project + 5-level parent chain, as ValidateBlocking selects
 issue_node() {
   local prj='"project":{"id":"proj-1","name":"Test"}'
+  local cycle_parent='{"id":"uuid-p","identifier":"CC-P","parent":{"id":"uuid-a","identifier":"CC-A","parent":{"id":"uuid-p","identifier":"CC-P","parent":{"id":"uuid-a","identifier":"CC-A","parent":{"id":"uuid-p","identifier":"CC-P"}}}}}'
   case "$1" in
-  uuid-761) printf '{"identifier":"CC-761",%s,"parent":null}' "$prj" ;;
-  uuid-763) printf '{"identifier":"CC-763",%s,"parent":{"identifier":"CC-761","parent":null}}' "$prj" ;;
-  uuid-764) printf '{"identifier":"CC-764",%s,"parent":{"identifier":"CC-761","parent":null}}' "$prj" ;;
-  uuid-766) printf '{"identifier":"CC-766",%s,"parent":{"identifier":"CC-763","parent":{"identifier":"CC-761","parent":null}}}' "$prj" ;;
-  uuid-767) printf '{"identifier":"CC-767",%s,"parent":{"identifier":"CC-764","parent":{"identifier":"CC-761","parent":null}}}' "$prj" ;;
-  uuid-768) printf '{"identifier":"CC-768",%s,"parent":{"identifier":"CC-763","parent":{"identifier":"CC-761","parent":null}}}' "$prj" ;;
-  uuid-780) printf '{"identifier":"CC-780",%s,"parent":null}' "$prj" ;;
+  uuid-761) printf '{"id":"uuid-761","identifier":"CC-761",%s,"parent":null}' "$prj" ;;
+  uuid-763) printf '{"id":"uuid-763","identifier":"CC-763",%s,"parent":{"id":"uuid-761","identifier":"CC-761","parent":null}}' "$prj" ;;
+  uuid-764) printf '{"id":"uuid-764","identifier":"CC-764",%s,"parent":{"id":"uuid-761","identifier":"CC-761","parent":null}}' "$prj" ;;
+  uuid-766) printf '{"id":"uuid-766","identifier":"CC-766",%s,"parent":{"id":"uuid-763","identifier":"CC-763","parent":{"id":"uuid-761","identifier":"CC-761","parent":null}}}' "$prj" ;;
+  uuid-767) printf '{"id":"uuid-767","identifier":"CC-767",%s,"parent":{"id":"uuid-764","identifier":"CC-764","parent":{"id":"uuid-761","identifier":"CC-761","parent":null}}}' "$prj" ;;
+  uuid-768) printf '{"id":"uuid-768","identifier":"CC-768",%s,"parent":{"id":"uuid-763","identifier":"CC-763","parent":{"id":"uuid-761","identifier":"CC-761","parent":null}}}' "$prj" ;;
+  uuid-780) printf '{"id":"uuid-780","identifier":"CC-780",%s,"parent":null}' "$prj" ;;
+  uuid-799) printf '{"id":"uuid-799","identifier":"CC-799",%s}' "$prj" ;;
+  uuid-800) printf '{"id":"uuid-800","identifier":"CC-800",%s,"parent":"uuid-761"}' "$prj" ;;
+  uuid-801) printf '[]' ;;
+  uuid-802) printf '{"id":"uuid-802","identifier":"CC-802",%s,"parent":{"id":"","identifier":"CC-761","parent":null}}' "$prj" ;;
+  uuid-830 | uuid-831) printf '{"id":"%s","identifier":"CC-%s",%s,"parent":%s}' "$1" "${1#uuid-}" "$prj" "$cycle_parent" ;;
+  uuid-840 | uuid-841) printf '{"id":"%s","identifier":"CC-%s","parent":null}' "$1" "${1#uuid-}" ;;
+  uuid-842 | uuid-843) printf '{"id":"%s","identifier":"CC-%s","project":"proj-1","parent":null}' "$1" "${1#uuid-}" ;;
+  uuid-844 | uuid-845) printf '{"id":"%s","identifier":"CC-%s","project":{"id":"","name":"Test"},"parent":null}' "$1" "${1#uuid-}" ;;
+  uuid-846 | uuid-847) printf '{"id":"%s","identifier":"CC-%s","project":null,"parent":null}' "$1" "${1#uuid-}" ;;
   *) printf 'null' ;;
   esac
 }
@@ -68,6 +85,34 @@ case "$query" in
 esac
 SH
 chmod +x "$TMP_ROOT/bin/curl"
+
+# Run this complete regression file with the unsupported macOS-era runtime.
+# The CLI must reject it before shared config loads or any API request occurs.
+if [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
+  payload_log="$TMP_ROOT/bash3-payloads.jsonl"
+  : >"$payload_log"
+  set +e
+  output=$(PATH="$TMP_ROOT/bin:$PATH" \
+    LINEAR_API_KEY=test-token \
+    CURL_PAYLOAD_LOG="$payload_log" \
+    bash "$TMP_ROOT/.agents/skills/linear/scripts/linear.sh" \
+      issues add-relation CC-763 --blocks CC-764 2>&1)
+  rc=$?
+  set -e
+  expected="Error: Linear CLI requires Bash 4.0 or newer; found Bash $BASH_VERSION. Install Bash 4+ and invoke linear.sh with that executable."
+  if [ "$rc" -eq 0 ] || [ "$output" != "$expected" ]; then
+    echo "FAIL Bash 3 runtime contract: expected a clear Bash 4+ diagnostic"
+    printf 'exit=%s\noutput=%s\n' "$rc" "$output"
+    exit 1
+  fi
+  if [ -s "$payload_log" ]; then
+    echo "FAIL Bash 3 runtime contract: CLI attempted an API request"
+    cat "$payload_log"
+    exit 1
+  fi
+  echo "all pass (unsupported Bash 3 runtime rejected before hierarchy validation)"
+  exit 0
+fi
 
 run_add_relation() {
   local payload_log="$1"
@@ -186,10 +231,60 @@ if [ "$(extract_prescription "$TMP_ROOT/err")" != "CC-761 CC-780" ]; then
   exit 1
 fi
 
+# Missing/wrong-typed hierarchy shapes must fail before issueRelationCreate.
+reject "missing parent key" CC-799 --blocks CC-780
+grep -q "Hierarchy validation failed closed" "$TMP_ROOT/err" || {
+  echo "FAIL missing parent key: missing fail-closed diagnostic"
+  exit 1
+}
+
+reject "non-object parent" CC-800 --blocks CC-780
+grep -q "Hierarchy validation failed closed" "$TMP_ROOT/err" || {
+  echo "FAIL non-object parent: missing fail-closed diagnostic"
+  exit 1
+}
+
+reject "non-object issue" CC-801 --blocks CC-780
+grep -q "Hierarchy validation failed closed" "$TMP_ROOT/err" || {
+  echo "FAIL non-object issue: missing fail-closed diagnostic"
+  exit 1
+}
+
+reject "empty parent ID" CC-802 --blocks CC-780
+grep -q "Hierarchy validation failed closed" "$TMP_ROOT/err" || {
+  echo "FAIL empty parent ID: missing fail-closed diagnostic"
+  exit 1
+}
+
+reject "same-parent repeated ancestor cycle" CC-830 --blocks CC-831
+grep -q "parent cycle detected" "$TMP_ROOT/err" || {
+  echo "FAIL same-parent repeated ancestor cycle: missing cycle diagnostic"
+  exit 1
+}
+
+reject "missing project" CC-840 --blocks CC-841
+grep -q "missing or malformed project data" "$TMP_ROOT/err" || {
+  echo "FAIL missing project: missing fail-closed diagnostic"
+  exit 1
+}
+
+reject "wrong-typed project" CC-842 --blocks CC-843
+grep -q "missing or malformed project data" "$TMP_ROOT/err" || {
+  echo "FAIL wrong-typed project: missing fail-closed diagnostic"
+  exit 1
+}
+
+reject "empty project ID" CC-844 --blocks CC-845
+grep -q "missing or malformed project data" "$TMP_ROOT/err" || {
+  echo "FAIL empty project ID: missing fail-closed diagnostic"
+  exit 1
+}
+
 # --- (d) relations the rule blesses still pass ---
 accept "siblings (CC-763 --blocks CC-764)" CC-763 --blocks CC-764
 accept "leaf siblings (CC-766 --blocks CC-768)" CC-766 --blocks CC-768
 accept "top-level (CC-761 --blocks CC-780)" CC-761 --blocks CC-780
 accept "blocked-by siblings (CC-764 --blocked-by CC-763)" CC-764 --blocked-by CC-763
+accept "explicit null projects" CC-846 --blocks CC-847
 
 echo "all pass"

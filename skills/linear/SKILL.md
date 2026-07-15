@@ -125,7 +125,7 @@ sortOrder → sort_order  # Manual sort position
 | Issue A blocked by Issue B (both in Linear) | Relation: `--blocked-by` |
 | Issue blocked by external factor (vendor, license) | `blocked` label + comment |
 
-Blocking relations must connect peers of one bundle: same direct parent, or both top-level (and same project). An issue cannot block its own ancestor or descendant — the parent-child hierarchy already encodes that dependency; use `--related` for traceability. Rejections for cross-subtree pairs prescribe the valid pair at the level where the subtrees separate.
+Blocking relations must connect peers of one bundle: same direct parent, or both top-level (and same project). An issue cannot block its own ancestor or descendant — the parent-child hierarchy already encodes that dependency; use `--related` for traceability. Rejections for cross-subtree pairs prescribe the valid pair at the level where the subtrees separate. Before either acceptance or remediation, the guard proves each parent chain reaches an explicit null root through well-formed edges with unique IDs/identifiers. It also requires an explicit null or well-formed project value; incomplete, cyclic, or malformed hierarchy data is rejected before mutation.
 
 ## Common Pitfalls
 
@@ -156,5 +156,6 @@ Blocking relations must connect peers of one bundle: same direct parent, or both
 
 ## Dependencies
 
+- Bash 4.0 or newer (macOS system Bash 3.2 is unsupported; install a newer Bash and invoke `linear.sh` with it)
 - `curl`
 - `jq`

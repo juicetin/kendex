@@ -10,6 +10,10 @@
 #   CC-701 (root) <- CC-702 <- ... <- CC-707 <- CC-708, CC-709   (8 levels)
 #   CC-701 <- CC-751 <- CC-752 <- ... <- CC-757                  (second branch)
 #   CC-9000 (root) <- CC-9001 <- ... <- CC-9120                  (121 levels)
+#   CC-850 <- CC-851 <- ... <- CC-855 <- CC-856 <- CC-857 <- CC-852
+#                                                    (cross-chunk parent cycle)
+#   CC-860, CC-861 -> P -> A -> B -> C -> D -> A
+#                    (same-parent cycle hidden beyond the eager selection)
 
 set -euo pipefail
 
@@ -44,6 +48,12 @@ parent_of() {
   CC-751) echo CC-701 ;; CC-752) echo CC-751 ;; CC-753) echo CC-752 ;;
   CC-754) echo CC-753 ;; CC-755) echo CC-754 ;; CC-756) echo CC-755 ;;
   CC-757) echo CC-756 ;;
+  CC-850) echo CC-851 ;; CC-851) echo CC-852 ;; CC-852) echo CC-853 ;;
+  CC-853) echo CC-854 ;; CC-854) echo CC-855 ;; CC-855) echo CC-856 ;;
+  CC-856) echo CC-857 ;; CC-857) echo CC-852 ;;
+  CC-860 | CC-861) echo CC-870 ;; CC-870) echo CC-871 ;;
+  CC-871) echo CC-872 ;; CC-872) echo CC-873 ;; CC-873) echo CC-874 ;;
+  CC-874) echo CC-871 ;;
   CC-9???)
     local n="${1#CC-}"
     if [ "$n" -gt 9000 ]; then printf 'CC-%d' "$((n - 1))"; fi
@@ -59,14 +69,14 @@ parent_of() {
 nested_issue() {
   local id="$1" depth="$2" p
   if [ "$depth" -eq 0 ]; then
-    printf '{"identifier":"%s"}' "$id"
+    printf '{"id":"uuid-%s","identifier":"%s"}' "${id#CC-}" "$id"
     return
   fi
   p="$(parent_of "$id")"
   if [ -z "$p" ]; then
-    printf '{"identifier":"%s","parent":null}' "$id"
+    printf '{"id":"uuid-%s","identifier":"%s","parent":null}' "${id#CC-}" "$id"
   else
-    printf '{"identifier":"%s","parent":%s}' "$id" "$(nested_issue "$p" $((depth - 1)))"
+    printf '{"id":"uuid-%s","identifier":"%s","parent":%s}' "${id#CC-}" "$id" "$(nested_issue "$p" $((depth - 1)))"
   fi
 }
 
@@ -143,7 +153,7 @@ for args in "CC-708 --blocks CC-701" "CC-701 --blocks CC-708"; do
   fi
 done
 
-# --- deep-but-valid siblings: accepted, no follow-up ancestor queries needed ---
+# --- deep-but-valid siblings: accepted after their root is proven ---
 if ! run_add_relation "$TMP_ROOT/payloads.jsonl" CC-708 --blocks CC-709 >"$TMP_ROOT/out" 2>"$TMP_ROOT/err"; then
   echo "FAIL deep siblings: expected acceptance, got rejection:"
   cat "$TMP_ROOT/err"
@@ -153,8 +163,8 @@ if ! jq -s -e 'any(.[]; .query | contains("issueRelationCreate"))' "$TMP_ROOT/pa
   echo "FAIL deep siblings: accepted relation never sent issueRelationCreate"
   exit 1
 fi
-if jq -s -e 'any(.[]; .query | contains("AncestorChunk"))' "$TMP_ROOT/payloads.jsonl" >/dev/null; then
-  echo "FAIL deep siblings: accept path should not need AncestorChunk queries"
+if ! jq -s -e 'any(.[]; .query | contains("AncestorChunk"))' "$TMP_ROOT/payloads.jsonl" >/dev/null; then
+  echo "FAIL deep siblings: full-depth accept path did not prove its root"
   cat "$TMP_ROOT/payloads.jsonl"
   exit 1
 fi
@@ -205,6 +215,48 @@ if [ "$(wc -l <"$TMP_ROOT/err")" -ne 1 ] || ! jq -e '.error' "$TMP_ROOT/err" >/d
 fi
 if jq -s -e 'any(.[]; .query | contains("issueRelationCreate"))' "$TMP_ROOT/payloads.jsonl" >/dev/null; then
   echo "FAIL chunk bound: rejected relation still sent issueRelationCreate"
+  exit 1
+fi
+
+# --- cycle crossing a chunk boundary: reject before relation mutation ---
+set +e
+run_add_relation "$TMP_ROOT/payloads.jsonl" CC-850 --blocks CC-701 >"$TMP_ROOT/out" 2>"$TMP_ROOT/err"
+rc=$?
+set -e
+if [ "$rc" -eq 0 ]; then
+  echo "FAIL cross-chunk cycle: expected rejection, got success"
+  exit 1
+fi
+if ! grep -q "parent cycle detected" "$TMP_ROOT/err"; then
+  echo "FAIL cross-chunk cycle: missing cycle diagnostic:"
+  cat "$TMP_ROOT/err"
+  exit 1
+fi
+if jq -s -e 'any(.[]; .query | contains("issueRelationCreate"))' "$TMP_ROOT/payloads.jsonl" >/dev/null; then
+  echo "FAIL cross-chunk cycle: rejected relation still sent issueRelationCreate"
+  exit 1
+fi
+
+# --- same-parent cycle hidden beyond eager selection: fail before shortcut ---
+set +e
+run_add_relation "$TMP_ROOT/payloads.jsonl" CC-860 --blocks CC-861 >"$TMP_ROOT/out" 2>"$TMP_ROOT/err"
+rc=$?
+set -e
+if [ "$rc" -eq 0 ]; then
+  echo "FAIL hidden same-parent cycle: expected rejection, got success"
+  exit 1
+fi
+if ! grep -q "parent cycle detected" "$TMP_ROOT/err"; then
+  echo "FAIL hidden same-parent cycle: missing cycle diagnostic:"
+  cat "$TMP_ROOT/err"
+  exit 1
+fi
+if ! jq -s -e 'any(.[]; .query | contains("AncestorChunk"))' "$TMP_ROOT/payloads.jsonl" >/dev/null; then
+  echo "FAIL hidden same-parent cycle: no root-proof query was sent"
+  exit 1
+fi
+if jq -s -e 'any(.[]; .query | contains("issueRelationCreate"))' "$TMP_ROOT/payloads.jsonl" >/dev/null; then
+  echo "FAIL hidden same-parent cycle: rejected relation still sent issueRelationCreate"
   exit 1
 fi
 

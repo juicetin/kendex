@@ -1,22 +1,17 @@
 #!/usr/bin/env bash
-# Regression test for #557 (reopened): the skill's scripts run under
-# `#!/usr/bin/env bash` with no Bash 4 guarantee (macOS ships system Bash
-# 3.2), so Bash-4-only builtins and declarations must not appear in shell
-# code. jq programs may use their own [-1]/negative indexing — this scans
-# for shell constructs only.
+# Regression test for #557: the Linear CLI has an explicit Bash 4+ contract.
+# Under Bash 3 this delegates to the full hierarchy regression, which proves
+# the clear preflight diagnostic and that no API request is attempted.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-
-violations="$(grep -rnE 'mapfile|readarray|declare -A|local -A' \
-  "$SKILL_DIR/scripts/lib" "$SKILL_DIR/scripts/commands" || true)"
-
-if [ -n "$violations" ]; then
-  echo "FAIL Bash-4-only constructs found (macOS system bash is 3.2):"
-  echo "$violations"
-  exit 1
+if [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
+  exec bash "$SCRIPT_DIR/issues-add-relation-hierarchy.test.sh"
 fi
+
+SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+help_output=$(bash "$SKILL_DIR/scripts/linear.sh" --help)
+grep -q "Bash 4.0 or newer. macOS system Bash 3.2 is unsupported." <<<"$help_output"
 
 echo "all pass"

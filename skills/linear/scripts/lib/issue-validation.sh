@@ -117,6 +117,78 @@ hierarchy_chain_contains() {
 	[[ -n "$id" ]] && grep -qxF "$id" <<<"$chain"
 }
 
+# hierarchy_chains_overlap CANDIDATES EXISTING — true when any non-empty
+# candidate is already present in the existing newline-separated chain.
+hierarchy_chains_overlap() {
+	local candidates="$1" existing="$2" candidate
+	while IFS= read -r candidate; do
+		if [[ -n "$candidate" ]] && hierarchy_chain_contains "$existing" "$candidate"; then
+			return 0
+		fi
+	done <<<"$candidates"
+	return 1
+}
+
+# validate_parent_chain_shape ISSUE_JSON SELECTED_DEPTH CONTEXT
+# A selected parent field is trustworthy only when the current issue is an
+# object and the field is explicitly present. A literal null proves a root;
+# an edge must be an object with non-empty GraphQL id/identifier fields. At
+# SELECTED_DEPTH the query intentionally stops selecting another parent field.
+validate_parent_chain_shape() {
+	local issue_json="$1" selected_depth="$2" context="$3"
+	if ! jq -e --argjson selected_depth "$selected_depth" '
+		def valid_chain($remaining):
+			(type == "object")
+			and ((.id | type) == "string" and (.id | length) > 0)
+			and ((.identifier | type) == "string" and (.identifier | length) > 0)
+			and (
+				if $remaining == 0 then true
+				elif (has("parent") | not) then false
+				elif .parent == null then true
+				elif (.parent | type) == "object" then
+					(.parent | valid_chain($remaining - 1))
+				else false
+				end
+			);
+		valid_chain($selected_depth)
+	' <<<"$issue_json" >/dev/null; then
+		echo "{\"error\": \"Hierarchy validation failed closed: Linear returned incomplete or malformed parent data for '$context'.\"}" >&2
+		return 1
+	fi
+	if ! jq -e '
+		def unique_chain_field($field):
+			[recurse(.parent; . != null) | .[$field]] as $values
+			| ($values | length) == ($values | unique | length);
+		unique_chain_field("id") and unique_chain_field("identifier")
+	' <<<"$issue_json" >/dev/null; then
+		echo "{\"error\": \"Hierarchy validation failed closed: parent cycle detected from repeated ancestor identity for '$context'.\"}" >&2
+		return 1
+	fi
+}
+
+# validate_issue_project_shape ISSUE_JSON CONTEXT
+# The top-level validation query selects project explicitly. Literal null is a
+# supported no-project value; otherwise the project must carry the fields used
+# by the same-project check and its diagnostic.
+validate_issue_project_shape() {
+	local issue_json="$1" context="$2"
+	if ! jq -e '
+		(type == "object")
+		and has("project")
+		and (
+			.project == null
+			or (
+				(.project | type) == "object"
+				and ((.project.id | type) == "string" and (.project.id | length) > 0)
+				and ((.project.name | type) == "string" and (.project.name | length) > 0)
+			)
+		)
+	' <<<"$issue_json" >/dev/null; then
+		echo "{\"error\": \"Hierarchy validation failed closed: Linear returned missing or malformed project data for '$context'.\"}" >&2
+		return 1
+	fi
+}
+
 # hoist_to_lca_child CHAIN OTHER_CHAIN
 # Print two lines: the entry of CHAIN whose parent is the lowest common
 # ancestor of both chains (the subtree root where the chains separate), then
@@ -124,7 +196,7 @@ hierarchy_chain_contains() {
 # share no ancestor). Callers must have excluded ancestor/descendant pairs.
 hoist_to_lca_child() {
 	local chain="$1" other="$2"
-	# Bash 3.2 (macOS system bash) lacks the array-read builtin.
+	# Read the newline-separated chain without an extra subprocess.
 	local -a entries=()
 	local line
 	while IFS= read -r line; do
@@ -168,7 +240,7 @@ blocking_level_violation_message() {
 	fi
 
 	# hoist_to_lca_child prints "candidate\nparent"; command substitution
-	# strips the trailing newline of an empty parent line (Bash 3.2 compatible).
+	# strips the trailing newline of an empty parent line.
 	local hoist1 hoist2
 	hoist1=$(hoist_to_lca_child "$chain1" "$chain2")
 	hoist2=$(hoist_to_lca_child "$chain2" "$chain1")
