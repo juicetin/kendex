@@ -13,6 +13,14 @@ export type BridgeEffortLevel = "low" | "medium" | "high" | "xhigh" | "max";
 
 const VALID_EFFORT_LEVELS = new Set<BridgeEffortLevel>(["low", "medium", "high", "xhigh", "max"]);
 
+/**
+ * Per-session control over claude.ai connector WRITE tools when connectors are
+ * enabled. `deny` (default) hides Gmail/Calendar/Drive mutating tools so
+ * connector chat sessions are read-only; `allow` exposes them (used only by the
+ * one-shot approved-write executor). Reads are always available.
+ */
+export type ConnectorWriteMode = "deny" | "allow";
+
 export interface Config {
 	enabled?: boolean;
 	/** Low-level Claude Agent SDK plumbing. Most users won't need these. */
@@ -28,6 +36,27 @@ export interface Config {
 		settingSources?: SettingSource[];
 		strictMcpConfig?: boolean;
 		pathToClaudeCodeExecutable?: string;
+		/**
+		 * Expose the authenticated Claude account's claude.ai cloud MCP
+		 * connectors (Gmail / Google Calendar / Google Drive, etc.) to the model.
+		 * Off by default so Pi owns tool execution and tokens stay lean. Also
+		 * settable via the CLAUDE_BRIDGE_ENABLE_CONNECTORS env var (env OR config
+		 * enables it). See docs/plans/claude-bridge-google-connectors.md.
+		 */
+		enableConnectors?: boolean;
+		/**
+		 * When connectors are enabled, whether their WRITE tools
+		 * (create/update/delete/label/etc.) are exposed. Defaults to `deny`
+		 * (read-only), enforced two ways: known write tools are removed from the
+		 * model's context (disallowedTools by exact id), and a PreToolUse hook
+		 * blocks any connector write tool by name prefix at call time (covers
+		 * future write tools). `allow` disables both — intended ONLY for a
+		 * one-shot approved-write executor process. Also settable via
+		 * CLAUDE_BRIDGE_CONNECTOR_WRITE=deny|allow (env wins over config). Any
+		 * value but exact `allow` is treated as `deny`. Ignored when connectors
+		 * are disabled.
+		 */
+		connectorWriteMode?: ConnectorWriteMode;
 	};
 	/** Extra Pi context forwarded to Claude Code on top of AGENTS.md + skills. */
 	promptContext?: {
@@ -46,8 +75,27 @@ function expandHome(input: string): string {
 	return input;
 }
 
-function piUserDir(): string {
+/**
+ * The Pi agent config dir: `PI_CODING_AGENT_DIR` when set, else `~/.pi/agent`.
+ * Every bridge default that used to hardcode `~/.pi/agent` routes through this
+ * so a host app that owns the agent dir owns those paths too.
+ */
+export function piUserDir(): string {
 	return resolve(expandHome(process.env.PI_CODING_AGENT_DIR?.trim() || "~/.pi/agent"));
+}
+
+/**
+ * Isolated mode (`CLAUDE_BRIDGE_ISOLATED=1`): a host app embedding the bridge
+ * declares that nothing outside its explicitly configured dirs may be read.
+ * Disables every cwd/home discovery fallback — the cwd AGENTS.md walk, project
+ * `.pi/` settings + claude-bridge.json, project APPEND_SYSTEM.md, and the
+ * `$PATH` claude executable search. Reads stay confined to `piUserDir()` (i.e.
+ * `PI_CODING_AGENT_DIR`) and the explicitly configured executable path.
+ * Default (unset) behavior for normal pi CLI users is unchanged.
+ */
+export function isolatedFromEnv(): boolean {
+	const v = (process.env.CLAUDE_BRIDGE_ISOLATED ?? "").trim().toLowerCase();
+	return v === "1" || v === "true" || v === "yes" || v === "on";
 }
 
 function asRecord(value: unknown): SettingsRecord | undefined {
@@ -111,6 +159,7 @@ function projectSettingsTrusted(settingsPath: string): boolean {
 
 function settingsPaths(cwd: string): string[] {
 	const user = join(piUserDir(), "settings.json");
+	if (isolatedFromEnv()) return [user];
 	const project = projectSettingsPath(cwd);
 	return projectSettingsTrusted(project) ? [user, project] : [user];
 }
@@ -155,6 +204,13 @@ function hasOwn(raw: SettingsRecord, key: string): boolean {
 	return Object.prototype.hasOwnProperty.call(raw, key);
 }
 
+export function normalizeConnectorWriteMode(value: unknown): ConnectorWriteMode | undefined {
+	if (typeof value !== "string") return undefined;
+	const normalized = value.trim().toLowerCase();
+	if (normalized === "deny" || normalized === "allow") return normalized;
+	return undefined;
+}
+
 export function normalizeEffortLevel(value: unknown): BridgeEffortLevel | undefined {
 	if (typeof value !== "string") return undefined;
 	const normalized = value.trim().toLowerCase();
@@ -195,6 +251,13 @@ function normalizeProviderConfig(provider: Config["provider"] | undefined): Conf
 	const modelEffortOverrides = normalizeModelEffortOverrides(raw.modelEffortOverrides);
 	if (modelEffortOverrides) out.modelEffortOverrides = modelEffortOverrides;
 	else delete out.modelEffortOverrides;
+	// Fail closed: legacy config files are merged raw, so an unvalidated
+	// connectorWriteMode (e.g. "Deny", "read-only", true) must not slip through as
+	// a truthy non-"allow" value. Drop anything that isn't exactly deny/allow so
+	// the resolver falls back to the default deny.
+	const connectorWriteMode = normalizeConnectorWriteMode(raw.connectorWriteMode);
+	if (connectorWriteMode) out.connectorWriteMode = connectorWriteMode;
+	else delete out.connectorWriteMode;
 	return out;
 }
 
@@ -216,6 +279,10 @@ function managerToConfig(raw: SettingsRecord): Partial<Config> {
 	}
 	const strictMcpConfig = boolFrom(raw, "strictMcpConfig");
 	if (strictMcpConfig !== undefined) provider.strictMcpConfig = strictMcpConfig;
+	const enableConnectors = boolFrom(raw, "enableConnectors");
+	if (enableConnectors !== undefined) provider.enableConnectors = enableConnectors;
+	const connectorWriteMode = normalizeConnectorWriteMode(raw.connectorWriteMode);
+	if (connectorWriteMode) provider.connectorWriteMode = connectorWriteMode;
 	const claudePath = stringFrom(raw, "pathToClaudeCodeExecutable");
 	if (claudePath) provider.pathToClaudeCodeExecutable = claudePath;
 
@@ -237,8 +304,9 @@ function managerToConfig(raw: SettingsRecord): Partial<Config> {
 
 export function loadConfig(cwd: string): Config {
 	const global = tryParseJson(join(piUserDir(), "claude-bridge.json"));
-	const projectSettings = projectSettingsPath(cwd);
-	const trustedProject = projectSettingsTrusted(projectSettings);
+	const isolated = isolatedFromEnv();
+	const projectSettings = isolated ? undefined : projectSettingsPath(cwd);
+	const trustedProject = projectSettings !== undefined && projectSettingsTrusted(projectSettings);
 	const project = trustedProject ? tryParseJson(join(dirname(projectSettings), "claude-bridge.json")) : {};
 	const manager = managerToConfig(readManagerConfig(cwd));
 	const provider = normalizeProviderConfig({ ...global.provider, ...project.provider, ...manager.provider });

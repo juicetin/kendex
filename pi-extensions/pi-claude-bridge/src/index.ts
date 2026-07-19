@@ -1,14 +1,13 @@
 import { calculateCost, type AssistantMessage, type AssistantMessageEventStream, type Context, type Model, type SimpleStreamOptions, type Tool } from "@earendil-works/pi-ai";
 import * as piAi from "@earendil-works/pi-ai";
 import { type ExtensionAPI, type ExtensionUIContext } from "@earendil-works/pi-coding-agent";
-import { createSdkMcpServer, query, type EffortLevel, type SDKMessage, type SDKUserMessage, type SettingSource, type SpawnOptions, type SpawnedProcess } from "@anthropic-ai/claude-agent-sdk";
+import { createSdkMcpServer, query, type EffortLevel, type HookCallback, type SDKMessage, type SDKUserMessage, type SettingSource, type SpawnOptions, type SpawnedProcess } from "@anthropic-ai/claude-agent-sdk";
 import type { Base64ImageSource, ContentBlockParam, MessageParam } from "@anthropic-ai/sdk/resources";
 import { createSession, deleteSession, openSession, repairToolPairing } from "cc-session-io";
 import { spawn as spawnProcess } from "child_process";
 import { createHash } from "crypto";
 import { accessSync, appendFileSync, chmodSync, constants as fsConstants, mkdirSync, readFileSync, realpathSync, statSync } from "fs";
 import { resolve as pathResolve } from "path";
-import { homedir } from "os";
 import { delimiter, dirname, join } from "path";
 import { PROVIDER_ID, messageContentToText, convertPiMessages } from "./convert.js";
 import { FABLE_FALLBACK_MODEL_ID, FABLE_MODEL_ID, buildModels, fallbackModelForPrimaryModel } from "./models.js";
@@ -17,7 +16,8 @@ import { verifyWrittenSession as _verifyWrittenSession } from "./session-verify.
 import { extractAllToolResults as _extractAllToolResults, type McpResult } from "./extract-tool-results.js";
 import { QueryContext, ctx, stackDepth, pushContext, popContext } from "./query-state.js";
 import { findUnpairedToolUses, summarizeMissingToolNames, type MissingToolResult } from "./tool-pairing-audit.js";
-import { loadConfig, normalizeEffortLevel, recordProjectTrust, type Config } from "./config.js";
+import { isolatedFromEnv, loadConfig, normalizeConnectorWriteMode, normalizeEffortLevel, piUserDir, recordProjectTrust, type Config, type ConnectorWriteMode } from "./config.js";
+import { decideRegistration, hasClaudeCredentials } from "./auth-presence.js";
 import { extractAgentsAppend } from "./agents-md.js";
 import { buildPromptContextAppend } from "./prompt-context.js";
 import { jsonSchemaToZodShape } from "./typebox-to-zod.js";
@@ -32,14 +32,14 @@ const newAssistantMessageEventStream: () => AssistantMessageEventStream =
 		: () => new _piAi.AssistantMessageEventStream();
 
 // --- Debug logging ---
-// CLAUDE_BRIDGE_DEBUG=1 enables debug logging to ~/.pi/agent/claude-bridge.log
+// CLAUDE_BRIDGE_DEBUG=1 enables debug logging to <piUserDir>/claude-bridge.log
+// (~/.pi/agent/claude-bridge.log unless PI_CODING_AGENT_DIR points elsewhere).
 
 const DEBUG = process.env.CLAUDE_BRIDGE_DEBUG === "1";
-const DEBUG_LOG_PATH = process.env.CLAUDE_BRIDGE_DEBUG_PATH || join(homedir(), ".pi", "agent", "claude-bridge.log");
-const DEFAULT_DIAG_LOG_PATH = join(homedir(), ".pi", "agent", "claude-bridge-diag.log");
+const DEBUG_LOG_PATH = process.env.CLAUDE_BRIDGE_DEBUG_PATH || join(piUserDir(), "claude-bridge.log");
 
 function diagLogPath(): string {
-	return process.env.CLAUDE_BRIDGE_DIAG_PATH || DEFAULT_DIAG_LOG_PATH;
+	return process.env.CLAUDE_BRIDGE_DIAG_PATH || join(piUserDir(), "claude-bridge-diag.log");
 }
 
 // Ensure log directories exist when debug is enabled
@@ -81,9 +81,13 @@ function executableFromPath(name: string): string | undefined {
 	return undefined;
 }
 
-function resolveClaudeExecutable(configured?: string): string | undefined {
+export function resolveClaudeExecutable(configured?: string): string | undefined {
 	const trimmed = configured?.trim();
 	if (trimmed) return trimmed;
+	// Isolated mode: never run whatever `claude` happens to be on $PATH — the
+	// host app either pins an executable in config or gets the SDK's bundled
+	// default, which ships inside the host bundle.
+	if (isolatedFromEnv()) return undefined;
 	return executableFromPath("claude") ?? executableFromPath("claude-code");
 }
 
@@ -456,20 +460,31 @@ export function __testGetBridgeIntegrityState(): { sharedSession: SessionState |
 
 // --- Constants ---
 
-// Global key to prevent re-registration of the provider across module reloads.
+// Two process-global tokens govern provider registration across module reloads.
+// Extensions like pi-subagents spawn a subagent that loads THIS module again as
+// a fresh (non-primary) instance. Two failure modes must be prevented:
+//   (1) a subagent's registerProvider() overwriting the parent's `streamSimple`
+//       in the shared ModelRegistry — the parent would then deliver tool results
+//       through the subagent's empty-state streamSimple and break tool pairing;
+//   (2) a subagent STEALING registration ownership: if the parent loaded
+//       uncredentialed and the user logged in mid-session, a later subagent load
+//       would see credentialed + no-owner and claim ownership + register ITS
+//       streamSimple, split-braining the shared session/ctx.
 //
-// Extensions like pi-subagents spawn a subagent and it loads this module
-// again. Without this guard, the subagent's call to registerProvider() would
-// overwrite the parent's `streamSimple` function reference in the shared
-// ModelRegistry. When the parent later delivers a tool result, it would call
-// the subagent's `streamSimple` (which has empty state) instead of its own.
+// PRIMARY_INSTANCE_KEY — claimed UNCONDITIONALLY (regardless of credentials) by
+// the first-loaded module instance. ONLY the primary instance may ever
+// register, unregister, or claim the stream guard. Non-primary instances
+// (subagents) always no-op. This is the authority token; it closes (2).
 //
-// By storing the active streamSimple in a Symbol.for() global (shared across all
-// module instances), we ensure only the FIRST instance to register takes effect.
-// Subsequent instances wrap the stored function instead of overwriting it.
+// ACTIVE_STREAM_SIMPLE_KEY — holds the registered instance's `streamSimple`.
+// Only the primary claims it, and only while a registration is live. It doubles
+// as the "already registered" flag (guard === our streamSimple) and the routing
+// target for reentrant subagent calls; it closes (1).
 //
-// On session_shutdown (including /reload), clearSession() resets this so a fresh
-// registration can occur for the next session.
+// Both are released on session_shutdown (incl. /reload) by releaseProviderTokens
+// so the next module load starts clean. See applyProviderRegistration for the
+// state machine and auth-presence.ts/decideRegistration for the pure decision.
+const PRIMARY_INSTANCE_KEY = Symbol.for("claude-bridge:primaryInstance");
 const ACTIVE_STREAM_SIMPLE_KEY = Symbol.for("claude-bridge:activeStreamSimple");
 const COMMANDS_REGISTERED_KEY = Symbol.for("claude-bridge:commandsRegistered");
 
@@ -504,6 +519,207 @@ export const CLAUDE_BRIDGE_TOOL_ISOLATION = {
 	disallowedTools: DISALLOWED_BUILTIN_TOOLS,
 	allowedTools: [`mcp__${MCP_SERVER_NAME}__*`],
 } satisfies Pick<NonNullable<Parameters<typeof query>[0]["options"]>, "tools" | "allowedTools" | "disallowedTools">;
+
+// --- Claude account cloud MCP connectors (Gmail / Calendar / Drive) ---
+//
+// By default the bridge suppresses claude.ai cloud MCP servers (see the
+// ENABLE_CLAUDEAI_MCP_SERVERS="0" note near the query builder) so Pi owns tool
+// execution and tokens stay lean. This opt-in flag lets the authenticated
+// Claude account's authorized Google connectors flow through to the model,
+// exposing Gmail/Calendar/Drive tools the account has connected. Gated so the
+// default behavior is unchanged. See
+// docs/plans/claude-bridge-google-connectors.md.
+export function connectorsEnabledFromEnv(): boolean {
+	const v = (process.env.CLAUDE_BRIDGE_ENABLE_CONNECTORS ?? "").trim().toLowerCase();
+	return v === "1" || v === "true" || v === "yes" || v === "on";
+}
+
+// Connectors are enabled if EITHER the env var is truthy OR the resolved bridge
+// config sets `provider.enableConnectors`. Env is the simplest per-process knob
+// (one sidecar per Claude account sets it in its child env); config lets a host
+// app enable it declaratively via its written settings.json.
+export function connectorsEnabledFor(config?: Config): boolean {
+	return connectorsEnabledFromEnv() || config?.provider?.enableConnectors === true;
+}
+
+// Cloud MCP connector tool namespaces auto-allowed when connectors are enabled.
+// Names match Claude Code's claude.ai connector servers.
+export const CLAUDE_AI_CONNECTOR_TOOL_PATTERNS = [
+	"mcp__claude_ai_Gmail__*",
+	"mcp__claude_ai_Google_Calendar__*",
+	"mcp__claude_ai_Google_Drive__*",
+];
+
+// Claude Code registers a Claude account's cloud connectors as DEFERRED tools
+// that the model must load via ToolSearch (and enumerate via the MCP-resource
+// tools). The default bridge isolation disallows all three so Pi owns tool
+// discovery — but that hides the connectors from the model entirely. When
+// connectors are enabled we must let these through so Gmail/Calendar/Drive are
+// discoverable. Verified: disallowing ToolSearch reliably yields NO_CONNECTORS.
+export const CONNECTOR_DISCOVERY_TOOLS = ["ToolSearch", "ListMcpResources", "ReadMcpResource"];
+
+// --- Connector WRITE tool control (read-inline / write-by-approval) ---
+//
+// Connector tools execute INSIDE claude via the bridge, so Memsira's Pi-level
+// ConsentGate never sees them. To keep every connector WRITE explicit + gated,
+// connector chat sessions run read-only (writes denied); the model performs a
+// write only through a gated Pi custom-tool whose app-side dispatcher runs a
+// ONE-SHOT write-enabled bridge query. This block is the bridge lever for that:
+// deny connector write tools by default, allow them only for that executor.
+//
+// Cloud connector server namespaces (the `mcp__<server>__` prefix).
+const CONNECTOR_NS_GMAIL = "mcp__claude_ai_Gmail__";
+const CONNECTOR_NS_CALENDAR = "mcp__claude_ai_Google_Calendar__";
+const CONNECTOR_NS_DRIVE = "mcp__claude_ai_Google_Drive__";
+const CONNECTOR_NAMESPACES = [CONNECTOR_NS_GMAIL, CONNECTOR_NS_CALENDAR, CONNECTOR_NS_DRIVE];
+
+// Read-verb prefixes: a connector tool whose name (the segment after its
+// namespace) starts with one of these is a non-mutating READ and always stays
+// available. Everything else on a connector namespace is treated as a WRITE.
+// Observed reads (POC): list_labels, search_threads, get_message, list_calendars,
+// list_events, get_event — i.e. list_/search_/get_; the rest are common Google
+// read verbs. Keep this list tight: mis-classifying a read as a write only
+// blocks a read (safe, easily fixed), whereas mis-classifying a write as a read
+// would open an ungated mutation.
+const CONNECTOR_READ_PREFIXES = [
+	"list_", "search_", "get_", "read_", "fetch_", "find_",
+	"download_", "describe_", "query_", "count_", "view_",
+];
+
+// Explicit known write tool names (current claude.ai connectors). Passed to the
+// SDK disallowedTools so today's writes are removed from the model's context by
+// exact tool id (the CLI matcher only supports exact ids or a whole-server glob).
+export const CONNECTOR_WRITE_TOOLS = [
+	`${CONNECTOR_NS_GMAIL}create_draft`,
+	`${CONNECTOR_NS_GMAIL}create_label`,
+	`${CONNECTOR_NS_GMAIL}label_message`,
+	`${CONNECTOR_NS_GMAIL}label_thread`,
+	`${CONNECTOR_NS_GMAIL}unlabel_message`,
+	`${CONNECTOR_NS_GMAIL}unlabel_thread`,
+	`${CONNECTOR_NS_GMAIL}apply_sensitive_label`,
+	`${CONNECTOR_NS_GMAIL}remove_sensitive_label`,
+	`${CONNECTOR_NS_CALENDAR}create_event`,
+	`${CONNECTOR_NS_CALENDAR}update_event`,
+	`${CONNECTOR_NS_CALENDAR}delete_event`,
+	`${CONNECTOR_NS_CALENDAR}respond_to_event`,
+	`${CONNECTOR_NS_DRIVE}create_file`,
+	`${CONNECTOR_NS_DRIVE}copy_file`,
+];
+
+// Classify a connector tool name as a WRITE (mutating) tool. FAIL CLOSED: a tool
+// on a connector namespace is a write UNLESS its verb is a known read prefix, so
+// not-yet-known future write tools (e.g. Gmail send_message, Drive delete_file,
+// Calendar add_attendee) are classified as writes and blocked in a read-only
+// session. Non-connector tools (Pi custom-tools, ToolSearch, MCP-resource tools)
+// are never connector writes → false. Used by connectorWriteDenyHook and by
+// callers (e.g. the one-shot write executor) that enumerate live connector tools.
+export function isConnectorWriteTool(name: string): boolean {
+	const ns = CONNECTOR_NAMESPACES.find((n) => name.startsWith(n));
+	if (!ns) return false;
+	const tool = name.slice(ns.length);
+	return !CONNECTOR_READ_PREFIXES.some((prefix) => tool.startsWith(prefix));
+}
+
+// Connector write mode from the env override. `allow` exposes connector write
+// tools; `deny` hides them. Returns undefined when unset so config can decide.
+export function connectorWriteModeFromEnv(): ConnectorWriteMode | undefined {
+	const v = (process.env.CLAUDE_BRIDGE_CONNECTOR_WRITE ?? "").trim().toLowerCase();
+	if (v === "allow") return "allow";
+	if (v === "deny") return "deny";
+	return undefined;
+}
+
+// Resolve the connector write mode: env wins over config, default `deny`
+// (mirrors connectorsEnabledFor's env-first precedence). Only meaningful when
+// connectors are enabled; connector chat sessions keep the default deny and the
+// one-shot approved-write executor sets allow (env or config).
+//
+// FAIL CLOSED: writes are enabled ONLY by an explicit, validated `allow`. The
+// config value is re-normalized here (defense in depth over normalizeProviderConfig)
+// so a raw legacy-config value like "Deny"/"read-only"/true can never be treated
+// as a truthy non-deny and silently open writes — anything but exact allow → deny.
+export function connectorWriteModeFor(config?: Config): ConnectorWriteMode {
+	const resolved = connectorWriteModeFromEnv() ?? normalizeConnectorWriteMode(config?.provider?.connectorWriteMode);
+	return resolved === "allow" ? "allow" : "deny";
+}
+
+// PreToolUse hook that hard-blocks connector WRITE tools at call time. Hooks run
+// regardless of permissionMode (we use bypassPermissions), so this — not the
+// static deny lists — is the real prefix-based runtime enforcement of
+// isConnectorWriteTool. disallowedTools removes today's KNOWN writes from model
+// context, but the CLI matcher can't glob the tool segment, so a future write
+// tool (e.g. mcp__claude_ai_Gmail__send_message, ..._Drive__delete_file) would
+// otherwise be callable in a read-only session; this hook denies it by prefix.
+export function connectorWriteDenyHook(): HookCallback {
+	return async (input) => {
+		// The CLI treats a hook error/timeout as an EMPTY hook output and lets
+		// the tool call proceed (fail OPEN) — so any exception in this body
+		// must convert to a deny, never an allow. Today's body is pure string
+		// checks on schema-validated input; the catch pins that invariant for
+		// whatever gets added here later.
+		try {
+			if (input.hook_event_name !== "PreToolUse") return { continue: true };
+			if (!isConnectorWriteTool(input.tool_name)) return { continue: true };
+			return connectorWriteDenyOutput(String(input.tool_name));
+		} catch {
+			const toolName = typeof (input as { tool_name?: unknown })?.tool_name === "string"
+				? (input as { tool_name: string }).tool_name
+				: "<unknown>";
+			return connectorWriteDenyOutput(toolName);
+		}
+	};
+}
+
+function connectorWriteDenyOutput(toolName: string) {
+	return {
+		hookSpecificOutput: {
+			hookEventName: "PreToolUse" as const,
+			permissionDecision: "deny" as const,
+			permissionDecisionReason:
+				`Connector write tool "${toolName}" is blocked in read-only connector mode. ` +
+				`Connector writes must go through Memsira's gated approval flow.`,
+		},
+	};
+}
+
+// Connector query-option fragment: tool isolation (allow/deny lists) plus, when
+// connectors are enabled and writes are denied, the runtime PreToolUse write
+// hook. Spread into the SDK query options; continuation queries inherit it via
+// `{ ...queryOptions }`. Exported so the wiring is unit-testable end to end.
+export function connectorQueryOptions(connectorsEnabled: boolean, writeMode: ConnectorWriteMode = "deny"): Partial<Pick<NonNullable<Parameters<typeof query>[0]["options"]>, "tools" | "allowedTools" | "disallowedTools" | "hooks">> {
+	const isolation = toolIsolationForQuery(connectorsEnabled, writeMode);
+	// Only enforce (and only meaningful) when connectors are on and writes denied.
+	if (!connectorsEnabled || writeMode === "allow") return isolation;
+	return { ...isolation, hooks: { PreToolUse: [{ hooks: [connectorWriteDenyHook()] }] } };
+}
+
+// Tool isolation for a query. When connectors are enabled we still remove
+// Claude Code's filesystem/shell built-ins (via disallowedTools; Pi owns those)
+// and auto-allow the cloud connector tool namespaces so the model can call
+// Gmail/Calendar/Drive.
+//
+// Critically, we must OMIT `tools: []` in the connector path: an empty --tools
+// allowlist strips the claude.ai cloud MCP connector tools from the model's
+// view (verified — Pi's SDK-injected custom-tools survive it, but connectors do
+// not). Dropping `tools` leaves the connectors visible; disallowedTools still
+// hard-denies the built-ins so Pi keeps ownership of file/shell/web tools.
+export function toolIsolationForQuery(connectorsEnabled: boolean, writeMode: ConnectorWriteMode = "deny"): Partial<Pick<NonNullable<Parameters<typeof query>[0]["options"]>, "tools" | "allowedTools" | "disallowedTools">> {
+	if (!connectorsEnabled) return CLAUDE_BRIDGE_TOOL_ISOLATION;
+	// Keep ToolSearch + MCP-resource tools available so the model can discover the
+	// deferred cloud connector tools; still block file/shell/web built-ins.
+	const disallowedTools = DISALLOWED_BUILTIN_TOOLS.filter((t) => !CONNECTOR_DISCOVERY_TOOLS.includes(t));
+	// Deny connector WRITE tools unless writes are explicitly allowed (fail
+	// closed: any mode but exact "allow" is treated as read-only). This removes
+	// today's KNOWN writes from the model's context by exact id; deny rules take
+	// precedence over the CLAUDE_AI_CONNECTOR_TOOL_PATTERNS allow rules below, so
+	// reads stay available. Runtime enforcement covering unknown/future write
+	// tools is done by connectorWriteDenyHook — see connectorQueryOptions.
+	if (writeMode !== "allow") disallowedTools.push(...CONNECTOR_WRITE_TOOLS);
+	return {
+		disallowedTools,
+		allowedTools: [...CLAUDE_BRIDGE_TOOL_ISOLATION.allowedTools, ...CLAUDE_AI_CONNECTOR_TOOL_PATTERNS],
+	};
+}
 
 // --- Session persistence ---
 
@@ -1762,6 +1978,92 @@ async function consumeQuery(
 	return { capturedSessionId };
 }
 
+// Claim the primary-instance token for this module instance if unclaimed, and
+// report whether this instance is the primary. First-loaded instance wins,
+// UNCONDITIONALLY (before any credential check), so a later subagent load can
+// never become primary and steal registration ownership.
+function claimPrimaryInstance(): boolean {
+	const g = globalThis as Record<symbol, any>;
+	if (!g[PRIMARY_INSTANCE_KEY]) g[PRIMARY_INSTANCE_KEY] = streamClaudeAgentSdk;
+	return g[PRIMARY_INSTANCE_KEY] === streamClaudeAgentSdk;
+}
+
+// Release both process-global tokens this instance owns. Called on
+// session_shutdown (incl. /reload) so the freshly loaded instance starts clean.
+// NOTE: this does NOT unregister the provider — the ModelRegistry's
+// registeredProviders is a process-lifetime Map that survives module reload, so
+// retraction on logout is handled by applyProviderRegistration's defensive
+// unregister on the next load/session_start, not here.
+function releaseProviderTokens(event: string): void {
+	const g = globalThis as Record<symbol, any>;
+	if (g[ACTIVE_STREAM_SIMPLE_KEY] === streamClaudeAgentSdk) {
+		debug(`${event}: clearing ACTIVE_STREAM_SIMPLE_KEY`);
+		g[ACTIVE_STREAM_SIMPLE_KEY] = undefined;
+	}
+	if (g[PRIMARY_INSTANCE_KEY] === streamClaudeAgentSdk) {
+		debug(`${event}: clearing PRIMARY_INSTANCE_KEY`);
+		g[PRIMARY_INSTANCE_KEY] = undefined;
+	}
+}
+
+// Conditional (un)registration driven by real credential presence + instance
+// primacy. Run at extension load, on every session_start, and at pre-spawn
+// (fail-fast) so a `claude login` / logout is reflected without a /reload.
+//
+// decideRegistration encodes the pure state machine; this wrapper performs the
+// matching token mutations so tokens and registration never diverge:
+//   - register:   claim the stream guard, THEN registerProvider. If register
+//     throws/queue-fails, release the stream guard (but keep primacy) so a
+//     later re-check can retry cleanly (self-healing); errors are swallowed so
+//     a session_start handler can't crash the dispatch.
+//   - unregister: pi.unregisterProvider (idempotent), THEN release the stream
+//     guard if we own it. Defensive even when we never registered — this is the
+//     only retraction path for a stale registration surviving /reload. At LOAD
+//     the SDK's unregister only filters the pending-registration queue and can't
+//     mutate the persistent registry (loader.js), so the effective retraction
+//     lands on the post-load session_start re-check; the load-time call is a
+//     harmless idempotent no-op that also cancels any same-pass queued register.
+// Non-primary instances (subagents) always decide noop and touch nothing.
+function applyProviderRegistration(trigger: string): void {
+	const pi = extensionApi;
+	if (!pi) { debug(`${trigger}: applyProviderRegistration skipped — no extensionApi`); return; }
+	const g = globalThis as Record<symbol, any>;
+	const isPrimary = claimPrimaryInstance();
+	const credentialed = hasClaudeCredentials();
+	const registered = g[ACTIVE_STREAM_SIMPLE_KEY] === streamClaudeAgentSdk;
+	const decision = decideRegistration({ credentialed, isPrimary, registered });
+	debug(`${trigger}: registration decision=${decision} credentialed=${credentialed} isPrimary=${isPrimary} registered=${registered} (module=${moduleInstanceId})`);
+	if (decision === "register") {
+		// Claim ordering: stream guard BEFORE registerProvider so a concurrent
+		// subagent can never observe a registered provider without an owner.
+		g[ACTIVE_STREAM_SIMPLE_KEY] = streamClaudeAgentSdk;
+		try {
+			pi.registerProvider(PROVIDER_ID, {
+				baseUrl: "claude-bridge",
+				apiKey: "not-used",
+				api: "claude-bridge",
+				models: MODELS,
+				// Cast: pi-ai AssistantMessageEventStream diamond dep between pi-coding-agent and pi-agent-core
+				streamSimple: streamClaudeAgentSdk as any,
+			});
+		} catch (err) {
+			// Self-heal: release ONLY the stream guard we just claimed so a later
+			// re-check (primary + credentialed + not-registered → register) retries.
+			// Keep PRIMARY_INSTANCE_KEY: releasing it would reopen the subagent
+			// ownership-steal window, and retry does not need it released.
+			if (g[ACTIVE_STREAM_SIMPLE_KEY] === streamClaudeAgentSdk) g[ACTIVE_STREAM_SIMPLE_KEY] = undefined;
+			debug(`${trigger}: registerProvider threw; released stream guard for retry (kept primary):`, err);
+		}
+	} else if (decision === "unregister") {
+		try {
+			pi.unregisterProvider(PROVIDER_ID);
+		} catch (err) {
+			debug(`${trigger}: unregisterProvider threw (ignored):`, err);
+		}
+		if (g[ACTIVE_STREAM_SIMPLE_KEY] === streamClaudeAgentSdk) g[ACTIVE_STREAM_SIMPLE_KEY] = undefined;
+	}
+}
+
 /** Provider entry point. Pi calls this for each new prompt and each tool result.
  *  Two cases: tool result delivery (active query) or fresh query. */
 function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: SimpleStreamOptions): AssistantMessageEventStream {
@@ -1861,6 +2163,34 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 
 	// --- Fresh query ---
 
+	// Fail-fast credential re-check (only for a fresh query — NEVER for
+	// tool-result delivery of an in-flight query, handled above, where creds were
+	// valid at start and failing mid-turn would break tool pairing). This bounds
+	// the retraction-latency window from "next session boundary" to "first use":
+	// if credentials vanished since the last session_start, (a) trigger the same
+	// re-evaluation applyProviderRegistration does (primary-only; retracts the
+	// stale registration), and (b) fail this request with a clear, actionable
+	// message instead of letting the SDK spawn die with a generic error. The
+	// check is cheap (existsSync + env reads only, no credential contents).
+	if (!hasClaudeCredentials()) {
+		try { applyProviderRegistration("pre-spawn"); } catch { /* best effort */ }
+		const message = "Claude account not connected — connect an account (or run `claude login`) and retry.";
+		debug(`provider: pre-spawn credential check failed; failing fast: ${message}`);
+		const errorOutput: AssistantMessage = {
+			role: "assistant", content: [],
+			api: model.api, provider: model.provider, model: model.id,
+			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+			stopReason: "error", timestamp: Date.now(),
+			errorMessage: message,
+		};
+		queueMicrotask(() => {
+			stream.push({ type: "error", reason: "error", error: errorOutput });
+			stream.end();
+		});
+		return stream;
+	}
+
 	// 1. Determine reentrancy and push parent context if needed.
 	const isReentrant = ctx().activeQuery !== null;
 	if (isReentrant) pushContext();
@@ -1902,6 +2232,13 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	const mcpServers = buildMcpServers(mcpTools, ctx());
 	const bridgeConfig = loadConfig(cwd);
 	const providerSettings = bridgeConfig.provider ?? {};
+	// Whether to expose the Claude account's claude.ai cloud MCP connectors
+	// (Gmail/Calendar/Drive). Enabled via env or config; drives setting-sources,
+	// tool isolation, and the ENABLE_CLAUDEAI_MCP_SERVERS child-env gate below.
+	const enableCloudMcp = connectorsEnabledFor(bridgeConfig);
+	// Connector WRITE control: read-only by default (writes denied); the one-shot
+	// approved-write executor sets CLAUDE_BRIDGE_CONNECTOR_WRITE=allow / config.
+	const connectorWriteMode = connectorWriteModeFor(bridgeConfig);
 	const appendSystemPrompt = providerSettings.appendSystemPrompt !== false;
 	const agentsAppend = appendSystemPrompt ? extractAgentsAppend() : undefined;
 	const skillsAppend = appendSystemPrompt ? extractSkillsBlock(context.systemPrompt) : undefined;
@@ -1913,9 +2250,16 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	// SDK uses isolation mode and avoids filesystem settings. If users turn that
 	// off, load user/project settings but pass --strict-mcp-config so Claude Code
 	// ignores auto-discovered filesystem MCP servers while Pi owns tool execution.
-	const settingSources: SettingSource[] | undefined = appendSystemPrompt
-		? undefined
-		: providerSettings.settingSources ?? ["user", "project"];
+	// claude.ai cloud MCP connectors only load when Claude Code resolves its
+	// filesystem setting sources. The SDK treats settingSources=undefined as
+	// isolation (no sources), which drops the connectors even with
+	// ENABLE_CLAUDEAI_MCP_SERVERS=1. When connectors are enabled we force the CLI
+	// default source set so Gmail/Calendar/Drive surface.
+	const settingSources: SettingSource[] | undefined = enableCloudMcp
+		? (providerSettings.settingSources ?? ["user", "project", "local"])
+		: appendSystemPrompt
+			? undefined
+			: providerSettings.settingSources ?? ["user", "project"];
 	const strictMcpConfigEnabled = !appendSystemPrompt && providerSettings.strictMcpConfig !== false;
 	const claudeExecutable = resolveClaudeExecutable(providerSettings.pathToClaudeCodeExecutable);
 	const claudeExecutablePreflight = claudeExecutable ? preflightClaudeExecutable(claudeExecutable, cwd) : undefined;
@@ -1947,12 +2291,14 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	// also autocompact would double-flush the prompt cache and races pi's
 	// threshold with CC's, including CC's anti-thrashing guard (issue #8).
 	// Manual /compact in CC still works (we never invoke it).
-	const childEnv = { ...process.env, ENABLE_CLAUDEAI_MCP_SERVERS: "0", DISABLE_AUTO_COMPACT: "1" };
+	// When connectors are enabled, allow claude.ai cloud MCP servers so the
+	// authenticated account's Gmail/Calendar/Drive tools load. Default stays "0".
+	const childEnv = { ...process.env, ENABLE_CLAUDEAI_MCP_SERVERS: enableCloudMcp ? "1" : "0", DISABLE_AUTO_COMPACT: "1" };
 	const queryOptions: NonNullable<Parameters<typeof query>[0]["options"]> = {
 		cwd,
 		model: model.id,
 		env: childEnv,
-		...CLAUDE_BRIDGE_TOOL_ISOLATION,
+		...connectorQueryOptions(enableCloudMcp, connectorWriteMode),
 		permissionMode: "bypassPermissions",
 		includePartialMessages: true,
 		...(fallbackModel ? { fallbackModel } : {}),
@@ -1975,7 +2321,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 		`model=${model.id} msgs=${context.messages.length} tools=${mcpTools.length}`,
 		`resume=${resumeSessionId?.slice(0, 8) ?? "none"} effort=${effort ?? "default"}`,
 		`fallback=${fallbackModel ?? "none"}`,
-		`appendSys=${appendSystemPrompt} promptCtx=${promptContextAppend.labels.join(",") || "none"} strictMcp=${strictMcpConfigEnabled} fastMode=${providerSettings.fastMode === true}`,
+		`appendSys=${appendSystemPrompt} promptCtx=${promptContextAppend.labels.join(",") || "none"} strictMcp=${strictMcpConfigEnabled} fastMode=${providerSettings.fastMode === true} connectors=${enableCloudMcp}`,
 		`claudeExec=${claudeExecutablePreflight ? `${claudeExecutablePreflight.fileType}:${claudeExecutablePreflight.path}` : "sdk-default"}`,
 		`prompt=${promptText.slice(0, 60)}${promptBlocks ? " [+images]" : ""}`);
 
@@ -2259,20 +2605,15 @@ export default function (pi: ExtensionAPI) {
 		return;
 	}
 
-	// Reset shared session on pi session lifecycle events
+	// Reset shared (Claude) conversation state on pi session lifecycle events.
+	// Registration tokens are managed separately by applyProviderRegistration
+	// (load / session_start / pre-spawn) and releaseProviderTokens (shutdown), so
+	// a mid-session credential flip is handled while token ownership is intact.
 	const clearSession = (event: string) => {
 		debug(`${event}: clearing session ${sharedSession?.sessionId?.slice(0, 8) ?? "none"}`);
 		sharedSession = null;
-
-		// Clear the global streamSimple if this instance registered it.
-		// This allows /reload to work — the old instance clears the flag so
-		// the new instance can register fresh without wrapping stale state.
-		const g = globalThis as Record<symbol, any>;
-		if (g[ACTIVE_STREAM_SIMPLE_KEY] === streamClaudeAgentSdk) {
-			debug(`${event}: clearing ACTIVE_STREAM_SIMPLE_KEY`);
-			g[ACTIVE_STREAM_SIMPLE_KEY] = undefined;
-		}
 	};
+
 	pi.on("session_start", (event, ctx) => {
 		recordProjectTrust(ctx);
 		piUI = ctx.ui;
@@ -2284,8 +2625,14 @@ export default function (pi: ExtensionAPI) {
 		// them would --resume the parent's Claude jsonl and leak conversation past the
 		// fork point. Letting the first fork turn rebuild is the correct path.
 		if (event.reason === "startup" || event.reason === "resume") restoreSharedSessionFromPi(ctx);
+		// Live availability flip: re-evaluate credential presence every
+		// session_start so login/logout since load is reflected without /reload.
+		applyProviderRegistration(`session_start:${event.reason}`);
 	});
-	pi.on("session_shutdown", () => clearSession("session_shutdown"));
+	pi.on("session_shutdown", () => {
+		clearSession("session_shutdown");
+		releaseProviderTokens("session_shutdown");
+	});
 	pi.on("message_end", (event, ctx) => {
 		const message = (event as { message?: AssistantMessage }).message;
 		if (message?.role === "assistant" && message.provider === PROVIDER_ID) schedulePersistSharedSession(ctx);
@@ -2312,30 +2659,14 @@ export default function (pi: ExtensionAPI) {
 
 	// --- Provider ---
 	//
-	// Guard against re-registration when the module is loaded multiple times
-	// (e.g., when spawning subagents). The shared ModelRegistry would otherwise
-	// overwrite the parent's streamSimple, breaking tool result delivery.
-	// See ACTIVE_STREAM_SIMPLE_KEY for the full mechanism.
-
-	const g = globalThis as Record<symbol, any>;
-	if (!g[ACTIVE_STREAM_SIMPLE_KEY]) {
-		// First instance: store our streamSimple and register.
-		g[ACTIVE_STREAM_SIMPLE_KEY] = streamClaudeAgentSdk;
-		pi.registerProvider(PROVIDER_ID, {
-			baseUrl: "claude-bridge",
-			apiKey: "not-used",
-			api: "claude-bridge",
-			models: MODELS,
-			// Cast: pi-ai AssistantMessageEventStream diamond dep between pi-coding-agent and pi-agent-core
-			streamSimple: streamClaudeAgentSdk as any,
-		});
-	} else {
-		// Subsequent instance (subagent session): skip registration entirely.
-		// The subagent already has access to claude-bridge models via the shared
-		// ModelRegistry from the parent's registration. Calls to those models
-		// will route through the parent's streamSimple via the reentrant
-		// QueryContext stack mechanism.
-		debug(`provider: skipping re-registration, parent instance active (module=${moduleInstanceId})`);
-	}
-
+	// Register the provider ONLY when real Claude credentials are present, so
+	// claude-bridge models are never advertised as available/selectable when a
+	// request would fail at spawn time (pi's ModelRegistry.hasConfiguredAuth()
+	// treats the dummy apiKey as "configured", so the gate must live here).
+	//
+	// applyProviderRegistration also claims the primary-instance token (first
+	// load wins) and enforces the multi-instance guard: a non-primary subagent
+	// reload always no-ops, so it never overwrites the parent's streamSimple nor
+	// steals ownership. See PRIMARY_INSTANCE_KEY / ACTIVE_STREAM_SIMPLE_KEY.
+	applyProviderRegistration("load");
 }

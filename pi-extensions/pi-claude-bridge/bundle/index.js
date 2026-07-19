@@ -21976,10 +21976,9 @@ function readSession(jsonlPath, projectPath) {
 // src/index.ts
 import { spawn as spawnProcess } from "child_process";
 import { createHash } from "crypto";
-import { accessSync, appendFileSync as appendFileSync3, chmodSync, constants as fsConstants, mkdirSync as mkdirSync3, readFileSync as readFileSync6, realpathSync as realpathSync3, statSync as statSync3 } from "fs";
+import { accessSync, appendFileSync as appendFileSync3, chmodSync, constants as fsConstants, mkdirSync as mkdirSync3, readFileSync as readFileSync7, realpathSync as realpathSync3, statSync as statSync3 } from "fs";
 import { resolve as pathResolve } from "path";
-import { homedir as homedir5 } from "os";
-import { delimiter, dirname as dirname5, join as join5 } from "path";
+import { delimiter, dirname as dirname5, join as join6 } from "path";
 
 // node_modules/change-case/dist/index.js
 var SPLIT_LOWER_UPPER_RE = new RegExp("([\\p{Ll}\\d])(\\p{Lu})", "gu");
@@ -22657,6 +22656,10 @@ function expandHome(input) {
 function piUserDir() {
   return resolve(expandHome(process.env.PI_CODING_AGENT_DIR?.trim() || "~/.pi/agent"));
 }
+function isolatedFromEnv() {
+  const v2 = (process.env.CLAUDE_BRIDGE_ISOLATED ?? "").trim().toLowerCase();
+  return v2 === "1" || v2 === "true" || v2 === "yes" || v2 === "on";
+}
 function asRecord(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : void 0;
 }
@@ -22706,6 +22709,7 @@ function projectSettingsTrusted(settingsPath) {
 }
 function settingsPaths(cwd) {
   const user = join2(piUserDir(), "settings.json");
+  if (isolatedFromEnv()) return [user];
   const project = projectSettingsPath(cwd);
   return projectSettingsTrusted(project) ? [user, project] : [user];
 }
@@ -22740,6 +22744,12 @@ function stringFrom(raw, key) {
 }
 function hasOwn(raw, key) {
   return Object.prototype.hasOwnProperty.call(raw, key);
+}
+function normalizeConnectorWriteMode(value) {
+  if (typeof value !== "string") return void 0;
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "deny" || normalized === "allow") return normalized;
+  return void 0;
 }
 function normalizeEffortLevel(value) {
   if (typeof value !== "string") return void 0;
@@ -22778,6 +22788,9 @@ function normalizeProviderConfig(provider) {
   const modelEffortOverrides = normalizeModelEffortOverrides(raw.modelEffortOverrides);
   if (modelEffortOverrides) out.modelEffortOverrides = modelEffortOverrides;
   else delete out.modelEffortOverrides;
+  const connectorWriteMode = normalizeConnectorWriteMode(raw.connectorWriteMode);
+  if (connectorWriteMode) out.connectorWriteMode = connectorWriteMode;
+  else delete out.connectorWriteMode;
   return out;
 }
 function managerToConfig(raw) {
@@ -22797,6 +22810,10 @@ function managerToConfig(raw) {
   }
   const strictMcpConfig = boolFrom(raw, "strictMcpConfig");
   if (strictMcpConfig !== void 0) provider.strictMcpConfig = strictMcpConfig;
+  const enableConnectors = boolFrom(raw, "enableConnectors");
+  if (enableConnectors !== void 0) provider.enableConnectors = enableConnectors;
+  const connectorWriteMode = normalizeConnectorWriteMode(raw.connectorWriteMode);
+  if (connectorWriteMode) provider.connectorWriteMode = connectorWriteMode;
   const claudePath = stringFrom(raw, "pathToClaudeCodeExecutable");
   if (claudePath) provider.pathToClaudeCodeExecutable = claudePath;
   const includeAppendSystemPromptMd = boolFrom(raw, "includeAppendSystemPromptMd");
@@ -22815,8 +22832,9 @@ function managerToConfig(raw) {
 }
 function loadConfig(cwd) {
   const global2 = tryParseJson(join2(piUserDir(), "claude-bridge.json"));
-  const projectSettings = projectSettingsPath(cwd);
-  const trustedProject = projectSettingsTrusted(projectSettings);
+  const isolated = isolatedFromEnv();
+  const projectSettings = isolated ? void 0 : projectSettingsPath(cwd);
+  const trustedProject = projectSettings !== void 0 && projectSettingsTrusted(projectSettings);
   const project = trustedProject ? tryParseJson(join2(dirname2(projectSettings), "claude-bridge.json")) : {};
   const manager = managerToConfig(readManagerConfig(cwd));
   const provider = normalizeProviderConfig({ ...global2.provider, ...project.provider, ...manager.provider });
@@ -22827,22 +22845,73 @@ function loadConfig(cwd) {
   };
 }
 
-// src/agents-md.ts
+// src/auth-presence.ts
 import { existsSync as existsSync4, readFileSync as readFileSync4 } from "fs";
-import { homedir as homedir3 } from "os";
-import { dirname as dirname3, join as join3, resolve as resolve2 } from "path";
-var GLOBAL_AGENTS_PATH = join3(homedir3(), ".pi", "agent", "AGENTS.md");
+import { homedir as homedir3, platform as osPlatform } from "os";
+import { join as join3 } from "path";
+function resolveClaudeConfigDir(env = process.env) {
+  const configured = env.CLAUDE_CONFIG_DIR;
+  if (typeof configured === "string" && configured.trim().length > 0) return configured.trim();
+  return join3(homedir3(), ".claude");
+}
+function nonEmptyEnv(value) {
+  return typeof value === "string" && value.trim().length > 0;
+}
+function envTruthy(value) {
+  const v2 = value?.trim().toLowerCase();
+  return v2 === "1" || v2 === "true";
+}
+function hasApiKeyHelper(configDir) {
+  try {
+    const settingsPath = join3(configDir, "settings.json");
+    if (!existsSync4(settingsPath)) return false;
+    const parsed = JSON.parse(readFileSync4(settingsPath, "utf8"));
+    return typeof parsed?.apiKeyHelper === "string" && parsed.apiKeyHelper.trim().length > 0;
+  } catch {
+    return false;
+  }
+}
+function hasClaudeCredentials(env = process.env, platform = osPlatform()) {
+  if (nonEmptyEnv(env.CLAUDE_CODE_OAUTH_TOKEN)) return true;
+  if (nonEmptyEnv(env.ANTHROPIC_API_KEY)) return true;
+  if (nonEmptyEnv(env.ANTHROPIC_AUTH_TOKEN)) return true;
+  if (envTruthy(env.CLAUDE_CODE_USE_BEDROCK)) return true;
+  if (envTruthy(env.CLAUDE_CODE_USE_VERTEX)) return true;
+  if (envTruthy(env.CLAUDE_CODE_USE_FOUNDRY)) return true;
+  if (envTruthy(env.CLAUDE_CODE_USE_ANTHROPIC_AWS)) return true;
+  if (envTruthy(env.CLAUDE_CODE_USE_MANTLE)) return true;
+  const configDir = resolveClaudeConfigDir(env);
+  if (existsSync4(join3(configDir, ".credentials.json"))) return true;
+  if (hasApiKeyHelper(configDir)) return true;
+  if (platform === "darwin") return true;
+  return false;
+}
+function decideRegistration(state) {
+  if (!state.isPrimary) return "noop";
+  if (state.credentialed) return state.registered ? "noop" : "register";
+  return "unregister";
+}
+
+// src/agents-md.ts
+import { existsSync as existsSync5, readFileSync as readFileSync5 } from "fs";
+import { dirname as dirname3, join as join4, resolve as resolve2 } from "path";
+function globalAgentsPath() {
+  return join4(piUserDir(), "AGENTS.md");
+}
 function resolveAgentsMdPath() {
-  const fromCwd = findAgentsMdInParents(process.cwd());
-  if (fromCwd) return fromCwd;
-  if (existsSync4(GLOBAL_AGENTS_PATH)) return GLOBAL_AGENTS_PATH;
+  if (!isolatedFromEnv()) {
+    const fromCwd = findAgentsMdInParents(process.cwd());
+    if (fromCwd) return fromCwd;
+  }
+  const globalPath = globalAgentsPath();
+  if (existsSync5(globalPath)) return globalPath;
   return void 0;
 }
 function findAgentsMdInParents(startDir) {
   let current = resolve2(startDir);
   while (true) {
-    const candidate = join3(current, "AGENTS.md");
-    if (existsSync4(candidate)) return candidate;
+    const candidate = join4(current, "AGENTS.md");
+    if (existsSync5(candidate)) return candidate;
     const parent = dirname3(current);
     if (parent === current) break;
     current = parent;
@@ -22853,7 +22922,7 @@ function extractAgentsAppend() {
   const agentsPath = resolveAgentsMdPath();
   if (!agentsPath) return void 0;
   try {
-    const content = readFileSync4(agentsPath, "utf-8").trim();
+    const content = readFileSync5(agentsPath, "utf-8").trim();
     if (!content) return void 0;
     const sanitized = sanitizeAgentsContent(content);
     return sanitized.length > 0 ? `# CLAUDE.md
@@ -22873,18 +22942,12 @@ function sanitizeAgentsContent(content) {
 }
 
 // src/prompt-context.ts
-import { existsSync as existsSync5, readFileSync as readFileSync5 } from "fs";
-import { homedir as homedir4 } from "os";
-import { dirname as dirname4, join as join4, resolve as resolve3 } from "path";
-function piUserDir2() {
-  const configured = process.env.PI_CODING_AGENT_DIR?.trim();
-  if (configured) return resolve3(configured.replace(/^~(?=\/|$)/, homedir4()));
-  return join4(homedir4(), ".pi", "agent");
-}
+import { existsSync as existsSync6, readFileSync as readFileSync6 } from "fs";
+import { dirname as dirname4, join as join5, resolve as resolve3 } from "path";
 function readTrimmed(path) {
   try {
-    if (!existsSync5(path)) return void 0;
-    const content = readFileSync5(path, "utf8").trim();
+    if (!existsSync6(path)) return void 0;
+    const content = readFileSync6(path, "utf8").trim();
     return content.length > 0 ? content : void 0;
   } catch {
     return void 0;
@@ -22893,8 +22956,8 @@ function readTrimmed(path) {
 function findProjectAppendSystem(startDir) {
   let current = resolve3(startDir);
   while (true) {
-    const candidate = join4(current, ".pi", "APPEND_SYSTEM.md");
-    if (existsSync5(candidate)) return candidate;
+    const candidate = join5(current, ".pi", "APPEND_SYSTEM.md");
+    if (existsSync6(candidate)) return candidate;
     const parent = dirname4(current);
     if (parent === current) break;
     current = parent;
@@ -22903,9 +22966,9 @@ function findProjectAppendSystem(startDir) {
 }
 function readAppendSystemPromptFiles(cwd) {
   const files = [
-    { label: "global APPEND_SYSTEM.md", path: join4(piUserDir2(), "APPEND_SYSTEM.md") }
+    { label: "global APPEND_SYSTEM.md", path: join5(piUserDir(), "APPEND_SYSTEM.md") }
   ];
-  const projectPath = findProjectAppendSystem(cwd);
+  const projectPath = isolatedFromEnv() ? void 0 : findProjectAppendSystem(cwd);
   if (projectPath) files.push({ label: "project .pi/APPEND_SYSTEM.md", path: projectPath });
   const seen = /* @__PURE__ */ new Set();
   const output = [];
@@ -37579,10 +37642,9 @@ var _piAi = piAi;
 var getModels = await resolveGetModels(_piAi);
 var newAssistantMessageEventStream = typeof _piAi.createAssistantMessageEventStream === "function" ? _piAi.createAssistantMessageEventStream : () => new _piAi.AssistantMessageEventStream();
 var DEBUG = process.env.CLAUDE_BRIDGE_DEBUG === "1";
-var DEBUG_LOG_PATH = process.env.CLAUDE_BRIDGE_DEBUG_PATH || join5(homedir5(), ".pi", "agent", "claude-bridge.log");
-var DEFAULT_DIAG_LOG_PATH = join5(homedir5(), ".pi", "agent", "claude-bridge-diag.log");
+var DEBUG_LOG_PATH = process.env.CLAUDE_BRIDGE_DEBUG_PATH || join6(piUserDir(), "claude-bridge.log");
 function diagLogPath() {
-  return process.env.CLAUDE_BRIDGE_DIAG_PATH || DEFAULT_DIAG_LOG_PATH;
+  return process.env.CLAUDE_BRIDGE_DIAG_PATH || join6(piUserDir(), "claude-bridge-diag.log");
 }
 if (DEBUG) {
   try {
@@ -37610,7 +37672,7 @@ function debug(...args) {
 function executableFromPath(name) {
   const paths = (process.env.PATH ?? "").split(delimiter).filter(Boolean);
   for (const dir of paths) {
-    const candidate = join5(dir, name);
+    const candidate = join6(dir, name);
     try {
       accessSync(candidate, fsConstants.X_OK);
       return candidate;
@@ -37622,6 +37684,7 @@ function executableFromPath(name) {
 function resolveClaudeExecutable(configured) {
   const trimmed = configured?.trim();
   if (trimmed) return trimmed;
+  if (isolatedFromEnv()) return void 0;
   return executableFromPath("claude") ?? executableFromPath("claude-code");
 }
 function errnoValue(err) {
@@ -37725,7 +37788,7 @@ function preflightClaudeExecutable(path, cwd) {
   }
   let fileType;
   try {
-    fileType = classifyClaudeExecutableBytes(readFileSync6(realPath).subarray(0, 16));
+    fileType = classifyClaudeExecutableBytes(readFileSync7(realPath).subarray(0, 16));
   } catch (err) {
     throw makeClaudePreflightError("Claude Code executable preflight failed: cannot read executable header before spawning Claude Code.", {
       code: codeValue(err, "EACCES"),
@@ -37822,12 +37885,12 @@ function makeCliDebugOptions(tag) {
   if (!DEBUG) return {};
   const seq = nextCliDebugSeq++;
   const ts = (/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-");
-  const logDir = join5(dirname5(DEBUG_LOG_PATH), "cc-cli-logs");
+  const logDir = join6(dirname5(DEBUG_LOG_PATH), "cc-cli-logs");
   try {
     mkdirSync3(logDir, { recursive: true });
   } catch {
   }
-  const debugFile = join5(logDir, `${ts}-${tag}-${seq}.log`);
+  const debugFile = join6(logDir, `${ts}-${tag}-${seq}.log`);
   debug(`cli-debug: ${tag} #${seq} \u2192 ${debugFile}`);
   return {
     debug: true,
@@ -37937,6 +38000,7 @@ function __testSetBridgeIntegrityState(state) {
 function __testGetBridgeIntegrityState() {
   return { sharedSession };
 }
+var PRIMARY_INSTANCE_KEY = /* @__PURE__ */ Symbol.for("claude-bridge:primaryInstance");
 var ACTIVE_STREAM_SIMPLE_KEY = /* @__PURE__ */ Symbol.for("claude-bridge:activeStreamSimple");
 var COMMANDS_REGISTERED_KEY = /* @__PURE__ */ Symbol.for("claude-bridge:commandsRegistered");
 var SDK_TO_PI_TOOL_NAME = {
@@ -37985,6 +38049,103 @@ var CLAUDE_BRIDGE_TOOL_ISOLATION = {
   disallowedTools: DISALLOWED_BUILTIN_TOOLS,
   allowedTools: [`mcp__${MCP_SERVER_NAME}__*`]
 };
+function connectorsEnabledFromEnv() {
+  const v2 = (process.env.CLAUDE_BRIDGE_ENABLE_CONNECTORS ?? "").trim().toLowerCase();
+  return v2 === "1" || v2 === "true" || v2 === "yes" || v2 === "on";
+}
+function connectorsEnabledFor(config2) {
+  return connectorsEnabledFromEnv() || config2?.provider?.enableConnectors === true;
+}
+var CLAUDE_AI_CONNECTOR_TOOL_PATTERNS = [
+  "mcp__claude_ai_Gmail__*",
+  "mcp__claude_ai_Google_Calendar__*",
+  "mcp__claude_ai_Google_Drive__*"
+];
+var CONNECTOR_DISCOVERY_TOOLS = ["ToolSearch", "ListMcpResources", "ReadMcpResource"];
+var CONNECTOR_NS_GMAIL = "mcp__claude_ai_Gmail__";
+var CONNECTOR_NS_CALENDAR = "mcp__claude_ai_Google_Calendar__";
+var CONNECTOR_NS_DRIVE = "mcp__claude_ai_Google_Drive__";
+var CONNECTOR_NAMESPACES = [CONNECTOR_NS_GMAIL, CONNECTOR_NS_CALENDAR, CONNECTOR_NS_DRIVE];
+var CONNECTOR_READ_PREFIXES = [
+  "list_",
+  "search_",
+  "get_",
+  "read_",
+  "fetch_",
+  "find_",
+  "download_",
+  "describe_",
+  "query_",
+  "count_",
+  "view_"
+];
+var CONNECTOR_WRITE_TOOLS = [
+  `${CONNECTOR_NS_GMAIL}create_draft`,
+  `${CONNECTOR_NS_GMAIL}create_label`,
+  `${CONNECTOR_NS_GMAIL}label_message`,
+  `${CONNECTOR_NS_GMAIL}label_thread`,
+  `${CONNECTOR_NS_GMAIL}unlabel_message`,
+  `${CONNECTOR_NS_GMAIL}unlabel_thread`,
+  `${CONNECTOR_NS_GMAIL}apply_sensitive_label`,
+  `${CONNECTOR_NS_GMAIL}remove_sensitive_label`,
+  `${CONNECTOR_NS_CALENDAR}create_event`,
+  `${CONNECTOR_NS_CALENDAR}update_event`,
+  `${CONNECTOR_NS_CALENDAR}delete_event`,
+  `${CONNECTOR_NS_CALENDAR}respond_to_event`,
+  `${CONNECTOR_NS_DRIVE}create_file`,
+  `${CONNECTOR_NS_DRIVE}copy_file`
+];
+function isConnectorWriteTool(name) {
+  const ns2 = CONNECTOR_NAMESPACES.find((n10) => name.startsWith(n10));
+  if (!ns2) return false;
+  const tool = name.slice(ns2.length);
+  return !CONNECTOR_READ_PREFIXES.some((prefix) => tool.startsWith(prefix));
+}
+function connectorWriteModeFromEnv() {
+  const v2 = (process.env.CLAUDE_BRIDGE_CONNECTOR_WRITE ?? "").trim().toLowerCase();
+  if (v2 === "allow") return "allow";
+  if (v2 === "deny") return "deny";
+  return void 0;
+}
+function connectorWriteModeFor(config2) {
+  const resolved = connectorWriteModeFromEnv() ?? normalizeConnectorWriteMode(config2?.provider?.connectorWriteMode);
+  return resolved === "allow" ? "allow" : "deny";
+}
+function connectorWriteDenyHook() {
+  return async (input) => {
+    try {
+      if (input.hook_event_name !== "PreToolUse") return { continue: true };
+      if (!isConnectorWriteTool(input.tool_name)) return { continue: true };
+      return connectorWriteDenyOutput(String(input.tool_name));
+    } catch {
+      const toolName = typeof input?.tool_name === "string" ? input.tool_name : "<unknown>";
+      return connectorWriteDenyOutput(toolName);
+    }
+  };
+}
+function connectorWriteDenyOutput(toolName) {
+  return {
+    hookSpecificOutput: {
+      hookEventName: "PreToolUse",
+      permissionDecision: "deny",
+      permissionDecisionReason: `Connector write tool "${toolName}" is blocked in read-only connector mode. Connector writes must go through Memsira's gated approval flow.`
+    }
+  };
+}
+function connectorQueryOptions(connectorsEnabled, writeMode = "deny") {
+  const isolation = toolIsolationForQuery(connectorsEnabled, writeMode);
+  if (!connectorsEnabled || writeMode === "allow") return isolation;
+  return { ...isolation, hooks: { PreToolUse: [{ hooks: [connectorWriteDenyHook()] }] } };
+}
+function toolIsolationForQuery(connectorsEnabled, writeMode = "deny") {
+  if (!connectorsEnabled) return CLAUDE_BRIDGE_TOOL_ISOLATION;
+  const disallowedTools = DISALLOWED_BUILTIN_TOOLS.filter((t10) => !CONNECTOR_DISCOVERY_TOOLS.includes(t10));
+  if (writeMode !== "allow") disallowedTools.push(...CONNECTOR_WRITE_TOOLS);
+  return {
+    disallowedTools,
+    allowedTools: [...CLAUDE_BRIDGE_TOOL_ISOLATION.allowedTools, ...CLAUDE_AI_CONNECTOR_TOOL_PATTERNS]
+  };
+}
 var sharedSession = null;
 var extensionApi;
 var piUI;
@@ -38933,6 +39094,58 @@ async function consumeQuery(sdkQuery, customToolNameToPi, model, cwd, bridgeConf
   debug(`consumeQuery: for-await loop exited, wasAborted=${wasAborted()}, capturedSessionId=${capturedSessionId?.slice(0, 8) ?? "none"}`);
   return { capturedSessionId };
 }
+function claimPrimaryInstance() {
+  const g2 = globalThis;
+  if (!g2[PRIMARY_INSTANCE_KEY]) g2[PRIMARY_INSTANCE_KEY] = streamClaudeAgentSdk;
+  return g2[PRIMARY_INSTANCE_KEY] === streamClaudeAgentSdk;
+}
+function releaseProviderTokens(event) {
+  const g2 = globalThis;
+  if (g2[ACTIVE_STREAM_SIMPLE_KEY] === streamClaudeAgentSdk) {
+    debug(`${event}: clearing ACTIVE_STREAM_SIMPLE_KEY`);
+    g2[ACTIVE_STREAM_SIMPLE_KEY] = void 0;
+  }
+  if (g2[PRIMARY_INSTANCE_KEY] === streamClaudeAgentSdk) {
+    debug(`${event}: clearing PRIMARY_INSTANCE_KEY`);
+    g2[PRIMARY_INSTANCE_KEY] = void 0;
+  }
+}
+function applyProviderRegistration(trigger) {
+  const pi = extensionApi;
+  if (!pi) {
+    debug(`${trigger}: applyProviderRegistration skipped \u2014 no extensionApi`);
+    return;
+  }
+  const g2 = globalThis;
+  const isPrimary = claimPrimaryInstance();
+  const credentialed = hasClaudeCredentials();
+  const registered = g2[ACTIVE_STREAM_SIMPLE_KEY] === streamClaudeAgentSdk;
+  const decision = decideRegistration({ credentialed, isPrimary, registered });
+  debug(`${trigger}: registration decision=${decision} credentialed=${credentialed} isPrimary=${isPrimary} registered=${registered} (module=${moduleInstanceId})`);
+  if (decision === "register") {
+    g2[ACTIVE_STREAM_SIMPLE_KEY] = streamClaudeAgentSdk;
+    try {
+      pi.registerProvider(PROVIDER_ID, {
+        baseUrl: "claude-bridge",
+        apiKey: "not-used",
+        api: "claude-bridge",
+        models: MODELS,
+        // Cast: pi-ai AssistantMessageEventStream diamond dep between pi-coding-agent and pi-agent-core
+        streamSimple: streamClaudeAgentSdk
+      });
+    } catch (err) {
+      if (g2[ACTIVE_STREAM_SIMPLE_KEY] === streamClaudeAgentSdk) g2[ACTIVE_STREAM_SIMPLE_KEY] = void 0;
+      debug(`${trigger}: registerProvider threw; released stream guard for retry (kept primary):`, err);
+    }
+  } else if (decision === "unregister") {
+    try {
+      pi.unregisterProvider(PROVIDER_ID);
+    } catch (err) {
+      debug(`${trigger}: unregisterProvider threw (ignored):`, err);
+    }
+    if (g2[ACTIVE_STREAM_SIMPLE_KEY] === streamClaudeAgentSdk) g2[ACTIVE_STREAM_SIMPLE_KEY] = void 0;
+  }
+}
 function streamClaudeAgentSdk(model, context, options) {
   const stream = newAssistantMessageEventStream();
   const lastMsgRole = context.messages[context.messages.length - 1]?.role;
@@ -39006,6 +39219,37 @@ function streamClaudeAgentSdk(model, context, options) {
     });
     return stream;
   }
+  if (!hasClaudeCredentials()) {
+    try {
+      applyProviderRegistration("pre-spawn");
+    } catch {
+    }
+    const message = "Claude account not connected \u2014 connect an account (or run `claude login`) and retry.";
+    debug(`provider: pre-spawn credential check failed; failing fast: ${message}`);
+    const errorOutput = {
+      role: "assistant",
+      content: [],
+      api: model.api,
+      provider: model.provider,
+      model: model.id,
+      usage: {
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 0,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
+      },
+      stopReason: "error",
+      timestamp: Date.now(),
+      errorMessage: message
+    };
+    queueMicrotask(() => {
+      stream.push({ type: "error", reason: "error", error: errorOutput });
+      stream.end();
+    });
+    return stream;
+  }
   const isReentrant = ctx().activeQuery !== null;
   if (isReentrant) pushContext();
   debug(`provider: fresh query setup, isReentrant=${isReentrant}, stackDepth=${stackDepth()}`);
@@ -39035,13 +39279,15 @@ function streamClaudeAgentSdk(model, context, options) {
   const mcpServers = buildMcpServers(mcpTools, ctx());
   const bridgeConfig = loadConfig(cwd);
   const providerSettings = bridgeConfig.provider ?? {};
+  const enableCloudMcp = connectorsEnabledFor(bridgeConfig);
+  const connectorWriteMode = connectorWriteModeFor(bridgeConfig);
   const appendSystemPrompt = providerSettings.appendSystemPrompt !== false;
   const agentsAppend = appendSystemPrompt ? extractAgentsAppend() : void 0;
   const skillsAppend = appendSystemPrompt ? extractSkillsBlock(context.systemPrompt) : void 0;
   const promptContextAppend = buildPromptContextAppend(context.systemPrompt, cwd, bridgeConfig.promptContext ?? {});
   const appendParts = [agentsAppend, skillsAppend, promptContextAppend.text].filter((part) => Boolean(part));
   const systemPromptAppend = appendParts.length > 0 ? appendParts.join("\n\n") : void 0;
-  const settingSources = appendSystemPrompt ? void 0 : providerSettings.settingSources ?? ["user", "project"];
+  const settingSources = enableCloudMcp ? providerSettings.settingSources ?? ["user", "project", "local"] : appendSystemPrompt ? void 0 : providerSettings.settingSources ?? ["user", "project"];
   const strictMcpConfigEnabled = !appendSystemPrompt && providerSettings.strictMcpConfig !== false;
   const claudeExecutable = resolveClaudeExecutable(providerSettings.pathToClaudeCodeExecutable);
   const claudeExecutablePreflight = claudeExecutable ? preflightClaudeExecutable(claudeExecutable, cwd) : void 0;
@@ -39052,12 +39298,12 @@ function streamClaudeAgentSdk(model, context, options) {
   if (strictMcpConfigEnabled) extraArgs["strict-mcp-config"] = null;
   if (effort) extraArgs["thinking-display"] = "summarized";
   const fallbackModel = fallbackModelForPrimaryModel(model.id);
-  const childEnv = { ...process.env, ENABLE_CLAUDEAI_MCP_SERVERS: "0", DISABLE_AUTO_COMPACT: "1" };
+  const childEnv = { ...process.env, ENABLE_CLAUDEAI_MCP_SERVERS: enableCloudMcp ? "1" : "0", DISABLE_AUTO_COMPACT: "1" };
   const queryOptions = {
     cwd,
     model: model.id,
     env: childEnv,
-    ...CLAUDE_BRIDGE_TOOL_ISOLATION,
+    ...connectorQueryOptions(enableCloudMcp, connectorWriteMode),
     permissionMode: "bypassPermissions",
     includePartialMessages: true,
     ...fallbackModel ? { fallbackModel } : {},
@@ -39081,7 +39327,7 @@ function streamClaudeAgentSdk(model, context, options) {
     `model=${model.id} msgs=${context.messages.length} tools=${mcpTools.length}`,
     `resume=${resumeSessionId?.slice(0, 8) ?? "none"} effort=${effort ?? "default"}`,
     `fallback=${fallbackModel ?? "none"}`,
-    `appendSys=${appendSystemPrompt} promptCtx=${promptContextAppend.labels.join(",") || "none"} strictMcp=${strictMcpConfigEnabled} fastMode=${providerSettings.fastMode === true}`,
+    `appendSys=${appendSystemPrompt} promptCtx=${promptContextAppend.labels.join(",") || "none"} strictMcp=${strictMcpConfigEnabled} fastMode=${providerSettings.fastMode === true} connectors=${enableCloudMcp}`,
     `claudeExec=${claudeExecutablePreflight ? `${claudeExecutablePreflight.fileType}:${claudeExecutablePreflight.path}` : "sdk-default"}`,
     `prompt=${promptText.slice(0, 60)}${promptBlocks ? " [+images]" : ""}`
   );
@@ -39334,11 +39580,6 @@ function index_default(pi) {
   const clearSession = (event) => {
     debug(`${event}: clearing session ${sharedSession?.sessionId?.slice(0, 8) ?? "none"}`);
     sharedSession = null;
-    const g10 = globalThis;
-    if (g10[ACTIVE_STREAM_SIMPLE_KEY] === streamClaudeAgentSdk) {
-      debug(`${event}: clearing ACTIVE_STREAM_SIMPLE_KEY`);
-      g10[ACTIVE_STREAM_SIMPLE_KEY] = void 0;
-    }
   };
   pi.on("session_start", (event, ctx2) => {
     recordProjectTrust(ctx2);
@@ -39347,8 +39588,12 @@ function index_default(pi) {
       clearSession(`session_start:${event.reason}`);
     }
     if (event.reason === "startup" || event.reason === "resume") restoreSharedSessionFromPi(ctx2);
+    applyProviderRegistration(`session_start:${event.reason}`);
   });
-  pi.on("session_shutdown", () => clearSession("session_shutdown"));
+  pi.on("session_shutdown", () => {
+    clearSession("session_shutdown");
+    releaseProviderTokens("session_shutdown");
+  });
   pi.on("message_end", (event, ctx2) => {
     const message = event.message;
     if (message?.role === "assistant" && message.provider === PROVIDER_ID) schedulePersistSharedSession(ctx2);
@@ -39364,24 +39609,14 @@ function index_default(pi) {
   };
   pi.on("session_compact", () => markRebuild("session_compact"));
   pi.on("session_tree", () => markRebuild("session_tree"));
-  const g2 = globalThis;
-  if (!g2[ACTIVE_STREAM_SIMPLE_KEY]) {
-    g2[ACTIVE_STREAM_SIMPLE_KEY] = streamClaudeAgentSdk;
-    pi.registerProvider(PROVIDER_ID, {
-      baseUrl: "claude-bridge",
-      apiKey: "not-used",
-      api: "claude-bridge",
-      models: MODELS,
-      // Cast: pi-ai AssistantMessageEventStream diamond dep between pi-coding-agent and pi-agent-core
-      streamSimple: streamClaudeAgentSdk
-    });
-  } else {
-    debug(`provider: skipping re-registration, parent instance active (module=${moduleInstanceId})`);
-  }
+  applyProviderRegistration("load");
 }
 export {
   ALLOWED_RATE_LIMIT_WARNING_UTILIZATION_THRESHOLD,
+  CLAUDE_AI_CONNECTOR_TOOL_PATTERNS,
   CLAUDE_BRIDGE_TOOL_ISOLATION,
+  CONNECTOR_DISCOVERY_TOOLS,
+  CONNECTOR_WRITE_TOOLS,
   DEFAULT_STREAM_IDLE_TIMEOUT_MS,
   DISALLOWED_BUILTIN_TOOLS,
   STREAM_IDLE_BACKOFF_HINT_MS,
@@ -39390,10 +39625,17 @@ export {
   __testSetBridgeIntegrityState,
   buildStreamIdleTimeoutErrorMessage,
   classifyClaudeExecutableBytes,
+  connectorQueryOptions,
+  connectorWriteDenyHook,
+  connectorWriteModeFor,
+  connectorWriteModeFromEnv,
+  connectorsEnabledFor,
+  connectorsEnabledFromEnv,
   createStreamIdleWatchdog,
   index_default as default,
   formatAllowedRateLimitWarning,
   formatResetTimestamp,
+  isConnectorWriteTool,
   isExtraUsageRequiredMessage,
   mapToolName,
   normalizeRateLimitUtilization,
@@ -39401,11 +39643,13 @@ export {
   processAssistantMessage,
   processStreamEvent,
   reportToolResultMismatch,
+  resolveClaudeExecutable,
   resolveConfiguredEffort,
   restoreSharedSessionFromPi,
   shouldRestorePersistedBridgeEntry,
   spawnClaudeCodeWithDiagnostics,
   streamIdleTimeoutMsFromEnv,
+  toolIsolationForQuery,
   uniqueNonEmptyLines,
   wrapClaudeSpawnErrorForSdk
 };
