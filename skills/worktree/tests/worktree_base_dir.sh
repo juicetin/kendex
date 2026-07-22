@@ -124,17 +124,29 @@ assert_eq "$default_create_out" "$DEFAULT_ROOT/.worktrees/repo-a/issue-default" 
 assert_path_exists "$DEFAULT_ROOT/.worktrees/repo-a/issue-default/.git" "default-created worktree is registered"
 assert_path_absent "$DEFAULT_ROOT/repo-a/trees" "create adds nothing under the repo root"
 
-# cleanup parses the registry under the new layout and excludes the main
-# checkout by canonical comparison. Its collection semantics are unchanged:
-# a branch checked out in a worktree still refuses `git branch -d`, so the
-# worktree is skipped, and the main checkout is never a candidate.
+# cleanup parses the registry under the new layout, excludes the main checkout
+# by canonical comparison, and removes merged worktrees before deleting their
+# checked-out branches.
 set +e
 (cd "$DEFAULT_ROOT/repo-a" && "$WORKTREE_SCRIPT" cleanup >"$DEFAULT_ROOT/cleanup.out" 2>"$DEFAULT_ROOT/cleanup.err")
 cleanup_code=$?
 set -e
 assert_eq "$cleanup_code" "0" "cleanup runs cleanly under the default external layout"
-assert_path_exists "$DEFAULT_ROOT/.worktrees/repo-a/issue-default/.git" "cleanup skips a worktree whose branch is checked out"
+assert_path_absent "$DEFAULT_ROOT/.worktrees/repo-a/issue-default" "cleanup removes a merged worktree whose branch was checked out"
+assert_branch_absent "$DEFAULT_ROOT/repo-a" "issue-default" "cleanup deletes the merged worktree branch after removal"
 assert_path_exists "$DEFAULT_ROOT/repo-a/base.txt" "cleanup never touches the main checkout"
+
+invalid_cleanup_path=$(cd "$DEFAULT_ROOT/repo-a" && "$WORKTREE_SCRIPT" create issue-invalid-cleanup)
+printf 'WORKTREE_SYMLINKS="../outside"\n' >"$DEFAULT_ROOT/repo-a/.env"
+set +e
+(cd "$DEFAULT_ROOT/repo-a" && "$WORKTREE_SCRIPT" cleanup >"$DEFAULT_ROOT/invalid-cleanup.out" 2>"$DEFAULT_ROOT/invalid-cleanup.err")
+invalid_cleanup_code=$?
+set -e
+assert_eq "$invalid_cleanup_code" "1" "cleanup reports failure when configured symlinks cannot be cleaned safely"
+assert_contains "$(cat "$DEFAULT_ROOT/invalid-cleanup.err")" "Could not safely clean" "cleanup reports the skipped merged worktree"
+assert_path_exists "$invalid_cleanup_path/.git" "failed cleanup keeps the merged worktree registered"
+rm -f "$DEFAULT_ROOT/repo-a/.env"
+(cd "$DEFAULT_ROOT/repo-a" && "$WORKTREE_SCRIPT" remove issue-invalid-cleanup >/dev/null)
 
 echo "=== explicit absolute and ~ overrides ==="
 
