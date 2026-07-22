@@ -11,10 +11,11 @@
 //! 1. **Installed frontmatter.** Skills (and agents) that declare provenance —
 //!    `source: vstack` or a `repository` identifying the upstream repo — are
 //!    recognized as vstack-owned.
-//! 2. **The project lock's recorded source.** For an asset whose installed files
-//!    carry no provenance frontmatter (hooks, and agents that omit it), the
-//!    signal is the lock entry's `source`: a vstack-shaped source directory or
-//!    the upstream `owner/repo` remote shorthand.
+//! 2. **The project lock's recorded source identity.** For an asset whose
+//!    installed files carry no provenance frontmatter (hooks, and agents that
+//!    omit it), the signal is the lock entry's durable `source_repo` GitHub
+//!    identity. Legacy entries may still resolve through a live source Git
+//!    origin or the upstream `owner/repo` remote shorthand.
 //!
 //! Anything else defaults to project-local. This is a best-effort ownership
 //! signal, not a cryptographic proof of authorship; when the signals are absent
@@ -26,7 +27,6 @@
 use crate::config::{self, ItemKind, LockFile};
 use crate::frontmatter::split_yaml_frontmatter;
 use crate::harness::Harness;
-use crate::resolve::is_vstack_source;
 use crate::scope::ScopeFilter;
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
@@ -207,15 +207,17 @@ fn run_with_filer(args: ReportArgs, filer: &dyn IssueFiler) -> Result<()> {
 
 /// Ownership resolver. Pure: takes already-loaded inputs (the lock, an optional
 /// selector, optional parsed frontmatter, and the configured upstream slug) so
-/// it never touches disk itself except through [`is_vstack_source`], which stats
-/// the lock entry's source dir per precedence rule 2.
+/// it only touches disk for the legacy path-present Git-origin fallback.
 ///
 /// Precedence:
 /// 1. Frontmatter self-declares vstack: `source: vstack`, OR a `repository` whose
 ///    parsed `owner/repo` slug equals the canonical `vanillagreencom/vstack`.
-/// 2. Else name is in the lock (kind matching any given kind selector) with a
-///    source that is either a vstack-shaped directory OR the upstream `owner/repo`
-///    remote shorthand → Vstack.
+/// 2. Else a non-skill name is in the lock (kind matching any given kind
+///    selector) with a `source_repo` that identifies the canonical or
+///    configured upstream `owner/repo` → Vstack. A
+///    foreign `source_repo` is authoritative project-local; live source Git
+///    origin and remote shorthand fallbacks only apply to legacy entries that
+///    have no recorded `source_repo`.
 /// 3. Else → ProjectLocal (safe default).
 /// 4. No selector at all → ProjectLocal (safe default).
 fn resolve_ownership(
@@ -239,7 +241,7 @@ fn resolve_ownership(
     // Rule 2: the lock says it came from a vstack source (local dir or remote slug).
     if let Some(entry) = lock.entries.get(&selector.name) {
         let kind_matches = selector.kind.is_none_or(|k| k == entry.kind);
-        if kind_matches && lock_source_is_vstack(&entry.source, upstream) {
+        if kind_matches && lock_entry_is_vstack(entry, upstream) {
             return Ownership::Vstack;
         }
     }
@@ -249,15 +251,36 @@ fn resolve_ownership(
     Ownership::ProjectLocal
 }
 
-/// True when a lock entry's recorded `source` identifies vstack: either a
-/// vstack-shaped source directory present on disk, or the upstream `owner/repo`
-/// remote shorthand (the form recorded for a remote install, where no local
-/// source path exists to stat).
-fn lock_source_is_vstack(source: &str, upstream: &str) -> bool {
-    if is_vstack_source(Path::new(source)) {
-        return true;
+/// True when a lock entry identifies vstack by repository identity. This
+/// deliberately ignores source layout: a local project-shaped package source is
+/// not upstream unless its recorded or live GitHub identity is upstream.
+fn lock_entry_is_vstack(entry: &config::LockEntry, upstream: &str) -> bool {
+    // Skills are self-attributing: the repository distributing a skill is not
+    // necessarily the repository that owns it. Only installed skill
+    // frontmatter may opt a skill into upstream routing.
+    if entry.kind == ItemKind::Skill {
+        return false;
     }
-    parse_github_slug(source).is_some_and(|slug| slug == upstream)
+
+    if let Some(source_repo) = entry.source_repo.as_deref() {
+        return repo_is_vstack_upstream(source_repo, upstream);
+    }
+
+    // Other legacy kinds (including Pi packages) have no self-provenance and
+    // retain the live-source fallback.
+    config::source_repo_for_source(
+        config::resolve_source_path(&entry.source).as_deref(),
+        &entry.source,
+    )
+    .is_some_and(|source_repo| repo_is_vstack_upstream(&source_repo, upstream))
+}
+
+/// `--upstream` redirects filing and may name a fork that owns a vstack
+/// distribution, but it must never stop canonical vstack assets from being
+/// recognized as upstream-owned.
+fn repo_is_vstack_upstream(repository: &str, upstream: &str) -> bool {
+    config::github_slug_eq(repository, DEFAULT_UPSTREAM)
+        || config::github_slug_eq(repository, upstream)
 }
 
 /// True when frontmatter self-declares vstack ownership. The `repository` field
@@ -269,8 +292,7 @@ fn frontmatter_declares_vstack(fm: &AssetFrontmatter) -> bool {
     }
     fm.repository
         .as_deref()
-        .and_then(parse_github_slug)
-        .is_some_and(|slug| slug == DEFAULT_UPSTREAM)
+        .is_some_and(|repo| config::github_slug_eq(repo, DEFAULT_UPSTREAM))
 }
 
 /// Compose ownership resolution and gh-argument building into a single plan.
@@ -639,44 +661,8 @@ fn local_repo_issues_url() -> Option<String> {
         return None;
     }
     let url = String::from_utf8_lossy(&output.stdout);
-    let slug = parse_github_slug(url.trim())?;
+    let slug = config::parse_github_slug(url.trim())?;
     Some(format!("https://github.com/{slug}/issues"))
-}
-
-/// Parse an `owner/repo` slug out of a GitHub SSH/HTTPS remote URL, a bare
-/// `owner/repo` shorthand (as recorded for remote installs and used in
-/// `repository` frontmatter), or `owner/repo.git`. Returns None for anything
-/// that isn't exactly one `owner/repo` pair (local paths, non-GitHub URLs).
-fn parse_github_slug(url: &str) -> Option<String> {
-    let url = url.trim();
-
-    // Bare `owner/repo` (no scheme, no host, no whitespace): exactly two
-    // non-empty, slash-free segments. Local paths (`/home/...`, `a/b/c`) have a
-    // leading empty segment or more than two parts and fall through to None.
-    if !url.contains("://") && !url.contains('@') && !url.contains(char::is_whitespace) {
-        let bare = url.strip_suffix(".git").unwrap_or(url);
-        let mut parts = bare.split('/');
-        if let (Some(owner), Some(repo), None) = (parts.next(), parts.next(), parts.next())
-            && !owner.is_empty()
-            && !repo.is_empty()
-        {
-            return Some(format!("{owner}/{repo}"));
-        }
-        return None;
-    }
-
-    let after = url
-        .strip_prefix("git@github.com:")
-        .or_else(|| url.strip_prefix("https://github.com/"))
-        .or_else(|| url.strip_prefix("ssh://git@github.com/"))?;
-    let after = after.strip_suffix(".git").unwrap_or(after);
-    let mut parts = after.split('/');
-    let owner = parts.next()?;
-    let repo = parts.next()?;
-    if owner.is_empty() || repo.is_empty() {
-        return None;
-    }
-    Some(format!("{owner}/{repo}"))
 }
 
 #[cfg(test)]
@@ -685,17 +671,42 @@ mod tests {
     use crate::config::{InstallMethod, ItemKind, LockEntry, LockFile};
 
     fn lock_with(name: &str, kind: ItemKind, source: &str) -> LockFile {
+        lock_with_repo(name, kind, source, None)
+    }
+
+    fn lock_with_repo(
+        name: &str,
+        kind: ItemKind,
+        source: &str,
+        source_repo: Option<&str>,
+    ) -> LockFile {
         let mut lock = LockFile::default();
         lock.add(LockEntry {
             name: name.to_string(),
             kind,
             source: source.to_string(),
+            source_repo: source_repo.map(str::to_string),
             harnesses: vec!["claude-code".to_string()],
             method: InstallMethod::Copy,
             installed_at: "2026-07-21T00:00:00Z".to_string(),
             source_hash: String::new(),
         });
         lock
+    }
+
+    fn init_git_origin(dir: &Path, origin: &str) {
+        let status = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(dir)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let status = std::process::Command::new("git")
+            .args(["remote", "add", "origin", origin])
+            .current_dir(dir)
+            .status()
+            .unwrap();
+        assert!(status.success());
     }
 
     fn tmpdir(label: &str) -> PathBuf {
@@ -732,6 +743,22 @@ mod tests {
         ReportArgs {
             skill: Some(skill.to_string()),
             agent: None,
+            hook: None,
+            asset: None,
+            title: title.to_string(),
+            body: Some(body.to_string()),
+            body_file: None,
+            global: false,
+            scope: Some("project".to_string()),
+            upstream: None,
+            dry_run,
+        }
+    }
+
+    fn agent_args(agent: &str, title: &str, body: &str, dry_run: bool) -> ReportArgs {
+        ReportArgs {
+            skill: None,
+            agent: Some(agent.to_string()),
             hook: None,
             asset: None,
             title: title.to_string(),
@@ -805,14 +832,120 @@ mod tests {
     }
 
     #[test]
-    fn ownership_vstack_via_lock_source() {
-        // Rule 2: absent frontmatter, but the lock entry's source is vstack-shaped.
+    fn ownership_project_local_for_vstack_shaped_lock_source_without_repo_identity() {
+        // Rule 2 no longer trusts layout alone: arbitrary project-local package
+        // sources can be vstack-shaped without being upstream-owned.
         let source = make_vstack_source("lock-source");
         let lock = lock_with("dev", ItemKind::Skill, source.to_str().unwrap());
         let sel = selector("dev", Some(ItemKind::Skill));
         assert_eq!(
             resolve_ownership(&lock, Some(&sel), None, DEFAULT_UPSTREAM),
+            Ownership::ProjectLocal
+        );
+        let _ = std::fs::remove_dir_all(&source);
+    }
+
+    #[test]
+    fn ownership_vstack_via_lock_source_repo_when_path_absent() {
+        let missing_source = tmpdir("missing-vstack-source");
+        let lock = lock_with_repo(
+            "dev",
+            ItemKind::Agent,
+            missing_source.to_str().unwrap(),
+            Some("vanillagreencom/vstack"),
+        );
+        let sel = selector("dev", Some(ItemKind::Agent));
+        assert_eq!(
+            resolve_ownership(&lock, Some(&sel), None, DEFAULT_UPSTREAM),
             Ownership::Vstack
+        );
+    }
+
+    #[test]
+    fn ownership_vstack_via_canonical_lock_source_repo_with_upstream_override() {
+        let missing_source = tmpdir("missing-vstack-source-custom-target");
+        let lock = lock_with_repo(
+            "dev",
+            ItemKind::Agent,
+            missing_source.to_str().unwrap(),
+            Some(DEFAULT_UPSTREAM),
+        );
+        let sel = selector("dev", Some(ItemKind::Agent));
+        assert_eq!(
+            resolve_ownership(&lock, Some(&sel), None, "example/vstack-fork"),
+            Ownership::Vstack
+        );
+    }
+
+    #[test]
+    fn ownership_vstack_via_configured_fork_lock_source_repo() {
+        let missing_source = tmpdir("missing-vstack-fork-source");
+        let lock = lock_with_repo(
+            "dev",
+            ItemKind::Agent,
+            missing_source.to_str().unwrap(),
+            Some("example/vstack-fork"),
+        );
+        let sel = selector("dev", Some(ItemKind::Agent));
+        assert_eq!(
+            resolve_ownership(&lock, Some(&sel), None, "example/vstack-fork"),
+            Ownership::Vstack
+        );
+    }
+
+    #[test]
+    fn ownership_vstack_via_legacy_live_source_git_origin() {
+        let source = make_vstack_source("live-origin");
+        init_git_origin(&source, "git@github.com:vanillagreencom/vstack.git");
+        let lock = lock_with("guard", ItemKind::Hook, source.to_str().unwrap());
+        let sel = selector("guard", Some(ItemKind::Hook));
+        assert_eq!(
+            resolve_ownership(&lock, Some(&sel), None, DEFAULT_UPSTREAM),
+            Ownership::Vstack
+        );
+        let _ = std::fs::remove_dir_all(&source);
+    }
+
+    #[test]
+    fn ownership_vstack_via_canonical_legacy_source_with_upstream_override() {
+        let lock = lock_with("guard", ItemKind::Hook, DEFAULT_UPSTREAM);
+        let sel = selector("guard", Some(ItemKind::Hook));
+        assert_eq!(
+            resolve_ownership(&lock, Some(&sel), None, "example/vstack-fork"),
+            Ownership::Vstack
+        );
+    }
+
+    #[test]
+    fn ownership_project_local_when_source_repo_is_not_upstream() {
+        let missing_source = tmpdir("missing-local-source");
+        let lock = lock_with_repo(
+            "guard",
+            ItemKind::Hook,
+            missing_source.to_str().unwrap(),
+            Some("example/project-assets"),
+        );
+        let sel = selector("guard", Some(ItemKind::Hook));
+        assert_eq!(
+            resolve_ownership(&lock, Some(&sel), None, DEFAULT_UPSTREAM),
+            Ownership::ProjectLocal
+        );
+    }
+
+    #[test]
+    fn ownership_project_local_when_foreign_source_repo_has_live_vstack_origin() {
+        let source = make_vstack_source("foreign-recorded-live-vstack");
+        init_git_origin(&source, "git@github.com:vanillagreencom/vstack.git");
+        let lock = lock_with_repo(
+            "guard",
+            ItemKind::Hook,
+            source.to_str().unwrap(),
+            Some("example/project-assets"),
+        );
+        let sel = selector("guard", Some(ItemKind::Hook));
+        assert_eq!(
+            resolve_ownership(&lock, Some(&sel), None, DEFAULT_UPSTREAM),
+            Ownership::ProjectLocal
         );
         let _ = std::fs::remove_dir_all(&source);
     }
@@ -866,14 +999,62 @@ mod tests {
     }
 
     #[test]
-    fn ownership_vstack_via_lock_remote_slug_source() {
-        // Rule 2 remote-install branch: the lock source is the `owner/repo`
-        // shorthand (no local path to stat) and equals the upstream → Vstack.
-        let lock = lock_with("dev", ItemKind::Skill, "vanillagreencom/vstack");
-        let sel = selector("dev", Some(ItemKind::Skill));
+    fn ownership_vstack_hook_via_legacy_lock_remote_slug_source() {
+        // Legacy agent/hook lock entries may use the `owner/repo` shorthand
+        // when no durable source_repo field was recorded.
+        let lock = lock_with("guard", ItemKind::Hook, "vanillagreencom/vstack");
+        let sel = selector("guard", Some(ItemKind::Hook));
         assert_eq!(
             resolve_ownership(&lock, Some(&sel), None, DEFAULT_UPSTREAM),
             Ownership::Vstack
+        );
+    }
+
+    #[test]
+    fn ownership_vstack_pi_extension_via_legacy_lock_remote_slug_source() {
+        let lock = lock_with(
+            "@vanillagreen/pi-hooks",
+            ItemKind::PiExtension,
+            "vanillagreencom/vstack",
+        );
+        let sel = selector("@vanillagreen/pi-hooks", None);
+        assert_eq!(
+            resolve_ownership(&lock, Some(&sel), None, DEFAULT_UPSTREAM),
+            Ownership::Vstack
+        );
+    }
+
+    #[test]
+    fn ownership_project_local_for_unattributed_recovered_skill_source_hint() {
+        let lock = lock_with("third-party", ItemKind::Skill, "vanillagreencom/vstack");
+        let sel = selector("third-party", Some(ItemKind::Skill));
+        assert_eq!(
+            resolve_ownership(&lock, Some(&sel), None, DEFAULT_UPSTREAM),
+            Ownership::ProjectLocal
+        );
+    }
+
+    #[test]
+    fn ownership_project_local_for_skill_with_distributor_source_repo() {
+        let lock = lock_with_repo(
+            "third-party",
+            ItemKind::Skill,
+            "vanillagreencom/vstack",
+            Some(DEFAULT_UPSTREAM),
+        );
+        let sel = selector("third-party", Some(ItemKind::Skill));
+        assert_eq!(
+            resolve_ownership(&lock, Some(&sel), None, DEFAULT_UPSTREAM),
+            Ownership::ProjectLocal
+        );
+
+        let foreign = AssetFrontmatter {
+            source: None,
+            repository: Some("https://github.com/example/third-party".to_string()),
+        };
+        assert_eq!(
+            resolve_ownership(&lock, Some(&sel), Some(&foreign), DEFAULT_UPSTREAM),
+            Ownership::ProjectLocal
         );
     }
 
@@ -1030,13 +1211,16 @@ mod tests {
     #[test]
     fn plan_for_inputs_marker_kind_falls_back_to_lock_entry() {
         // `--asset` (kind None) resolves its marker kind from the lock entry.
-        let source = make_vstack_source("marker-kind");
-        let lock = lock_with("dev", ItemKind::Skill, source.to_str().unwrap());
+        let lock = lock_with_repo(
+            "dev",
+            ItemKind::Agent,
+            "/missing/source",
+            Some("vanillagreencom/vstack"),
+        );
         let sel = selector("dev", None);
         let plan = plan_for_inputs(&lock, Some(&sel), None, "T", "B", DEFAULT_UPSTREAM);
         assert_eq!(plan.ownership, Ownership::Vstack);
-        assert!(plan.body_with_marker.contains("kind=skill"));
-        let _ = std::fs::remove_dir_all(&source);
+        assert!(plan.body_with_marker.contains("kind=agent"));
     }
 
     // --- selector validation --------------------------------------------------
@@ -1215,6 +1399,75 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    #[test]
+    fn run_agent_lock_source_repo_vstack_files_upstream_with_marker_without_frontmatter() {
+        let root = tmpdir("cap-lock-source-repo-vstack");
+        std::fs::create_dir_all(&root).unwrap();
+        let missing_source = root.join("missing-source");
+        let lock = lock_with_repo(
+            "locked-agent",
+            ItemKind::Agent,
+            missing_source.to_str().unwrap(),
+            Some("vanillagreencom/vstack"),
+        );
+        lock.save(&root.join(".vstack-lock.json")).unwrap();
+
+        crate::test_util::with_project_root(&root, || {
+            let filer = CapturingFiler::default();
+            let args = agent_args("locked-agent", "broke", "body", false);
+            let result = run_with_filer(args, &filer);
+            assert!(result.is_ok());
+            let calls = filer.calls.borrow();
+            assert_eq!(calls.len(), 1);
+            let a = &calls[0];
+            let repo_idx = a
+                .iter()
+                .position(|x| x == "--repo")
+                .expect("source_repo=vstack must pass --repo");
+            assert_eq!(a[repo_idx + 1], DEFAULT_UPSTREAM);
+            assert!(
+                a.iter().any(|x| x.contains(
+                    "<!-- vstack-report:v1 asset=locked-agent kind=agent ownership=vstack -->"
+                )),
+                "vstack issue body must carry the marker"
+            );
+        });
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn run_lock_source_repo_foreign_files_locally_without_marker() {
+        let root = tmpdir("cap-lock-source-repo-foreign");
+        std::fs::create_dir_all(&root).unwrap();
+        let missing_source = root.join("missing-source");
+        let lock = lock_with_repo(
+            "locked-skill",
+            ItemKind::Skill,
+            missing_source.to_str().unwrap(),
+            Some("example/project-assets"),
+        );
+        lock.save(&root.join(".vstack-lock.json")).unwrap();
+
+        crate::test_util::with_project_root(&root, || {
+            let filer = CapturingFiler::default();
+            let args = skill_args("locked-skill", "broke", "body", false);
+            let result = run_with_filer(args, &filer);
+            assert!(result.is_ok());
+            let calls = filer.calls.borrow();
+            assert_eq!(calls.len(), 1);
+            let a = &calls[0];
+            assert!(
+                !a.iter().any(|x| x == "--repo"),
+                "foreign source_repo must not pass --repo"
+            );
+            assert!(
+                !a.iter().any(|x| x.contains("vstack-report:v1")),
+                "foreign source_repo must not carry the marker"
+            );
+        });
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     // --- disk frontmatter / installed-file resolution -------------------------
 
     #[test]
@@ -1330,27 +1583,27 @@ mod tests {
     #[test]
     fn parse_github_slug_handles_urls_bare_and_rejects_paths() {
         assert_eq!(
-            parse_github_slug("git@github.com:hyprtrade/app.git").as_deref(),
+            config::parse_github_slug("git@github.com:hyprtrade/app.git").as_deref(),
             Some("hyprtrade/app")
         );
         assert_eq!(
-            parse_github_slug("https://github.com/vanillagreencom/vstack").as_deref(),
+            config::parse_github_slug("https://github.com/vanillagreencom/vstack").as_deref(),
             Some("vanillagreencom/vstack")
         );
         // Bare owner/repo shorthand (remote-install lock source, repository fm).
         assert_eq!(
-            parse_github_slug("vanillagreencom/vstack").as_deref(),
+            config::parse_github_slug("vanillagreencom/vstack").as_deref(),
             Some("vanillagreencom/vstack")
         );
         assert_eq!(
-            parse_github_slug("vanillagreencom/vstack.git").as_deref(),
+            config::parse_github_slug("vanillagreencom/vstack.git").as_deref(),
             Some("vanillagreencom/vstack")
         );
         // Non-GitHub URL, local paths, and non-slug tokens must NOT parse.
-        assert_eq!(parse_github_slug("https://gitlab.com/x/y"), None);
-        assert_eq!(parse_github_slug("/home/me/dev/vstack"), None);
-        assert_eq!(parse_github_slug("a/b/c"), None);
-        assert_eq!(parse_github_slug("just-a-name"), None);
+        assert_eq!(config::parse_github_slug("https://gitlab.com/x/y"), None);
+        assert_eq!(config::parse_github_slug("/home/me/dev/vstack"), None);
+        assert_eq!(config::parse_github_slug("a/b/c"), None);
+        assert_eq!(config::parse_github_slug("just-a-name"), None);
     }
 
     #[test]

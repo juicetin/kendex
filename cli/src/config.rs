@@ -9,6 +9,11 @@ pub struct LockEntry {
     pub name: String,
     pub kind: ItemKind,
     pub source: String,
+    /// GitHub `owner/repo` identity for the source checkout/remote recorded at
+    /// install time. This is durable across moved or absent local paths and is
+    /// used for ownership routing where installed assets have no frontmatter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_repo: Option<String>,
     pub harnesses: Vec<String>,
     pub method: InstallMethod,
     pub installed_at: String,
@@ -780,6 +785,101 @@ pub fn resolve_source_path(source: &str) -> Option<PathBuf> {
     crate::refresh_sources::resolve_source_path(source)
 }
 
+/// Parse an `owner/repo` slug out of a GitHub SSH/HTTPS remote URL, a bare
+/// `owner/repo` shorthand, or `owner/repo.git`. Returns None for local paths,
+/// non-GitHub URLs, and anything that is not exactly one owner/repo pair.
+pub fn parse_github_slug(url: &str) -> Option<String> {
+    let url = url.trim().trim_end_matches('/');
+
+    // Bare `owner/repo` (no scheme, no host, no whitespace): exactly two
+    // non-empty, slash-free segments. Local absolute paths and nested relative
+    // paths have a leading empty segment or more than two parts.
+    if !url.contains("://") && !url.contains('@') && !url.contains(char::is_whitespace) {
+        let path = Path::new(url);
+        let has_windows_drive = url.as_bytes().get(1) == Some(&b':');
+        if path.is_absolute()
+            || url.starts_with("./")
+            || url.starts_with("../")
+            || url.starts_with(".\\")
+            || url.starts_with("..\\")
+            || url.contains('\\')
+            || has_windows_drive
+        {
+            return None;
+        }
+        let bare = url.strip_suffix(".git").unwrap_or(url);
+        let mut parts = bare.split('/');
+        if let (Some(owner), Some(repo), None) = (parts.next(), parts.next(), parts.next())
+            && !owner.is_empty()
+            && !repo.is_empty()
+        {
+            return Some(format!(
+                "{}/{}",
+                owner.to_ascii_lowercase(),
+                repo.to_ascii_lowercase()
+            ));
+        }
+        return None;
+    }
+
+    let after = if let Some(after) = url.strip_prefix("git@github.com:") {
+        after
+    } else if let Some(after_scheme) = url.strip_prefix("https://") {
+        let (authority, path) = after_scheme.split_once('/')?;
+        let host = authority.rsplit('@').next()?;
+        if !host.eq_ignore_ascii_case("github.com") {
+            return None;
+        }
+        path
+    } else if let Some(after) = url.strip_prefix("ssh://git@github.com/") {
+        after
+    } else {
+        return None;
+    };
+    let after = after
+        .trim_end_matches('/')
+        .strip_suffix(".git")
+        .unwrap_or(after);
+    let mut parts = after.split('/');
+    let owner = parts.next()?;
+    let repo = parts.next()?;
+    if owner.is_empty() || repo.is_empty() || parts.next().is_some() {
+        return None;
+    }
+    Some(format!(
+        "{}/{}",
+        owner.to_ascii_lowercase(),
+        repo.to_ascii_lowercase()
+    ))
+}
+
+pub fn github_slug_eq(left: &str, right: &str) -> bool {
+    parse_github_slug(left)
+        .zip(parse_github_slug(right))
+        .is_some_and(|(left, right)| left == right)
+}
+
+fn source_repo_from_git_origin(source_root: &Path) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args(["-C", source_root.to_str()?, "remote", "get-url", "origin"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let url = String::from_utf8_lossy(&output.stdout);
+    parse_github_slug(url.trim())
+}
+
+/// Resolve the durable repository identity for a source. Prefer the actual Git
+/// origin of a local/cached source root; fall back to the recorded source string
+/// only when it is itself a GitHub remote URL or owner/repo shorthand.
+pub fn source_repo_for_source(source_root: Option<&Path>, recorded_source: &str) -> Option<String> {
+    source_root
+        .and_then(source_repo_from_git_origin)
+        .or_else(|| parse_github_slug(recorded_source))
+}
+
 /// Compute source hash for a lock entry based on its kind.
 pub fn compute_source_hash(entry: &LockEntry) -> String {
     let source_root = match resolve_source_path(&entry.source) {
@@ -1327,6 +1427,7 @@ fn recover_hook_lock_entries_at_with_cursor_global_rules(
     installed_at: &str,
     cursor_global_rules_dir: &Path,
 ) -> bool {
+    let source_repo = source_repo_for_source(resolve_source_path(source).as_deref(), source);
     let mut modified = false;
     for item in scan_installed_hooks_on_disk_at_with_cursor_global_rules(
         project_root,
@@ -1336,6 +1437,18 @@ fn recover_hook_lock_entries_at_with_cursor_global_rules(
     ) {
         match lock.entries.get_mut(&item.name) {
             Some(entry) if entry.kind == ItemKind::Hook => {
+                // A resolvable recorded source is authoritative even when its
+                // current Git origin is absent: synchronize stale identity to
+                // the observed value, including None. If the source is
+                // unavailable, retain the last durable identity until a later
+                // refresh can observe it again.
+                if let Some(entry_source_root) = resolve_source_path(&entry.source) {
+                    let entry_source_repo = source_repo_from_git_origin(&entry_source_root);
+                    if entry.source_repo != entry_source_repo {
+                        entry.source_repo = entry_source_repo;
+                        modified = true;
+                    }
+                }
                 for harness in item.harnesses {
                     if !entry.harnesses.contains(&harness) {
                         entry.harnesses.push(harness);
@@ -1349,6 +1462,7 @@ fn recover_hook_lock_entries_at_with_cursor_global_rules(
                     name: item.name.clone(),
                     kind: ItemKind::Hook,
                     source: source.to_string(),
+                    source_repo: source_repo.clone(),
                     harnesses: item.harnesses,
                     method: InstallMethod::Copy,
                     installed_at: installed_at.to_string(),
@@ -1408,6 +1522,10 @@ pub fn reconcile_lock_with_disk(lock: &mut LockFile, global: bool, source: &str)
                 name: item.name.clone(),
                 kind: item.kind,
                 source: source.to_string(),
+                // A refresh marker proves vstack manages this installed skill,
+                // but not which registry supplied it. In a multi-source project
+                // the single reconciliation hint is insufficient attribution.
+                source_repo: None,
                 harnesses,
                 method: InstallMethod::Symlink,
                 installed_at: now.clone(),
@@ -1483,10 +1601,15 @@ pub fn reconcile_lock_with_disk(lock: &mut LockFile, global: bool, source: &str)
                 .source_repo
                 .clone()
                 .unwrap_or_else(|| source.to_string());
+            let entry_source_repo = source_repo_for_source(
+                resolve_source_path(&entry_source).as_deref(),
+                &entry_source,
+            );
             let mut entry = LockEntry {
                 name: pkg_name.clone(),
                 kind: ItemKind::PiExtension,
                 source: entry_source,
+                source_repo: entry_source_repo,
                 harnesses: vec!["pi".to_string()],
                 method: InstallMethod::Copy,
                 installed_at: now.clone(),
@@ -1530,6 +1653,91 @@ mod source_registry_tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    fn init_git_origin(dir: &Path, origin: &str) {
+        let status = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(dir)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let status = std::process::Command::new("git")
+            .args(["remote", "add", "origin", origin])
+            .current_dir(dir)
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
+    #[test]
+    fn lock_entry_deserializes_legacy_without_source_repo() {
+        let raw = r#"{
+          "name": "guard",
+          "kind": "hook",
+          "source": "/missing/source",
+          "harnesses": ["codex"],
+          "method": "copy",
+          "installed_at": "2026-07-21T00:00:00Z"
+        }"#;
+        let entry: LockEntry = serde_json::from_str(raw).unwrap();
+        assert_eq!(entry.name, "guard");
+        assert_eq!(entry.kind, ItemKind::Hook);
+        assert!(entry.source_repo.is_none());
+        assert!(entry.source_hash.is_empty());
+    }
+
+    #[test]
+    fn source_repo_for_source_prefers_git_origin_over_layout() {
+        let dir = sandbox("source_repo_git");
+        fs::create_dir_all(dir.join("agents")).unwrap();
+        fs::create_dir_all(dir.join("hooks")).unwrap();
+        init_git_origin(&dir, "https://github.com/vanillagreencom/vstack.git");
+
+        assert_eq!(
+            source_repo_for_source(Some(&dir), &dir.to_string_lossy()).as_deref(),
+            Some("vanillagreencom/vstack")
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn source_repo_for_source_does_not_infer_from_local_layout_only() {
+        let dir = sandbox("source_repo_layout");
+        fs::create_dir_all(dir.join("agents")).unwrap();
+        fs::create_dir_all(dir.join("hooks")).unwrap();
+
+        assert_eq!(
+            source_repo_for_source(Some(&dir), &dir.to_string_lossy()),
+            None
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parse_github_slug_normalizes_supported_remote_shapes() {
+        assert_eq!(
+            parse_github_slug("git@github.com:VanillaGreenCom/VStack.git").as_deref(),
+            Some("vanillagreencom/vstack")
+        );
+        assert_eq!(
+            parse_github_slug("https://github.com/owner/repo/").as_deref(),
+            Some("owner/repo")
+        );
+        assert_eq!(
+            parse_github_slug("https://credential@github.com/Owner/Repo.git").as_deref(),
+            Some("owner/repo")
+        );
+        assert_eq!(
+            parse_github_slug("https://user:token@github.com/owner/repo").as_deref(),
+            Some("owner/repo")
+        );
+        assert_eq!(parse_github_slug("a/b/c"), None);
+        assert_eq!(parse_github_slug("./source"), None);
+        assert_eq!(parse_github_slug("../source"), None);
+        assert_eq!(parse_github_slug("C:/source"), None);
+        assert_eq!(parse_github_slug(".\\source"), None);
+        assert_eq!(parse_github_slug("/home/me/dev/vstack"), None);
     }
 
     #[test]
@@ -1671,6 +1879,7 @@ mod source_registry_tests {
             name: "@vanillagreen/pi-questions".to_string(),
             kind: ItemKind::PiExtension,
             source: dir.display().to_string(),
+            source_repo: None,
             harnesses: vec!["pi".to_string()],
             method: InstallMethod::Symlink,
             installed_at: "2026-05-06T00:00:00Z".to_string(),
@@ -1762,6 +1971,7 @@ mod source_registry_tests {
             name: "my-hook".to_string(),
             kind: ItemKind::Hook,
             source: dir.display().to_string(),
+            source_repo: None,
             harnesses: vec!["claude-code".to_string()],
             method: InstallMethod::Symlink,
             installed_at: "2026-05-09T00:00:00Z".to_string(),
@@ -1889,6 +2099,176 @@ mod source_registry_tests {
         assert!(
             entry.source_hash.is_empty(),
             "refresh should count recovered hooks as updated after reinstall"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn recover_existing_hook_uses_lock_entry_source_identity_not_reconciliation_hint() {
+        let dir = sandbox("hook_recover_existing_source_identity");
+        let selected_source = dir.join("selected-source");
+        let recorded_source = dir.join("recorded-source");
+        let project = dir.join("project");
+        fs::create_dir_all(selected_source.join("hooks")).unwrap();
+        fs::create_dir_all(&recorded_source).unwrap();
+        init_git_origin(
+            &selected_source,
+            "git@github.com:vanillagreencom/vstack.git",
+        );
+        init_git_origin(
+            &recorded_source,
+            "https://github.com/example/project-assets.git",
+        );
+        let script = test_hook_script("my-hook", "echo source");
+        fs::write(selected_source.join("hooks/my-hook.sh"), &script).unwrap();
+        fs::create_dir_all(project.join(".claude/hooks")).unwrap();
+        fs::write(project.join(".claude/hooks/my-hook.sh"), &script).unwrap();
+
+        let mut lock = LockFile::default();
+        lock.add(LockEntry {
+            name: "my-hook".to_string(),
+            kind: ItemKind::Hook,
+            source: recorded_source.display().to_string(),
+            source_repo: None,
+            harnesses: vec!["claude-code".to_string()],
+            method: InstallMethod::Copy,
+            installed_at: "2026-07-21T00:00:00Z".to_string(),
+            source_hash: String::new(),
+        });
+
+        assert!(recover_hook_lock_entries_at(
+            &mut lock,
+            &project,
+            false,
+            &selected_source.display().to_string(),
+            "2026-07-22T00:00:00Z",
+        ));
+        assert_eq!(
+            lock.entries
+                .get("my-hook")
+                .and_then(|entry| entry.source_repo.as_deref()),
+            Some("example/project-assets")
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn recover_existing_hook_replaces_stale_source_identity_from_live_source() {
+        let dir = sandbox("hook_recover_replaces_stale_identity");
+        let selected_source = dir.join("selected-source");
+        let recorded_source = dir.join("recorded-source");
+        let project = dir.join("project");
+        fs::create_dir_all(selected_source.join("hooks")).unwrap();
+        fs::create_dir_all(&recorded_source).unwrap();
+        init_git_origin(
+            &recorded_source,
+            "https://github.com/example/project-assets.git",
+        );
+        let script = test_hook_script("my-hook", "echo source");
+        fs::write(selected_source.join("hooks/my-hook.sh"), &script).unwrap();
+        fs::create_dir_all(project.join(".claude/hooks")).unwrap();
+        fs::write(project.join(".claude/hooks/my-hook.sh"), &script).unwrap();
+
+        let mut lock = LockFile::default();
+        lock.add(LockEntry {
+            name: "my-hook".to_string(),
+            kind: ItemKind::Hook,
+            source: recorded_source.display().to_string(),
+            source_repo: Some("vanillagreencom/vstack".to_string()),
+            harnesses: vec!["claude-code".to_string()],
+            method: InstallMethod::Copy,
+            installed_at: "2026-07-21T00:00:00Z".to_string(),
+            source_hash: String::new(),
+        });
+
+        assert!(recover_hook_lock_entries_at(
+            &mut lock,
+            &project,
+            false,
+            &selected_source.display().to_string(),
+            "2026-07-22T00:00:00Z",
+        ));
+        assert_eq!(
+            lock.entries
+                .get("my-hook")
+                .and_then(|entry| entry.source_repo.as_deref()),
+            Some("example/project-assets")
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn recover_existing_hook_clears_stale_identity_for_live_source_without_origin() {
+        let dir = sandbox("hook_recover_clears_stale_identity");
+        let selected_source = dir.join("selected-source");
+        let recorded_source = dir.join("recorded-source");
+        let project = dir.join("project");
+        fs::create_dir_all(selected_source.join("hooks")).unwrap();
+        fs::create_dir_all(&recorded_source).unwrap();
+        let script = test_hook_script("my-hook", "echo source");
+        fs::write(selected_source.join("hooks/my-hook.sh"), &script).unwrap();
+        fs::create_dir_all(project.join(".claude/hooks")).unwrap();
+        fs::write(project.join(".claude/hooks/my-hook.sh"), &script).unwrap();
+
+        let mut lock = LockFile::default();
+        lock.add(LockEntry {
+            name: "my-hook".to_string(),
+            kind: ItemKind::Hook,
+            source: recorded_source.display().to_string(),
+            source_repo: Some("vanillagreencom/vstack".to_string()),
+            harnesses: vec!["claude-code".to_string()],
+            method: InstallMethod::Copy,
+            installed_at: "2026-07-21T00:00:00Z".to_string(),
+            source_hash: String::new(),
+        });
+
+        assert!(recover_hook_lock_entries_at(
+            &mut lock,
+            &project,
+            false,
+            &selected_source.display().to_string(),
+            "2026-07-22T00:00:00Z",
+        ));
+        assert_eq!(lock.entries.get("my-hook").unwrap().source_repo, None);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn recover_existing_hook_preserves_identity_when_recorded_source_is_unavailable() {
+        let dir = sandbox("hook_recover_preserves_unavailable_identity");
+        let selected_source = dir.join("selected-source");
+        let missing_recorded_source = dir.join("missing-recorded-source");
+        let project = dir.join("project");
+        fs::create_dir_all(selected_source.join("hooks")).unwrap();
+        let script = test_hook_script("my-hook", "echo source");
+        fs::write(selected_source.join("hooks/my-hook.sh"), &script).unwrap();
+        fs::create_dir_all(project.join(".claude/hooks")).unwrap();
+        fs::write(project.join(".claude/hooks/my-hook.sh"), &script).unwrap();
+
+        let mut lock = LockFile::default();
+        lock.add(LockEntry {
+            name: "my-hook".to_string(),
+            kind: ItemKind::Hook,
+            source: missing_recorded_source.display().to_string(),
+            source_repo: Some("vanillagreencom/vstack".to_string()),
+            harnesses: vec!["claude-code".to_string()],
+            method: InstallMethod::Copy,
+            installed_at: "2026-07-21T00:00:00Z".to_string(),
+            source_hash: String::new(),
+        });
+
+        assert!(!recover_hook_lock_entries_at(
+            &mut lock,
+            &project,
+            false,
+            &selected_source.display().to_string(),
+            "2026-07-22T00:00:00Z",
+        ));
+        assert_eq!(
+            lock.entries
+                .get("my-hook")
+                .and_then(|entry| entry.source_repo.as_deref()),
+            Some("vanillagreencom/vstack")
         );
         let _ = fs::remove_dir_all(&dir);
     }
@@ -2481,6 +2861,7 @@ echo foreign
             name: "reviewer".into(),
             kind: ItemKind::Skill,
             source: "source".into(),
+            source_repo: None,
             harnesses: vec!["claude-code".into()],
             method: InstallMethod::Copy,
             installed_at: "2026-07-03T00:00:00Z".into(),
@@ -2526,6 +2907,7 @@ echo foreign
             name: "reviewer".into(),
             kind: ItemKind::Skill,
             source: "source".into(),
+            source_repo: None,
             harnesses: vec!["claude-code".into()],
             method: InstallMethod::Copy,
             installed_at: "2026-07-03T00:00:00Z".into(),
@@ -2544,6 +2926,44 @@ echo foreign
             InstallMethod::Copy
         );
 
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reconcile_does_not_attribute_orphaned_skill_to_source_hint() {
+        let dir = sandbox("reconcile_orphaned_skill_identity");
+        let project = dir.join("project");
+        let source = dir.join("source");
+        fs::create_dir_all(project.join(".agents/skills/third-party")).unwrap();
+        fs::write(
+            project.join(".agents/skills/third-party/.vstack-refreshed"),
+            "managed\n",
+        )
+        .unwrap();
+        fs::create_dir_all(source.join("skills/third-party")).unwrap();
+        fs::write(
+            source.join("skills/third-party/SKILL.md"),
+            "# Third party\n",
+        )
+        .unwrap();
+        init_git_origin(&source, "git@github.com:vanillagreencom/vstack.git");
+
+        let recovered = crate::test_util::with_project_root(&project, || {
+            let mut lock = LockFile::default();
+            assert!(reconcile_lock_with_disk(
+                &mut lock,
+                false,
+                &source.display().to_string(),
+            ));
+            lock.entries.get("third-party").cloned()
+        })
+        .expect("orphaned managed skill should regain a lock entry");
+
+        assert_eq!(recovered.source, source.display().to_string());
+        assert_eq!(
+            recovered.source_repo, None,
+            "the reconciliation source hint is not proof of orphan ownership"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
