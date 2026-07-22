@@ -15,6 +15,10 @@
 # that is already enrolled reports QUEUED (75) from the authoritative post-call
 # snapshot, not BLOCKED, even though `gh pr merge --auto` exits nonzero when the
 # PR is already queued (vstack#616).
+# `--force` is deliberately different: it promises an immediate attempt, so a
+# nonzero merge mutation stays BLOCKED unless the exact head is now MERGED.
+# Auto-merge or a queue entry already active before the call is not success
+# proof for this mode (vstack#782).
 #
 # When BLOCKED, stderr distinguishes TRANSIENT issues (mergeable UNKNOWN,
 # ci pending — caller should `await-mergeable` and retry) from PERMANENT
@@ -87,7 +91,8 @@ Options:
   --delete-branch  Delete branch after merge (default: true)
   --keep-branch    Keep branch after merge
   --check          Run checks only, output JSON, don't merge
-  --force          Skip checks and merge (requires explicit user decision)
+  --force          Skip checks and merge (requires explicit user decision;
+                   cannot be combined with --auto)
   --auto           If immediate merge is blocked, enable GitHub auto-merge
                    (will fire when CI + branch protection clear). Exits 75.
                    Never bypasses actionable unresolved review threads.
@@ -419,6 +424,11 @@ main() {
         esac
     done
 
+    if [ "$force" = true ] && [ "$auto" = true ]; then
+        echo "Error: --force and --auto cannot be combined; --force is immediate-only" >&2
+        exit 1
+    fi
+
     if [ -z "$pr_num" ]; then
         echo '{"error": "PR number required"}' >&2
         exit 1
@@ -545,18 +555,24 @@ main() {
         exit 1
     fi
 
-    # A NONZERO `gh pr merge` exit is only benign when the authoritative
-    # snapshot proves a real success state: an already-enrolled merge queue
-    # entry (vstack#616), classic auto-merge already enabled, or an already
-    # merged PR. Anything else — conflicts, auth failure, CI, no enrollment —
-    # leaves no such proof and stays BLOCKED with the raw gh output. When the
-    # snapshot does prove success, fall through to the shared classification
-    # below so the outcome (MERGED / QUEUED / AUTO-MERGE) is reported once.
+    # A NONZERO `gh pr merge` exit is only benign outside `--force` when the
+    # authoritative snapshot proves a real success state: an already-enrolled
+    # merge queue entry (vstack#616), classic auto-merge already enabled, or an
+    # already merged PR. Anything else — conflicts, auth failure, CI, no
+    # enrollment — leaves no such proof and stays BLOCKED with the raw gh
+    # output. When the snapshot does prove success, fall through to the shared
+    # classification below so the outcome (MERGED / QUEUED / AUTO-MERGE) is
+    # reported once.
+    # `--force` promises an immediate mutation, so pre-existing pending state
+    # must never convert its failed mutation into success (vstack#782). An
+    # exact-head MERGED snapshot remains authoritative even if the CLI returned
+    # nonzero after the server completed the merge.
     if [ "$merge_exit" -ne 0 ] \
         && [ "$post_state" != "MERGED" ] \
-        && [ "$post_in_queue" != "true" ] \
-        && [ "$post_queue_entry" != "true" ] \
-        && [ "$post_auto" != "true" ]; then
+        && { [ "$force" = true ] \
+            || { [ "$post_in_queue" != "true" ] \
+                && [ "$post_queue_entry" != "true" ] \
+                && [ "$post_auto" != "true" ]; }; }; then
         local fail_args=(
             --severity error
             --importance important
