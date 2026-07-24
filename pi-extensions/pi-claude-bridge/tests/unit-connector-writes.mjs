@@ -124,6 +124,128 @@ test("isConnectorWriteTool keeps reads on UNKNOWN connector namespaces available
 	for (const name of reads) assert.equal(isConnectorWriteTool(name), false, name);
 });
 
+// Fixtures below are REAL tool ids, enumerated live (ToolSearch) from a Claude
+// account with the Slack and Atlassian connectors attached. They are the reason
+// the classifier matches read verbs as words instead of as `verb_` prefixes:
+// every one of these reads was denied by the old prefix test.
+test("isConnectorWriteTool keeps LIVE Slack + Atlassian reads available", () => {
+	const reads = [
+		// Slack: server-prefixed snake_case
+		"mcp__claude_ai_Slack__slack_read_channel",
+		"mcp__claude_ai_Slack__slack_read_thread",
+		"mcp__claude_ai_Slack__slack_read_canvas",
+		"mcp__claude_ai_Slack__slack_read_user_profile",
+		"mcp__claude_ai_Slack__slack_search_channels",
+		"mcp__claude_ai_Slack__slack_search_public",
+		"mcp__claude_ai_Slack__slack_search_public_and_private",
+		"mcp__claude_ai_Slack__slack_search_users",
+		// Atlassian: camelCase
+		"mcp__claude_ai_Atlassian__getJiraIssue",
+		"mcp__claude_ai_Atlassian__getJiraIssueRemoteIssueLinks",
+		"mcp__claude_ai_Atlassian__getJiraIssueTypeMetaWithFields",
+		"mcp__claude_ai_Atlassian__getJiraProjectIssueTypesMetadata",
+		"mcp__claude_ai_Atlassian__getTransitionsForJiraIssue",
+		"mcp__claude_ai_Atlassian__getVisibleJiraProjects",
+		"mcp__claude_ai_Atlassian__searchJiraIssuesUsingJql",
+		"mcp__claude_ai_Atlassian__lookupJiraAccountId",
+		"mcp__claude_ai_Atlassian__getConfluencePage",
+		"mcp__claude_ai_Atlassian__getConfluencePageDescendants",
+		"mcp__claude_ai_Atlassian__getConfluencePageFooterComments",
+		"mcp__claude_ai_Atlassian__getConfluencePageInlineComments",
+		"mcp__claude_ai_Atlassian__getConfluenceSpaces",
+		"mcp__claude_ai_Atlassian__getPagesInConfluenceSpace",
+		"mcp__claude_ai_Atlassian__searchConfluenceUsingCql",
+		"mcp__claude_ai_Atlassian__getAccessibleAtlassianResources",
+		"mcp__claude_ai_Atlassian__getIssueLinkTypes",
+		"mcp__claude_ai_Atlassian__getTeamworkGraphContext",
+		"mcp__claude_ai_Atlassian__getCompassComponents",
+		// bare single-word tools
+		"mcp__claude_ai_Atlassian__search",
+		"mcp__claude_ai_Atlassian__fetch",
+		// other connectors on the same account
+		"mcp__claude_ai_Figma__get_metadata",
+		"mcp__claude_ai_Figma__get_libraries",
+		"mcp__claude_ai_Figma__whoami",
+		"mcp__claude_ai_Google_Drive__list_recent_files",
+		"mcp__claude_ai_Gmail__get_thread",
+	];
+	for (const name of reads) assert.equal(isConnectorWriteTool(name), false, name);
+});
+
+test("isConnectorWriteTool denies LIVE Slack + Atlassian writes", () => {
+	const writes = [
+		"mcp__claude_ai_Slack__slack_send_message",
+		"mcp__claude_ai_Slack__slack_send_message_draft",
+		"mcp__claude_ai_Slack__slack_schedule_message",
+		"mcp__claude_ai_Slack__slack_create_canvas",
+		"mcp__claude_ai_Slack__slack_update_canvas",
+		"mcp__claude_ai_Atlassian__createJiraIssue",
+		"mcp__claude_ai_Atlassian__editJiraIssue",
+		"mcp__claude_ai_Atlassian__transitionJiraIssue",
+		"mcp__claude_ai_Atlassian__addCommentToJiraIssue",
+		"mcp__claude_ai_Atlassian__addWorklogToJiraIssue",
+		"mcp__claude_ai_Atlassian__createIssueLink",
+		"mcp__claude_ai_Atlassian__createConfluencePage",
+		"mcp__claude_ai_Atlassian__updateConfluencePage",
+		"mcp__claude_ai_Atlassian__createConfluenceFooterComment",
+		"mcp__claude_ai_Atlassian__createConfluenceInlineComment",
+		"mcp__claude_ai_Atlassian__createCompassComponent",
+		"mcp__claude_ai_Atlassian__addTeamworkGraphContext",
+		"mcp__claude_ai_Figma__upload_assets",
+		"mcp__claude_ai_Figma__export_video",
+	];
+	for (const name of writes) assert.equal(isConnectorWriteTool(name), true, name);
+});
+
+test("isConnectorWriteTool: a read verb mixed with a mutation still denies", () => {
+	// A name may open with a read verb and still mutate; deny wins over the
+	// read exemption so the mixed case can never sneak through. The second
+	// block uses mutating verbs BEYOND the obvious create/send/delete — the
+	// mutation vocabulary must cover the verbs real APIs actually use, or a
+	// compound name launders a mutation past the gate. `fetchAndLock` is a real
+	// precedent (Camunda's external-task endpoint, which locks tasks).
+	const writes = [
+		"mcp__claude_ai_Slack__getOrCreateChannel",
+		"mcp__claude_ai_Atlassian__findAndDeleteIssue",
+		"mcp__claude_ai_Gmail__get_and_send_draft",
+		"mcp__claude_ai_Camunda__fetchAndLock",
+		"mcp__claude_ai_Github__getMergePullRequest",
+		"mcp__claude_ai_Jira__getResolveIssue",
+		"mcp__claude_ai_PagerDuty__get_incident_and_acknowledge",
+		"mcp__claude_ai_AWS__describe_instance_and_terminate",
+		"mcp__claude_ai_AWS__describe_instance_and_stop",
+		"mcp__claude_ai_Calendly__get_next_slot_and_book",
+		"mcp__claude_ai_Slack__slack_search_and_join_channel",
+		"mcp__claude_ai_Slack__slack_get_channel_and_leave",
+		"mcp__claude_ai_Slack__slack_search_and_star_message",
+		"mcp__claude_ai_Slack__slack_get_message_and_forward",
+	];
+	for (const name of writes) assert.equal(isConnectorWriteTool(name), true, name);
+});
+
+test("isConnectorWriteTool: a verb-shaped SERVER name cannot launder its tool's verb", () => {
+	// The server-prefix skip exists for Slack's `slack_`-prefixed tools. It must
+	// never strip a leading word that is itself a mutation — otherwise a server
+	// named after a verb turns its own writes into reads.
+	const writes = [
+		"mcp__claude_ai_Sync__sync_get_status",
+		"mcp__claude_ai_Archive__archive_list_items",
+		"mcp__claude_ai_Delete__delete_get_thing",
+		"mcp__claude_ai_Merge__merge_read_branch",
+	];
+	for (const name of writes) assert.equal(isConnectorWriteTool(name), true, name);
+});
+
+test("isConnectorWriteTool skips only an exact server-name prefix", () => {
+	// `Slack__slack_read_channel` is judged on `read channel`…
+	assert.equal(isConnectorWriteTool("mcp__claude_ai_Slack__slack_read_channel"), false);
+	// …but the skip must not swallow a real first word on a multi-word server,
+	// and a tool named exactly after its server has no verb left → write.
+	assert.equal(isConnectorWriteTool("mcp__claude_ai_Google_Drive__google_send_file"), true);
+	assert.equal(isConnectorWriteTool("mcp__claude_ai_Google_Drive__google_drive_list_files"), false);
+	assert.equal(isConnectorWriteTool("mcp__claude_ai_Slack__slack"), true);
+});
+
 test("isConnectorWriteTool ignores non-connector tools entirely", () => {
 	const untouched = [
 		"ToolSearch",
@@ -145,8 +267,8 @@ test("isConnectorWriteTool FAILS CLOSED on malformed names inside the connector 
 		"mcp__claude_ai_Slack__", // empty tool segment
 		"mcp__claude_ai___search_messages", // EMPTY server segment: read verb must not exempt it
 		"mcp__claude_ai_____get_thing", // empty server + leading-underscore tool segment
-		"mcp__claude_ai_Weird__Server__list_things", // extra segment → not a bare read verb
-		"mcp__claude_ai_Slack__Send_Message", // read prefixes are case-sensitive
+		"mcp__claude_ai_Weird__Server__list_things", // extra segment → first word isn't a read verb
+		"mcp__claude_ai_Slack__Send_Message", // `send` is not a read verb, in any casing
 	];
 	for (const name of malformed) assert.equal(isConnectorWriteTool(name), true, name);
 });
