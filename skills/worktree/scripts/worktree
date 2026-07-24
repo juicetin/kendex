@@ -743,46 +743,6 @@ symlink_into_worktree() {
   fi
 }
 
-# Remove symlinks created by 'create' from a worktree
-remove_symlinks() {
-  local wt="$1"
-  # Clean configured symlinks
-  split_worktree_config_words "${WORKTREE_SYMLINKS:-}"
-  for path in ${WORKTREE_CONFIG_WORDS[@]+"${WORKTREE_CONFIG_WORDS[@]}"}; do
-    path="$(normalize_worktree_config_path WORKTREE_SYMLINKS "$path")" || return 1
-    if ! ensure_worktree_path_safe "$wt" "$path" false; then
-      echo "Warning: Skipping configured symlink cleanup for '$path' because a parent is a symlink." >&2
-      continue
-    fi
-    rm -f "$wt/$path" 2>/dev/null
-    # Try to clean empty parent dirs
-    local parent="$(dirname "$wt/$path")"
-    while [[ "$parent" != "$wt" && "$parent" != "/" ]]; do
-      rmdir "$parent" 2>/dev/null || break
-      parent="$(dirname "$parent")"
-    done
-  done
-  # Clean configured relative/internal symlinks
-  split_worktree_config_words "${WORKTREE_RELATIVE_SYMLINKS:-}"
-  for spec in ${WORKTREE_CONFIG_WORDS[@]+"${WORKTREE_CONFIG_WORDS[@]}"}; do
-    [[ "$spec" == *=* ]] || continue
-    local path="${spec%%=*}"
-    [[ -n "$path" ]] || continue
-    path="$(normalize_worktree_config_path WORKTREE_RELATIVE_SYMLINKS "$path")" || return 1
-    if ! ensure_worktree_path_safe "$wt" "$path" false; then
-      echo "Warning: Skipping configured relative symlink cleanup for '$path' because a parent is a symlink." >&2
-      continue
-    fi
-    rm -f "$wt/$path" 2>/dev/null
-    # Try to clean empty parent dirs
-    local parent="$(dirname "$wt/$path")"
-    while [[ "$parent" != "$wt" && "$parent" != "/" ]]; do
-      rmdir "$parent" 2>/dev/null || break
-      parent="$(dirname "$parent")"
-    done
-  done
-}
-
 # Apply all symlinks and copies to a worktree
 setup_worktree_links() {
   local wt="$1"
@@ -1427,6 +1387,29 @@ worktree_lock_reason() {
   printf '%s\n' "${reason:-locked}"
 }
 
+# Refuse to act on a worktree that carries a native `git worktree lock`.
+# `git worktree remove --force` does NOT override a lock (git wants `-f -f`),
+# so a locked worktree is unremovable. This is a DIAGNOSTIC precheck, not the
+# safety mechanism: git's refusal is authoritative and race-free, but it names
+# neither the owning session nor the way out. Sessions record `owner=<id>` in
+# the lock reason, so surface that plus the unlock path (#800). Callers must
+# still leave the tree intact until git itself succeeds.
+refuse_locked_worktree() {
+  local wt="$1" action="$2"
+  local lock_reason=""
+  lock_reason="$(worktree_lock_reason "$wt" || true)"
+  [[ -n "$lock_reason" ]] || return 0
+
+  echo "Error: $wt is a locked worktree; refusing to $action." >&2
+  echo "  Worktree: $wt" >&2
+  echo "  Lock reason: $lock_reason" >&2
+  echo "Nothing in the worktree was modified." >&2
+  echo "A lock usually means a live session owns this worktree; confirm it is finished first." >&2
+  echo "To release the lock and retry:" >&2
+  echo "  git -C \"$PROJECT_ROOT\" worktree unlock \"$wt\"" >&2
+  return 1
+}
+
 refuse_existing_worktree() {
   local issue="$1" wt="$2"
   local branch="" dirty="clean" upstream="" counts="" behind="0" ahead="0"
@@ -1993,9 +1976,34 @@ case "${1:-}" in
       if ! require_non_main_project_worktree "$WT_PATH" "remove it"; then
         exit 1
       fi
+      # Diagnostic precheck: a locked worktree cannot be removed, and git's own
+      # refusal names neither the owning session nor the unlock command (#800).
+      # Runs after the ownership guard so a foreign or main checkout is rejected
+      # on identity, never on another repo's lock state.
+      if ! refuse_locked_worktree "$WT_PATH" "remove it"; then
+        exit 1
+      fi
       BRANCH=$(git -C "$WT_PATH" branch --show-current 2>/dev/null)
-      remove_symlinks "$WT_PATH"
-      git -C "$PROJECT_ROOT" worktree remove --force "$WT_PATH"
+      # Let git remove the INTACT tree — it deletes the worktree contents itself,
+      # so there is nothing to pre-strip. Stripping the configured symlinks first
+      # left a live session's worktree without .agents/.claude/.env.local
+      # whenever git then refused the removal (#800), and no precheck can close
+      # that window: a lock acquired between the check and the strip lands right
+      # back in the original failure mode. Because nothing is mutated before git
+      # runs, a refusal issued BEFORE deletion begins — raced lock included —
+      # leaves the tree whole. Git's deletion is not transactional, so a failure
+      # partway through can still leave it partially removed; that is git's own
+      # window, not one this script widens. Same ordering `cleanup` adopted in
+      # #784, for the same reason.
+      REMOVE_OUTPUT=""
+      if ! REMOVE_OUTPUT="$(git -C "$PROJECT_ROOT" worktree remove --force "$WT_PATH" 2>&1)"; then
+        echo "Error: Git could not remove the worktree; preserving it for manual recovery: $WT_PATH" >&2
+        [[ -n "$REMOVE_OUTPUT" ]] && printf '%s\n' "$REMOVE_OUTPUT" | sed 's/^/  git: /' >&2
+        echo "  Branch: ${BRANCH:-unknown} (not deleted)" >&2
+        echo "Nothing was removed before Git ran, so a refusal made before deletion started (a lock, for example) leaves the worktree exactly as it was." >&2
+        echo "Git's deletion is not atomic: if it failed partway through, the worktree may be partially removed — inspect its contents before retrying, and restore links with: $0 fix-links \"$WT_PATH\"" >&2
+        exit 1
+      fi
       # Safety net: remove directory if git left it behind
       [[ -d "$WT_PATH" ]] && rm -rf "$WT_PATH"
     fi
