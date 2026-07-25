@@ -1,0 +1,7 @@
+{
+  "lastVersion": "0.82.1",
+  "lastDate": "2026-07-25",
+  "lastRun": "2026-07-25T22:41:48Z",
+  "lastRunHead": "38b36fc0500bb7b9c4cffbd748c10c3fb7f88acf",
+  "sourcesCovered": ["agent", "ai", "coding-agent", "server", "storage", "tui", "releases"]
+}
