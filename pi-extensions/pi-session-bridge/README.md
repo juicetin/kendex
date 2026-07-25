@@ -85,7 +85,7 @@ Local Pi extensions can publish activity updates that `pi-bridge stream` exposes
 `pi-bridge send` uses a hybrid slash dispatch path:
 
 - Plain text sends a normal user message.
-- `/skill:<name> ...` and prompt templates expand before being sent, matching Pi's editor behavior.
+- `/skill:<name> ...` and prompt templates expand before being sent, matching Pi's editor behavior, including positional and all-argument defaults (`${N:-default}`, `${@:-default}`, `${ARGUMENTS:-default}`).
 - Repeated skill sends in the same Pi session use a short reminder instead of resending the entire skill body.
 - Extension/TUI commands, such as `/bridge:ping` and `/tasks:add`, are delivered to Pi's own editor so they behave like typed commands.
 - If command delivery fails, the bridge falls back to sending the text as a normal message.

@@ -27135,6 +27135,7 @@ var FALLBACK_MODELS = {
     id: SONNET_5_MODEL_ID,
     name: "Claude Sonnet 5",
     reasoning: true,
+    thinkingLevelMap: { xhigh: "xhigh", max: "max" },
     input: ["text", "image"],
     contextWindow: 1e6,
     maxTokens: 128e3
@@ -44655,7 +44656,8 @@ var REASONING_TO_EFFORT = {
   low: "low",
   medium: "medium",
   high: "high",
-  xhigh: "max"
+  xhigh: "max",
+  max: "max"
 };
 function normalizeEffortOverrideModelKey(value) {
   const key = value.trim().toLowerCase();

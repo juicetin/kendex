@@ -1,12 +1,20 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { zstdDecompressSync } from "node:zlib";
-import { buildCodexUserAgent, buildRequestBody, compressRequestBodyZstd, getEnvApiKeyCompat } from "../src/provider-shim.js";
+import {
+	buildCodexUserAgent,
+	buildRequestBody,
+	clampOpenAIPromptCacheKey,
+	compressRequestBodyZstd,
+	createCodexRequestId,
+	getEnvApiKeyCompat,
+	isPreviousResponseNotFoundError,
+} from "../src/provider-shim.js";
 import { convertResponsesMessages } from "../src/providers/openai-responses-shared.js";
 
 const model = {
-	id: "gpt-5.5",
-	name: "GPT-5.5",
+	id: "gpt-5.6-sol",
+	name: "GPT-5.6 Sol",
 	api: "openai-codex-responses",
 	provider: "openai-codex",
 	baseUrl: "https://chatgpt.com/backend-api",
@@ -22,8 +30,33 @@ test("Codex request body forwards required tool choice", () => {
 	assert.equal(body.tool_choice, "required");
 });
 
+test("Codex cache retention none suppresses session cache key", () => {
+	const body = buildRequestBody(model, { messages: [], tools: [] } as any, {
+		cacheRetention: "none",
+		sessionId: "session-123",
+	} as any);
+	assert.equal(body.prompt_cache_key, undefined);
+});
+
+test("Codex prompt cache keys clamp to 64 Unicode characters", () => {
+	const key = `${"a".repeat(63)}😀suffix`;
+	const clamped = clampOpenAIPromptCacheKey(key);
+	assert.equal(Array.from(clamped ?? "").length, 64);
+	assert.equal(clamped, `${"a".repeat(63)}😀`);
+});
+
+test("Codex sessionless request IDs are UUIDv7", () => {
+	assert.match(createCodexRequestId(), /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+});
+
+test("Codex detects missing cached continuations by code or message", () => {
+	assert.equal(isPreviousResponseNotFoundError({ code: "previous_response_not_found" }), true);
+	assert.equal(isPreviousResponseNotFoundError(new Error("Codex error: previous_response_not_found")), true);
+	assert.equal(isPreviousResponseNotFoundError(new Error("other failure")), false);
+});
+
 test("Codex SSE request bodies use reversible zstd compression", () => {
-	const source = JSON.stringify({ model: "gpt-5.5", input: [{ role: "user", content: "hello" }] });
+	const source = JSON.stringify({ model: "gpt-5.6-sol", input: [{ role: "user", content: "hello" }] });
 	const compressed = compressRequestBodyZstd(source);
 	assert.ok(compressed, "Node runtime must expose zstd compression");
 	assert.equal(zstdDecompressSync(compressed).toString("utf8"), source);

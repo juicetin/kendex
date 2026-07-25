@@ -116,7 +116,7 @@ async function summarizeWithRemote(endpoint: string, systemPrompt: string, promp
 
 export function resolveConfiguredModel(ctx: ExtensionContext, configured: string): any | undefined {
 	if (!configured || configured.trim().toLowerCase() === "current") return ctx.model;
-	const withoutThinking = configured.replace(/:(off|minimal|low|medium|high|xhigh)$/i, "");
+	const withoutThinking = configured.replace(/:(off|minimal|low|medium|high|xhigh|max)$/i, "");
 	const slash = withoutThinking.indexOf("/");
 	if (slash > 0) return ctx.modelRegistry.find(withoutThinking.slice(0, slash), withoutThinking.slice(slash + 1));
 	const providers = [ctx.model?.provider, "google", "openai", "anthropic", "mistral", "moonshot", "cloudflare-ai-gateway", "cloudflare-workers-ai"].filter((value): value is string => typeof value === "string");
@@ -164,7 +164,6 @@ async function singleShotSummary(ctx: ExtensionContext, request: SummarizeReques
 	if (!model) throw new Error(`Summary model not found: ${configuredModel}`);
 	const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
 	if (!auth.ok) throw new Error(auth.error);
-	if (!auth.apiKey) throw new Error(`No API key for ${model.provider}`);
 
 	const message: Message = {
 		content: [{ text: promptText, type: "text" }],
@@ -174,7 +173,7 @@ async function singleShotSummary(ctx: ExtensionContext, request: SummarizeReques
 	const response = await complete(
 		model,
 		{ messages: [message], systemPrompt: QOL_COMPACTION_SYSTEM_PROMPT },
-		{ apiKey: auth.apiKey, headers: auth.headers, maxTokens: options.maxTokens, signal: options.signal },
+		{ apiKey: auth.apiKey, env: auth.env, headers: auth.headers, maxTokens: options.maxTokens, signal: options.signal },
 	);
 	const summary = response.content
 		.filter((content): content is { type: "text"; text: string } => content.type === "text")

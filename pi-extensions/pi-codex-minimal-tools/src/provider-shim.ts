@@ -40,7 +40,12 @@ const CODEX_RESPONSE_STATUSES = new Set(["completed", "incomplete", "failed", "c
 const OPENAI_BETA_RESPONSES_WEBSOCKETS = "responses_websockets=2026-02-06";
 const SESSION_WEBSOCKET_CACHE_TTL_MS = 5 * 60 * 1000;
 const REQUEST_COMPRESSION_ZSTD_LEVEL = 3;
+const OPENAI_PROMPT_CACHE_KEY_MAX_LENGTH = 64;
+const PREVIOUS_RESPONSE_NOT_FOUND_CODE = "previous_response_not_found";
 const dynamicImport = (specifier: string) => import(specifier);
+
+let lastUuidV7Timestamp = -Infinity;
+let uuidV7Sequence = 0;
 
 export async function getEnvApiKeyCompat(
 	provider: string,
@@ -467,11 +472,49 @@ function headersToRecord(headers: Headers): Record<string, string> {
 	return Object.fromEntries(headers.entries());
 }
 
-function createCodexRequestId(): string {
-	if (typeof globalThis.crypto?.randomUUID === "function") {
-		return globalThis.crypto.randomUUID();
+function fillRandomBytes(bytes: Uint8Array<ArrayBuffer>): void {
+	if (globalThis.crypto?.getRandomValues) {
+		globalThis.crypto.getRandomValues(bytes);
+		return;
 	}
-	return `codex_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+	for (let index = 0; index < bytes.length; index++) bytes[index] = Math.floor(Math.random() * 256);
+}
+
+export function createCodexRequestId(): string {
+	const random = new Uint8Array(16);
+	fillRandomBytes(random);
+	const timestamp = Date.now();
+	if (timestamp > lastUuidV7Timestamp) {
+		uuidV7Sequence = random[6]! * 0x1000000 + random[7]! * 0x10000 + random[8]! * 0x100 + random[9]!;
+		lastUuidV7Timestamp = timestamp;
+	} else {
+		uuidV7Sequence = (uuidV7Sequence + 1) >>> 0;
+		if (uuidV7Sequence === 0) lastUuidV7Timestamp++;
+	}
+
+	const bytes = new Uint8Array(16);
+	bytes[0] = (lastUuidV7Timestamp / 0x10000000000) & 0xff;
+	bytes[1] = (lastUuidV7Timestamp / 0x100000000) & 0xff;
+	bytes[2] = (lastUuidV7Timestamp / 0x1000000) & 0xff;
+	bytes[3] = (lastUuidV7Timestamp / 0x10000) & 0xff;
+	bytes[4] = (lastUuidV7Timestamp / 0x100) & 0xff;
+	bytes[5] = lastUuidV7Timestamp & 0xff;
+	bytes[6] = 0x70 | ((uuidV7Sequence >>> 28) & 0x0f);
+	bytes[7] = (uuidV7Sequence >>> 20) & 0xff;
+	bytes[8] = 0x80 | ((uuidV7Sequence >>> 14) & 0x3f);
+	bytes[9] = (uuidV7Sequence >>> 6) & 0xff;
+	bytes[10] = ((uuidV7Sequence & 0x3f) << 2) | (random[10]! & 0x03);
+	bytes.set(random.slice(11), 11);
+	const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0"));
+	return `${hex.slice(0, 4).join("")}-${hex.slice(4, 6).join("")}-${hex.slice(6, 8).join("")}-${hex.slice(8, 10).join("")}-${hex.slice(10, 16).join("")}`;
+}
+
+export function clampOpenAIPromptCacheKey(key: string | undefined): string | undefined {
+	if (key === undefined) return undefined;
+	const chars = Array.from(key);
+	return chars.length <= OPENAI_PROMPT_CACHE_KEY_MAX_LENGTH
+		? key
+		: chars.slice(0, OPENAI_PROMPT_CACHE_KEY_MAX_LENGTH).join("");
 }
 
 function buildBaseCodexHeaders(
@@ -548,7 +591,7 @@ function getServiceTierCostMultiplier(model: Model<Api>, serviceTier: ServiceTie
 		case "flex":
 			return 0.5;
 		case "priority":
-			return model.id === "gpt-5.5" ? 2.5 : 2;
+			return model.id === "gpt-5.6-sol" ? 2.5 : 2;
 		default:
 			return 1;
 	}
@@ -575,6 +618,7 @@ export function buildRequestBody<TApi extends Api>(model: Model<TApi>, context: 
 	const messages = convertResponsesMessages(model, context, CODEX_TOOL_CALL_PROVIDERS, {
 		includeSystemPrompt: false,
 	});
+	const cacheSessionId = options?.cacheRetention === "none" ? undefined : options?.sessionId;
 
 	const body: ResponsesBody = {
 		model: model.id,
@@ -584,7 +628,7 @@ export function buildRequestBody<TApi extends Api>(model: Model<TApi>, context: 
 		input: messages,
 		text: { verbosity: ((options as { textVerbosity?: string } | undefined)?.textVerbosity ?? "low") as string },
 		include: ["reasoning.encrypted_content"],
-		prompt_cache_key: options?.sessionId,
+		prompt_cache_key: clampOpenAIPromptCacheKey(cacheSessionId),
 		tool_choice: (options as { toolChoice?: "auto" | "none" | "required" } | undefined)?.toolChoice ?? "auto",
 		parallel_tool_calls: true,
 	};
@@ -1184,6 +1228,12 @@ function isWebSocketConnectionLimitReachedError(error: unknown): boolean {
 	return typeof candidate?.message === "string" && candidate.message.includes(WEBSOCKET_CONNECTION_LIMIT_REACHED_CODE);
 }
 
+export function isPreviousResponseNotFoundError(error: unknown): boolean {
+	const candidate = error as { code?: unknown; message?: unknown };
+	if (candidate?.code === PREVIOUS_RESPONSE_NOT_FOUND_CODE) return true;
+	return typeof candidate?.message === "string" && candidate.message.includes(PREVIOUS_RESPONSE_NOT_FOUND_CODE);
+}
+
 async function* mapCodexEvents(events: AsyncIterable<StreamEventShape>): AsyncIterable<StreamEventShape> {
 	let sawTerminalResponse = false;
 	const completedOutputItems = new Set<string>();
@@ -1362,6 +1412,7 @@ async function processWebSocketStream<TApi extends Api>(
 	model: Model<TApi>,
 	onStart: () => void,
 	options: SimpleStreamOptions | undefined,
+	cacheSessionId: string | undefined,
 	deps: {
 		onImageSaved?: (savedImage: SavedGeneratedImage, imageData: { data: string; mimeType: string }) => void;
 		onWebSearchCaptured?: (search: SurfacedWebSearch) => void;
@@ -1372,7 +1423,7 @@ async function processWebSocketStream<TApi extends Api>(
 	let streamStarted = false;
 
 	for (let attempt = 0; attempt < 2; attempt++) {
-		const { socket, entry, release, reused } = await acquireWebSocket(url, headers, options?.sessionId, options?.signal);
+		const { socket, entry, release, reused } = await acquireWebSocket(url, headers, cacheSessionId, options?.signal);
 		let keepConnection = true;
 		let released = false;
 		let eventCount = 0;
@@ -1428,6 +1479,11 @@ async function processWebSocketStream<TApi extends Api>(
 			}
 			keepConnection = false;
 			releaseOnce({ keep: false });
+			// A cached continuation can disappear server-side. Clear local state above,
+			// reconnect, and retry once with the full request body.
+			if (attempt === 0 && !options?.signal?.aborted && isPreviousResponseNotFoundError(error)) {
+				continue;
+			}
 			// Pi's stock provider reuses session WebSockets. In practice the Codex
 			// backend sometimes cleanly closes an idle cached socket between turns;
 			// if that stale socket fails before any response event, retry once on a
@@ -1680,14 +1736,16 @@ function createCodexStream<TApi extends Api>(
 			}
 
 			const accountId = extractAccountId(apiKey);
+			const cacheSessionId = options?.cacheRetention === "none" ? undefined : options?.sessionId;
+			const codexSessionId = clampOpenAIPromptCacheKey(cacheSessionId);
 			let body = buildRequestBody(model, context, options);
 			const nextBody = await options?.onPayload?.(body, model);
 			if (nextBody !== undefined) {
 				body = nextBody as ResponsesBody;
 			}
 
-			const websocketRequestId = options?.sessionId || createCodexRequestId();
-			const sseHeaders = buildSSEHeaders(model.headers, options?.headers, accountId, apiKey, options?.sessionId);
+			const websocketRequestId = codexSessionId || createCodexRequestId();
+			const sseHeaders = buildSSEHeaders(model.headers, options?.headers, accountId, apiKey, codexSessionId);
 			const websocketHeaders = buildWebSocketHeaders(model.headers, options?.headers, accountId, apiKey, websocketRequestId);
 			const bodyJson = JSON.stringify(body);
 			const responseHeaderTimeoutMs = responseHeaderTimeoutMsFromOptions(options);
@@ -1710,6 +1768,7 @@ function createCodexStream<TApi extends Api>(
 								websocketStarted = true;
 							},
 							options,
+							cacheSessionId,
 							deps,
 							requestCwd,
 							requestPrompt,

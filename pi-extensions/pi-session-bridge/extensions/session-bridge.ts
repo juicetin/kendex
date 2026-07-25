@@ -923,9 +923,11 @@ export function parseCommandArgs(argsString: string): string[] {
 
 export function substitutePromptArgs(content: string, args: string[]): string {
 	const allArgs = args.join(" ");
-	return content.replace(/\$\{(\d+):-([^}]*)\}|\$\{@:(\d+)(?::(\d+))?\}|\$(ARGUMENTS|@|\d+)/g, (_match, defaultNum: string | undefined, defaultValue: string | undefined, sliceStart: string | undefined, sliceLength: string | undefined, simple: string | undefined) => {
-		if (defaultNum) {
-			const value = args[Number.parseInt(defaultNum, 10) - 1];
+	return content.replace(/\$\{(\d+|ARGUMENTS|@):-([^}]*)\}|\$\{@:(\d+)(?::(\d+))?\}|\$(ARGUMENTS|@|\d+)/g, (_match, defaultTarget: string | undefined, defaultValue: string | undefined, sliceStart: string | undefined, sliceLength: string | undefined, simple: string | undefined) => {
+		if (defaultTarget) {
+			const value = defaultTarget === "@" || defaultTarget === "ARGUMENTS"
+				? allArgs
+				: args[Number.parseInt(defaultTarget, 10) - 1];
 			return value ? value : (defaultValue ?? "");
 		}
 		if (sliceStart) {

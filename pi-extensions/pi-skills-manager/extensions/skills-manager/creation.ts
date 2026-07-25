@@ -43,7 +43,7 @@ async function generateSkillDraft(ctx: ExtensionContext, answers: SkillCreationA
 	if (options?.signal?.aborted) throw new Error("Generation aborted");
 	if (!settingBoolean("aiGenerationEnabled", true, ctx.cwd) || !ctx.model) return buildFallbackSkill(answers);
 	const auth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model);
-	if (!auth.ok || !auth.apiKey) return buildFallbackSkill(answers);
+	if (!auth.ok) return buildFallbackSkill(answers);
 
 	const userMessage: UserMessage = {
 		role: "user",
@@ -69,7 +69,7 @@ async function generateSkillDraft(ctx: ExtensionContext, answers: SkillCreationA
 	const response = await completeSimple(
 		ctx.model,
 		{ systemPrompt: GENERATE_SKILL_SYSTEM_PROMPT, messages: [userMessage] },
-		{ apiKey: auth.apiKey, headers: auth.headers, ...(reasoning ? { reasoning } : {}), ...(options?.signal ? { signal: options.signal } : {}) },
+		{ apiKey: auth.apiKey, env: auth.env, headers: auth.headers, ...(reasoning ? { reasoning } : {}), ...(options?.signal ? { signal: options.signal } : {}) },
 	);
 	if (options?.signal?.aborted) throw new Error("Generation aborted");
 	const generated = response.content.filter((c): c is { type: "text"; text: string } => c.type === "text").map((c) => c.text).join("\n").trim();

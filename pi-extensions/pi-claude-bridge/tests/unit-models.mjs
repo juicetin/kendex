@@ -54,6 +54,7 @@ describe("MODELS projection", () => {
 		assert.equal(models.find((m) => m.id === "claude-opus-5")?.maxTokens, 128000);
 		assert.deepEqual(models.find((m) => m.id === "claude-opus-5")?.thinkingLevelMap, { xhigh: "xhigh", max: "max" });
 		assert.deepEqual(models.find((m) => m.id === "claude-fable-5")?.thinkingLevelMap, { xhigh: "xhigh", max: "max" });
+		assert.deepEqual(models.find((m) => m.id === "claude-sonnet-5")?.thinkingLevelMap, { xhigh: "xhigh", max: "max" });
 	});
 
 	it("prefers pi-ai metadata over bridge fallback metadata", () => {

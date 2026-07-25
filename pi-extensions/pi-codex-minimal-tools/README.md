@@ -16,6 +16,7 @@ Minimal Codex/OpenAI tools for Pi. Adds Codex-style tools without replacing Pi n
 - Tools only activate on OpenAI/Codex-like models; hidden on Anthropic/Claude-bridge sessions.
 - Optional direct OpenAI Images API fallback when `OPENAI_API_KEY` is set.
 - Codex provider failures keep HTTP status prefixes such as `HTTP 429:` or `HTTP 503:` so Pi can classify retries and limits.
+- Codex session parity matches Pi 0.82: cache/session IDs clamp to provider limits, `cacheRetention: "none"` disables session cache keys, sessionless WebSockets use UUIDv7, and missing cached continuations retry once with full context.
 
 For web search, install [`pi-web-tools`](../pi-web-tools/README.md) alongside this package.
 

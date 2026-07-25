@@ -66,6 +66,7 @@ const FALLBACK_MODELS: Record<string, BridgeModelMetadata> = {
 		id: SONNET_5_MODEL_ID,
 		name: "Claude Sonnet 5",
 		reasoning: true,
+		thinkingLevelMap: { xhigh: "xhigh", max: "max" },
 		input: ["text", "image"],
 		contextWindow: 1000000,
 		maxTokens: 128000,

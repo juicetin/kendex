@@ -63,7 +63,7 @@ async function runCodexProvider(streamOptions: Record<string, unknown> = {}, mod
 		{
 			provider: "openai-codex",
 			api: "openai-codex-responses",
-			id: "gpt-5.5",
+			id: "gpt-5.6-sol",
 			baseUrl: "https://example.test/backend-api",
 			headers: {},
 			input: ["text"],

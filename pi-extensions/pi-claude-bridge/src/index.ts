@@ -374,7 +374,7 @@ function buildMcpServers(tools: Tool[], queryCtx: QueryContext): Record<string, 
 // Pi reasoning levels → CC SDK effort levels
 
 const REASONING_TO_EFFORT: Record<string, EffortLevel> = {
-	minimal: "low", low: "low", medium: "medium", high: "high", xhigh: "max",
+	minimal: "low", low: "low", medium: "medium", high: "high", xhigh: "max", max: "max",
 };
 
 function normalizeEffortOverrideModelKey(value: string): string {
