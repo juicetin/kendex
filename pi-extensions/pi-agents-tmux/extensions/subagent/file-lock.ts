@@ -15,12 +15,14 @@ const DEFAULT_TIMEOUT_MS = 45_000;
 let fileLockOptionsForTests: LockOptions | undefined;
 
 export class FileLockTimeoutError extends Error {
-	constructor(
-		public readonly filePath: string,
-		public readonly timeoutMs: number,
-	) {
+	readonly filePath: string;
+	readonly timeoutMs: number;
+
+	constructor(filePath: string, timeoutMs: number) {
 		super(`Timed out acquiring file lock for ${filePath} after ${timeoutMs}ms`);
 		this.name = "FileLockTimeoutError";
+		this.filePath = filePath;
+		this.timeoutMs = timeoutMs;
 	}
 }
 

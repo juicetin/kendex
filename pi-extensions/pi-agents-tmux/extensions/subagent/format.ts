@@ -266,9 +266,9 @@ export async function parseTranscriptUsage(transcriptPath: string | undefined): 
 	} catch {
 		return undefined;
 	}
-	const total: UsageStats = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 };
+	const total: UsageStats = { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 };
 	let model: string | undefined;
-	let bestPerTurn: { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number } | undefined;
+	let bestPerTurn: { input: number; output: number; reasoning: number; cacheRead: number; cacheWrite: number; cost: number } | undefined;
 	for (const line of content.split(/\r?\n/)) {
 		if (!line.trim()) continue;
 		let event: any;
@@ -285,6 +285,13 @@ export async function parseTranscriptUsage(transcriptPath: string | undefined): 
 		if (!usage || typeof usage !== "object") continue;
 		const input = Number((usage as Record<string, unknown>).input ?? (usage as Record<string, unknown>).input_tokens ?? 0) || 0;
 		const output = Number((usage as Record<string, unknown>).output ?? (usage as Record<string, unknown>).output_tokens ?? 0) || 0;
+		const outputDetails = (usage as Record<string, unknown>).output_tokens_details;
+		const reasoning = Number(
+			(usage as Record<string, unknown>).reasoning ??
+				(usage as Record<string, unknown>).reasoning_tokens ??
+				(outputDetails && typeof outputDetails === "object" ? (outputDetails as Record<string, unknown>).reasoning_tokens : 0) ??
+				0,
+		) || 0;
 		const cacheRead = Number((usage as Record<string, unknown>).cacheRead ?? (usage as Record<string, unknown>).cache_read_input_tokens ?? 0) || 0;
 		const cacheWrite = Number((usage as Record<string, unknown>).cacheWrite ?? (usage as Record<string, unknown>).cache_creation_input_tokens ?? 0) || 0;
 		const rawCost = (usage as Record<string, unknown>).cost;
@@ -301,18 +308,20 @@ export async function parseTranscriptUsage(transcriptPath: string | undefined): 
 		}
 		const type = inner?.type;
 		const isFinal = type === "message" || type === "message_end";
-		const hasAny = input > 0 || output > 0 || cacheRead > 0 || cacheWrite > 0 || cost > 0;
+		const hasAny = input > 0 || output > 0 || reasoning > 0 || cacheRead > 0 || cacheWrite > 0 || cost > 0;
 		if (isFinal && hasAny) {
 			total.input += input;
 			total.output += output;
+			total.reasoning = (total.reasoning ?? 0) + reasoning;
 			total.cacheRead += cacheRead;
 			total.cacheWrite += cacheWrite;
 			total.cost += cost;
 			total.turns = (total.turns ?? 0) + 1;
 		} else if (hasAny) {
-			bestPerTurn = bestPerTurn ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
+			bestPerTurn = bestPerTurn ?? { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
 			bestPerTurn.input = Math.max(bestPerTurn.input, input);
 			bestPerTurn.output = Math.max(bestPerTurn.output, output);
+			bestPerTurn.reasoning = Math.max(bestPerTurn.reasoning, reasoning);
 			bestPerTurn.cacheRead = Math.max(bestPerTurn.cacheRead, cacheRead);
 			bestPerTurn.cacheWrite = Math.max(bestPerTurn.cacheWrite, cacheWrite);
 			bestPerTurn.cost = Math.max(bestPerTurn.cost, cost);
@@ -321,6 +330,7 @@ export async function parseTranscriptUsage(transcriptPath: string | undefined): 
 	if ((total.turns ?? 0) === 0 && bestPerTurn) {
 		total.input = bestPerTurn.input;
 		total.output = bestPerTurn.output;
+		total.reasoning = bestPerTurn.reasoning;
 		total.cacheRead = bestPerTurn.cacheRead;
 		total.cacheWrite = bestPerTurn.cacheWrite;
 		total.cost = bestPerTurn.cost;
@@ -333,6 +343,7 @@ export async function parseTranscriptUsage(transcriptPath: string | undefined): 
 export function formatUsageStatsForDashboard(usage: {
 	input: number;
 	output: number;
+	reasoning?: number;
 	cost: number;
 	turns?: number;
 }): string[] {
@@ -341,6 +352,7 @@ export function formatUsageStatsForDashboard(usage: {
 	const tokenBits: string[] = [];
 	if (usage.input) tokenBits.push(`↑${formatTokens(usage.input)}`);
 	if (usage.output) tokenBits.push(`↓${formatTokens(usage.output)}`);
+	if (usage.reasoning) tokenBits.push(`T${formatTokens(usage.reasoning)}`);
 	if (tokenBits.length > 0) parts.push(tokenBits.join(" "));
 	if (usage.cost) parts.push(`$${usage.cost.toFixed(4)}`);
 	return parts;
@@ -350,6 +362,7 @@ export function formatUsageStats(
 	usage: {
 		input: number;
 		output: number;
+		reasoning?: number;
 		cacheRead: number;
 		cacheWrite: number;
 		cost: number;
@@ -362,6 +375,7 @@ export function formatUsageStats(
 	if (usage.turns) parts.push(`${usage.turns} turn${usage.turns > 1 ? "s" : ""}`);
 	if (usage.input) parts.push(`↑${formatTokens(usage.input)}`);
 	if (usage.output) parts.push(`↓${formatTokens(usage.output)}`);
+	if (usage.reasoning) parts.push(`T${formatTokens(usage.reasoning)}`);
 	if (usage.cacheRead) parts.push(`R${formatTokens(usage.cacheRead)}`);
 	if (usage.cacheWrite) parts.push(`W${formatTokens(usage.cacheWrite)}`);
 	if (usage.cost) parts.push(`$${usage.cost.toFixed(4)}`);

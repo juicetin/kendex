@@ -1,6 +1,17 @@
 import { calculateCost, type Api, type AssistantMessage, type Context, type Model, type Tool, type Usage } from "@earendil-works/pi-ai";
 import type { ResponseCreateParamsStreaming, ResponseInput, ResponseStreamEvent, Tool as OpenAITool } from "openai/resources/responses/responses.js";
 import type { AssistantMessageEventStream } from "@earendil-works/pi-ai";
+import {
+	appendGrammarToolInputJsonDelta,
+	createGrammarToolInputProperties,
+	getGrammarToolInput,
+	resolveGrammarSampling,
+	resolveStrictSampling,
+	splitDeferredTools,
+	type GrammarInputBuffer,
+} from "./openai-responses-compat.js";
+
+export { createGrammarToolInputProperties, splitDeferredTools } from "./openai-responses-compat.js";
 
 type MessageRole = Context["messages"][number]["role"];
 type Message = Context["messages"][number];
@@ -22,6 +33,7 @@ type InternalAssistantContent = Extract<Message, { role: "assistant" }>["content
 
 export interface OpenAIResponsesStreamOptions {
 	serviceTier?: ResponseCreateParamsStreaming["service_tier"];
+	grammarToolInputProperties?: ReadonlyMap<string, string>;
 	resolveServiceTier?: (
 		responseServiceTier: ResponseCreateParamsStreaming["service_tier"] | undefined,
 		requestServiceTier: ResponseCreateParamsStreaming["service_tier"] | undefined,
@@ -33,11 +45,18 @@ type TextSignaturePhase = "commentary" | "final_answer";
 
 interface ConvertResponsesMessagesOptions {
 	includeSystemPrompt?: boolean;
+	grammarToolInputProperties?: ReadonlyMap<string, string>;
+	deferredTools?: ReadonlyMap<string, Tool>;
+	toolOptions?: ConvertResponsesToolsOptions;
 }
 
 interface ConvertResponsesToolsOptions {
 	strict?: boolean | null;
+	supportsStrictMode?: boolean;
+	supportsOpenAIGrammarTools?: boolean;
+	deferLoading?: boolean;
 }
+
 
 function shortHash(str: string): string {
 	let h1 = 0xdeadbeef;
@@ -252,6 +271,7 @@ export function convertResponsesMessages<TApi extends Api>(
 	options?: ConvertResponsesMessagesOptions,
 ): ResponseInput {
 	const messages: ResponseInput = [];
+	const loadedToolNames = new Set<string>();
 	const normalizeIdPart = (part: string) => {
 		const sanitized = part.replace(/[^a-zA-Z0-9_-]/g, "_");
 		const normalized = sanitized.length > 64 ? sanitized.slice(0, 64) : sanitized;
@@ -316,15 +336,26 @@ export function convertResponsesMessages<TApi extends Api>(
 					assistantBlockIndex++;
 				} else if (block.type === "toolCall") {
 					const [callId, itemIdRaw] = block.id.split("|");
+					const customInputProperty = options?.grammarToolInputProperties?.get(block.name);
 					let itemId: string | undefined = itemIdRaw;
-					if (isDifferentModel && itemId?.startsWith("fc_")) itemId = undefined;
-					output.push({
-						type: "function_call",
-						...(itemId ? { id: itemId } : {}),
-						call_id: callId,
-						name: block.name,
-						arguments: JSON.stringify(block.arguments),
-					} as ResponseInput[number]);
+					if ((isDifferentModel && itemId?.startsWith("fc_")) || (customInputProperty === undefined && !itemId?.startsWith("fc_"))) itemId = undefined;
+					if (customInputProperty !== undefined) {
+						output.push({
+							type: "custom_tool_call",
+							...(itemId ? { id: itemId } : {}),
+							call_id: callId,
+							name: block.name,
+							input: sanitizeSurrogates(getGrammarToolInput(block.name, block.arguments, customInputProperty)),
+						} as ResponseInput[number]);
+					} else {
+						output.push({
+							type: "function_call",
+							...(itemId ? { id: itemId } : {}),
+							call_id: callId,
+							name: block.name,
+							arguments: JSON.stringify(block.arguments),
+						} as ResponseInput[number]);
+					}
 				}
 			}
 			if (output.length > 0) messages.push(...output);
@@ -345,7 +376,36 @@ export function convertResponsesMessages<TApi extends Api>(
 							})),
 					]
 				: sanitizeSurrogates(hasText ? textResult : hasImages ? "(see attached image)" : "(no tool output)");
-			messages.push({ type: "function_call_output", call_id: callId, output });
+			messages.push({
+				type: options?.grammarToolInputProperties?.has(msg.toolName) ? "custom_tool_call_output" : "function_call_output",
+				call_id: callId,
+				output,
+			} as ResponseInput[number]);
+			const deferredTools: Tool[] = [];
+			for (const name of (msg as unknown as { addedToolNames?: string[] }).addedToolNames ?? []) {
+				const tool = options?.deferredTools?.get(name);
+				if (!tool || loadedToolNames.has(name)) continue;
+				loadedToolNames.add(name);
+				deferredTools.push(tool);
+			}
+			if (deferredTools.length > 0) {
+				const names = deferredTools.map((tool) => tool.name);
+				const searchCallId = `pi_tool_load_${shortHash(`${msg.toolCallId}:${names.join(",")}`)}`;
+				messages.push({
+					type: "tool_search_call",
+					call_id: searchCallId,
+					execution: "client",
+					status: "completed",
+					arguments: { query: names.join(" "), limit: names.length },
+				} as ResponseInput[number]);
+				messages.push({
+					type: "tool_search_output",
+					call_id: searchCallId,
+					execution: "client",
+					status: "completed",
+					tools: convertResponsesTools(deferredTools, { ...options?.toolOptions, deferLoading: true }),
+				} as ResponseInput[number]);
+			}
 		}
 		msgIndex++;
 	}
@@ -353,15 +413,31 @@ export function convertResponsesMessages<TApi extends Api>(
 	return messages;
 }
 
-export function convertResponsesTools(tools: Tool[], options?: ConvertResponsesToolsOptions): OpenAITool[] {
-	const strict = options?.strict === undefined ? false : options.strict;
-	return tools.map((tool) => ({
-		type: "function",
-		name: tool.name,
-		description: tool.description,
-		parameters: tool.parameters as unknown as Record<string, unknown>,
-		strict,
-	}));
+export function convertResponsesTools(tools: readonly Tool[], options?: ConvertResponsesToolsOptions): OpenAITool[] {
+	const defaultStrict = options?.strict === undefined ? false : options.strict;
+	const supportsStrictMode = options?.supportsStrictMode ?? true;
+	const supportsOpenAIGrammarTools = options?.supportsOpenAIGrammarTools ?? false;
+	return tools.map((tool) => {
+		const grammar = resolveGrammarSampling(tool, supportsOpenAIGrammarTools);
+		if (grammar) {
+			return {
+				type: "custom",
+				name: tool.name,
+				description: tool.description,
+				format: { type: "grammar", syntax: grammar.format, definition: grammar.definition },
+				...(options?.deferLoading ? { defer_loading: true } : {}),
+			} as OpenAITool;
+		}
+		const constrainedStrict = resolveStrictSampling(tool, supportsStrictMode);
+		return {
+			type: "function",
+			name: tool.name,
+			description: tool.description,
+			parameters: tool.parameters as unknown as Record<string, unknown>,
+			...(options?.deferLoading ? { defer_loading: true } : {}),
+			...(supportsStrictMode ? { strict: constrainedStrict ?? defaultStrict } : {}),
+		} as OpenAITool;
+	});
 }
 
 export async function processResponsesStream<TApi extends Api>(
@@ -375,7 +451,10 @@ export async function processResponsesStream<TApi extends Api>(
 	const blockIndex = () => blocks.length - 1;
 	type ThinkingBlock = Extract<AssistantMessage["content"][number], { type: "thinking" }>;
 	type TextBlock = Extract<AssistantMessage["content"][number], { type: "text" }>;
-	type ToolCallBlock = Extract<AssistantMessage["content"][number], { type: "toolCall" }> & { partialJson?: string };
+	type ToolCallBlock = Extract<AssistantMessage["content"][number], { type: "toolCall" }> & {
+		partialJson?: string;
+		customInput?: { property: string; jsonBuffer: GrammarInputBuffer };
+	};
 
 	type ReasoningState = {
 		kind: "reasoning";
@@ -435,12 +514,27 @@ export async function processResponsesStream<TApi extends Api>(
 			}
 		}
 	};
+	const pushToolCallDelta = (state: FunctionCallState, delta: string | undefined) => {
+		if (delta !== undefined) stream.push({ type: "toolcall_delta", contentIndex: state.blockIndex, delta, partial: output });
+	};
+	const customToolInput = (block: ToolCallBlock): string => {
+		const property = block.customInput?.property;
+		const value = property ? block.arguments[property] : undefined;
+		return typeof value === "string" ? value : "";
+	};
+	const appendCustomToolInput = (block: ToolCallBlock, nextInput: string, close: boolean): string | undefined => {
+		const custom = block.customInput;
+		if (!custom) return undefined;
+		const delta = appendGrammarToolInputJsonDelta(custom.jsonBuffer, custom.property, nextInput, close);
+		block.arguments = { [custom.property]: nextInput };
+		return delta;
+	};
 
 	for await (const event of openaiStream) {
 		if (event.type === "response.created") {
 			output.responseId = event.response.id;
 		} else if (event.type === "response.output_item.added") {
-			const item = event.item;
+			const item = event.item as any;
 			if (item.type === "reasoning") {
 				const currentBlock: ThinkingBlock = { type: "thinking", thinking: "" };
 				output.content.push(currentBlock);
@@ -475,6 +569,19 @@ export async function processResponsesStream<TApi extends Api>(
 					blockIndex: blockIndex(),
 					block: currentBlock,
 				});
+				stream.push({ type: "toolcall_start", contentIndex: blockIndex(), partial: output });
+			} else if (item.type === "custom_tool_call") {
+				const property = options?.grammarToolInputProperties?.get(item.name) ?? "input";
+				const input = item.input || "";
+				const currentBlock: ToolCallBlock = {
+					type: "toolCall",
+					id: `${item.call_id}|${item.id}`,
+					name: item.name,
+					arguments: { [property]: input },
+					customInput: { property, jsonBuffer: { input: "", started: false, closed: false } },
+				};
+				output.content.push(currentBlock);
+				outputStates.set(event.output_index, { kind: "function_call", blockIndex: blockIndex(), block: currentBlock });
 				stream.push({ type: "toolcall_start", contentIndex: blockIndex(), partial: output });
 			}
 		} else if (event.type === "response.reasoning_summary_part.added") {
@@ -559,8 +666,20 @@ export async function processResponsesStream<TApi extends Api>(
 					}
 				}
 			}
+		} else if ((event as any).type === "response.custom_tool_call_input.delta") {
+			const customEvent = event as any;
+			const state = outputStates.get(customEvent.output_index);
+			if (state?.kind === "function_call" && state.block.customInput) {
+				pushToolCallDelta(state, appendCustomToolInput(state.block, customToolInput(state.block) + customEvent.delta, false));
+			}
+		} else if ((event as any).type === "response.custom_tool_call_input.done") {
+			const customEvent = event as any;
+			const state = outputStates.get(customEvent.output_index);
+			if (state?.kind === "function_call" && state.block.customInput) {
+				pushToolCallDelta(state, appendCustomToolInput(state.block, customEvent.input, true));
+			}
 		} else if (event.type === "response.output_item.done") {
-			const item = event.item;
+			const item = event.item as any;
 			if (item.type === "reasoning") {
 				let state = outputStates.get(event.output_index);
 				if (!state || state.kind !== "reasoning") {
@@ -569,7 +688,7 @@ export async function processResponsesStream<TApi extends Api>(
 					state = { kind: "reasoning", blockIndex: blockIndex(), block: currentBlock, summaryParts: new Map() };
 					outputStates.set(event.output_index, state);
 				}
-				const summaryText = item.summary?.map((summary) => summary.text).join("\n\n") || "";
+				const summaryText = item.summary?.map((summary: { text?: string }) => summary.text ?? "").join("\n\n") || "";
 				const contentText = (item as { content?: Array<{ text?: string }> }).content?.map((content) => content.text ?? "").filter(Boolean).join("\n\n") || "";
 				state.block.thinking = summaryText || contentText || state.block.thinking;
 				state.block.thinkingSignature = JSON.stringify(item);
@@ -587,7 +706,7 @@ export async function processResponsesStream<TApi extends Api>(
 				// (e.g. vLLM) can emit an empty message item with content: null before a
 				// function_call. Without the guard, item.content.map throws and the stream
 				// aborts, silently dropping the tool call (earendil-works/pi#5819).
-				state.block.text = (item.content ?? []).map((content) => (content.type === "output_text" ? content.text : content.refusal)).join("");
+				state.block.text = (item.content ?? []).map((content: { type?: string; text?: string; refusal?: string }) => (content.type === "output_text" ? content.text ?? "" : content.refusal ?? "")).join("");
 				state.block.textSignature = encodeTextSignatureV1(item.id, item.phase ?? undefined);
 				stream.push({ type: "text_end", contentIndex: state.blockIndex, content: state.block.text, partial: output });
 				outputStates.delete(event.output_index);
@@ -615,6 +734,24 @@ export async function processResponsesStream<TApi extends Api>(
 				const toolCallIndex = state?.kind === "function_call" ? state.blockIndex : blockIndex();
 				stream.push({ type: "toolcall_end", contentIndex: toolCallIndex, toolCall, partial: output });
 				outputStates.delete(event.output_index);
+			} else if (item.type === "custom_tool_call") {
+				let state = outputStates.get(event.output_index);
+				if (!state || state.kind !== "function_call" || !state.block.customInput) {
+					const property = options?.grammarToolInputProperties?.get(item.name) ?? "input";
+					const currentBlock: ToolCallBlock = {
+						type: "toolCall",
+						id: `${item.call_id}|${item.id}`,
+						name: item.name,
+						arguments: { [property]: item.input ?? "" },
+						customInput: { property, jsonBuffer: { input: "", started: false, closed: false } },
+					};
+					output.content.push(currentBlock);
+					state = { kind: "function_call", blockIndex: blockIndex(), block: currentBlock };
+				}
+				pushToolCallDelta(state, appendCustomToolInput(state.block, item.input ?? customToolInput(state.block), true));
+				delete state.block.customInput;
+				stream.push({ type: "toolcall_end", contentIndex: state.blockIndex, toolCall: state.block, partial: output });
+				outputStates.delete(event.output_index);
 			} else if (item.type === "image_generation_call") {
 				appendImageGenerationCall(item);
 				outputStates.delete(event.output_index);
@@ -630,13 +767,15 @@ export async function processResponsesStream<TApi extends Api>(
 			}
 			if (response?.id) output.responseId = response.id;
 			if (response?.usage) {
-				const cachedTokens = response.usage.input_tokens_details?.cached_tokens || 0;
+				const inputDetails = response.usage.input_tokens_details as { cached_tokens?: number; cache_write_tokens?: number } | undefined;
+				const cachedTokens = inputDetails?.cached_tokens || 0;
+				const cacheWriteTokens = inputDetails?.cache_write_tokens || 0;
 				const reasoningTokens = (response.usage as { output_tokens_details?: { reasoning_tokens?: number } }).output_tokens_details?.reasoning_tokens || 0;
 				output.usage = {
-					input: (response.usage.input_tokens || 0) - cachedTokens,
+					input: Math.max(0, (response.usage.input_tokens || 0) - cachedTokens - cacheWriteTokens),
 					output: response.usage.output_tokens || 0,
 					cacheRead: cachedTokens,
-					cacheWrite: 0,
+					cacheWrite: cacheWriteTokens,
 					totalTokens: response.usage.total_tokens || 0,
 					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 				};

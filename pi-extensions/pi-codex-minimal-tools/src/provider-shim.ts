@@ -20,9 +20,11 @@ import {
 import * as piAi from "@earendil-works/pi-ai";
 import type { ResponseCreateParamsStreaming } from "openai/resources/responses/responses.js";
 import {
+	createGrammarToolInputProperties,
 	convertResponsesMessages,
 	convertResponsesTools,
 	processResponsesStream,
+	splitDeferredTools,
 } from "./providers/openai-responses-shared.js";
 
 const DEFAULT_CODEX_BASE_URL = "https://chatgpt.com/backend-api";
@@ -207,7 +209,7 @@ interface ResponseEnvelope {
 		input_tokens?: number;
 		output_tokens?: number;
 		total_tokens?: number;
-		input_tokens_details?: { cached_tokens?: number };
+		input_tokens_details?: { cached_tokens?: number; cache_write_tokens?: number };
 	};
 	service_tier?: string;
 	error?: { message?: string };
@@ -615,8 +617,16 @@ function resolveCodexServiceTier(responseServiceTier: ServiceTier, requestServic
 }
 
 export function buildRequestBody<TApi extends Api>(model: Model<TApi>, context: Context, options?: SimpleStreamOptions): ResponsesBody {
+	const supportsStrictMode = (model.compat as { supportsStrictMode?: boolean } | undefined)?.supportsStrictMode ?? true;
+	const supportsOpenAIGrammarTools = (model.compat as { supportsOpenAIGrammarTools?: boolean } | undefined)?.supportsOpenAIGrammarTools ?? false;
+	const supportsToolSearch = (model.compat as { supportsToolSearch?: boolean } | undefined)?.supportsToolSearch ?? false;
+	const grammarToolInputProperties = createGrammarToolInputProperties(context.tools, supportsOpenAIGrammarTools);
+	const toolPlacement = splitDeferredTools(context, supportsToolSearch);
 	const messages = convertResponsesMessages(model, context, CODEX_TOOL_CALL_PROVIDERS, {
 		includeSystemPrompt: false,
+		grammarToolInputProperties,
+		deferredTools: toolPlacement.deferred,
+		toolOptions: { strict: null, supportsStrictMode, supportsOpenAIGrammarTools },
 	});
 	const cacheSessionId = options?.cacheRetention === "none" ? undefined : options?.sessionId;
 
@@ -647,8 +657,8 @@ export function buildRequestBody<TApi extends Api>(model: Model<TApi>, context: 
 		body.service_tier = serviceTier;
 	}
 
-	if (context.tools && context.tools.length > 0) {
-		body.tools = convertResponsesTools(context.tools, { strict: null });
+	if (toolPlacement.immediate.length > 0) {
+		body.tools = convertResponsesTools(toolPlacement.immediate, { strict: null, supportsStrictMode, supportsOpenAIGrammarTools });
 	}
 
 	const clampedReasoning = options?.reasoning ? clampThinkingLevel(model, options.reasoning) : undefined;
@@ -665,11 +675,13 @@ export function buildRequestBody<TApi extends Api>(model: Model<TApi>, context: 
 	return body;
 }
 
-function isRetryableError(status: number, errorText: string): boolean {
-	if (status === 429 || status === 500 || status === 502 || status === 503 || status === 504) {
-		return true;
-	}
-	return /rate.?limit|overloaded|service.?unavailable|upstream.?connect|connection.?refused/i.test(errorText);
+const NON_RETRYABLE_PROVIDER_LIMIT_ERROR_PATTERN = /GoUsageLimitError|FreeUsageLimitError|Monthly usage limit reached|available balance|usage_limit_reached|usage_not_included|insufficient_quota|out of budget|quota exceeded|billing/i;
+const RETRYABLE_PROVIDER_ERROR_PATTERN = /overloaded|rate.?limit|too many requests|429|500|502|503|504|524|service.?unavailable|server.?error|internal.?error|provider.?returned.?error|network.?error|connection.?error|connection.?refused|connection.?lost|other side closed|fetch failed|getaddrinfo|ENOTFOUND|EAI_AGAIN|upstream.?connect|reset before headers|socket hang up|socket connection was closed|timed? out|timeout|terminated|websocket.?closed|websocket.?error|ended without|stream ended before message_stop|stream ended before a terminal response event|http2 request did not get a response|retry delay|you can retry your request|try your request again|please retry your request|ResourceExhausted/i;
+
+export function isRetryableError(status: number, errorText: string): boolean {
+	if (NON_RETRYABLE_PROVIDER_LIMIT_ERROR_PATTERN.test(errorText)) return false;
+	if (status === 429 || status === 500 || status === 502 || status === 503 || status === 504 || status === 524) return true;
+	return RETRYABLE_PROVIDER_ERROR_PATTERN.test(errorText);
 }
 
 export function withHttpStatusPrefix(status: number, message: string): string {
@@ -1382,6 +1394,7 @@ async function processCapturedResponsesStream<TApi extends Api>(
 	stream: AssistantMessageEventStream,
 	model: Model<TApi>,
 	options: SimpleStreamOptions | undefined,
+	grammarToolInputProperties: ReadonlyMap<string, string>,
 	deps: {
 		onImageSaved?: (savedImage: SavedGeneratedImage, imageData: { data: string; mimeType: string }) => void;
 		onWebSearchCaptured?: (search: SurfacedWebSearch) => void;
@@ -1398,6 +1411,7 @@ async function processCapturedResponsesStream<TApi extends Api>(
 
 	await processResponsesStream(tappedEvents as AsyncIterable<never>, output, stream, model, {
 		serviceTier: (options as { serviceTier?: ServiceTier } | undefined)?.serviceTier,
+		grammarToolInputProperties,
 		resolveServiceTier: resolveCodexServiceTier,
 		applyServiceTierPricing: (usage, serviceTier) => applyServiceTierPricing(usage, serviceTier, model as Model<Api>),
 	});
@@ -1412,6 +1426,7 @@ async function processWebSocketStream<TApi extends Api>(
 	model: Model<TApi>,
 	onStart: () => void,
 	options: SimpleStreamOptions | undefined,
+	grammarToolInputProperties: ReadonlyMap<string, string>,
 	cacheSessionId: string | undefined,
 	deps: {
 		onImageSaved?: (savedImage: SavedGeneratedImage, imageData: { data: string; mimeType: string }) => void;
@@ -1455,6 +1470,7 @@ async function processWebSocketStream<TApi extends Api>(
 				stream,
 				model,
 				options,
+				grammarToolInputProperties,
 				deps,
 				cwd,
 				requestPrompt,
@@ -1464,7 +1480,11 @@ async function processWebSocketStream<TApi extends Api>(
 			} else if (useCachedContext && entry && output.responseId) {
 				const responseItems = convertResponsesMessages(model, { messages: [output] }, CODEX_TOOL_CALL_PROVIDERS, {
 					includeSystemPrompt: false,
-				}).filter((item) => typeof item === "object" && item !== null && (item as { type?: unknown }).type !== "function_call_output");
+					grammarToolInputProperties,
+				}).filter((item) => {
+					const type = typeof item === "object" && item !== null ? (item as { type?: unknown }).type : undefined;
+					return type !== "function_call_output" && type !== "custom_tool_call_output";
+				});
 				entry.continuation = {
 					lastRequestBody: fullBody,
 					lastResponseId: output.responseId,
@@ -1728,8 +1748,13 @@ function createCodexStream<TApi extends Api>(
 	(async () => {
 		const output = createInitialAssistantMessage(model);
 		const requestPrompt = getLatestUserText(context);
+		let grammarToolInputProperties: ReadonlyMap<string, string> = new Map();
 
 		try {
+			grammarToolInputProperties = createGrammarToolInputProperties(
+				context.tools,
+				(model.compat as { supportsOpenAIGrammarTools?: boolean } | undefined)?.supportsOpenAIGrammarTools ?? false,
+			);
 			const apiKey = options?.apiKey || await getEnvApiKeyCompat(model.provider) || "";
 			if (!apiKey) {
 				throw new Error(`No API key for provider: ${model.provider}`);
@@ -1768,6 +1793,7 @@ function createCodexStream<TApi extends Api>(
 								websocketStarted = true;
 							},
 							options,
+							grammarToolInputProperties,
 							cacheSessionId,
 							deps,
 							requestCwd,
@@ -1870,7 +1896,7 @@ function createCodexStream<TApi extends Api>(
 			}
 
 			stream.push({ type: "start", partial: output });
-			await processCapturedResponsesStream(parseSSE(response), output, stream, model, options, deps, requestCwd, requestPrompt);
+			await processCapturedResponsesStream(parseSSE(response), output, stream, model, options, grammarToolInputProperties, deps, requestCwd, requestPrompt);
 			finalizeUsage(model, output);
 
 			if (options?.signal?.aborted) {

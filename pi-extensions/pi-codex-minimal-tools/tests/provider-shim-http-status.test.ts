@@ -57,7 +57,11 @@ function mockFetch(factories: FetchFactory[]): () => number {
 	return () => calls;
 }
 
-async function runCodexProvider(streamOptions: Record<string, unknown> = {}, modelOverrides: Record<string, unknown> = {}): Promise<any> {
+async function runCodexProvider(
+	streamOptions: Record<string, unknown> = {},
+	modelOverrides: Record<string, unknown> = {},
+	contextOverrides: Record<string, unknown> = {},
+): Promise<any> {
 	const provider = createCodexProvider();
 	const stream = provider.streamSimple(
 		{
@@ -75,6 +79,7 @@ async function runCodexProvider(streamOptions: Record<string, unknown> = {}, mod
 			systemPrompt: "",
 			messages: [{ role: "user", content: "hello" }],
 			tools: [],
+			...contextOverrides,
 		},
 		{ apiKey: codexJwt(), transport: "sse", ...streamOptions },
 	);
@@ -135,9 +140,22 @@ test("final HTTP 429 provider failure preserves friendly usage-limit text after 
 
 	const result = await runCodexProvider();
 
-	assert.equal(fetchCalls(), 4);
+	assert.equal(fetchCalls(), 1);
 	assert.equal(result.stopReason, "error");
 	assert.equal(result.errorMessage, "HTTP 429: You have hit your ChatGPT usage limit (plus plan).");
+});
+
+test("deterministic HTTP 400 guidance is not retried", async () => {
+	installImmediateRetryTimers();
+	const fetchCalls = mockFetch([
+		() => errorResponse(400, { error: { code: "invalid_request", message: "Do not retry the request: invalid schema" } }, "Bad Request"),
+	]);
+
+	const result = await runCodexProvider();
+
+	assert.equal(fetchCalls(), 1);
+	assert.equal(result.stopReason, "error");
+	assert.match(result.errorMessage, /Do not retry the request/);
 });
 
 test("final HTTP 503 provider failure preserves HTTP status prefix", async () => {
@@ -165,6 +183,24 @@ test("successful SSE retry hides intermediate HTTP failure", async () => {
 	assert.equal(fetchCalls(), 2);
 	assert.equal(result.stopReason, "stop");
 	assert.equal(result.errorMessage, undefined);
+});
+
+test("invalid grammar schema settles provider stream as an error", async () => {
+	const result = await runCodexProvider(
+		{},
+		{ compat: { supportsOpenAIGrammarTools: true } },
+		{
+			tools: [{
+				name: "bad_grammar",
+				description: "Bad grammar",
+				parameters: { type: "object", properties: { a: { type: "string" }, b: { type: "string" } }, required: ["a", "b"] },
+				constrainedSampling: { type: "grammar", variants: { openai_lark: "start: /.+/" } },
+			}],
+		},
+	);
+
+	assert.equal(result.stopReason, "error");
+	assert.match(result.errorMessage, /exactly one required string property/);
 });
 
 test("SSE response-header timeout uses configured stream timeout", async () => {

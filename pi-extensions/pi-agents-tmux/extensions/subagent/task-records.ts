@@ -40,12 +40,13 @@ export function monitorSessionKey(record: PaneTaskRecord): { id: string; type: M
 }
 
 export function usageSum(records: PaneTaskRecord[]): UsageStats | undefined {
-	const total: UsageStats = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 };
+	const total: UsageStats = { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 };
 	let seen = false;
 	for (const usage of records.map((record) => record.usage).filter(Boolean) as UsageStats[]) {
 		seen = true;
 		total.input += usage.input || 0;
 		total.output += usage.output || 0;
+		total.reasoning = (total.reasoning ?? 0) + (usage.reasoning || 0);
 		total.cacheRead += usage.cacheRead || 0;
 		total.cacheWrite += usage.cacheWrite || 0;
 		total.cost += usage.cost || 0;

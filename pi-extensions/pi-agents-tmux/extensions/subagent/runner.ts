@@ -774,6 +774,7 @@ async function runSingleAgentAttempt(
 						if (usage) {
 							currentResult.usage.input += usage.input || 0;
 							currentResult.usage.output += usage.output || 0;
+							currentResult.usage.reasoning = (currentResult.usage.reasoning ?? 0) + ((usage as typeof usage & { reasoning?: number }).reasoning || 0);
 							currentResult.usage.cacheRead += usage.cacheRead || 0;
 							currentResult.usage.cacheWrite += usage.cacheWrite || 0;
 							currentResult.usage.cost += usage.cost?.total || 0;

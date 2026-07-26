@@ -362,13 +362,14 @@ export function renderDashboardWidgetLines(state: SubagentDashboardState, theme:
 	const title = `${theme.fg("customMessageLabel", theme.bold("Agents"))} ${theme.fg("muted", headerParts.join(" · "))}${hint}`;
 	const lines = [title];
 	const aggregateDashboardUsage = (entries: SubagentDashboardItem[]): UsageStats | undefined => {
-		const total: UsageStats = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 };
+		const total: UsageStats = { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 };
 		let any = false;
 		for (const entry of entries) {
 			if (!entry.usage) continue;
 			any = true;
 			total.input += entry.usage.input || 0;
 			total.output += entry.usage.output || 0;
+			total.reasoning = (total.reasoning ?? 0) + (entry.usage.reasoning || 0);
 			total.cacheRead += entry.usage.cacheRead || 0;
 			total.cacheWrite += entry.usage.cacheWrite || 0;
 			total.cost += entry.usage.cost || 0;

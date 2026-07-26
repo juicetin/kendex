@@ -168,13 +168,14 @@ export function normalizeUsageStats(value: unknown): UsageStats | undefined {
 	const usage: UsageStats = {
 		input: Number(raw.input) || 0,
 		output: Number(raw.output) || 0,
+		reasoning: Number(raw.reasoning) || 0,
 		cacheRead: Number(raw.cacheRead) || 0,
 		cacheWrite: Number(raw.cacheWrite) || 0,
 		cost: Number(raw.cost) || 0,
 		contextTokens: Number(raw.contextTokens) || 0,
 		turns: Number(raw.turns) || 0,
 	};
-	return usage.input || usage.output || usage.cacheRead || usage.cacheWrite || usage.cost || usage.contextTokens || usage.turns ? usage : undefined;
+	return usage.input || usage.output || usage.reasoning || usage.cacheRead || usage.cacheWrite || usage.cost || usage.contextTokens || usage.turns ? usage : undefined;
 }
 
 export function appendUniqueDiagnostic(existing: string[] | undefined, diagnostic: string): string[] {

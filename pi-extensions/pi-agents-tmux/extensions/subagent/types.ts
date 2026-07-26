@@ -41,7 +41,7 @@ export interface SubagentStatsItem {
 	kind?: string;
 	model?: string;
 	effort?: string;
-	usage?: { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number; contextTokens: number; turns: number };
+	usage?: { input: number; output: number; reasoning?: number; cacheRead: number; cacheWrite: number; cost: number; contextTokens: number; turns: number };
 	updatedAt?: string;
 }
 
@@ -143,6 +143,7 @@ export interface ChatMessage {
 export interface UsageStats {
 	input: number;
 	output: number;
+	reasoning?: number;
 	cacheRead: number;
 	cacheWrite: number;
 	cost: number;

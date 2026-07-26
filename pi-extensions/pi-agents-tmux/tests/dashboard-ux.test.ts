@@ -25,13 +25,15 @@ import {
 	traceViewerItems,
 } from "../extensions/subagent/browser.js";
 import { latestDashboardActivity, renderDashboardWidgetLines, shouldReplaceDashboardItem, sortDashboardItems } from "../extensions/subagent/dashboard.js";
-import { COMPLETION_SUMMARY_UNAVAILABLE, extractLastAssistantTextFromTranscriptContent, highlightInlinePreview, oneLinePreview, parseTranscriptUsage } from "../extensions/subagent/format.js";
+import { COMPLETION_SUMMARY_UNAVAILABLE, extractLastAssistantTextFromTranscriptContent, formatUsageStats, formatUsageStatsForDashboard, highlightInlinePreview, oneLinePreview, parseTranscriptUsage } from "../extensions/subagent/format.js";
 import { oneShotTranscriptPath } from "../extensions/subagent/paths.js";
+import { usageSum } from "../extensions/subagent/task-records.js";
 import { formatTaskRecordResult } from "../extensions/subagent/renderers.js";
 import { animateSpinnersEnabled, recordProjectTrust } from "../extensions/subagent/settings.js";
 import { subagentToolRenderers } from "../extensions/subagent/subagent-render.js";
 import {
 	backfillTaskSummaryFromTranscript,
+	normalizeUsageStats,
 	readTaskRegistry,
 	updateTaskRegistry,
 } from "../extensions/subagent/tasks.js";
@@ -491,9 +493,9 @@ test("transcript readers normalize bridge/nested event shapes", async () => {
 	const runtimeRoot = tempRuntime();
 	const transcriptPath = join(runtimeRoot, "mixed-shapes.jsonl");
 	writeFileSync(transcriptPath, [
-		JSON.stringify({ ts: "2026-05-14T05:00:00.000Z", event: { type: "event", event: "message_end", data: { message: { role: "assistant", content: [{ type: "text", text: "Bridge summary" }], usage: { input: 2, output: 3, cacheRead: 4, cacheWrite: 5, totalTokens: 9 }, model: "bridge-model" } } } }),
-		JSON.stringify({ ts: "2026-05-14T05:01:00.000Z", event: { event: { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "Nested summary" }], usage: { input: 7, output: 11, cacheRead: 13, cacheWrite: 17, totalTokens: 31 }, model: "nested-model" } } } }),
-		JSON.stringify({ ts: "2026-05-14T05:02:00.000Z", type: "event", event: "message_end", data: { message: { role: "assistant", content: [{ type: "text", text: "Raw bridge summary" }], usage: { input: 19, output: 23, cacheRead: 29, cacheWrite: 31, totalTokens: 102 }, model: "raw-bridge-model" } } }),
+		JSON.stringify({ ts: "2026-05-14T05:00:00.000Z", event: { type: "event", event: "message_end", data: { message: { role: "assistant", content: [{ type: "text", text: "Bridge summary" }], usage: { input: 2, output: 3, reasoning: 5, cacheRead: 4, cacheWrite: 5, totalTokens: 9 }, model: "bridge-model" } } } }),
+		JSON.stringify({ ts: "2026-05-14T05:01:00.000Z", event: { event: { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "Nested summary" }], usage: { input: 7, output: 11, reasoning_tokens: 7, cacheRead: 13, cacheWrite: 17, totalTokens: 31 }, model: "nested-model" } } } }),
+		JSON.stringify({ ts: "2026-05-14T05:02:00.000Z", type: "event", event: "message_end", data: { message: { role: "assistant", content: [{ type: "text", text: "Raw bridge summary" }], usage: { input: 19, output: 23, output_tokens_details: { reasoning_tokens: 11 }, cacheRead: 29, cacheWrite: 31, totalTokens: 102 }, model: "raw-bridge-model" } } }),
 	].join("\n"));
 
 	assert.equal(extractLastAssistantTextFromTranscriptContent(readFileSync(transcriptPath, "utf8")), "Raw bridge summary");
@@ -502,9 +504,22 @@ test("transcript readers normalize bridge/nested event shapes", async () => {
 	assert.equal(usage?.model, "bridge-model");
 	assert.equal(usage?.usage.input, 28);
 	assert.equal(usage?.usage.output, 37);
+	assert.equal(usage?.usage.reasoning, 23);
 	assert.equal(usage?.usage.cacheRead, 46);
 	assert.equal(usage?.usage.cacheWrite, 53);
 	assert.equal(usage?.usage.turns, 3);
+});
+
+test("usage formatters and aggregators preserve reasoning tokens", () => {
+	const usage = { input: 1000, output: 2000, reasoning: 1500, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 1 };
+	assert.match(formatUsageStats(usage), /T1\.5k/);
+	assert.ok(formatUsageStatsForDashboard(usage).some((part) => part.includes("T1.5k")));
+	assert.equal(normalizeUsageStats({ reasoning: 750 })?.reasoning, 750);
+	const summed = usageSum([
+		record("scout", "usage-1", "2026-05-14T05:00:00.000Z", { usage: { ...usage, reasoning: 750 } }),
+		record("scout", "usage-2", "2026-05-14T05:01:00.000Z", { usage: { ...usage, reasoning: 1250 } }),
+	]);
+	assert.equal(summed?.reasoning, 2000);
 });
 
 test("transcript usage captures enriched agent_start model when usage events omit model", async () => {

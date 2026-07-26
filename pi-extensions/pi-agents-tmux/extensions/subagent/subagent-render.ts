@@ -283,10 +283,11 @@ export const subagentToolRenderers = {
 		}
 
 		const aggregateUsage = (results: SingleResult[]) => {
-			const total: UsageStats = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 };
+			const total: UsageStats = { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 };
 			for (const r of results) {
 				total.input += r.usage.input;
 				total.output += r.usage.output;
+				total.reasoning = (total.reasoning ?? 0) + (r.usage.reasoning || 0);
 				total.cacheRead += r.usage.cacheRead;
 				total.cacheWrite += r.usage.cacheWrite;
 				total.cost += r.usage.cost;
