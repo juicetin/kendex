@@ -9,6 +9,36 @@ Baseline: `0.80.0`. Sources: `agent`, `ai`, `coding-agent`, `server`, `storage`,
 - Global refresh updated all eight packages; `vstack verify -g` reported `src:✓ install:✓` for each.
 - Live Pi smoke: `openai-codex/gpt-5.6-sol:low` returned `OK`. Unit coverage details remain in the run report.
 
+## Optional follow-up implementation
+
+User policy: adopt every optional entry that provides correctness, performance, standardization, maintainability, or duplicate-removal value. Reassessment resolved all 51 optional occurrences:
+
+| Resolution | Occurrences | Result |
+|---|---:|---|
+| Implemented in extension-owned paths | 28 | Shipped in `ae831b6a` (`feat(pi-extensions): adopt optional Pi 0.82 capabilities`). |
+| Already covered by canonical extensions | 5 | Existing `outputPad` and `session_info_changed` handling retained and regression-tested. |
+| Core/API-owned or inapplicable to extension paths | 18 | No duplicate extension implementation added. |
+
+Implemented conceptual groups:
+
+- Constrained sampling: Codex custom provider now supports strict JSON-schema tools, Lark/regex grammar tools, grammar stream replay, and exact grammar-definition preservation.
+- Cache-friendly dynamic tools: Codex custom provider now emits transcript-positioned `tool_search_call`/`tool_search_output` entries for additive `addedToolNames` activation.
+- Retry parity: QOL compaction and Skills Manager generation use Pi's bounded retry helper when available with Pi 0.75 fallback; Codex retry classification now matches transient and terminal provider guidance.
+- Usage accounting: subagent live state, persistence, aggregation, dashboard, Monitor, and result rendering preserve reasoning-token usage.
+- Standardization: Pi 0.75 strip-only compatibility violations in file-lock and image-rendering classes were removed.
+
+No duplicate work added for core-owned session storage, context projectors, `contentText`, max-token capping, legacy stream aliases, model-runtime request assembly, provider-header hooks, cache-miss notices, inline extensions, entry renderers, RPC tree access, session metadata events, or SQLite storage. Named Codex `toolChoice` remains intentionally unchanged because Pi 0.82.1's Codex provider contract still exposes only `auto | none | required`.
+
+Claude Bridge received no follow-up changes. Conservative audit found no justified optional runtime migration; this avoided churn in the widely vendored package.
+
+Validation:
+
+- Full changed-package suites passed.
+- Codex full typecheck and 73-test suite passed against both Pi `0.75.0` and `0.82.1` dependency sets.
+- Pi package policy passed `3/3`, including Node strip-only parsing.
+- Live Pi 0.82.1 flow activated a deferred tool, emitted an OpenAI regex grammar call with `code=ABC`, executed `SPECIAL:ABC`, and completed with `DONE`.
+- Final correctness, quality, test, and error-handling specialist reviews returned `pass`.
+
 ## Parser reconciliation
 
 | Source | Expected/parser count | Report rows |
