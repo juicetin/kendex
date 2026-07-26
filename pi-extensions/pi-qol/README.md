@@ -129,7 +129,7 @@ Advanced: input cap, title length, output tokens, timeout, custom prompt templat
 | Enable session search | Register `/search` and the overlay. |
 | Session search shortcut | Configurable; set to `none` to disable. |
 | Result limit | Max matching prompts returned. |
-| Visible session rows | Rows shown before scrolling. |
+| Visible session rows | Rows shown before scrolling; defaults to `8`. |
 | Preview snippets | Matching snippets shown on the preview screen. |
 | Session cache TTL | Seconds before the session list refreshes; `0` keeps it until you run `/search:refresh`. |
 

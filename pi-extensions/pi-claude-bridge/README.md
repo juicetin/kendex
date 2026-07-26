@@ -108,9 +108,26 @@ Turn this on and the model can use whatever your Claude account already has conn
 
 Sessions are **read-only** by default: the model can look things up, but cannot send, post, or change anything unless you explicitly turn writes on below.
 
-These are low-level `provider` options (set in `settings.json` under the extension-manager config, or via env). Off by default so Pi owns tool execution.
+Extension-manager settings use flat package-scoped keys:
 
-| Option (`provider.*`) | Env var | Values | Default | What it does |
+```json
+{
+  "vstack": {
+    "extensionManager": {
+      "config": {
+        "@vanillagreen/pi-claude-bridge": {
+          "enableConnectors": true,
+          "connectorWriteMode": "deny"
+        }
+      }
+    }
+  }
+}
+```
+
+Legacy `.pi/claude-bridge.json` configuration keeps these options nested under `provider`. Environment variables work with either format. Connectors remain off by default so Pi owns tool execution.
+
+| Extension-manager key | Env var | Values | Default | What it does |
 | --- | --- | --- | --- | --- |
 | `enableConnectors` | `CLAUDE_BRIDGE_ENABLE_CONNECTORS` | `true`/`false` | off | Expose the account's connectors to the model (env OR config enables). |
 | `connectorWriteMode` | `CLAUDE_BRIDGE_CONNECTOR_WRITE` | `deny`/`allow` | `deny` | When connectors are enabled, whether their WRITE tools are exposed. |

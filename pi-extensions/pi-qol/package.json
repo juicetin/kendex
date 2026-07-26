@@ -452,7 +452,7 @@
           "label": "Visible session rows",
           "description": "Maximum number of sessions shown at once in the overlay before scrolling.",
           "type": "number",
-          "default": 10,
+          "default": 8,
           "category": "Session Search",
           "apply": "live"
         },
