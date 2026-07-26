@@ -4,7 +4,7 @@ Baseline: `0.80.0`. Sources: `agent`, `ai`, `coding-agent`, `server`, `storage`,
 
 ## Shipped implementation
 
-- `f4e8c6d1` — `fix(pi-extensions): align runtime parity with Pi 0.82.1`
+- `fefbe22d` — `fix(pi-extensions): align runtime parity with Pi 0.82.1`
 - Affected packages: `pi-agents-tmux`, `pi-claude-bridge`, `pi-codex-minimal-tools`, `pi-qol`, `pi-session-bridge`, `pi-skills-manager`, `pi-tool-renderer`, `pi-web-tools`.
 - Global refresh updated all eight packages; `vstack verify -g` reported `src:✓ install:✓` for each.
 - Live Pi smoke: `openai-codex/gpt-5.6-sol:low` returned `OK`. Unit coverage details remain in the run report.
@@ -15,7 +15,7 @@ User policy: adopt every optional entry that provides correctness, performance, 
 
 | Resolution | Occurrences | Result |
 |---|---:|---|
-| Implemented in extension-owned paths | 28 | Shipped in `ae831b6a` (`feat(pi-extensions): adopt optional Pi 0.82 capabilities`). |
+| Implemented in extension-owned paths | 28 | Shipped in `36c85b56` (`feat(pi-extensions): adopt optional Pi 0.82 capabilities`). |
 | Already covered by canonical extensions | 5 | Existing `outputPad` and `session_info_changed` handling retained and regression-tested. |
 | Core/API-owned or inapplicable to extension paths | 18 | No duplicate extension implementation added. |
 
