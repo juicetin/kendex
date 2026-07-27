@@ -652,5 +652,49 @@ assert_file_contains "$dev_start_workflow" '`child_sessions` keys, reports, and 
 assert_file_contains "$state_schema" '{name: {agent_type, task_name?, fallback}}' "workflow-state schema extends reviewer runtime metadata with task_name"
 assert_file_contains "$state_schema" '"task_name": "security_review"' "workflow-state schema example shows a translated runtime task_name"
 
+# vstack#925 — in Claude Code, a task ASSIGNMENT notification wakes a live
+# agent immediately, not only task creation at spawn time. The old
+# re-delegation order (create task → assign → send delegation) therefore
+# started fix rounds from the bare task_assignment payload: the delegation
+# carrying the item list landed one turn after the wake, and the agent
+# reconstructed the item set itself — a mis-keyed dev-return artifact and a
+# false acceptance failure whenever its dedupe differed from the
+# orchestrator's. Re-delegation to a live agent now sends the delegation
+# BEFORE creating and assigning the task; fresh spawns keep
+# create-before-spawn (tasks exist before the agent does), and the
+# escalation ladder re-creates tasks before respawning for the same reason.
+assert_file_contains "$orch_skill" 'send delegation → create and assign new tasks' "SKILL Dev Agent Persistence re-delegation sends the delegation before task assignment"
+assert_file_not_contains "$orch_skill" 'create new tasks → send delegation' "SKILL drops the assignment-first re-delegation order"
+assert_file_contains "$orch_skill" 'Task creation and assignment notifications wake a live agent immediately' "SKILL Claude Code note states assignment wakes a live agent, not only spawn-time creation"
+assert_file_contains "$orch_skill" 'send the delegation message before creating and assigning the task' "SKILL Claude Code note orders the delegation before create+assign"
+assert_file_contains "$orch_skill" 'shut down → re-create tasks → respawn → re-delegate' "SKILL escalation re-creates tasks before the respawn"
+for workflow_path in dev-fix review-pr-comments ci-fix; do
+  assert_file_contains "$REPO_ROOT/skills/orch/workflows/$workflow_path.md" \
+    'send the delegation message before creating and assigning its task' \
+    "$workflow_path re-delegation sends the delegation before task assignment"
+done
+
+# vstack#877/#926 — the session-guard lease is claimed on the shared
+# initialize path. The launcher-side claim in start.md was unreachable for
+# worktree-launched sessions: open-terminal creates the worktree and starts
+# the session inside it, `start` routes that session to start-worktree.md,
+# and neither it nor initialize.md claimed — so every session launched
+# through orch's own mandated path ran unprotected from `worktree cleanup`.
+# initialize.md § 1 now claims immediately after WORKTREE_PATH resolves;
+# start-worktree.md § 1 invokes that section, which covers the launched
+# path, and start.md's step is a pointer, never a drifting duplicate claim.
+# The --repo warning must travel with the claim command: claim/refresh
+# reject --repo, and a wrapper that swallows that error leaves the guard
+# looking installed while it silently never claims.
+initialize_workflow="$REPO_ROOT/skills/orch/workflows/initialize.md"
+start_workflow="$REPO_ROOT/skills/orch/workflows/start.md"
+assert_file_contains "$initialize_workflow" 'worktree-session-guard claim [WORKTREE_PATH] --owner [ISSUE_ID]' "initialize § 1 claims the session-guard lease after WORKTREE_PATH resolves"
+assert_file_contains "$initialize_workflow" 'Do **not** pass `--repo`' "initialize claim carries the --repo rejection warning"
+assert_file_contains "$initialize_workflow" 'silently never claims' "initialize claim warns that a swallowed --repo failure never claims"
+assert_file_contains "$initialize_workflow" 'Exit 75 means another session already holds the lease' "initialize claim keeps the foreign-lease coordination rule"
+assert_file_contains "$start_worktree_workflow" 'workflows/initialize.md § 1-2' "start-worktree § 1 routes through initialize, so launched sessions claim"
+assert_file_not_contains "$start_workflow" 'worktree-session-guard claim' "start.md carries no duplicate claim command to drift from initialize"
+assert_file_contains "$start_workflow" 'claimed by the working session in `initialize.md`' "start.md points at the shared initialize claim"
+
 printf 'pass: %d   fail: %d\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]
