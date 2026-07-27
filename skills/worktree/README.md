@@ -25,7 +25,7 @@ Route by shape. `git checkout -- .agents` is **never** the recovery: the path ho
 
 `worktree-session-guard` records a session's claim on an issue worktree as a **native Git worktree lock** whose reason line carries the owner and heartbeat, so `git worktree remove [--force]` refuses it and `git worktree prune` leaves the registration alone. Using the native lock rather than a private marker file is deliberate: it needs no cooperation from whoever runs the cleanup.
 
-`VSTACK_SESSION_OWNER` sets the owner, which the workflow sets to the issue ID.
+`VSTACK_SESSION_OWNER` sets the owner, which the workflow sets to the issue ID. Issue-addressed lifecycle commands (`remove <ID>`, `create <ID> --reuse`) also derive an owner from the issue ID itself — matching the workflow's claim — so a claiming session's release works on a default install where no session env var is set; the env ladder is still probed as a second identity and covers path-addressed calls.
 
 **Claiming is explicit; the destructive commands respect a lease** (vstack#877):
 
@@ -45,7 +45,7 @@ Limits worth knowing before relying on it:
 
 - The lease is keyed on the owner string (the issue ID), so two sessions on the same issue share one lease. Bare `create <ID>` is what refuses a second implementer; `create --reuse|--restack` skips that refusal by design, so **nothing prevents a second implementer there**.
 - Staleness is heartbeat age with no liveness probe, so a session still running that has **outlived its TTL without refreshing** will be treated as abandoned by `release --stale` and `sweep`.
-- The guard requires `flock(1)` and checks only whether it is on PATH — a capability, not a platform — so **wherever flock is available, the claim is mandatory**. Without flock the session is unguarded rather than protected.
+- The guard serializes mutations through `flock(1)` when it is on PATH and through a `mkdir` mutex otherwise (stock macOS ships no flock) — a capability, not a platform — so **wherever the repository's common dir is writable, the claim is mandatory**. When neither mechanism can take the lock, mutating guard commands fail loudly instead of leaving the session silently unguarded.
 - `git worktree remove -f -f` and `rm -rf` still destroy a claimed worktree; `status` and `list` exist to attribute that afterwards.
 
 ## Setup

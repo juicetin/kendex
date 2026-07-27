@@ -16,8 +16,10 @@
 #     its OWN lease, `create --reuse` refuses a foreign one and refreshes its
 #     own.
 #
-# The guard serializes every mutation through flock(1), so this suite can only
-# run where flock exists — a capability check, matching worktree_session_guard.sh.
+# The `worktree` script's own per-issue claim lock still requires flock(1)
+# (`create` refuses to run without it), so this integration suite can only run
+# where flock exists. The guard itself no longer needs flock — its mkdir-mutex
+# fallback is covered directly in worktree_session_guard.sh.
 set -euo pipefail
 
 TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -26,7 +28,7 @@ WORKTREE_SCRIPT="$WORKTREE_PACKAGE_DIR/scripts/worktree"
 GUARD_SCRIPT="$WORKTREE_PACKAGE_DIR/scripts/worktree-session-guard"
 
 if ! command -v flock >/dev/null 2>&1; then
-  printf 'SKIP: worktree session guard lifecycle needs flock(1), which is not on PATH\n' >&2
+  printf 'SKIP: worktree lifecycle integration needs flock(1) for the per-issue claim lock, which is not on PATH\n' >&2
   exit 0
 fi
 
@@ -164,6 +166,58 @@ else
   pass "remove of a foreign-claimed worktree does not report a removal"
 fi
 
+echo "=== issue-addressed calls derive the owner (default install) ==="
+
+# start.md claims with `--owner ISSUE_ID`, and a default install sets no
+# session-owner env var — so `remove <ID>` must derive that same identity from
+# its own argument, or claim and release never agree (#907).
+DERIVE_ROOT="$TMP_ROOT/derive"
+make_repo "$DERIVE_ROOT"
+export GH_STATE="$DERIVE_ROOT/gh-state"
+add_merged_tree "$DERIVE_ROOT" "issue-d1"
+D1="$DERIVE_ROOT/trees/issue-d1"
+"$GUARD_SCRIPT" claim "$D1" --owner issue-d1 >/dev/null
+set +e
+(cd "$DERIVE_ROOT/main" && env -u VSTACK_SESSION_OWNER -u HT_SESSION_OWNER \
+  "$WORKTREE_SCRIPT" remove issue-d1 >/dev/null 2>"$DERIVE_ROOT/derive.err")
+derive_code=$?
+set -e
+assert_eq "$derive_code" "0" "remove <ID> releases the issue-keyed lease with no session env"
+assert_contains "$(cat "$DERIVE_ROOT/derive.err")" "Released session guard lease (owner=issue-d1)" \
+  "the released identity is the issue ID the command was addressed with"
+assert_path_absent "$D1" "the issue-claimed worktree is gone"
+
+# The session env identity is still honoured when it, not the issue ID, owns
+# the lease — the derivation adds an identity, it does not remove one.
+add_merged_tree "$DERIVE_ROOT" "issue-d2"
+D2="$DERIVE_ROOT/trees/issue-d2"
+"$GUARD_SCRIPT" claim "$D2" --owner SESSION-X >/dev/null
+set +e
+(cd "$DERIVE_ROOT/main" && env -u HT_SESSION_OWNER VSTACK_SESSION_OWNER=SESSION-X \
+  "$WORKTREE_SCRIPT" remove issue-d2 >/dev/null 2>"$DERIVE_ROOT/derive2.err")
+derive2_code=$?
+set -e
+assert_eq "$derive2_code" "0" "remove <ID> still honours the session env identity"
+assert_contains "$(cat "$DERIVE_ROOT/derive2.err")" "(owner=SESSION-X)" \
+  "the env-owned lease is released as the env identity"
+assert_path_absent "$D2" "the env-claimed worktree is gone"
+
+# `create <ID> --reuse` derives the same identity, so the session that claimed
+# per start.md can re-enter its own worktree without env plumbing.
+env -u VSTACK_SESSION_OWNER -u HT_SESSION_OWNER bash -c \
+  "cd '$DERIVE_ROOT/main' && '$WORKTREE_SCRIPT' create issue-d3" >/dev/null 2>&1
+D3="$DERIVE_ROOT/trees/issue-d3"
+assert_path_exists "$D3" "derivation reuse fixture was created"
+"$GUARD_SCRIPT" claim "$D3" --owner issue-d3 >/dev/null
+set +e
+env -u VSTACK_SESSION_OWNER -u HT_SESSION_OWNER bash -c \
+  "cd '$DERIVE_ROOT/main' && '$WORKTREE_SCRIPT' create issue-d3 --reuse" >/dev/null 2>"$DERIVE_ROOT/derive3.err"
+derive3_code=$?
+set -e
+assert_eq "$derive3_code" "0" "create <ID> --reuse refreshes the issue-keyed lease with no session env"
+assert_eq "$(guard_status_code "$D3" "$DERIVE_ROOT/main" --owner issue-d3)" "0" \
+  "the issue-keyed lease survives the reuse"
+
 echo "=== cleanup is lease-aware ==="
 
 CLEAN_ROOT="$TMP_ROOT/cleanup"
@@ -236,6 +290,32 @@ assert_contains "$ttl_err" "non-negative integer" "the --ttl-minutes refusal say
 help_out=$(cd "$CLEAN_ROOT/main" && "$WORKTREE_SCRIPT" cleanup --help)
 assert_contains "$help_out" "--stale" "cleanup --help documents --stale"
 assert_contains "$help_out" "never collected" "cleanup --help states the lease guarantee"
+
+echo "=== an unavailable guard degrades loudly ==="
+
+# A guard that cannot run must be announced, not silently skipped: the
+# lifecycle integrations returning 0 with no probe is how cleanup would
+# collect live worktrees again (#912). Once per invocation, not per worktree.
+NOGUARD_ROOT="$TMP_ROOT/noguard"
+make_repo "$NOGUARD_ROOT"
+add_merged_tree "$NOGUARD_ROOT" "issue-ng1"
+add_merged_tree "$NOGUARD_ROOT" "issue-ng2"
+NOGUARD_SCRIPTS="$TMP_ROOT/noguard-scripts"
+mkdir -p "$NOGUARD_SCRIPTS"
+cp -R "$WORKTREE_PACKAGE_DIR/scripts/." "$NOGUARD_SCRIPTS/"
+chmod -x "$NOGUARD_SCRIPTS/worktree-session-guard"
+set +e
+noguard_out=$(cd "$NOGUARD_ROOT/main" && "$NOGUARD_SCRIPTS/worktree" cleanup 2>"$NOGUARD_ROOT/noguard.err")
+noguard_code=$?
+set -e
+noguard_err="$(cat "$NOGUARD_ROOT/noguard.err")"
+assert_eq "$noguard_code" "0" "cleanup proceeds when the guard is unavailable"
+assert_contains "$noguard_err" "unguarded" \
+  "the unavailable guard is announced, not silently skipped"
+assert_contains "$noguard_out" "Cleaned: $NOGUARD_ROOT/trees/issue-ng1" \
+  "cleanup still collects merged worktrees without the guard"
+noguard_warns="$(grep -c "not executable" "$NOGUARD_ROOT/noguard.err" || true)"
+assert_eq "$noguard_warns" "1" "the degradation warning appears once per invocation"
 
 echo "=== create --reuse and leases ==="
 
