@@ -1,5 +1,6 @@
 import { calculateCost, type AssistantMessage, type Model } from "@earendil-works/pi-ai";
 import { type SDKMessage } from "@anthropic-ai/claude-agent-sdk";
+import { isChildExecutedTool } from "./connectors.js";
 import { debug } from "./debug.js";
 import { ctx } from "./query-state.js";
 import { mapToolArgs, mapToolName } from "./tool-mapping.js";
@@ -7,10 +8,21 @@ import { mapToolArgs, mapToolName } from "./tool-mapping.js";
 // --- Usage helpers ---
 
 function updateUsage(output: AssistantMessage, usage: Record<string, number | undefined>, model: Model<any>): void {
-	if (usage.input_tokens != null) output.usage.input = usage.input_tokens;
-	if (usage.output_tokens != null) output.usage.output = usage.output_tokens;
-	if (usage.cache_read_input_tokens != null) output.usage.cacheRead = usage.cache_read_input_tokens;
-	if (usage.cache_creation_input_tokens != null) output.usage.cacheWrite = usage.cache_creation_input_tokens;
+	// Anthropic reports per-message counters and RE-reports them as the message
+	// grows, so the in-flight message's figures are replaced, not added. What is
+	// added is every child message already finished in this Pi turn — see
+	// `turnUsageCarry` in query-state.ts for why a turn can span several.
+	const c = ctx();
+	const current = c.currentMessageUsage;
+	const carry = c.turnUsageCarry;
+	if (usage.input_tokens != null) current.input = usage.input_tokens;
+	if (usage.output_tokens != null) current.output = usage.output_tokens;
+	if (usage.cache_read_input_tokens != null) current.cacheRead = usage.cache_read_input_tokens;
+	if (usage.cache_creation_input_tokens != null) current.cacheWrite = usage.cache_creation_input_tokens;
+	output.usage.input = carry.input + current.input;
+	output.usage.output = carry.output + current.output;
+	output.usage.cacheRead = carry.cacheRead + current.cacheRead;
+	output.usage.cacheWrite = carry.cacheWrite + current.cacheWrite;
 	output.usage.totalTokens = output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
 	calculateCost(model, output.usage);
 	const promptTokens = output.usage.input + output.usage.cacheRead + output.usage.cacheWrite;
@@ -76,6 +88,10 @@ export function processStreamEvent(
 
 	if (event?.type === "message_start") {
 		c.resetToolTracking();
+		// A new child message begins: bank what the previous one billed before its
+		// counters are replaced. No-op on the turn's first, and no-op if this same
+		// message was already declared (see beginChildMessage).
+		c.beginChildMessage(event.message?.id);
 		updateTurnOutputModel(event.message?.model);
 		if (event.message?.usage) updateUsage(c.turnOutput, event.message.usage, model);
 		return;
@@ -84,6 +100,18 @@ export function processStreamEvent(
 	if (event?.type === "content_block_start") {
 		c.turnSawStreamEvent = true;
 		ensureTurnStarted();
+		// A new block owns this index from here on, so release any child-executed
+		// claim on it. Belt-and-braces against a missed message_start: without this
+		// a stale index could silently swallow a later text block's deltas.
+		c.childExecutedStreamIndexes.delete(event.index);
+		if (event.content_block?.type === "tool_use" && isChildExecutedTool(event.content_block.name)) {
+			// The child runs this one itself — mirroring it into the Pi stream would
+			// make Pi's agent loop dispatch a tool it does not have. See
+			// isChildExecutedTool.
+			c.noteChildExecutedToolCall(event.content_block.id, event.content_block.name, event.index);
+			debug(`processStreamEvent: child-executed tool ${event.content_block.name} [${event.content_block.id}] — not mirrored as a Pi tool call`);
+			return;
+		}
 		if (event.content_block?.type === "text") {
 			c.turnBlocks.push({ type: "text", text: "", index: event.index });
 			c.currentPiStream!.push({ type: "text_start", contentIndex: c.turnBlocks.length - 1, partial: c.turnOutput });
@@ -108,6 +136,14 @@ export function processStreamEvent(
 	}
 
 	if (event?.type === "content_block_delta") {
+		// A child-executed tool's argument deltas have no Pi block to land in. Skip
+		// them here rather than letting the lookup below miss, so the "unmatched"
+		// warning keeps meaning "something is wrong". Unlike that stale-event case
+		// this IS a live event for the current message, so it still counts as one.
+		if (c.childExecutedStreamIndexes.has(event.index)) {
+			c.turnSawStreamEvent = true;
+			return;
+		}
 		const index = c.turnBlocks.findIndex((b: any) => b.index === event.index);
 		const block = c.turnBlocks[index];
 		if (!block) {
@@ -134,6 +170,12 @@ export function processStreamEvent(
 	}
 
 	if (event?.type === "content_block_stop") {
+		// Same as the delta case: the block was never mirrored, so there is nothing
+		// to seal and nothing unmatched about it.
+		if (c.childExecutedStreamIndexes.has(event.index)) {
+			c.turnSawStreamEvent = true;
+			return;
+		}
 		const index = c.turnBlocks.findIndex((b: any) => b.index === event.index);
 		const block = c.turnBlocks[index];
 		if (!block) {
@@ -200,6 +242,14 @@ function appendMissingToolUsesFromAssistant(
 	let sawToolUse = false;
 	for (const block of assistantMsg.content) {
 		if (block.type !== "tool_use") continue;
+		if (isChildExecutedTool(block.name)) {
+			// Not a Pi tool call, so it is NOT a turn boundary either: `sawToolUse`
+			// stays false for it and the caller keeps streaming this Pi message. The
+			// child neither blocks on Pi nor needs a result from it.
+			c.noteChildExecutedToolCall(block.id, block.name);
+			debug(`assistant message: child-executed tool ${block.name} [${block.id}] — not mirrored as a Pi tool call`);
+			continue;
+		}
 		sawToolUse = true;
 		const existingIdx = c.turnBlocks.findIndex((b: any) => b.type === "toolCall" && b.id === block.id);
 		const name = mapToolName(block.name, customToolNameToPi);
@@ -233,6 +283,37 @@ function appendMissingToolUsesFromAssistant(
 	return sawToolUse;
 }
 
+/**
+ * Record that a child-executed tool call came back, from the SDK's `user` message
+ * carrying the child's own `tool_result` blocks.
+ *
+ * This is the only place the bridge ever OBSERVES one of these results, and it is
+ * deliberately observation-only: the result already reached the model inside the
+ * child, which is the conversation of record for a bridge turn, so re-delivering
+ * it would double it. What the bridge could not do before this existed was say
+ * anything true about these calls at all — the Pi transcript claimed they failed
+ * and nothing anywhere claimed otherwise.
+ *
+ * The payload is NEVER logged, only its shape: a connector result is live account
+ * data (mail, messages, documents) and the bridge's debug log sits outside a host
+ * app's redaction boundary.
+ */
+export function noteChildExecutedToolResults(message: SDKMessage): void {
+	const c = ctx();
+	if (c.childExecutedToolCalls.size === 0) return;
+	const content = (message as SDKMessage & { message?: { content?: unknown } }).message?.content;
+	if (!Array.isArray(content)) return;
+	for (const block of content) {
+		if (block?.type !== "tool_result") continue;
+		const name = c.childExecutedToolCalls.get(block.tool_use_id);
+		if (!name) continue;
+		const size = typeof block.content === "string"
+			? block.content.length
+			: Array.isArray(block.content) ? block.content.length : 0;
+		debug(`child-executed tool result: ${name} [${block.tool_use_id}] isError=${block.is_error === true} contentSize=${size}`);
+	}
+}
+
 export function processAssistantMessage(message: SDKMessage, model: Model<any>, customToolNameToPi: Map<string, string>): void {
 	const c = ctx();
 	const assistantMsg = (message as any).message;
@@ -258,6 +339,11 @@ export function processAssistantMessage(message: SDKMessage, model: Model<any>, 
 		return;
 	}
 	c.resetToolTracking();
+	// The no-stream-events path also sees a message boundary. It is keyed on the
+	// message ID rather than trusted blindly, because this branch is ALSO reached
+	// for a message whose `message_start` already streamed — any message that
+	// produced no content blocks, since `turnSawStreamEvent` only tracks those.
+	c.beginChildMessage(assistantMsg.id);
 	debug(`processAssistantMessage fallback: ${assistantMsg.content.length} blocks, types=${assistantMsg.content.map((b: any) => b.type).join(",")}`);
 	for (const block of assistantMsg.content) {
 		if (block.type === "text" && block.text) {
@@ -275,6 +361,13 @@ export function processAssistantMessage(message: SDKMessage, model: Model<any>, 
 			if (block.thinking) c.currentPiStream?.push({ type: "thinking_delta", contentIndex: idx, delta: block.thinking, partial: c.turnOutput });
 			c.currentPiStream?.push({ type: "thinking_end", contentIndex: idx, content: block.thinking ?? "", partial: c.turnOutput });
 		} else if (block.type === "tool_use") {
+			if (isChildExecutedTool(block.name)) {
+				// Same as the streamed path: the child owns this call, so it never
+				// becomes a Pi tool call and never ends the turn.
+				c.noteChildExecutedToolCall(block.id, block.name);
+				debug(`processAssistantMessage fallback: child-executed tool ${block.name} [${block.id}] — not mirrored as a Pi tool call`);
+				continue;
+			}
 			ensureTurnStarted();
 			c.turnSawToolCall = true;
 			const mappedName = mapToolName(block.name, customToolNameToPi);

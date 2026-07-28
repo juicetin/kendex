@@ -27275,6 +27275,61 @@ var QueryContext = class {
   reportedToolResultMismatch = false;
   deferredUserMessages = [];
   handledTerminalError = false;
+  // Tool calls the CHILD executes itself (claude.ai connectors — see
+  // isChildExecutedTool). Deliberately NOT in turnToolCalls/turnToolCallIds:
+  // those track calls Pi owes a result for, and Pi owes nothing here. Kept only
+  // so the child's real result can be recognized when it comes back on the SDK's
+  // `user` message, and so the streamed block's deltas can be skipped silently
+  // instead of logging as "unmatched" (which reads like a bug).
+  /** tool_use id → raw SDK tool name. */
+  childExecutedToolCalls = /* @__PURE__ */ new Map();
+  /** Anthropic content-block indexes of the current assistant message that carry
+   *  a child-executed tool_use. Scoped to one message: cleared at message_start,
+   *  and an index is released as soon as a new block starts there. */
+  childExecutedStreamIndexes = /* @__PURE__ */ new Set();
+  // Usage accounting for a Pi turn that spans SEVERAL child assistant messages.
+  //
+  // Every child message is a separate billed API call, and each reports its own
+  // counters — `message_start`/`message_delta` REPLACE rather than accumulate. A
+  // Pi turn used to end at the first tool call, so one Pi message meant one child
+  // message and replacing was right. A turn containing a child-executed connector
+  // call now keeps running across the child's follow-up messages, so replacing
+  // would silently drop everything the earlier ones billed (measured: 55,685
+  // cache-write tokens lost on a single connector turn).
+  //
+  // So: `turnUsageCarry` holds the totals of the child messages already COMPLETE
+  // in this Pi turn, `currentMessageUsage` holds the one in flight, and the Pi
+  // message reports their sum. Summing is the correct model for input and cache
+  // too — each call bills its own.
+  turnUsageCarry = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+  currentMessageUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+  /** Anthropic id of the child message `currentMessageUsage` describes. */
+  currentMessageId;
+  /**
+   * Declare which child message the following usage belongs to, banking the
+   * previous one's counters into the turn total.
+   *
+   * Keyed on the MESSAGE ID rather than on the call site, because both paths
+   * that see a message boundary can fire for the SAME message: `message_start`
+   * arrives on the stream, and the SDK then yields that message again in
+   * completed form. Banking per call site double-counted whenever the completed
+   * copy took the no-stream-events branch — which it does whenever a message
+   * produced no content blocks, since `turnSawStreamEvent` only tracks those.
+   *
+   * With no id on either side (older/streamless shapes) this degrades to
+   * banking on every call, which is what each caller means when it cannot
+   * prove otherwise.
+   */
+  beginChildMessage(messageId) {
+    const id = typeof messageId === "string" && messageId.length > 0 ? messageId : void 0;
+    if (id !== void 0 && id === this.currentMessageId) return;
+    this.turnUsageCarry.input += this.currentMessageUsage.input;
+    this.turnUsageCarry.output += this.currentMessageUsage.output;
+    this.turnUsageCarry.cacheRead += this.currentMessageUsage.cacheRead;
+    this.turnUsageCarry.cacheWrite += this.currentMessageUsage.cacheWrite;
+    this.currentMessageUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+    this.currentMessageId = id;
+  }
   // Per-turn (reset together)
   turnOutput = null;
   turnStarted = false;
@@ -27306,6 +27361,9 @@ var QueryContext = class {
     this.turnSawStreamEvent = false;
     this.turnSawToolCall = false;
     this.handledTerminalError = false;
+    this.turnUsageCarry = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+    this.currentMessageUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+    this.currentMessageId = void 0;
   }
   resetToolTracking() {
     this.turnToolCallIds = [];
@@ -27315,6 +27373,14 @@ var QueryContext = class {
     this.resolvedToolResultIds.clear();
     this.unmatchedToolResultIds.clear();
     this.reportedToolResultMismatch = false;
+    this.childExecutedToolCalls.clear();
+    this.childExecutedStreamIndexes.clear();
+  }
+  /** Note a tool_use the child runs itself. `streamIndex` is present only on the
+   *  streamed path, where later deltas/stops for that block must be skipped. */
+  noteChildExecutedToolCall(id, rawName, streamIndex) {
+    if (id) this.childExecutedToolCalls.set(id, rawName);
+    if (typeof streamIndex === "number") this.childExecutedStreamIndexes.add(streamIndex);
   }
   recordToolCall(id, toolName, args = {}) {
     if (!id) return;
@@ -43240,6 +43306,9 @@ var CONNECTOR_WRITE_TOOLS = [
   `${CONNECTOR_NS_ATLASSIAN}createCompassComponentRelationship`,
   `${CONNECTOR_NS_ATLASSIAN}createCompassCustomFieldDefinition`
 ];
+function isChildExecutedTool(name) {
+  return typeof name === "string" && name.startsWith(CONNECTOR_NS_PREFIX2);
+}
 function isConnectorWriteTool(name) {
   if (!name.startsWith(CONNECTOR_NS_PREFIX2)) return false;
   const sep2 = name.indexOf("__", CONNECTOR_NS_PREFIX2.length);
@@ -44255,10 +44324,17 @@ function mapToolArgs(toolName, args) {
 // src/assistant-stream.ts
 import { calculateCost } from "@earendil-works/pi-ai";
 function updateUsage(output, usage, model) {
-  if (usage.input_tokens != null) output.usage.input = usage.input_tokens;
-  if (usage.output_tokens != null) output.usage.output = usage.output_tokens;
-  if (usage.cache_read_input_tokens != null) output.usage.cacheRead = usage.cache_read_input_tokens;
-  if (usage.cache_creation_input_tokens != null) output.usage.cacheWrite = usage.cache_creation_input_tokens;
+  const c = ctx();
+  const current = c.currentMessageUsage;
+  const carry = c.turnUsageCarry;
+  if (usage.input_tokens != null) current.input = usage.input_tokens;
+  if (usage.output_tokens != null) current.output = usage.output_tokens;
+  if (usage.cache_read_input_tokens != null) current.cacheRead = usage.cache_read_input_tokens;
+  if (usage.cache_creation_input_tokens != null) current.cacheWrite = usage.cache_creation_input_tokens;
+  output.usage.input = carry.input + current.input;
+  output.usage.output = carry.output + current.output;
+  output.usage.cacheRead = carry.cacheRead + current.cacheRead;
+  output.usage.cacheWrite = carry.cacheWrite + current.cacheWrite;
   output.usage.totalTokens = output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
   calculateCost(model, output.usage);
   const promptTokens = output.usage.input + output.usage.cacheRead + output.usage.cacheWrite;
@@ -44317,6 +44393,7 @@ function processStreamEvent(message, customToolNameToPi, model) {
   }
   if (event?.type === "message_start") {
     c.resetToolTracking();
+    c.beginChildMessage(event.message?.id);
     updateTurnOutputModel(event.message?.model);
     if (event.message?.usage) updateUsage(c.turnOutput, event.message.usage, model);
     return;
@@ -44324,6 +44401,12 @@ function processStreamEvent(message, customToolNameToPi, model) {
   if (event?.type === "content_block_start") {
     c.turnSawStreamEvent = true;
     ensureTurnStarted();
+    c.childExecutedStreamIndexes.delete(event.index);
+    if (event.content_block?.type === "tool_use" && isChildExecutedTool(event.content_block.name)) {
+      c.noteChildExecutedToolCall(event.content_block.id, event.content_block.name, event.index);
+      debug(`processStreamEvent: child-executed tool ${event.content_block.name} [${event.content_block.id}] \u2014 not mirrored as a Pi tool call`);
+      return;
+    }
     if (event.content_block?.type === "text") {
       c.turnBlocks.push({ type: "text", text: "", index: event.index });
       c.currentPiStream.push({ type: "text_start", contentIndex: c.turnBlocks.length - 1, partial: c.turnOutput });
@@ -44349,6 +44432,10 @@ function processStreamEvent(message, customToolNameToPi, model) {
     return;
   }
   if (event?.type === "content_block_delta") {
+    if (c.childExecutedStreamIndexes.has(event.index)) {
+      c.turnSawStreamEvent = true;
+      return;
+    }
     const index = c.turnBlocks.findIndex((b) => b.index === event.index);
     const block = c.turnBlocks[index];
     if (!block) {
@@ -44374,6 +44461,10 @@ function processStreamEvent(message, customToolNameToPi, model) {
     return;
   }
   if (event?.type === "content_block_stop") {
+    if (c.childExecutedStreamIndexes.has(event.index)) {
+      c.turnSawStreamEvent = true;
+      return;
+    }
     const index = c.turnBlocks.findIndex((b) => b.index === event.index);
     const block = c.turnBlocks[index];
     if (!block) {
@@ -44420,6 +44511,11 @@ function appendMissingToolUsesFromAssistant(assistantMsg, model, customToolNameT
   let sawToolUse = false;
   for (const block of assistantMsg.content) {
     if (block.type !== "tool_use") continue;
+    if (isChildExecutedTool(block.name)) {
+      c.noteChildExecutedToolCall(block.id, block.name);
+      debug(`assistant message: child-executed tool ${block.name} [${block.id}] \u2014 not mirrored as a Pi tool call`);
+      continue;
+    }
     sawToolUse = true;
     const existingIdx = c.turnBlocks.findIndex((b) => b.type === "toolCall" && b.id === block.id);
     const name = mapToolName(block.name, customToolNameToPi);
@@ -44452,6 +44548,19 @@ function appendMissingToolUsesFromAssistant(assistantMsg, model, customToolNameT
   if (assistantMsg.usage && c.turnOutput) updateUsage(c.turnOutput, assistantMsg.usage, model);
   return sawToolUse;
 }
+function noteChildExecutedToolResults(message) {
+  const c = ctx();
+  if (c.childExecutedToolCalls.size === 0) return;
+  const content = message.message?.content;
+  if (!Array.isArray(content)) return;
+  for (const block of content) {
+    if (block?.type !== "tool_result") continue;
+    const name = c.childExecutedToolCalls.get(block.tool_use_id);
+    if (!name) continue;
+    const size = typeof block.content === "string" ? block.content.length : Array.isArray(block.content) ? block.content.length : 0;
+    debug(`child-executed tool result: ${name} [${block.tool_use_id}] isError=${block.is_error === true} contentSize=${size}`);
+  }
+}
 function processAssistantMessage(message, model, customToolNameToPi) {
   const c = ctx();
   const assistantMsg = message.message;
@@ -44471,6 +44580,7 @@ function processAssistantMessage(message, model, customToolNameToPi) {
     return;
   }
   c.resetToolTracking();
+  c.beginChildMessage(assistantMsg.id);
   debug(`processAssistantMessage fallback: ${assistantMsg.content.length} blocks, types=${assistantMsg.content.map((b) => b.type).join(",")}`);
   for (const block of assistantMsg.content) {
     if (block.type === "text" && block.text) {
@@ -44488,6 +44598,11 @@ function processAssistantMessage(message, model, customToolNameToPi) {
       if (block.thinking) c.currentPiStream?.push({ type: "thinking_delta", contentIndex: idx, delta: block.thinking, partial: c.turnOutput });
       c.currentPiStream?.push({ type: "thinking_end", contentIndex: idx, content: block.thinking ?? "", partial: c.turnOutput });
     } else if (block.type === "tool_use") {
+      if (isChildExecutedTool(block.name)) {
+        c.noteChildExecutedToolCall(block.id, block.name);
+        debug(`processAssistantMessage fallback: child-executed tool ${block.name} [${block.id}] \u2014 not mirrored as a Pi tool call`);
+        continue;
+      }
       ensureTurnStarted();
       c.turnSawToolCall = true;
       const mappedName = mapToolName(block.name, customToolNameToPi);
@@ -44806,8 +44921,8 @@ async function consumeQuery(sdkQuery, customToolNameToPi, model, cwd, bridgeConf
         }
         break;
       case "user":
+        noteChildExecutedToolResults(message);
         break;
-      // SDK echo of user prompt — not needed
       case "rate_limit_event": {
         const info = message.rate_limit_info;
         debug("consumeQuery: rate_limit_event", JSON.stringify(info).slice(0, 300));
@@ -45477,6 +45592,7 @@ export {
   listAccountConnectors,
   mapToolName,
   normalizeRateLimitUtilization,
+  noteChildExecutedToolResults,
   preflightClaudeExecutable,
   primeConnectorServers,
   processAssistantMessage,

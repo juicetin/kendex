@@ -140,6 +140,64 @@ export class QueryContext {
 	deferredUserMessages: string[] = [];
 	handledTerminalError = false;
 
+	// Tool calls the CHILD executes itself (claude.ai connectors — see
+	// isChildExecutedTool). Deliberately NOT in turnToolCalls/turnToolCallIds:
+	// those track calls Pi owes a result for, and Pi owes nothing here. Kept only
+	// so the child's real result can be recognized when it comes back on the SDK's
+	// `user` message, and so the streamed block's deltas can be skipped silently
+	// instead of logging as "unmatched" (which reads like a bug).
+	/** tool_use id → raw SDK tool name. */
+	childExecutedToolCalls = new Map<string, string>();
+	/** Anthropic content-block indexes of the current assistant message that carry
+	 *  a child-executed tool_use. Scoped to one message: cleared at message_start,
+	 *  and an index is released as soon as a new block starts there. */
+	childExecutedStreamIndexes = new Set<number>();
+
+	// Usage accounting for a Pi turn that spans SEVERAL child assistant messages.
+	//
+	// Every child message is a separate billed API call, and each reports its own
+	// counters — `message_start`/`message_delta` REPLACE rather than accumulate. A
+	// Pi turn used to end at the first tool call, so one Pi message meant one child
+	// message and replacing was right. A turn containing a child-executed connector
+	// call now keeps running across the child's follow-up messages, so replacing
+	// would silently drop everything the earlier ones billed (measured: 55,685
+	// cache-write tokens lost on a single connector turn).
+	//
+	// So: `turnUsageCarry` holds the totals of the child messages already COMPLETE
+	// in this Pi turn, `currentMessageUsage` holds the one in flight, and the Pi
+	// message reports their sum. Summing is the correct model for input and cache
+	// too — each call bills its own.
+	turnUsageCarry = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+	currentMessageUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+	/** Anthropic id of the child message `currentMessageUsage` describes. */
+	currentMessageId: string | undefined;
+
+	/**
+	 * Declare which child message the following usage belongs to, banking the
+	 * previous one's counters into the turn total.
+	 *
+	 * Keyed on the MESSAGE ID rather than on the call site, because both paths
+	 * that see a message boundary can fire for the SAME message: `message_start`
+	 * arrives on the stream, and the SDK then yields that message again in
+	 * completed form. Banking per call site double-counted whenever the completed
+	 * copy took the no-stream-events branch — which it does whenever a message
+	 * produced no content blocks, since `turnSawStreamEvent` only tracks those.
+	 *
+	 * With no id on either side (older/streamless shapes) this degrades to
+	 * banking on every call, which is what each caller means when it cannot
+	 * prove otherwise.
+	 */
+	beginChildMessage(messageId?: unknown): void {
+		const id = typeof messageId === "string" && messageId.length > 0 ? messageId : undefined;
+		if (id !== undefined && id === this.currentMessageId) return; // same message
+		this.turnUsageCarry.input += this.currentMessageUsage.input;
+		this.turnUsageCarry.output += this.currentMessageUsage.output;
+		this.turnUsageCarry.cacheRead += this.currentMessageUsage.cacheRead;
+		this.turnUsageCarry.cacheWrite += this.currentMessageUsage.cacheWrite;
+		this.currentMessageUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+		this.currentMessageId = id;
+	}
+
 	// Per-turn (reset together)
 	turnOutput: AssistantMessage | null = null;
 	turnStarted = false;
@@ -163,6 +221,11 @@ export class QueryContext {
 		this.turnSawStreamEvent = false;
 		this.turnSawToolCall = false;
 		this.handledTerminalError = false;
+		// Usage accounting IS per-Pi-message, so it resets with the message it
+		// describes — unlike tool-call tracking below.
+		this.turnUsageCarry = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+		this.currentMessageUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+		this.currentMessageId = undefined;
 		// Tool-call tracking is NOT reset here — it persists across the
 		// tool-result delivery callback for the same assistant message. New
 		// assistant messages call resetToolTracking() explicitly.
@@ -176,6 +239,15 @@ export class QueryContext {
 		this.resolvedToolResultIds.clear();
 		this.unmatchedToolResultIds.clear();
 		this.reportedToolResultMismatch = false;
+		this.childExecutedToolCalls.clear();
+		this.childExecutedStreamIndexes.clear();
+	}
+
+	/** Note a tool_use the child runs itself. `streamIndex` is present only on the
+	 *  streamed path, where later deltas/stops for that block must be skipped. */
+	noteChildExecutedToolCall(id: string | undefined, rawName: string, streamIndex?: number): void {
+		if (id) this.childExecutedToolCalls.set(id, rawName);
+		if (typeof streamIndex === "number") this.childExecutedStreamIndexes.add(streamIndex);
 	}
 
 	recordToolCall(id: string | undefined, toolName: string, args: Record<string, unknown> = {}): void {
