@@ -60,7 +60,19 @@ Apply [Worktree Scope](../SKILL.md#worktree-scope): if in a worktree and `ISSUE_
 
    </output_format>
 
-4. **Ask user**: `Fix all` | Multi-select: `#N: [TITLE]` | `Cancel`
+4. **Resolve the decision mode**, then ask:
+
+   ```bash
+   .agents/skills/orch/scripts/orch-env ORCH_DECISION_MODE ask
+   ```
+
+   **If the output is `auto-recommended`**: do not present the ask — take the recommended option (`Fix all`), log it in the round record, and → § 2. Decision-record revisits, scope expansion beyond the issue, anything touching benchmark-host protocol, and merge ALWAYS ask, in every mode.
+
+   ```bash
+   .agents/skills/orch/scripts/workflow-state append [ISSUE_ID] auto_decisions '"auto-selected: Fix all — [REASON]"'
+   ```
+
+   Otherwise **ask user**: `Fix all` | Multi-select: `#N: [TITLE]` | `Cancel`
 
    | Choice | Action |
    |--------|--------|
@@ -92,7 +104,7 @@ Apply [Worktree Scope](../SKILL.md#worktree-scope): if in a worktree and `ISSUE_
 
      GitHub items: use `gh issue view ${ISSUE_ID#issue-} --json labels`, or infer from component paths.
 
-2. **Group items by agent domain** if multi-domain. Order per [agent-sequencing.md](agent-sequencing.md).
+2. **Group items by agent domain** if multi-domain. Order per [agent-sequencing.md](agent-sequencing.md). Prefer 2 scoped rounds over 1 broad round when the item count exceeds ~8 — absorbing more into a single round injects new blockers instead of clearing them (an observed 24-item round introduced 8 new blockers, 2 of them P1 — vstack#944).
 
 3. **Detect team context**:
    ```bash
