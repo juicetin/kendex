@@ -10,6 +10,8 @@
 import type { AssistantMessageEvent, AssistantMessageEventStream } from "@earendil-works/pi-ai";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { debug } from "./debug.js";
+import { resetTimestampMs } from "./rate-limit.js";
 
 export const CLAUDE_ACCOUNT_ROUTER_SYMBOL = Symbol.for("vstack.pi.claude-account-router.v1");
 export const CLAUDE_BRIDGE_ACCOUNT_HOST_SYMBOL = Symbol.for("vstack.pi.claude-bridge.account-host.v1");
@@ -75,6 +77,17 @@ export function resolveClaudeAccountRouter(): ClaudeAccountRouterV1 | undefined 
 	const host = globalThis as unknown as Record<PropertyKey, unknown>;
 	const candidate = host[CLAUDE_ACCOUNT_ROUTER_SYMBOL] as ClaudeAccountRouterV1 | undefined;
 	return candidate?.version === 1 ? candidate : undefined;
+}
+
+/** Run a companion-router telemetry callback without letting it fail the turn.
+ *  The router is third-party code reached from delivery paths (a throwing
+ *  recordSuccess would otherwise error a turn whose answer already rendered). */
+export function safeRouterCall(label: string, call: () => void): void {
+	try {
+		call();
+	} catch (error) {
+		debug(`router callback ${label} threw:`, error);
+	}
 }
 
 export function subscriberProfileEnv(
@@ -189,13 +202,9 @@ export function rateLimitResetFromInfo(info: Record<string, unknown> | undefined
 }
 
 export function rateLimitResetMs(info: Record<string, unknown> | undefined): number | undefined {
-	const value = rateLimitResetFromInfo(info);
-	if (typeof value === "number" && Number.isFinite(value)) return value < 1_000_000_000_000 ? value * 1000 : value;
-	if (typeof value !== "string" || !value.trim()) return undefined;
-	const numeric = Number(value);
-	if (Number.isFinite(numeric)) return numeric < 1_000_000_000_000 ? numeric * 1000 : numeric;
-	const parsed = Date.parse(value);
-	return Number.isFinite(parsed) ? parsed : undefined;
+	// The seconds-vs-ms magnitude heuristic lives in resetTimestampMs; this is
+	// just field extraction over it.
+	return resetTimestampMs(rateLimitResetFromInfo(info));
 }
 
 // An HTTP status code counts only in an http-ish context ("status 429",

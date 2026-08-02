@@ -37,6 +37,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { piUserDir } from "./config.js";
+import { debug } from "./debug.js";
 import type { ConnectorEntry } from "./connector-inventory.js";
 
 const CACHE_VERSION = 2;
@@ -47,8 +48,19 @@ const CACHE_VERSION = 2;
  *  correctness boundary. */
 const MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
+/**
+ * THE canonical credential-scope key: a trimmed CLAUDE_CONFIG_DIR, or the
+ * `"<default>"` sentinel for the default account. The on-disk cache format has
+ * an external reader (see the module header), and the in-memory prime cache in
+ * connector-runtime.ts keys the same scopes — both MUST agree on this rule, so
+ * there is exactly one implementation.
+ */
+export function scopeKeyFor(claudeConfigDir?: string): string {
+	return claudeConfigDir?.trim() || "<default>";
+}
+
 export function connectorCacheScopeKey(env: NodeJS.ProcessEnv = process.env): string {
-	return env.CLAUDE_CONFIG_DIR?.trim() || "<default>";
+	return scopeKeyFor(env.CLAUDE_CONFIG_DIR);
 }
 
 // Full sha256 hex of a scope key. The filename keeps only the first 16 chars;
@@ -88,7 +100,10 @@ export function readCachedConnectors(
 	let parsed: any;
 	try {
 		parsed = JSON.parse(raw);
-	} catch {
+	} catch (error) {
+		// A corrupt cache degrades to the no-cache path by contract, but silently
+		// doing so on every turn is how a bad file hides forever.
+		debug(`connector-cache: corrupt cache ${connectorCachePath(scopeKey)}:`, error instanceof Error ? error.message : String(error));
 		return undefined;
 	}
 	if (parsed?.version !== CACHE_VERSION) return undefined;
@@ -124,7 +139,10 @@ export function writeCachedConnectors(
 			{ mode: 0o600 },
 		);
 		return true;
-	} catch {
+	} catch (error) {
+		// Best-effort by contract, but a persistent write failure means every cold
+		// process re-loses the turn-1 race this cache exists to win — say so.
+		debug(`connector-cache: write failed ${path}:`, error instanceof Error ? error.message : String(error));
 		return false;
 	}
 }
