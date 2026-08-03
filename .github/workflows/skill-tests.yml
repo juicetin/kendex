@@ -8,6 +8,9 @@ name: Skill Tests
 
 "on":
   pull_request:
+  # Required checks must exist on merge-group shas too, or queue entries
+  # block forever on contexts nothing creates (VST-10).
+  merge_group:
   push:
     branches: [main]
 
@@ -96,6 +99,23 @@ jobs:
           npm ci --no-audit --no-fund || npm install --no-audit --no-fund
           npm run build
           npm run test:unit
+
+  gate-selftest:
+    # DELIBERATELY UNGATED: no `needs`, no approval condition, no path
+    # filter. If the predicate is broken, nothing is ever approved, so a
+    # gated selftest could never run when it matters. Runs from the repo
+    # root so the configured layer regenerates its approve/near-miss
+    # battery from THIS repo's committed vstack.settings.toml trust values
+    # (self-adoption, VST-10).
+    name: Pin the review-gate decision table
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: review-gate selftest against this repo's settings
+        run: skills/review-gate/scripts/review-predicate-selftest.sh
 
   cli-tests:
     name: CLI (cargo test + integration check)
