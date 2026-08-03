@@ -26,7 +26,7 @@ import assert from "node:assert/strict";
 
 // In-process modules must load with DEBUG off regardless of the runner's env.
 delete process.env.CLAUDE_BRIDGE_DEBUG;
-const { DEBUG } = await import("../src/debug.ts");
+const { DEBUG, diagGuidance, diagLogPath } = await import("../src/debug.ts");
 const { summarizeDroppedUserMessages } = await import("../src/query-state.ts");
 const { consumeQuery } = await import("../src/consume-query.ts");
 
@@ -57,6 +57,71 @@ function runProbeChild({ debugOn }) {
 	else delete env.CLAUDE_BRIDGE_DEBUG;
 	execFileSync(process.execPath, ["--import", "tsx", scriptPath], { cwd: pkgRoot, env });
 }
+
+// Run a child (DEBUG on) whose debug() call mixes healthy args with args whose
+// formatting throws: a throwing thunk, a circular structure, and a BigInt
+// (JSON.stringify throws on the last two). vstack#1041: the formatting used to
+// run outside debug()'s try, so any of these aborted the caller — including
+// the consumeQuery stream loop.
+function runThrowingArgsProbeChild() {
+	const scriptPath = join(dir, "probe-throwing-args.mjs");
+	writeFileSync(scriptPath, [
+		`import { debug } from ${JSON.stringify(pathToFileURL(join(pkgRoot, "src/debug.ts")).href)};`,
+		`const circular = {}; circular.self = circular;`,
+		`debug("before-args", () => { throw new Error("thunk boom"); }, circular, 10n, "after-args");`,
+		`// The thrown value itself can defeat String(): a null-prototype object`,
+		`// has no toString at all. The placeholder must degrade to its constant.`,
+		`debug("second-line", () => { throw Object.create(null); }, "still-logs");`,
+		`// JSON.stringify returns undefined (not a string) for undefined and`,
+		`// Symbol args — they must render, not silently blank the slot; and an`,
+		`// Error whose message is a Symbol would make template interpolation of`,
+		`// the placeholder itself throw without String() around the reason.`,
+		`const symErr = new Error(); symErr.message = Symbol("sym-reason");`,
+		`debug("third-line", undefined, Symbol("naked-symbol"), () => { throw symErr; }, "tail");`,
+		`// JSON.stringify also returns undefined for an object whose toJSON`,
+		`// returns undefined — and that object's own toString can throw, so the`,
+		`// explicit-render fallback needs its own guard too.`,
+		`debug("fourth-line", { toJSON: () => undefined, toString: () => { throw new Error("hostile toString"); } }, "end");`,
+	].join("\n"));
+	const env = { ...process.env, PI_CODING_AGENT_DIR: join(dir, "agent") };
+	env.CLAUDE_BRIDGE_DIAG_PATH = join(dir, "diag.log");
+	env.CLAUDE_BRIDGE_DEBUG_PATH = join(dir, "debug.log");
+	env.CLAUDE_BRIDGE_DEBUG = "1";
+	execFileSync(process.execPath, ["--import", "tsx", scriptPath], { cwd: pkgRoot, env });
+}
+
+describe("debug() formatting failures are non-fatal (vstack#1041)", () => {
+	it("a throwing thunk / circular arg / BigInt degrade to placeholders and the other args still log", () => {
+		// execFileSync throws on a non-zero exit, so reaching the assertions
+		// proves debug() did not let the formatting failures escape.
+		runThrowingArgsProbeChild();
+		const log = readFileSync(join(dir, "debug.log"), "utf8");
+		assert.match(log, /before-args/);
+		assert.match(log, /after-args/, "args after a failed one must still log");
+		assert.match(log, /\[unprintable: thunk boom\]/);
+		assert.match(log, /\[unprintable: [^[]*circular[\s\S]*?\]/i);
+		assert.match(log, /\[unprintable: [^[]*BigInt[\s\S]*?\]/);
+		// Thrown null-prototype object: String(error) itself throws, so the
+		// placeholder degrades to its constant and the line still logs whole.
+		assert.match(log, /second-line \[unprintable: formatting failed\] still-logs/);
+		// undefined and Symbol args render (JSON.stringify yields undefined for
+		// both — join() must not silently blank the slot), and an Error carrying
+		// a Symbol message cannot make the placeholder interpolation throw.
+		assert.match(log, /third-line undefined Symbol\(naked-symbol\) \[unprintable: Symbol\(sym-reason\)\] tail/);
+		// An object whose toJSON returns undefined reaches the explicit-render
+		// fallback as an arbitrary object; its hostile toString must not escape.
+		assert.match(log, /fourth-line \[unprintable: formatting failed\] end/);
+	});
+});
+
+describe("diagGuidance (vstack#1041)", () => {
+	it("with DEBUG off points at the debug env var, never at the unwritten diag log", () => {
+		assert.equal(DEBUG, false, "precondition: this test process must run with DEBUG off");
+		const guidance = diagGuidance();
+		assert.match(guidance, /CLAUDE_BRIDGE_DEBUG=1/);
+		assert.ok(!guidance.includes(diagLogPath()), "no pointer to a diag file that was never written");
+	});
+});
 
 describe("diagDump gating (VST-15)", () => {
 	it("writes nothing to disk when CLAUDE_BRIDGE_DEBUG is off", () => {

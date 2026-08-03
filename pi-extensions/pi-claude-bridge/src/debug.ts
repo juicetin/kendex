@@ -13,6 +13,16 @@ export function diagLogPath(): string {
 	return process.env.CLAUDE_BRIDGE_DIAG_PATH || join(piUserDir(), "claude-bridge-diag.log");
 }
 
+/** Trailing clause for user-facing integrity notifications. With DEBUG on the
+ *  diag log exists and is worth pointing at; without it the file was never
+ *  written (diagDump early-returns), so point at the switch that would have
+ *  captured a dump instead of at a path that does not exist. */
+export function diagGuidance(): string {
+	return DEBUG
+		? `see ${diagLogPath()}`
+		: "re-run with CLAUDE_BRIDGE_DEBUG=1 to capture a diagnostic dump";
+}
+
 // Ensure log directories exist when debug is enabled. 0o700/0o600 throughout:
 // these logs carry prompt previews and session metadata and belong to the user
 // alone — same discipline as diagDump.
@@ -44,7 +54,41 @@ export function debug(...args: unknown[]) {
 		if (typeof a === "function") return fmt((a as () => unknown)());
 		return JSON.stringify(a);
 	};
-	const msg = args.map(fmt).join(" ");
+	// A throwing thunk or JSON.stringify (circular structure, BigInt) must not
+	// escape debug() — one call site sits inside the SDK stream loop, where a
+	// formatting failure would abort the user's turn exactly when they enabled
+	// debugging. A failed arg degrades to a placeholder; the rest still log.
+	const safeFmt = (a: unknown): string => {
+		let out: string | undefined;
+		try {
+			out = fmt(a);
+		} catch (error) {
+			// The caught value's own conversion can throw too (a thrown
+			// null-prototype object, a throwing toString, an Error whose
+			// message is a Symbol — template interpolation would rethrow) —
+			// degrade to a constant rather than let the placeholder escape.
+			let reason = "formatting failed";
+			try {
+				reason = String(error instanceof Error ? error.message : error);
+			} catch { /* keep the constant */ }
+			return `[unprintable: ${reason}]`;
+		}
+		// JSON.stringify returns undefined (not a string) for undefined,
+		// Symbol, AND objects whose toJSON returns undefined — render the
+		// slot explicitly instead of letting join() silently drop it. That
+		// last shape means `a` can be an arbitrary object here, and its
+		// toString can throw, so this conversion needs the same guard as the
+		// catch path. (A thunk that returned one of these renders as plain
+		// "undefined".)
+		if (out !== undefined) return out;
+		if (typeof a === "function") return "undefined";
+		try {
+			return String(a);
+		} catch {
+			return "[unprintable: formatting failed]";
+		}
+	};
+	const msg = args.map(safeFmt).join(" ");
 	try { appendFileSync(DEBUG_LOG_PATH, `[${ts}] [${moduleInstanceId}] ${msg}\n`, { mode: 0o600 }); } catch { /* debug is best effort */ }
 }
 
