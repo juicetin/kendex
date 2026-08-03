@@ -6,6 +6,17 @@ path, e.g. in tests). List values pack into one string with `;` separators.
 Commented defaults ship in this skill's `vstack.settings.toml.example`;
 per-repo wiring and values: [adoption.md](adoption.md).
 
+Script-consumed keys are matched file-wide by exact name, regardless of the
+enclosing TOML table — that is how assignments under an adopter's `[env]`
+table resolve at all. Every such key name is therefore reserved across the
+whole file: a same-named key under an unrelated table would be read as the
+gate setting, so keeping these names out of unrelated tables is the
+adopter's responsibility. The parser fails loud on the one detectable
+ambiguity — the same name assigned more than once anywhere in the file.
+Exception: `REVIEW_GATE_TRUST_PR_WORKFLOWS` is consumed by workflow wiring,
+not by these scripts, so it gets no parser guard — treat its name as
+reserved all the same.
+
 | Key | Default | Meaning |
 |---|---|---|
 | `REVIEW_GATE_CONTEXT` | `Review gate` | Gate commit-status context (the required check name). |
