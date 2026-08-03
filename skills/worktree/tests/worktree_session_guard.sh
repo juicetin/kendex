@@ -1167,9 +1167,72 @@ fi
 rm -rf "$nf_mutex"
 wait "$blocked_pid" || fail "the contender must acquire the mutex once the holder releases it"
 
+# The released-mutex window (vstack#1029): a contender's mkdir can fail while
+# the holder's release is mid-flight, so by the time the contender probes the
+# path there is nothing in the way. That observation must read as "retry",
+# not "the common dir is unwritable" — the race above only hits this window
+# under scheduler pressure, so it is provoked deterministically instead: a
+# mkdir shim fails the first attempt on the lock directory without creating
+# it, handing the guard exactly one failed-mkdir-with-nothing-there
+# observation before delegating to the real mkdir.
+vanish_marker="$tmp_dir/vanish-marker"
+vanish_shim_dir="$tmp_dir/vanish-shim"
+mkdir -p "$vanish_shim_dir"
+real_mkdir="$(command -v mkdir)"
+{
+	printf '#!/usr/bin/env bash\n'
+	printf 'if [[ "${!#}" == %q && ! -e %q ]]; then\n' "$nf_mutex" "$vanish_marker"
+	printf '\t: >%q\n' "$vanish_marker"
+	printf '\texit 1\n'
+	printf 'fi\n'
+	printf 'exec %q "$@"\n' "$real_mkdir"
+} >"$vanish_shim_dir/mkdir"
+chmod +x "$vanish_shim_dir/mkdir"
+
+RUN_RC=0
+env PATH="$vanish_shim_dir:$noflock_bin" "$GUARD" refresh "$nf_wt" --owner CC-1000 \
+	>"$run_out" 2>"$run_err" || RUN_RC=$?
+[[ -e "$vanish_marker" ]] \
+	|| fail "the vanish shim never intercepted a mkdir; the released-mutex window was not exercised"
+assert_eq "$RUN_RC" "0" "a contender must retry a mutex that vanished mid-probe"
+assert_not_contains "$run_err" "cannot create the session-guard mutex"
+[[ ! -e "$nf_mutex" ]] || fail "the mkdir mutex must be released after the vanished-mutex retry"
+
 run_noflock release "$nf_wt" --owner CC-1000
 assert_eq "$RUN_RC" "0" "release without flock"
 [[ ! -e "$nf_mutex" ]] || fail "the mkdir mutex must not outlive the release"
+
+# Companion cutoff case: a GENUINELY unwritable lock location must still fail
+# loudly rather than retry forever — the shim refuses every mkdir under the
+# mutex path (the mutex itself AND the sibling probe, prefix match), which is
+# exactly what an unwritable parent looks like: the probe fails too, and the
+# guard concludes unwritable immediately instead of spinning.
+unwritable_count="$tmp_dir/unwritable-count"
+unwritable_shim_dir="$tmp_dir/unwritable-shim"
+mkdir -p "$unwritable_shim_dir"
+{
+	printf '#!/usr/bin/env bash\n'
+	printf 'if [[ "${!#}" == %q* ]]; then\n' "$nf_mutex"
+	printf '\techo "${!#}" >>%q\n' "$unwritable_count"
+	printf '\texit 1\n'
+	printf 'fi\n'
+	printf 'exec %q "$@"\n' "$real_mkdir"
+} >"$unwritable_shim_dir/mkdir"
+chmod +x "$unwritable_shim_dir/mkdir"
+
+RUN_RC=0
+env PATH="$unwritable_shim_dir:$noflock_bin" "$GUARD" claim "$nf_wt" --owner CC-1000 \
+	>"$run_out" 2>"$run_err" || RUN_RC=$?
+[[ "$RUN_RC" -ne 0 ]] || fail "an unwritable mutex location must fail, not succeed or spin"
+assert_contains "$run_err" "cannot create the session-guard mutex"
+# Two refusals reach the conclusion: the mutex mkdir, then the sibling probe
+# that proves the parent (not a vanished mutex) is at fault. Guarded read:
+# a missing count file must fail the assertion, not the suite (set -e).
+attempts=0
+[[ -f "$unwritable_count" ]] && attempts="$(wc -l <"$unwritable_count" | tr -d '[:space:]')"
+assert_eq "$attempts" "2" "the mutex attempt plus the sibling probe reach the unwritable conclusion"
+grep -qF -- ".probe." "$unwritable_count" 2>/dev/null \
+	|| fail "the sibling probe was never attempted; unwritability was concluded without proof"
 
 # ── The documented exit-code contract ────────────────────────────────
 
