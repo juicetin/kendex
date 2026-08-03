@@ -28,6 +28,81 @@ CACHE_PROJECT_ROOT="$(linear_cache_project_root)"
 CACHE_DIR="$CACHE_PROJECT_ROOT/.cache/linear"
 
 # =============================================================================
+# WORKTREE CLOBBER GUARD (vstack#1032)
+# =============================================================================
+# A git operation can re-materialize a WORKTREE_SYMLINKS-managed `.cache`
+# symlink in a linked worktree as a real, near-empty directory. The resolved
+# cache dir then looks exactly like a cold cache, and a full re-sync silently
+# re-pulls the entire issue/comment history into the worktree-local dir —
+# burning a large slice of the shared Linear API budget. These helpers detect
+# that state so sync can fail closed instead.
+
+# True when the resolved cache root is a linked worktree whose `.cache` is a
+# real directory while the main checkout's `.cache` exists — the symlink
+# convention is configured but broken here. When WORKTREE_SYMLINKS is set
+# (loaded from project config by common.sh) and does NOT manage `.cache`, the
+# repo has explicitly opted its worktrees into local caches and the guard
+# stands down. Sets CACHE_WORKTREE_MAIN_ROOT for the refusal message.
+CACHE_WORKTREE_MAIN_ROOT=""
+cache_worktree_cache_clobbered() {
+    local root="$CACHE_PROJECT_ROOT" common_dir="" main_root="" entry=""
+    CACHE_WORKTREE_MAIN_ROOT=""
+    [[ -n "$root" ]] || return 1
+    # Healthy states exit fast: `.cache` missing (a cold checkout) or a
+    # symlink (the convention is intact and writes reach the shared cache).
+    [[ -d "$root/.cache" && ! -L "$root/.cache" ]] || return 1
+    common_dir="$(git -C "$root" rev-parse --git-common-dir 2>/dev/null)" || return 1
+    [[ -n "$common_dir" ]] || return 1
+    [[ "$common_dir" == /* ]] || common_dir="$root/$common_dir"
+    main_root="$(linear_cache_canonical_existing_dir "$(dirname "$common_dir")")" || return 1
+    [[ "$main_root" != "$root" ]] || return 1
+    [[ -e "$main_root/.cache" ]] || return 1
+    if [[ -n "${WORKTREE_SYMLINKS:-}" ]]; then
+        local manages_cache=false stripped=""
+        for entry in ${WORKTREE_SYMLINKS}; do
+            # The worktree config normalizer strips ANY number of trailing
+            # slashes; match it, or ".cache//" would read as an opt-out.
+            stripped="$entry"
+            while [[ "$stripped" == */ ]]; do stripped="${stripped%/}"; done
+            if [[ "$stripped" == ".cache" ]]; then
+                manages_cache=true
+                break
+            fi
+        done
+        [[ "$manages_cache" == true ]] || return 1
+    fi
+    CACHE_WORKTREE_MAIN_ROOT="$main_root"
+    return 0
+}
+
+cache_worktree_clobber_refusal() {
+    {
+        echo "Sync refused: cache dir is a worktree-local real directory (vstack#1032)."
+        echo "  Worktree:       $CACHE_PROJECT_ROOT"
+        echo "  Cache dir here: $CACHE_PROJECT_ROOT/.cache (real directory)"
+        echo "  Expected:       .cache -> $CACHE_WORKTREE_MAIN_ROOT/.cache (WORKTREE_SYMLINKS-managed symlink)"
+        echo "  A git operation re-materialized the symlink. Syncing here would re-pull the full"
+        echo "  Linear history into this worktree instead of the shared cache, silently burning"
+        echo "  the shared API budget. Repair the link from the main checkout, then re-run sync:"
+        echo "    cd '$CACHE_WORKTREE_MAIN_ROOT' && $(cache_worktree_repair_script) fix-links '$CACHE_PROJECT_ROOT'"
+    } >&2
+}
+
+# The worktree script lives at .agents/skills/... in a consumer install and
+# at skills/... in the source repo — point the repair guidance at whichever
+# exists so it can be pasted as-is (consumer spelling when neither resolves).
+cache_worktree_repair_script() {
+    local rel=""
+    for rel in ".agents/skills/worktree/scripts/worktree" "skills/worktree/scripts/worktree"; do
+        if [[ -x "$CACHE_WORKTREE_MAIN_ROOT/$rel" ]]; then
+            printf '%s\n' "$rel"
+            return 0
+        fi
+    done
+    printf '%s\n' ".agents/skills/worktree/scripts/worktree"
+}
+
+# =============================================================================
 # DIRECTORY & LIFECYCLE
 # =============================================================================
 
