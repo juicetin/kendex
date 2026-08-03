@@ -28,6 +28,15 @@
 rg_setting() { # NAME DEFAULT — resolved value on stdout; nonzero + ::error on
                # a present-but-unparseable assignment (callers must propagate)
   local name="$1" default="$2" line val file
+  # The name is interpolated into ERE patterns below; constrain it to the
+  # identifier shape every real key has, so a metacharacter can neither
+  # misgrep nor inject pattern syntax.
+  case "$name" in
+    "" | [0-9]* | *[!A-Za-z0-9_]*)
+      echo "::error::rg_setting: invalid key name '$name' (shell identifier shape required: [A-Za-z_][A-Za-z0-9_]*)" >&2
+      return 1
+      ;;
+  esac
   # Indirect expansion, not eval: a non-literal NAME must never become code.
   # ${!name+x} tests set-ness of the variable NAMED by $name (Bash 3.2-safe).
   if [ -n "${!name+x}" ]; then
@@ -39,16 +48,21 @@ rg_setting() { # NAME DEFAULT — resolved value on stdout; nonzero + ::error on
     # Key PRESENCE decides, not value non-emptiness: `NAME = ""` is a real
     # assignment ("empty disables" per the settings docs) and must override the
     # built-in default, exactly like a set-but-empty env var does above.
-    if grep -q "^${name}[[:space:]]*=" "$file"; then
+    # Leading whitespace before a key is valid TOML, so matching is
+    # whitespace-tolerant everywhere (presence, ambiguity guard, extraction)
+    # — anchoring at column one made an indented duplicate bypass the
+    # fail-loud guard and an indented sole assignment collapse silently to
+    # the built-in default (vstack#1059).
+    if grep -Eq "^[[:space:]]*${name}[[:space:]]*=" "$file"; then
       # File-wide matching (header contract) makes a re-assigned name
       # ambiguous — e.g. the same key under two tables. Silently taking the
       # first could read an unrelated table's value on a security-sensitive
       # path, so ambiguity is a configuration error.
-      if [ "$(grep -c "^${name}[[:space:]]*=" "$file")" -gt 1 ]; then
+      if [ "$(grep -Ec "^[[:space:]]*${name}[[:space:]]*=" "$file")" -gt 1 ]; then
         echo "::error::$file: $name is assigned more than once (keys are matched file-wide regardless of TOML table; each name must be unique in the file)" >&2
         return 1
       fi
-      line="$(grep "^${name}[[:space:]]*=" "$file" | head -n 1)"
+      line="$(grep -E "^[[:space:]]*${name}[[:space:]]*=" "$file" | head -n 1)"
       # A PRESENT assignment this parser cannot read (e.g. TOML array syntax
       # for a list key) must fail LOUDLY, never collapse to empty: an empty
       # value can silently widen the gate (empty trusted-logins = any
@@ -56,11 +70,11 @@ rg_setting() { # NAME DEFAULT — resolved value on stdout; nonzero + ::error on
       # supported — the value is quote-free ([^"]*), which makes the
       # extraction exact even with a trailing TOML comment (accepted);
       # anything else is a configuration error.
-      if ! printf '%s\n' "$line" | grep -Eq "^${name}[[:space:]]*=[[:space:]]*\"[^\"]*\"[[:space:]]*(#.*)?\$"; then
+      if ! printf '%s\n' "$line" | grep -Eq "^[[:space:]]*${name}[[:space:]]*=[[:space:]]*\"[^\"]*\"[[:space:]]*(#.*)?\$"; then
         echo "::error::$file: unsupported syntax for $name (expected a single-line basic string: $name = \"value\"; list keys pack items with ';' separators)" >&2
         return 1
       fi
-      val="$(printf '%s\n' "$line" | sed -n "s/^${name}[[:space:]]*=[[:space:]]*\"\([^\"]*\)\".*\$/\1/p")"
+      val="$(printf '%s\n' "$line" | sed -n "s/^[[:space:]]*${name}[[:space:]]*=[[:space:]]*\"\([^\"]*\)\".*\$/\1/p")"
       printf '%s' "$val"
       return 0
     fi
