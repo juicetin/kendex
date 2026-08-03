@@ -209,6 +209,22 @@ impl SourceRegistry {
         Ok(())
     }
 
+    /// Drop `entries` that resolve to `project_root` itself while that root
+    /// provably lacks vstack source content — consumer projects recorded as
+    /// their own source by project-local installs (vstack#1024). Command
+    /// paths that know the project root call this before persisting
+    /// (vstack#1038). Scoped to the current project on purpose (#1047
+    /// review): entries elsewhere on disk are never judged, because a
+    /// registered minimal source (e.g. a skills-only checkout added by
+    /// explicit path) fails the two-dir content shape without being stale.
+    /// Returns the number removed.
+    pub fn prune_project_self_non_source(&mut self, project_root: &Path) -> usize {
+        let before = self.entries.len();
+        self.entries
+            .retain(|entry| !is_project_self_non_source(entry, project_root));
+        before - self.entries.len()
+    }
+
     pub fn remember(&mut self, source: &str) {
         // Temporary installer sandboxes should be usable for the current
         // command, but should not become sticky source choices in the user's
@@ -310,6 +326,20 @@ fn is_temporary_local_path(entry: &str) -> bool {
     prefixes
         .iter()
         .any(|p| raw_path.starts_with(p) || canonical_path.starts_with(p))
+}
+
+/// True iff `entry` is a local path resolving to `project_root` itself while
+/// that root provably lacks vstack source content — the content-based check
+/// source resolution uses (vstack#1037). Entries elsewhere on disk are never
+/// judged (#1047 review): a minimal source layout is legitimate, and a
+/// missing path proves nothing about its content.
+pub(crate) fn is_project_self_non_source(entry: &str, project_root: &Path) -> bool {
+    let Some(path) = expanded_local_path(entry) else {
+        return false;
+    };
+    path.exists()
+        && crate::resolve::same_path(&path, project_root)
+        && !crate::resolve::has_vstack_source_content(project_root)
 }
 
 fn expanded_local_path(entry: &str) -> Option<PathBuf> {
@@ -1883,6 +1913,126 @@ mod source_registry_tests {
         let on_disk: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(on_disk["entries"].as_array().unwrap().len(), 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// vstack#1038, rescoped in the #1047 review: the write-path prune drops
+    /// ONLY the current project's own self entry, and only when that project
+    /// provably lacks vstack source content (a consumer project recorded as
+    /// its own source, vstack#1024). Other local paths — another project, a
+    /// registered skills-only source, a missing path — are never judged.
+    #[test]
+    fn prune_project_self_drops_only_the_non_source_self_entry() {
+        let dir = sandbox("prune_project_self");
+        let project = dir.join("consumer-project");
+        let other_project = dir.join("other-consumer-project");
+        let skills_only = dir.join("skills-only-source");
+        let genuine = dir.join("genuine");
+        let missing = dir.join("missing");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(&other_project).unwrap();
+        fs::create_dir_all(skills_only.join("skills/demo")).unwrap();
+        fs::create_dir_all(genuine.join("agents")).unwrap();
+        fs::create_dir_all(genuine.join("skills")).unwrap();
+
+        let mut reg = SourceRegistry {
+            current: Some(project.display().to_string()),
+            entries: vec![
+                "vanillagreencom/vstack".to_string(),
+                project.display().to_string(),
+                other_project.display().to_string(),
+                skills_only.display().to_string(),
+                genuine.display().to_string(),
+                missing.display().to_string(),
+            ],
+            ..Default::default()
+        };
+        let pruned = reg.prune_project_self_non_source(&project);
+
+        assert_eq!(pruned, 1);
+        assert_eq!(
+            reg.entries,
+            vec![
+                "vanillagreencom/vstack".to_string(),
+                other_project.display().to_string(),
+                skills_only.display().to_string(),
+                genuine.display().to_string(),
+                missing.display().to_string(),
+            ]
+        );
+        // `current`/`project_current` are left alone: the #1024 read-side
+        // guards already neutralize a stale self-pointer there, and dropping a
+        // user's sticky per-project choice is riskier than cleaning the
+        // picker-facing entries list.
+        assert_eq!(reg.current.as_deref(), Some(project.display().to_string()).as_deref());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The self prune must keep a project that genuinely is a vstack source
+    /// (running add inside a source checkout).
+    #[test]
+    fn prune_project_self_keeps_a_project_with_source_content() {
+        let dir = sandbox("prune_project_self_genuine");
+        let project = dir.join("source-checkout");
+        fs::create_dir_all(project.join("agents")).unwrap();
+        fs::create_dir_all(project.join("skills")).unwrap();
+
+        let mut reg = SourceRegistry {
+            entries: vec![project.display().to_string()],
+            ..Default::default()
+        };
+        assert_eq!(reg.prune_project_self_non_source(&project), 0);
+        assert_eq!(reg.entries, vec![project.display().to_string()]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Round-trip policy (#1047 review): `save` never judges entries — every
+    /// in-memory entry is written, including missing paths and non-source
+    /// dirs. Dead local paths are dropped at LOAD by `prune_dead_paths`,
+    /// which exists for deleted/moved worktrees (b14d593f) — so a missing
+    /// path deliberately does NOT survive a save/load round trip.
+    #[test]
+    fn save_writes_all_entries_and_load_drops_dead_local_paths() {
+        let dir = sandbox("save_load_round_trip");
+        let path = dir.join("sources.json");
+        let plain = dir.join("plain-non-source-dir");
+        fs::create_dir_all(&plain).unwrap();
+        let missing = dir.join("missing");
+
+        let reg = SourceRegistry {
+            entries: vec![
+                "vanillagreencom/vstack".to_string(),
+                plain.display().to_string(),
+                missing.display().to_string(),
+            ],
+            ..Default::default()
+        };
+        reg.save(&path).unwrap();
+
+        let on_disk: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let written: Vec<&str> = on_disk["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(
+            written,
+            vec![
+                "vanillagreencom/vstack",
+                plain.display().to_string().as_str(),
+                missing.display().to_string().as_str(),
+            ],
+            "save must write every entry verbatim"
+        );
+
+        let loaded = SourceRegistry::load(&path).unwrap();
+        assert_eq!(
+            loaded.entries,
+            vec!["vanillagreencom/vstack".to_string(), plain.display().to_string()],
+            "load drops dead local paths (worktree hygiene), keeps live ones"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 

@@ -7,6 +7,7 @@ use crate::pi_extension::PiExtension;
 use crate::skill;
 use crate::skill::Skill;
 use crate::tui;
+use crate::resolve::{same_path, source_from_project_lock};
 use anyhow::Context;
 use anyhow::Result;
 use std::collections::HashSet;
@@ -222,6 +223,14 @@ fn build_source_options(
         {
             continue;
         }
+        // vstack#1038: the current project recorded as its own source without
+        // being one (vstack#1024) is noise in the picker. Only the project's
+        // own self entry is judged — other local entries may be legitimate
+        // minimal sources (#1047 review). The source resolved for THIS run
+        // always stays listed — the user chose it.
+        if source != resolved.source && config::is_project_self_non_source(&source, project_root) {
+            continue;
+        }
         options.push(tui::RepoOption {
             label: source_label(&source),
             source,
@@ -230,10 +239,26 @@ fn build_source_options(
     options
 }
 
-fn same_path(a: &Path, b: &Path) -> bool {
-    let a = a.canonicalize().unwrap_or_else(|_| a.to_path_buf());
-    let b = b.canonicalize().unwrap_or_else(|_| b.to_path_buf());
-    a == b
+/// Resolve the harness set for a non-interactive add (`-y` / `--harness`).
+/// An empty result is a hard error: nothing would be installed, and scripted
+/// adopters chain on the exit code (vstack#1038).
+fn noninteractive_harnesses(filter: Option<&[String]>) -> Result<Vec<Harness>> {
+    let harnesses: Vec<Harness> = match filter {
+        Some(filter) => filter.iter().filter_map(|f| Harness::from_id(f)).collect(),
+        None => Harness::ALL
+            .iter()
+            .copied()
+            .filter(|h| h.is_detected())
+            .collect(),
+    };
+    if harnesses.is_empty() {
+        let ids: Vec<&str> = Harness::ALL.iter().map(Harness::id).collect();
+        anyhow::bail!(
+            "No harnesses selected or detected. Use --harness to specify ({}).",
+            ids.join(",")
+        );
+    }
+    Ok(harnesses)
 }
 
 fn add_writes_project_skill_root(
@@ -1343,6 +1368,234 @@ role: engineer
         assert!(!project.join(".vstack-lock.json").exists());
         let _ = std::fs::remove_dir_all(root);
     }
+
+    /// vstack#1038: a non-interactive add that ends up with zero harnesses
+    /// installs nothing — that must be a nonzero exit naming the real flag
+    /// (`--harness`), never exit 0 with a wrong-flag hint.
+    #[test]
+    fn add_with_no_matching_harness_fails_nonzero_and_names_harness_flag() {
+        let root = tmpdir("no-harness");
+        let source = root.join("source");
+        let project = root.join("project");
+        let home = root.join("home");
+        let config_home = root.join("config");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&config_home).unwrap();
+        write_demo_skill(&source);
+
+        let err = crate::test_util::with_home_and_config(&home, &config_home, || {
+            crate::test_util::with_project_root(&project, || {
+                let err = run(
+                    Some(source.to_string_lossy().into_owned()),
+                    false,
+                    Some(vec!["not-a-harness".into()]),
+                    None,
+                    Some(vec!["demo".into()]),
+                    None,
+                    None,
+                    false,
+                    true,
+                    false,
+                    false,
+                    false,
+                )
+                .unwrap_err();
+
+                // #1047 round 4: a failing add must not touch registry state —
+                // no sources.json had existed, so none may appear.
+                assert!(
+                    !config::source_registry_path().exists(),
+                    "a failed add must not create sources.json"
+                );
+                err
+            })
+        });
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("--harness"),
+            "hint must name the real flag: {msg}"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// vstack#1038 (review round 3): a non-interactive add against a source
+    /// with nothing installable must exit nonzero — same defect shape as the
+    /// zero-harness path: exit 0 with nothing installed reads as success to
+    /// scripted adopters. Interactive runs never hit this bail; without
+    /// -y/--all/--harness they fall through to the source picker instead.
+    #[test]
+    fn add_empty_source_noninteractive_fails_nonzero() {
+        let root = tmpdir("empty-source");
+        let source = root.join("source");
+        let project = root.join("project");
+        let home = root.join("home");
+        let config_home = root.join("config");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&config_home).unwrap();
+
+        let err = crate::test_util::with_home_and_config(&home, &config_home, || {
+            crate::test_util::with_project_root(&project, || {
+                // #1047 round 4: a failing add must not mutate sources.json.
+                // Seed a registry carrying a stale project-self entry that the
+                // persist-path prune WOULD rewrite, and pin the exact bytes.
+                let reg_path = config::source_registry_path();
+                let registry = config::SourceRegistry {
+                    entries: vec![
+                        "vanillagreencom/vstack".to_string(),
+                        project.display().to_string(),
+                    ],
+                    ..Default::default()
+                };
+                registry.save(&reg_path).unwrap();
+                let before = std::fs::read(&reg_path).unwrap();
+
+                let err = run(
+                    Some(source.to_string_lossy().into_owned()),
+                    false,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    false,
+                    true,
+                    false,
+                    false,
+                    false,
+                )
+                .unwrap_err();
+
+                assert_eq!(
+                    std::fs::read(&reg_path).unwrap(),
+                    before,
+                    "a failed add must leave sources.json byte-identical"
+                );
+                err
+            })
+        });
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("No agents, skills, hooks, pi-packages, or extras found"),
+            "empty source must fail loud: {msg}"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn noninteractive_harnesses_rejects_all_unknown_ids_naming_the_flag() {
+        let err = noninteractive_harnesses(Some(&["nope".to_string()])).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("--harness"), "hint must name the real flag: {msg}");
+        let ids: Vec<&str> = Harness::ALL.iter().map(Harness::id).collect();
+        assert!(
+            msg.contains(&ids.join(",")),
+            "hint must carry the canonical id list, derived so it cannot drift: {msg}"
+        );
+    }
+
+    #[test]
+    fn noninteractive_harnesses_accepts_known_ids() {
+        let harnesses = noninteractive_harnesses(Some(&["codex".to_string()])).unwrap();
+        assert_eq!(harnesses, vec![Harness::Codex]);
+    }
+
+    /// vstack#1038, rescoped in the #1047 review: the picker filters ONLY the
+    /// current project's own self entry, and only when the project lacks
+    /// vstack source content (a consumer project recorded as its own source,
+    /// vstack#1024). Other local entries are never judged — a registered
+    /// skills-only source is legitimate (explicit-path adds accept it), and a
+    /// missing path proves nothing about its content.
+    #[test]
+    fn source_options_exclude_only_the_current_project_self_entry() {
+        let root = tmpdir("picker-self-only");
+        let project = root.join("consumer-project");
+        let other_project = root.join("other-consumer-project");
+        let skills_only = root.join("skills-only-source");
+        let genuine = root.join("genuine-source");
+        let missing = root.join("unmounted");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&other_project).unwrap();
+        std::fs::create_dir_all(skills_only.join("skills/demo")).unwrap();
+        write_canonical_source(&genuine);
+
+        let registry = config::SourceRegistry {
+            entries: vec![
+                project.display().to_string(),
+                other_project.display().to_string(),
+                skills_only.display().to_string(),
+                genuine.display().to_string(),
+                missing.display().to_string(),
+                "owner/custom".to_string(),
+            ],
+            ..Default::default()
+        };
+        let resolved = ResolvedSource {
+            source: genuine.display().to_string(),
+            source_repo: None,
+            label: "local".into(),
+            dir: genuine.clone(),
+            persist: false,
+        };
+
+        let options = build_source_options(&registry, &resolved, &project);
+        let sources: Vec<String> = options.iter().map(|o| o.source.clone()).collect();
+
+        assert!(
+            !sources.contains(&project.display().to_string()),
+            "the current project's non-source self entry must be filtered: {sources:?}"
+        );
+        assert!(
+            sources.contains(&other_project.display().to_string()),
+            "local entries that are not the current project must be kept: {sources:?}"
+        );
+        assert!(
+            sources.contains(&skills_only.display().to_string()),
+            "a registered skills-only source must be kept: {sources:?}"
+        );
+        assert!(sources.contains(&genuine.display().to_string()));
+        assert!(
+            sources.contains(&missing.display().to_string()),
+            "missing-path entries must be kept: {sources:?}"
+        );
+        assert!(sources.contains(&"owner/custom".to_string()));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The source resolved for THIS run always stays listed, even when it is
+    /// the current project's own non-source root — the user explicitly chose
+    /// it (e.g. a project-skills-dir self-add, vstack#1024).
+    #[test]
+    fn source_options_keep_the_resolved_source_even_if_non_source() {
+        let root = tmpdir("picker-resolved-non-source");
+        let consumer = root.join("consumer-project");
+        std::fs::create_dir_all(&consumer).unwrap();
+
+        let registry = config::SourceRegistry {
+            entries: vec![consumer.display().to_string()],
+            ..Default::default()
+        };
+        let resolved = ResolvedSource {
+            source: consumer.display().to_string(),
+            source_repo: None,
+            label: "local".into(),
+            dir: consumer.clone(),
+            persist: false,
+        };
+
+        let options = build_source_options(&registry, &resolved, &consumer);
+        assert!(
+            options
+                .iter()
+                .any(|o| o.source == consumer.display().to_string()),
+            "the currently resolved source must stay selectable"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
 }
 
 /// vstack#71: walk each agent's [agent-skills] + [role-skills] + transitive
@@ -1685,16 +1938,6 @@ source (e.g. switching vstack repos, or starting clean), pass --clobber:
                 missing.join(", ")
             );
         }
-        // Persist the source choice only once the run can still succeed: a
-        // failed add must not mutate sources.json (vstack#1024 review round).
-        if resolved.persist {
-            if global {
-                registry.remember(&resolved.source);
-            } else {
-                registry.remember_for_project(&project_root, &resolved.source);
-            }
-            registry.save(&config::source_registry_path())?;
-        }
         let agents = match agent_filter.as_deref() {
             Some(filter) if filter.iter().any(|f| f == "*") => all_agents,
             Some(filter) => {
@@ -1757,11 +2000,41 @@ source (e.g. switching vstack repos, or starting clean), pass --clobber:
 
         let installable_total = agents.len() + skills.len() + hooks.len() + pi_extensions.len();
         if installable_total == 0 && extras.is_empty() && (yes || all || harness_filter.is_some()) {
-            eprintln!(
+            // vstack#1038: nothing installed must exit nonzero — scripted
+            // adopters chain on the exit code. Interactive runs never reach
+            // this bail: without -y/--all/--harness they fall through to the
+            // picker below, where the user can switch sources.
+            anyhow::bail!(
                 "No agents, skills, hooks, pi-packages, or extras found in {}",
                 source_dir.display()
             );
-            return Ok(());
+        }
+
+        // Validate the non-interactive harness selection while the run can
+        // still fail cleanly. `--all` always uses every harness and the
+        // interactive picker chooses harnesses in the TUI, so only the
+        // -y/--harness path can come up empty.
+        let noninteractive_harness_selection = if !all && (yes || harness_filter.is_some()) {
+            Some(noninteractive_harnesses(harness_filter.as_deref())?)
+        } else {
+            None
+        };
+
+        // Persist the source choice only once the run can still succeed: a
+        // failed add must not mutate sources.json — neither the remembered
+        // source nor the opportunistic self-entry prune may land when nothing
+        // will be installed (vstack#1024 review round; the empty-source and
+        // zero-harness validations above must stay above this block).
+        if resolved.persist {
+            if global {
+                registry.remember(&resolved.source);
+            } else {
+                registry.remember_for_project(&project_root, &resolved.source);
+            }
+            // vstack#1038: opportunistic hygiene on the write path — drop a
+            // stale self entry left by an earlier project-local install.
+            registry.prune_project_self_non_source(&project_root);
+            registry.save(&config::source_registry_path())?;
         }
 
         eprintln!(
@@ -1790,21 +2063,7 @@ source (e.g. switching vstack repos, or starting clean), pass --clobber:
                 },
                 false,
             );
-        } else if yes || harness_filter.is_some() {
-            let harnesses = if let Some(ref filter) = harness_filter {
-                filter.iter().filter_map(|f| Harness::from_id(f)).collect()
-            } else {
-                Harness::ALL
-                    .iter()
-                    .copied()
-                    .filter(|h| h.is_detected())
-                    .collect::<Vec<_>>()
-            };
-
-            if harnesses.is_empty() {
-                eprintln!("No harnesses selected or detected. Use --agent to specify.");
-                return Ok(());
-            }
+        } else if let Some(harnesses) = noninteractive_harness_selection {
 
             // In non-interactive mode, only auto-install Pi packages when Pi
             // is one of the chosen harnesses. The agents/skills/hooks loops
@@ -2398,26 +2657,6 @@ fn resolve_source(source: Option<&str>) -> Result<PathBuf> {
             clone_or_update(crate::REPO)
         }
     }
-}
-
-fn source_from_project_lock(project_root: &Path) -> Option<String> {
-    let lock = config::LockFile::load(&project_root.join(".vstack-lock.json")).ok()?;
-    // Project-local items record the project itself as their source; those
-    // entries must not outvote the canonical source (vstack#1024).
-    let allow_project_self = crate::resolve::has_vstack_source_content(project_root);
-    let mut counts = std::collections::BTreeMap::<String, usize>::new();
-    for entry in lock.entries.values() {
-        if !allow_project_self && same_path(Path::new(&entry.source), project_root) {
-            continue;
-        }
-        *counts.entry(entry.source.clone()).or_default() += 1;
-    }
-    counts
-        .into_iter()
-        .max_by(|(a_source, a_count), (b_source, b_count)| {
-            a_count.cmp(b_count).then_with(|| b_source.cmp(a_source))
-        })
-        .map(|(source, _)| source)
 }
 
 fn looks_like_remote(source: &str) -> bool {
