@@ -21,10 +21,18 @@ name: Approval CI re-fire
 #     and a stale failed/cancelled required check from a superseded run
 #     blocks it.
 #
-# Anti-loop: this workflow triggers only on review/evidence events; the
-# reruns it issues never re-trigger it. A genuinely-failing build after
-# approval is NOT retried automatically — the gate status stays success and
-# the red required contexts block on their own; re-run manually to retry.
+# Anti-loop: the reruns this workflow issues never re-trigger it, and
+# neither do its own gate-status POSTs — they are authored by the workflow's
+# GITHUB_TOKEN, and GitHub suppresses workflow runs for token-authored
+# events — the platform's standard anti-recursion rule ("Events that
+# trigger workflows": GITHUB_TOKEN-authored events do not create new
+# workflow runs). There is therefore NO self-triggered
+# trailing pass to lean on: every run that executes converges EVERY open PR
+# itself (see the event routing in the job); the concurrency group sits at
+# JOB level, so a run the trust guards skip never claims the writer slot in
+# the first place. A genuinely-failing build after approval is NOT retried
+# automatically — the gate status stays success and the red required
+# contexts block on their own; re-run manually to retry.
 
 "on":
   pull_request_review:
@@ -45,7 +53,8 @@ name: Approval CI re-fire
   # Some reviewers publish their clean-analysis evidence as a legacy commit
   # STATUS instead of a check-run, and a status update is a `status` event -
   # not check_run. Without this trigger the clean path still cannot re-fire
-  # the gate here.
+  # the gate here. Status events run UNFILTERED and converge all open PRs —
+  # see the event routing in the job (#1039).
   status: {}
   # Comment-form reviewers post NEITHER a review object NOR a check/status on
   # a clean pass — only an ISSUE COMMENT on the PR. Its evidence is accepted
@@ -73,21 +82,30 @@ permissions:
   # checkout of the shared re-fire script
   contents: read
 
-concurrency:
-  # ONE repo-wide group for EVERY gate writer (this workflow AND the sweep):
-  # per-event group keys let two writers evaluate different snapshots of the
-  # same head concurrently and post out of order — an older `approved`
-  # evaluation taking the prior-success fast path could overwrite a newer
-  # failure post. Serializing all writers removes that race. Events that get
-  # replaced in the single pending slot are converged, not lost: every run
-  # re-reads CURRENT review state at execution, and the scheduled sweep is
-  # the convergence backstop for any dropped trigger (latency, not
-  # correctness).
-  group: review-gate-writer
-  cancel-in-progress: false
 
 jobs:
   rerun:
+    concurrency:
+      # ONE repo-wide group for EVERY gate writer (this workflow AND the sweep):
+      # per-event group keys let two writers evaluate different snapshots of the
+      # same head concurrently and post out of order — an older `approved`
+      # evaluation taking the prior-success fast path could overwrite a newer
+      # failure post. Serializing all writers removes that race.
+      #
+      # GitHub keeps ONE pending run per group and REPLACES it, so an arriving
+      # run EVICTS whatever writer was pending — including another PR's
+      # changes-requested convergence. Replacement is latency, not correctness,
+      # BECAUSE every run that executes converges ALL open PRs (#1039): a
+      # surviving run subsumes the work of every run it displaced, whatever
+      # event shape either had. No shape keeps a single-PR fast path — the
+      # workflow's own token-authored status posts cannot re-trigger it (GitHub
+      # suppresses token-authored events), so a "PR-specific survivor + trailing
+      # healing pass" design cannot exist here. The scheduled sweep remains the
+      # only guaranteed backstop for the one residue: a run whose job-level
+      # trust guard skips it still evicts and converges nothing — bounded at
+      # the sweep's 15-minute cadence.
+      group: review-gate-writer
+      cancel-in-progress: false
     name: Re-fire CI after review
     # check_run events: act only on the trusted reviewer's own check (exact
     # name), and only when it has an associated PR (guarded again in-script).
@@ -95,27 +113,48 @@ jobs:
     # Filter to a PR, to the trusted reviewer login, and to the commit-binding
     # line — same trust model as the predicate: the AUTHOR is what is trusted,
     # the body only narrows which comments are worth a re-fire.
-    # ADAPT: 'Devin Review' = REVIEW_GATE_TRUSTED_STATUS_CONTEXTS,
-    # 'vstack-reviewer-outage' = REVIEW_GATE_OUTAGE_CONTEXT,
+    #
+    # `status` is deliberately ABSENT from this guard (#1039): the workflow
+    # enters the shared writer concurrency group BEFORE any job-level filter,
+    # so a status run skipped here would still have evicted the pending
+    # writer it replaced while converging nothing — an irrelevant status
+    # context could silently drop another PR's changes-requested convergence.
+    # Every run that executes — whatever its event shape — converges ALL
+    # open PRs (the routing below): the workflow's token-authored posts
+    # cannot re-trigger it, so an evicted writer's work is only recovered by
+    # the run that evicted it doing everything. The predicate re-derives
+    # every verdict from scratch, so a loose gate here can never cause a
+    # false approval, only work. The check_run/issue_comment guards stay:
+    # their event volume (every CI job completion, every human comment)
+    # makes running on all of them unaffordable — and with the group at job
+    # level a guard-skipped run never claims the writer slot, so the skip
+    # costs nothing.
+    #
+    # Cost bound: an executing pass costs one paginated PR listing plus
+    # ~6-8 API reads per open PR (the same bill as one scheduled sweep);
+    # rerun POSTs stay capped per head by REVIEW_GATE_MAX_RERUN_ATTEMPTS.
+    # Executing shapes are low-frequency (review submits, the trusted
+    # check name, trusted comment-form comments, commit-status posters),
+    # and the shared group both serializes passes and REPLACES the pending
+    # slot, so a burst of k events coalesces into at most one executing
+    # plus one pending pass. Sustained worst case: back-to-back
+    # sweep-equivalents in a single serialized lane.
+    # ADAPT: 'Devin Review' (check name) = REVIEW_GATE_TRUSTED_STATUS_CONTEXTS,
     # 'chatgpt-codex-connector[bot]' / 'Reviewed commit' =
     # REVIEW_GATE_COMMENT_REVIEWERS login / binding pattern.
     if: >-
       (github.event_name != 'check_run' || github.event.check_run.name == 'Devin Review') &&
-      (github.event_name != 'status' || ((github.event.context == 'Devin Review' || github.event.context == 'vstack-reviewer-outage') && github.event.state == 'success')) &&
       (github.event_name != 'issue_comment' || (github.event.issue.pull_request != null && github.event.comment.user.login == 'chatgpt-codex-connector[bot]' && contains(github.event.comment.body, 'Reviewed commit')))
     runs-on: ubuntu-latest
     timeout-minutes: 40
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       GH_REPO: ${{ github.repository }}
-      PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number || github.event.check_run.pull_requests[0].number }}
-      # issue_comment carries no head sha — the comment is on the conversation,
-      # not on a commit. Resolved from the PR in the step below, and resolved
-      # there rather than read out of the comment body deliberately: the gate
-      # must converge on what the PR head IS, not on what a comment says it was.
-      HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.check_run.head_sha || github.event.sha }}
-      # Empty on check_run and issue_comment events; resolved from the PR.
-      PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+      # Used ONLY by the bootstrap-window fallback below; the normal path is
+      # all-PRs and ignores these. Empty for non-pull_request_review events.
+      BOOTSTRAP_PR_NUMBER: ${{ github.event.pull_request.number }}
+      BOOTSTRAP_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      BOOTSTRAP_PR_AUTHOR: ${{ github.event.pull_request.user.login }}
     steps:
       # The evaluate-and-converge logic lives in the shared vendored script
       # (single source of truth with approval-sweep.yml). Checkout is pinned
@@ -127,37 +166,9 @@ jobs:
           ref: ${{ github.event.repository.default_branch }}
           persist-credentials: false
 
-      - name: Converge the review gate for the PR head
+      - name: Converge the review gate
         run: |
           set -u
-          # check_run.pull_requests[] is best-effort - it can be EMPTY even
-          # for same-repo PRs (notably app-created check runs), so an empty
-          # PR_NUMBER must not silently no-op the clean-case re-fire. Resolve
-          # the PR from the head sha instead; only a genuine no-open-PR
-          # result (push-triggered analysis) exits.
-          if [ -z "${PR_NUMBER:-}" ]; then
-            # The lookup itself must fail LOUDLY: an API outage that lands in
-            # the no-op branch would silently drop a clean-case re-fire. Only
-            # a SUCCESSFUL empty response means "no open PR".
-            PR_NUMBER="$(gh api "repos/$GH_REPO/commits/$HEAD_SHA/pulls" --jq '[.[] | select(.state == "open")][0].number // empty')" || {
-              echo "::error::could not list open PRs for head $HEAD_SHA; taking no action"
-              exit 1
-            }
-            if [ -z "${PR_NUMBER:-}" ]; then
-              echo "no open PR associated with head $HEAD_SHA; nothing to do"
-              exit 0
-            fi
-            echo "resolved PR #$PR_NUMBER from head sha (check_run payload had no pull_requests)"
-          fi
-          # issue_comment events carry no head sha (see the env note above).
-          if [ -z "${HEAD_SHA:-}" ]; then
-            HEAD_SHA="$(gh api "repos/$GH_REPO/pulls/$PR_NUMBER" --jq .head.sha)" || {
-              echo "::error::could not resolve head sha for PR #$PR_NUMBER"
-              exit 1
-            }
-            export HEAD_SHA
-            echo "resolved head $HEAD_SHA for PR #$PR_NUMBER (comment event carries no sha)"
-          fi
           if [ ! -f .agents/skills/review-gate/scripts/approval-refire.sh ]; then
             # Only reachable while the PR introducing the vendored skill is
             # unmerged (these trigger events check out the default branch) —
@@ -166,5 +177,34 @@ jobs:
             echo "::error::.agents/skills/review-gate/scripts/approval-refire.sh is missing on the default branch (bootstrap PR? deleted?); no re-fire action taken"
             exit 1
           fi
-          export PR_NUMBER
+          # Event-shape routing (#1039): every run that reaches this step
+          # entered the shared writer group and REPLACED whatever writer was
+          # pending there — possibly another PR's changes-requested
+          # convergence. This workflow's own token-authored status posts
+          # cannot re-trigger it (GitHub suppresses token-authored events),
+          # so there is no trailing pass to recover evicted work later: the
+          # run that evicted it must do everything. Every executing shape —
+          # status, review submit/dismiss, trusted check_run, comment-form
+          # evidence — therefore converges EVERY open PR; replacement
+          # subsumes and eviction loses nothing.
+          # Bootstrap window: this yaml can run PRE-merge (pull_request_review
+          # uses the PR's workflow version) while the checkout above pins the
+          # DEFAULT branch's script — which, before the all-PRs change lands
+          # there, ignores ALL_OPEN_PRS and demands PR_NUMBER. Skip cleanly in
+          # that window; the sweep still converges, and this branch is dead
+          # once the script and yaml land together on the default branch.
+          if ! grep -q ALL_OPEN_PRS .agents/skills/review-gate/scripts/approval-refire.sh; then
+            # Degrade to the old script's OWN interface instead of a silent
+            # green no-op: PR-shaped events converge their PR exactly as the
+            # pre-change system did; only PR-less shapes have nothing to
+            # offer an old script and skip with a loud warning.
+            if [ -n "${BOOTSTRAP_PR_NUMBER:-}" ]; then
+              echo "::warning::default-branch approval-refire.sh predates all-PRs mode (bootstrap window); converging PR #$BOOTSTRAP_PR_NUMBER single-PR"
+              export PR_NUMBER="$BOOTSTRAP_PR_NUMBER" HEAD_SHA="$BOOTSTRAP_HEAD_SHA" PR_AUTHOR="$BOOTSTRAP_PR_AUTHOR"
+              exec .agents/skills/review-gate/scripts/approval-refire.sh
+            fi
+            echo "::warning::default-branch approval-refire.sh predates all-PRs mode (bootstrap window) and this event carries no PR; skipping — the scheduled sweep covers convergence"
+            exit 0
+          fi
+          export ALL_OPEN_PRS=1
           exec .agents/skills/review-gate/scripts/approval-refire.sh
