@@ -59,7 +59,10 @@ pub fn ensure_skill_settings(
 
     let original =
         std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-    let existing_keys = env_keys(&original);
+    // File-wide, not [env]-scoped: the review-gate settings contract enforces key
+    // uniqueness across the whole file (its shell-side reader is not TOML-table-aware),
+    // so a key assigned under any table must block a duplicate append just the same.
+    let existing_keys = assigned_keys(&original);
     let missing: Vec<EnvEntry> = entries
         .into_iter()
         .filter(|entry| !existing_keys.contains(&entry.key))
@@ -214,6 +217,41 @@ fn extract_env_entries(content: &str) -> Vec<EnvEntry> {
     entries
 }
 
+/// Keys assigned anywhere in the file, regardless of which table (or no
+/// table) they fall under. Mirrors the file-wide uniqueness the settings
+/// contract enforces, rather than the TOML-scoped view `env_keys` uses for
+/// locating the `[env]` table.
+fn assigned_keys(content: &str) -> BTreeSet<String> {
+    // Mirror the shell reader's matcher exactly (`^[[:space:]]*NAME[[:space:]]*=`,
+    // bare identifier keys only): what counts as "assigned" here must be
+    // precisely what that line-oriented reader would match, no more (a
+    // quoted `"KEY" = ...` is invisible to it and must not block the
+    // template append) and no less (a key-shaped line anywhere in the file
+    // — the reader is not TOML string-state-aware, so neither are we;
+    // appending a "missing" default the reader can see elsewhere would trip
+    // its file-wide uniqueness guard).
+    content
+        .lines()
+        .filter(|line| !is_table_header(line))
+        .filter_map(|line| {
+            // Raw key, before any quote handling: assignment_key trims
+            // quotes, which would make `"KEY" = ...` (invisible to the
+            // shell reader) indistinguishable from a bare `KEY = ...`.
+            let trimmed = line.trim_start();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                return None;
+            }
+            let (key, _) = trimmed.split_once('=')?;
+            let key = key.trim();
+            (!key.is_empty()
+                && key
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_'))
+            .then(|| key.to_string())
+        })
+        .collect()
+}
+
 fn env_keys(content: &str) -> BTreeSet<String> {
     let mut keys = BTreeSet::new();
     let mut in_env = false;
@@ -363,6 +401,65 @@ value = true
         assert!(settings.contains("SECOND_OPINION_TIMEOUT = \"42\""));
         assert!(settings.contains("SECOND_OPINION_CODEX_CMD = \"codex exec -m gpt-5.6-sol\""));
         assert!(settings.contains("[other]\nvalue = true"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn skips_key_already_assigned_outside_the_env_table() {
+        // Regression for VST-67 / #1071 (drovr#433): a consumer's hand-set
+        // value for a settings key must never gain a duplicate assignment
+        // from the template's default, even when that hand-set value sits
+        // under a different table than [env] — the settings contract
+        // enforces uniqueness file-wide, not per-table.
+        let root = temp_root("outside_env");
+        let skill_dir = root.join("source").join("skills").join("review-gate");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join(SETTINGS_TEMPLATE),
+            r#"[env]
+
+# REVIEW GATE
+REVIEW_GATE_STATUS_PUBLISHER_REJECT = ""
+REVIEW_GATE_CONTEXT = "Review gate"
+"#,
+        )
+        .unwrap();
+        let project = root.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            project.join(SETTINGS_FILE),
+            r#"# Existing settings
+
+[other]
+REVIEW_GATE_STATUS_PUBLISHER_REJECT = "github-actions[bot]"
+
+[env]
+"#,
+        )
+        .unwrap();
+
+        let result = ensure_skill_settings(&project, &[skill("review-gate", skill_dir)])
+            .unwrap()
+            .unwrap();
+
+        assert!(!result.created);
+        assert_eq!(result.added_keys, vec!["REVIEW_GATE_CONTEXT"]);
+        let settings = std::fs::read_to_string(project.join(SETTINGS_FILE)).unwrap();
+        // Count ASSIGNMENT lines (the shell reader's matcher shape), not raw
+        // substring hits — a comment mentioning the key must not count.
+        assert_eq!(
+            settings
+                .lines()
+                .filter(|l| {
+                    l.trim_start()
+                        .strip_prefix("REVIEW_GATE_STATUS_PUBLISHER_REJECT")
+                        .is_some_and(|rest| rest.trim_start().starts_with('='))
+                })
+                .count(),
+            1
+        );
+        assert!(settings.contains("REVIEW_GATE_STATUS_PUBLISHER_REJECT = \"github-actions[bot]\""));
+        assert!(settings.contains("REVIEW_GATE_CONTEXT = \"Review gate\""));
         let _ = std::fs::remove_dir_all(root);
     }
 
