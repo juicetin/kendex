@@ -84,13 +84,20 @@
 # Env (required): GH_TOKEN (or ambient gh auth), GH_REPO, PR_NUMBER, HEAD_SHA
 # Env (optional): PR_AUTHOR — resolved from the PR when empty.
 # Env (optional): REVIEW_GATE_STATUS_SNAPSHOT_FILE — path to a combined-status
-#   snapshot (JSON object with a `statuses` array) supplied by the CALLER; when
-#   set, the predicate evaluates trusted-context and outage evidence against it
-#   instead of fetching the combined status itself. A converge-style caller that
-#   already read the combined status for its own projection hands it in here and
-#   the duplicate per-head read disappears. Per-invocation env seam (like
-#   REVIEW_GATE_SETTINGS_FILE), never a settings key: the snapshot is bound to
-#   one head at one moment. An unreadable/malformed snapshot is exit 2.
+#   snapshot (JSON object with a `statuses` array and a top-level `sha` equal
+#   to HEAD_SHA) supplied by the CALLER; when set, the predicate evaluates
+#   trusted-context and outage evidence against it instead of fetching the
+#   combined status itself. A converge-style caller that already read the
+#   combined status for its own projection hands it in here and the duplicate
+#   per-head read disappears — the API response carries the head sha at top
+#   level, so a SINGLE-PAGE response satisfies the binding as-is. The
+#   snapshot must contain the COMPLETE status set for the head: a caller
+#   that paginated (heads with >100 statuses) merges every page's statuses
+#   into one array under one top-level sha before handing it in — a
+#   first-page-only snapshot would silently drop later-page evidence. Per-invocation env
+#   seam (like REVIEW_GATE_SETTINGS_FILE), never a settings key: the snapshot
+#   is bound to one head at one moment, and the `sha` requirement enforces
+#   that binding. An unreadable/malformed/wrong-head snapshot is exit 2.
 #
 # Output: one machine-readable line on stdout:
 #   verdict=approved|awaiting|threads-open|changes-requested detail=<human text>
@@ -337,15 +344,29 @@ got="$(jq --arg sha "$HEAD_SHA" --arg author "$PR_AUTHOR" \
 # this read is skipped entirely.
 if [ -n "${REVIEW_GATE_STATUS_SNAPSHOT_FILE:-}" ]; then
   # The snapshot substitutes for a READ, so it gets the read contract: not a
-  # file, zero bytes, unparseable, or missing the statuses array is exit 2 —
-  # never an empty-evidence verdict.
-  status_resp="$(jq 'if (type == "object") and ((.statuses | type) == "array")
+  # file, zero bytes, unparseable, missing the statuses array, or not bound
+  # to THIS head (top-level sha != HEAD_SHA — a snapshot for another head
+  # would pass shape validation and evaluate stale evidence) is exit 2 —
+  # never an empty-evidence verdict. A single-page API response carries the
+  # head sha at top level and satisfies the binding as-is; paginating
+  # callers must merge all pages' statuses into the one array first (a
+  # first-page-only snapshot silently drops later-page evidence).
+  status_resp="$(jq --arg sha "$HEAD_SHA" '
+                     if (type == "object") and ((.statuses | type) == "array")
+                        and (.sha == $sha)
                      then {statuses: .statuses}
-                     else error("not a combined-status snapshot") end' \
+                     else error("not a combined-status snapshot for this head") end' \
                     "$REVIEW_GATE_STATUS_SNAPSHOT_FILE" 2>/dev/null)" || {
-    echo "::error::REVIEW_GATE_STATUS_SNAPSHOT_FILE '$REVIEW_GATE_STATUS_SNAPSHOT_FILE' is not a readable combined-status snapshot (JSON object with a statuses array)" >&2
+    echo "::error::REVIEW_GATE_STATUS_SNAPSHOT_FILE '$REVIEW_GATE_STATUS_SNAPSHOT_FILE' is not a readable combined-status snapshot bound to $HEAD_SHA (JSON object with a statuses array and top-level sha == HEAD_SHA)" >&2
     exit 2
   }
+  # A zero-value input (empty file) makes jq exit 0 WITHOUT output — the
+  # error() branch never runs because there is no value to run it on — so
+  # emptiness is checked on the result, same contract as the fetched path.
+  if [ -z "$status_resp" ]; then
+    echo "::error::REVIEW_GATE_STATUS_SNAPSHOT_FILE '$REVIEW_GATE_STATUS_SNAPSHOT_FILE' contains no JSON value (empty snapshot — broken caller handoff)" >&2
+    exit 2
+  fi
 else
   status_pages="$(gh_read "repos/$GH_REPO/commits/$HEAD_SHA/status?per_page=100" --paginate)" || {
     echo "::error::could not read the combined commit status for $HEAD_SHA" >&2
@@ -355,8 +376,16 @@ else
     echo "::error::combined-status read for $HEAD_SHA produced zero bytes (broken read)" >&2
     exit 2
   fi
-  status_resp="$(jq -s '{statuses: (map(.statuses) | add // [])}' <<<"$status_pages")" || {
-    echo "::error::could not merge the combined commit status pages for $HEAD_SHA" >&2
+  # Validate every page BEFORE merging: a nonempty non-status page (an error
+  # object, `{}`, a truncated body) would survive the zero-byte guard, then
+  # `map(.statuses) | add // []` collapses its null into an empty status list
+  # and the predicate reaches a verdict on broken evidence. A broken read is
+  # exit 2, never an empty-evidence verdict.
+  status_resp="$(jq -s 'if all(type == "object" and ((.statuses | type) == "array"))
+                        then {statuses: (map(.statuses) | add // [])}
+                        else error("not a combined-status page") end' \
+                    <<<"$status_pages" 2>/dev/null)" || {
+    echo "::error::could not merge the combined commit status pages for $HEAD_SHA (each page must be an object with a statuses array)" >&2
     exit 2
   }
 fi
