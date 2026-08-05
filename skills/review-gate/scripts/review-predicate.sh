@@ -55,9 +55,42 @@
 #   REVIEW_GATE_REVIEW_OBJECT_MIN_STATE       (a) "any" (any review row) or "approved"
 #                                             (an APPROVED row not withdrawn by a later
 #                                             CHANGES_REQUESTED from the same login)
+#   REVIEW_GATE_THREADS                       "enforce" (default) or "off": "off" skips
+#                                             the reviewThreads GraphQL read entirely and
+#                                             never emits threads-open — for repos whose
+#                                             thread hygiene is a server-side zero-bypass
+#                                             ruleset (the CI-side term is a latency
+#                                             optimization there, not the enforcement
+#                                             point of record)
+#   REVIEW_GATE_API_ATTEMPTS                  bounded in-predicate retries for every
+#                                             evidence read (default 1 = single attempt);
+#                                             a read failing through the retries is still
+#                                             exit 2 — the fail-loud contract is unchanged
+#   REVIEW_GATE_API_RETRY_DELAY_SECONDS       delay between retry attempts (default 2)
+#   REVIEW_GATE_CARRY_FORWARD                 carry-safe delta classes ("docs", "comments",
+#                                             ';' or '|' separated; empty = off, today's
+#                                             behavior): when NO evidence exists at head,
+#                                             a qualifying review object at an ancestor
+#                                             commit N still satisfies the evidence term
+#                                             if the N→head diff classifies ENTIRELY into
+#                                             the enabled classes (or is an identical
+#                                             tree). Never a waiver: real evidence must
+#                                             exist, and only EXTENDS across a delta
+#                                             review would not re-examine; code changes
+#                                             always require fresh evidence, and
+#                                             changes-requested / unresolved threads
+#                                             still fail closed.
 #
 # Env (required): GH_TOKEN (or ambient gh auth), GH_REPO, PR_NUMBER, HEAD_SHA
 # Env (optional): PR_AUTHOR — resolved from the PR when empty.
+# Env (optional): REVIEW_GATE_STATUS_SNAPSHOT_FILE — path to a combined-status
+#   snapshot (JSON object with a `statuses` array) supplied by the CALLER; when
+#   set, the predicate evaluates trusted-context and outage evidence against it
+#   instead of fetching the combined status itself. A converge-style caller that
+#   already read the combined status for its own projection hands it in here and
+#   the duplicate per-head read disappears. Per-invocation env seam (like
+#   REVIEW_GATE_SETTINGS_FILE), never a settings key: the snapshot is bound to
+#   one head at one moment. An unreadable/malformed snapshot is exit 2.
 #
 # Output: one machine-readable line on stdout:
 #   verdict=approved|awaiting|threads-open|changes-requested detail=<human text>
@@ -82,6 +115,10 @@ OUTAGE_CONTEXT="$(rg_setting REVIEW_GATE_OUTAGE_CONTEXT "vstack-reviewer-outage"
 PUBLISHER_REJECT="$(rg_setting REVIEW_GATE_STATUS_PUBLISHER_REJECT "")" || exit 2
 TRUSTED_LOGINS="$(rg_setting REVIEW_GATE_REVIEW_OBJECT_TRUSTED_LOGINS "")" || exit 2
 MIN_STATE="$(rg_setting REVIEW_GATE_REVIEW_OBJECT_MIN_STATE "any")" || exit 2
+THREADS_MODE="$(rg_setting REVIEW_GATE_THREADS "enforce")" || exit 2
+API_ATTEMPTS="$(rg_setting REVIEW_GATE_API_ATTEMPTS "1")" || exit 2
+API_RETRY_DELAY="$(rg_setting REVIEW_GATE_API_RETRY_DELAY_SECONDS "2")" || exit 2
+CARRY_FORWARD="$(rg_setting REVIEW_GATE_CARRY_FORWARD "")" || exit 2
 
 # Configuration errors are exit 2 (no verdict), same contract as a failed
 # evidence read: a typo in trust config must never quietly widen or narrow
@@ -103,6 +140,63 @@ case "$MIN_STATE" in
     exit 2
     ;;
 esac
+case "$THREADS_MODE" in
+  enforce|off) ;;
+  *)
+    echo "::error::review-predicate: REVIEW_GATE_THREADS must be 'enforce' or 'off', got '$THREADS_MODE'" >&2
+    exit 2
+    ;;
+esac
+case "$API_ATTEMPTS" in
+  ''|*[!0-9]*|0)
+    echo "::error::review-predicate: REVIEW_GATE_API_ATTEMPTS must be an integer >= 1, got '$API_ATTEMPTS'" >&2
+    exit 2
+    ;;
+esac
+case "$API_RETRY_DELAY" in
+  ''|*[!0-9]*)
+    echo "::error::review-predicate: REVIEW_GATE_API_RETRY_DELAY_SECONDS must be a non-negative integer, got '$API_RETRY_DELAY'" >&2
+    exit 2
+    ;;
+esac
+# Carry-forward classes: ';' (engine list convention) or '|' (the shape the
+# ask was filed with) both split. An unknown class is a config error — a typo
+# must never silently widen or narrow what carries.
+while IFS= read -r cls; do
+  cls="$(printf '%s' "$cls" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+  [ -z "$cls" ] && continue
+  case "$cls" in
+    docs|comments) ;;
+    *)
+      echo "::error::review-predicate: REVIEW_GATE_CARRY_FORWARD class must be 'docs' or 'comments', got '$cls'" >&2
+      exit 2
+      ;;
+  esac
+done <<EOF_CARRY_CFG
+$(printf '%s' "$CARRY_FORWARD" | tr ';|' '\n\n')
+EOF_CARRY_CFG
+
+# Every evidence read goes through here: up to REVIEW_GATE_API_ATTEMPTS tries
+# with REVIEW_GATE_API_RETRY_DELAY_SECONDS between them, so a single transient
+# 5xx can survive in-process instead of deferring the verdict to the caller's
+# next pass. The default (1 attempt) is exactly today's single try, and a read
+# that fails through every attempt still returns nonzero — callers keep the
+# fail-loud exit-2 contract unchanged.
+gh_read() {
+  gh_read_attempt=1
+  while :; do
+    if gh_read_out="$(gh api "$@")"; then
+      printf '%s' "$gh_read_out"
+      return 0
+    fi
+    if [ "$gh_read_attempt" -ge "$API_ATTEMPTS" ]; then
+      return 1
+    fi
+    gh_read_attempt=$((gh_read_attempt + 1))
+    echo "::warning::review-predicate: read failed; retry $gh_read_attempt/$API_ATTEMPTS after ${API_RETRY_DELAY}s" >&2
+    sleep "$API_RETRY_DELAY"
+  done
+}
 
 # The gate's own posted status must never be review evidence: with
 # REVIEW_GATE_CONTEXT listed as a trusted status context (or naming the
@@ -140,20 +234,34 @@ for required in GH_REPO PR_NUMBER HEAD_SHA; do
 done
 
 if [ -z "${PR_AUTHOR:-}" ]; then
-  PR_AUTHOR="$(gh api "repos/$GH_REPO/pulls/$PR_NUMBER" --jq .user.login)" || {
+  PR_AUTHOR="$(gh_read "repos/$GH_REPO/pulls/$PR_NUMBER" --jq .user.login)" || {
     echo "::error::could not resolve PR #$PR_NUMBER author" >&2
     exit 2
   }
+  if [ -z "$PR_AUTHOR" ]; then
+    echo "::error::PR #$PR_NUMBER author resolved to an empty login" >&2
+    exit 2
+  fi
 fi
 
 # Two steps, not a pipe: `--paginate` emits ONE ARRAY PER PAGE, which the
 # count filters below would evaluate per-array (multi-line counts that can
 # never equal "0" past 100 reviews), and a mid-pipe gh failure must fail
-# loudly rather than hand jq a truncated page set.
-raw_reviews="$(gh api "repos/$GH_REPO/pulls/$PR_NUMBER/reviews" --paginate)" || {
+# loudly rather than hand jq a truncated page set. ZERO BYTES from a
+# successful producer is a broken read too (truncated stream, empty response
+# body): `jq -s 'add // []'` would silently turn it into [], and for the
+# reviews read specifically an empty result can erase a standing
+# CHANGES_REQUESTED while other evidence still satisfies the positive side —
+# a false approved. An intentionally empty page set from a real API response
+# is a NON-EMPTY `[]` body, so only a bytes-empty producer is refused.
+raw_reviews="$(gh_read "repos/$GH_REPO/pulls/$PR_NUMBER/reviews?per_page=100" --paginate)" || {
   echo "::error::could not read reviews for PR #$PR_NUMBER" >&2
   exit 2
 }
+if [ -z "$raw_reviews" ]; then
+  echo "::error::reviews read for PR #$PR_NUMBER produced zero bytes (broken read, not an empty page set)" >&2
+  exit 2
+fi
 reviews="$(jq -s 'add // []' <<<"$raw_reviews")" || {
   echo "::error::could not parse reviews for PR #$PR_NUMBER" >&2
   exit 2
@@ -223,15 +331,35 @@ got="$(jq --arg sha "$HEAD_SHA" --arg author "$PR_AUTHOR" \
 # snapshot — each trusted context and the outage attestation below evaluate
 # against it. Fetch and merge are SEPARATE steps for the same reason as the
 # check-runs read: a pipe would replace gh's exit status with jq's and turn a
-# read failure into an empty-success (fail-open).
-status_pages="$(gh api "repos/$GH_REPO/commits/$HEAD_SHA/status?per_page=100" --paginate)" || {
-  echo "::error::could not read the combined commit status for $HEAD_SHA" >&2
-  exit 2
-}
-status_resp="$(jq -s '{statuses: (map(.statuses) | add // [])}' <<<"$status_pages")" || {
-  echo "::error::could not merge the combined commit status pages for $HEAD_SHA" >&2
-  exit 2
-}
+# read failure into an empty-success (fail-open). A caller that already holds
+# the combined status (a converge-style sweep projecting required statuses
+# per head) hands it in via REVIEW_GATE_STATUS_SNAPSHOT_FILE instead, and
+# this read is skipped entirely.
+if [ -n "${REVIEW_GATE_STATUS_SNAPSHOT_FILE:-}" ]; then
+  # The snapshot substitutes for a READ, so it gets the read contract: not a
+  # file, zero bytes, unparseable, or missing the statuses array is exit 2 —
+  # never an empty-evidence verdict.
+  status_resp="$(jq 'if (type == "object") and ((.statuses | type) == "array")
+                     then {statuses: .statuses}
+                     else error("not a combined-status snapshot") end' \
+                    "$REVIEW_GATE_STATUS_SNAPSHOT_FILE" 2>/dev/null)" || {
+    echo "::error::REVIEW_GATE_STATUS_SNAPSHOT_FILE '$REVIEW_GATE_STATUS_SNAPSHOT_FILE' is not a readable combined-status snapshot (JSON object with a statuses array)" >&2
+    exit 2
+  }
+else
+  status_pages="$(gh_read "repos/$GH_REPO/commits/$HEAD_SHA/status?per_page=100" --paginate)" || {
+    echo "::error::could not read the combined commit status for $HEAD_SHA" >&2
+    exit 2
+  }
+  if [ -z "$status_pages" ]; then
+    echo "::error::combined-status read for $HEAD_SHA produced zero bytes (broken read)" >&2
+    exit 2
+  fi
+  status_resp="$(jq -s '{statuses: (map(.statuses) | add // [])}' <<<"$status_pages")" || {
+    echo "::error::could not merge the combined commit status pages for $HEAD_SHA" >&2
+    exit 2
+  }
+fi
 check=0
 while IFS= read -r ctx; do
   ctx="$(printf '%s' "$ctx" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
@@ -242,10 +370,14 @@ while IFS= read -r ctx; do
   # (a missed run strands the gate at awaiting — wrong direction to lose).
   # Fetch and merge are SEPARATE steps: a pipe would replace gh's exit status
   # with jq's and turn a read failure into an empty-success (fail-open).
-  checkruns_pages="$(gh api "repos/$GH_REPO/commits/$HEAD_SHA/check-runs?check_name=$ctx_uri&per_page=100" --paginate)" || {
+  checkruns_pages="$(gh_read "repos/$GH_REPO/commits/$HEAD_SHA/check-runs?check_name=$ctx_uri&per_page=100" --paginate)" || {
     echo "::error::could not read '$ctx' check-runs" >&2
     exit 2
   }
+  if [ -z "$checkruns_pages" ]; then
+    echo "::error::'$ctx' check-runs read produced zero bytes (broken read)" >&2
+    exit 2
+  fi
   checkruns_resp="$(jq -s '{check_runs: (map(.check_runs) | add // [])}' <<<"$checkruns_pages")" || {
     echo "::error::could not merge '$ctx' check-run pages" >&2
     exit 2
@@ -317,12 +449,16 @@ EOF
 # binding pattern immediately preceding the sha slot, not the quoting.
 comment_hits=0
 if [ -n "$COMMENT_REVIEWERS" ]; then
-  # Two steps, not a pipe — same pagination/fail-loud reason as the reviews
-  # read above.
-  raw_comments="$(gh api "repos/$GH_REPO/issues/$PR_NUMBER/comments" --paginate)" || {
+  # Two steps, not a pipe — same pagination/fail-loud/zero-byte reasons as
+  # the reviews read above.
+  raw_comments="$(gh_read "repos/$GH_REPO/issues/$PR_NUMBER/comments?per_page=100" --paginate)" || {
     echo "::error::could not read issue comments for PR #$PR_NUMBER" >&2
     exit 2
   }
+  if [ -z "$raw_comments" ]; then
+    echo "::error::issue-comments read for PR #$PR_NUMBER produced zero bytes (broken read, not an empty page set)" >&2
+    exit 2
+  fi
   comments="$(jq -s 'add // []' <<<"$raw_comments")" || {
     echo "::error::could not parse issue comments for PR #$PR_NUMBER" >&2
     exit 2
@@ -389,13 +525,162 @@ if [ -n "$OUTAGE_CONTEXT" ]; then
   }
 fi
 
+# Evidence carry-forward across carry-safe deltas (VST-57). Evidence is
+# review at the EXACT head, so every push — including one that changes no
+# executable behavior (review-servicing prose, comment rewording) — discards
+# existing evidence and restarts the full bot-review wait. When NO evidence
+# exists at head and REVIEW_GATE_CARRY_FORWARD enables it, a qualifying
+# review OBJECT at an ancestor commit N still satisfies the evidence term if
+# the N→head diff classifies ENTIRELY into the enabled carry-safe classes:
+#   docs      every changed file is documentation BY EXTENSION
+#             (*.md/*.markdown; a docs/-directory rule would carry
+#             executable files like docs/conf.py)
+#   comments  every changed file is a MODIFIED code file whose patch touches
+#             only full-line comments (per a conservative per-extension
+#             comment-token table; unknown extensions refuse)
+# and an IDENTICAL tree (rebase residue, empty commits — the VST-58 shape)
+# always carries once any class is enabled. This is NOT the retired
+# docs-only waiver: real evidence must exist, and only EXTENDS across a
+# delta review would not re-examine — code changes always require fresh
+# evidence, and the changes-requested and thread terms below still fail
+# closed with carried evidence exactly as with head evidence. Only the
+# NEWEST ancestor candidate decides: an older candidate's delta is a
+# superset, so walking further back can only widen what carries.
+carried=0
+carry_base=""
+carry_kind=""
+if [ -n "$CARRY_FORWARD" ] && [ "$got" = "0" ] && [ "$check" = "0" ] \
+   && [ "$comment_hits" = "0" ] && [ "$outageok" = "0" ]; then
+  # Candidate commits: accepted review rows (same trust filters as head
+  # evidence; min_state=approved accepts only APPROVED rows — a later
+  # withdrawal by the same login is a standing CR and fails the gate before
+  # carry could matter), newest-first, distinct, never the head itself,
+  # bounded so a force-push-heavy PR cannot turn the walk into an API storm.
+  carry_candidates="$(jq -r --arg sha "$HEAD_SHA" --arg author "$PR_AUTHOR" \
+      --arg trusted "$TRUSTED_LOGINS" --arg minstate "$MIN_STATE" '
+    ($trusted | split("[;,\n]+"; "") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))) as $t
+    | [ .[]
+        | select(.state != "DISMISSED" and .state != "PENDING" and .user.login != $author)
+        | select(($t | length) == 0 or (.user.login as $l | ($t | index($l)) != null))
+        | select($minstate != "approved" or .state == "APPROVED")
+        | select((.commit_id // "") != "" and .commit_id != $sha)
+      ]
+    | sort_by(.submitted_at // "") | reverse | map(.commit_id)
+    | reduce .[] as $c ([]; if (index($c) != null) then . else . + [$c] end)
+    | .[0:10] | .[]' <<<"$reviews")" || {
+    echo "::error::could not derive carry-forward candidates for PR #$PR_NUMBER" >&2
+    exit 2
+  }
+  while IFS= read -r base; do
+    [ -z "$base" ] && continue
+    # The compare read is the ancestry check AND the delta: status "ahead"
+    # means base is an ancestor of head; "identical" is the empty diff;
+    # "behind"/"diverged" (superseded pre-force-push shas) are skipped. A
+    # failed or zero-byte read is exit 2 like every other evidence read —
+    # deciding carry from a truncated file list is the fail-open this
+    # predicate exists to prevent.
+    cmp_pages="$(gh_read "repos/$GH_REPO/compare/$base...$HEAD_SHA?per_page=100" --paginate)" || {
+      echo "::error::could not read the comparison $base...$HEAD_SHA" >&2
+      exit 2
+    }
+    if [ -z "$cmp_pages" ]; then
+      echo "::error::comparison $base...$HEAD_SHA produced zero bytes (broken read)" >&2
+      exit 2
+    fi
+    # The first page of a healthy compare response ALWAYS carries a files
+    # array (possibly empty); its absence is a malformed or truncated
+    # response, and defaulting it to [] would read as an identical tree on
+    # the "ahead" path below — a carried approval from a broken read. Same
+    # exit-2 contract as every other evidence read.
+    cmp="$(jq -s 'if ((.[0].files // null) | type) != "array"
+                  then error("no files array")
+                  else {status: (.[0].status // ""), files: (map(.files // []) | add)} end' \
+              <<<"$cmp_pages" 2>/dev/null)" || {
+      echo "::error::could not merge the comparison pages for $base...$HEAD_SHA (missing or malformed files array)" >&2
+      exit 2
+    }
+    cmp_status="$(jq -r .status <<<"$cmp")"
+    case "$cmp_status" in
+      identical)
+        carried=1; carry_base="$base"; carry_kind="identical tree"
+        break
+        ;;
+      ahead) ;;
+      *) continue ;;
+    esac
+    cmp_file_count="$(jq '.files | length' <<<"$cmp")"
+    if [ "$cmp_file_count" = "0" ]; then
+      # Ahead by commits that change no file: the trees are equal.
+      carried=1; carry_base="$base"; carry_kind="identical tree"
+      break
+    fi
+    # The compare API caps the returned file list at 300 entries, so a list
+    # AT the cap cannot prove the delta is complete — an omitted 301st file
+    # could be code, and classifying only what was returned would be the
+    # fail-open this predicate exists to prevent. The read itself is
+    # healthy, so this refuses the carry (fresh review required) rather
+    # than exit 2; older candidates' deltas are supersets, so stop walking.
+    if [ "$cmp_file_count" -ge 300 ]; then
+      echo "::warning::compare $base...$HEAD_SHA returned $cmp_file_count files (the API caps the list at 300): the delta cannot be proven complete; refusing carry-forward" >&2
+      break
+    fi
+    # Classify every changed file into an ENABLED class; anything else —
+    # code lines, added/removed/renamed files under "comments", binary or
+    # patch-less files, unknown extensions — refuses the whole carry.
+    carry_ok="$(jq -r --arg classes "$CARRY_FORWARD" '
+      ($classes | split("[;|]"; "") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))) as $cl
+      | def comment_token:
+          if test("\\.(sh|bash|py|rb|toml|yml|yaml)$") then "#"
+          elif test("\\.(js|mjs|cjs|ts|tsx|jsx|rs|go|c|h|cc|cpp|hpp|java|kt|swift)$") then "//"
+          else null end;
+      [ .files[]
+        | . as $f
+        | (.filename // "") as $fn
+        | if (($cl | index("docs")) != null)
+             and ($fn | test("\\.(md|markdown)$"))
+          then "docs"
+          elif (($cl | index("comments")) != null)
+               and ($f.status == "modified")
+               and (($f.patch // "") != "")
+               and (($fn | comment_token) != null)
+          then ( ($fn | comment_token) as $tok
+                 | ($f.patch | split("\n")
+                    | map(select(test("^[+-]")))
+                    | map(sub("^[+-][[:space:]]*"; ""))
+                    | map(select(length > 0))) as $chg
+                 | if ($chg | all(startswith($tok))) then "comments" else "refuse" end )
+          else "refuse" end
+      ] | all(. != "refuse")' <<<"$cmp")" || {
+      echo "::error::could not classify the $base...$HEAD_SHA delta" >&2
+      exit 2
+    }
+    if [ "$carry_ok" = "true" ]; then
+      carried=1; carry_base="$base"; carry_kind="carry-safe delta ($CARRY_FORWARD)"
+    fi
+    break
+  done <<EOF_CARRY
+$carry_candidates
+EOF_CARRY
+fi
+
 # A genuine GraphQL failure must NOT fall through as unresolved threads — fail
 # loudly instead. `pageInfo.hasNextPage` (>100 threads) is a SUCCESSFUL read
 # we cannot fully verify, so it reports "overflow" and fails closed to
 # threads-open. Same posture for a thread node whose isResolved is not a
 # boolean ("malformed"): null/missing nodes must never count as resolved —
 # that direction is a false approval on a merge gate.
-unresolved="$(gh api graphql \
+#
+# REVIEW_GATE_THREADS=off skips this read ENTIRELY and the predicate never
+# emits threads-open: on repos whose thread hygiene is a server-side
+# zero-bypass ruleset (required_review_thread_resolution), the CI-side term
+# is a latency optimization that costs a GraphQL read per evaluation for a
+# verdict the merge-time gate already enforces — and forces every caller to
+# reinterpret threads-open in its own adapter. The narrowing is bounded:
+# only the thread term is disabled; evidence and changes-requested still
+# fail closed exactly as before.
+unresolved=0
+if [ "$THREADS_MODE" = "enforce" ]; then
+unresolved="$(gh_read graphql \
   -f query='query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){reviewThreads(first:100){pageInfo{hasNextPage} nodes{isResolved}}}}}' \
   -F owner="${GH_REPO%/*}" -F repo="${GH_REPO#*/}" -F number="$PR_NUMBER" \
   --jq 'if .data.repository.pullRequest.reviewThreads.pageInfo.hasNextPage then "overflow"
@@ -404,15 +689,18 @@ unresolved="$(gh api graphql \
   echo "::error::could not read review threads" >&2
   exit 2
 }
+fi
 
-echo "PR #$PR_NUMBER head $HEAD_SHA: reviews=$got clean-analysis=$check comment-form=$comment_hits outage-marker=$outageok changes-requested=$cr unresolved-threads=$unresolved" >&2
+echo "PR #$PR_NUMBER head $HEAD_SHA: reviews=$got clean-analysis=$check comment-form=$comment_hits outage-marker=$outageok carried=$carried changes-requested=$cr unresolved-threads=$unresolved (threads=$THREADS_MODE)" >&2
 
 if [ "$cr" != "0" ]; then
   echo "verdict=changes-requested detail=standing review changes requested (persists across pushes until re-approval or dismissal)"
-elif [ "$got" = "0" ] && [ "$check" = "0" ] && [ "$comment_hits" = "0" ] && [ "$outageok" = "0" ]; then
+elif [ "$got" = "0" ] && [ "$check" = "0" ] && [ "$comment_hits" = "0" ] && [ "$outageok" = "0" ] && [ "$carried" = "0" ]; then
   echo "verdict=awaiting detail=awaiting a non-author review for $HEAD_SHA"
 elif [ "$unresolved" != "0" ]; then
   echo "verdict=threads-open detail=$unresolved unresolved review thread(s)"
+elif [ "$carried" = "1" ]; then
+  echo "verdict=approved detail=review evidence at $carry_base carried to head across a $carry_kind"
 else
   echo "verdict=approved detail=reviewed at head with no unresolved threads"
 fi

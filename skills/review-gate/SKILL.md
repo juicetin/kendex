@@ -67,10 +67,24 @@ Evidence for the CURRENT head is any of:
    orchestrator's status posted only on genuine total reviewer silence.
    Substitutes for MISSING evidence only.
 
+With `REVIEW_GATE_CARRY_FORWARD` enabled (off by default), evidence at an
+ancestor commit carries to head when the delta is provably in a class review
+would not re-examine (docs-only, comment-only, identical tree) — never a
+waiver: real evidence must exist, code changes always require fresh
+evidence, and the fail-closed terms below still apply
+(see [references/settings.md](references/settings.md)).
+
 Changes-requested and unresolved threads always fail closed, even with
 evidence present. Every evidence read fails LOUD (exit 2, no verdict) — a
-transient API error must never flip a healthy PR's merge state. More than
+transient API error must never flip a healthy PR's merge state; reads retry
+in-process up to `REVIEW_GATE_API_ATTEMPTS` (default 1) before failing, and
+a zero-byte producer is a failed read, never an empty page set. More than
 100 review threads reports overflow and fails closed to `threads-open`.
+Repos whose thread hygiene is a server-side zero-bypass ruleset can set
+`REVIEW_GATE_THREADS = "off"` to skip the thread read (never emits
+`threads-open`); a converge-style caller can hand in its combined-status
+snapshot via `REVIEW_GATE_STATUS_SNAPSHOT_FILE` to kill the duplicate read
+(see [references/settings.md](references/settings.md)).
 
 **Trust model.** Trust keys on names only GitHub controls: the author login
 of a review or comment (exact match on the bot login) or the exact
@@ -101,7 +115,15 @@ behavior unchanged.
 own, no check-run churn) and opens the gate only by re-running the head's
 completed `pull_request` runs — or a direct `success` post when a prior gate
 success proves an approved attempt already ran on that sha. Reruns are capped
-by `REVIEW_GATE_MAX_RERUN_ATTEMPTS`.
+by `REVIEW_GATE_MAX_RERUN_ATTEMPTS`. Convergence properties (see the script
+header): it never writes on a failure path (a failed read leaves the head as
+found; the scheduled sweep is the universal retry); "stuck" (GitHub refuses
+the rerun, or no run exists to re-run) warns and stays green while
+"malfunction" (read failure, rerun 5xx or 401, throttled through the retry budget)
+reddens the run; and the rerun POST discriminates throttle from refusal by
+response headers, retrying only throttles (bounded by
+`REVIEW_GATE_API_ATTEMPTS`). The sweep template escalates its own sustained
+failure to a rolling incident issue.
 
 ## Settings
 
