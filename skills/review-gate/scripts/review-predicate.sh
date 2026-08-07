@@ -118,7 +118,18 @@ TRUSTED_CONTEXTS="$(rg_setting REVIEW_GATE_TRUSTED_STATUS_CONTEXTS "")" || exit 
 SKIP_PATTERNS="$(rg_setting REVIEW_GATE_CHECKRUN_SKIP_PATTERNS "rate limited;skipped;queued")" || exit 2
 COMMENT_REVIEWERS="$(rg_setting REVIEW_GATE_COMMENT_REVIEWERS "")" || exit 2
 SHA_FLOOR="$(rg_setting REVIEW_GATE_SHA_PREFIX_FLOOR "7")" || exit 2
-OUTAGE_CONTEXT="$(rg_setting REVIEW_GATE_OUTAGE_CONTEXT "vstack-reviewer-outage")" || exit 2
+# Operator override context, v2 name, resolved HERE (not only in the writer):
+# every live gate read — the writer, consumers' heavy-job gate jobs, the
+# selftest — goes through this predicate, so an adopter who sets only the v2
+# key must not silently lose their override. Presence is detected with a
+# sentinel default: a key set nowhere leaves the legacy resolution untouched;
+# a key set anywhere (even to the empty string, which disables the source)
+# wins over the legacy name.
+override_sentinel="__review-gate-override-unset__"
+OUTAGE_CONTEXT="$(rg_setting REVIEW_GATE_OVERRIDE_CONTEXT "$override_sentinel")" || exit 2
+if [ "$OUTAGE_CONTEXT" = "$override_sentinel" ]; then
+  OUTAGE_CONTEXT="$(rg_setting REVIEW_GATE_OUTAGE_CONTEXT "vstack-reviewer-outage")" || exit 2
+fi
 PUBLISHER_REJECT="$(rg_setting REVIEW_GATE_STATUS_PUBLISHER_REJECT "")" || exit 2
 TRUSTED_LOGINS="$(rg_setting REVIEW_GATE_REVIEW_OBJECT_TRUSTED_LOGINS "")" || exit 2
 MIN_STATE="$(rg_setting REVIEW_GATE_REVIEW_OBJECT_MIN_STATE "any")" || exit 2
@@ -371,26 +382,35 @@ if [ -n "${REVIEW_GATE_STATUS_SNAPSHOT_FILE:-}" ]; then
     exit 2
   }
 else
-  status_pages="$(gh_read "repos/$GH_REPO/commits/$HEAD_SHA/status?per_page=100" --paginate)" || {
-    echo "::error::could not read the combined commit status for $HEAD_SHA" >&2
+  # THE STATUSES LIST, NOT THE COMBINED STATUS — this is a security
+  # requirement, not a style choice. The combined endpoint
+  # (/commits/<sha>/status) serializes `creator` as NULL for every
+  # App-posted status, and GITHUB_TOKEN in any PR workflow IS the GitHub
+  # Actions app. Reading it made REVIEW_GATE_STATUS_PUBLISHER_REJECT
+  # inert: PR-controlled code could mint a trusted context (or the operator
+  # override) and no login entry could ever match it. The LIST endpoint
+  # (/commits/<sha>/statuses) reports the real creator login, so the
+  # reject-list works as documented. Caught live by sandbox scenario 6.
+  status_pages="$(gh_read "repos/$GH_REPO/commits/$HEAD_SHA/statuses?per_page=100" --paginate)" || {
+    echo "::error::could not read commit statuses for $HEAD_SHA" >&2
     exit 2
   }
   if [ -z "$status_pages" ]; then
-    echo "::error::combined-status read for $HEAD_SHA produced zero bytes (broken read)" >&2
+    echo "::error::commit-statuses read for $HEAD_SHA produced zero bytes (broken read)" >&2
     exit 2
   fi
-  # Validate every page BEFORE merging: a nonempty non-status page (an error
-  # object, `{}`, a truncated body) would survive the zero-byte guard, then
-  # `map(.statuses) | add // []` collapses its null into an empty status list
-  # and the predicate reaches a verdict on broken evidence. A broken read is
-  # exit 2, never an empty-evidence verdict. `length > 0` guards the vacuous
-  # case: a whitespace-only response passes the -z check yet slurps to [],
-  # where all(...) is trivially true (vstack#1086).
-  status_resp="$(jq -s 'if (length > 0) and all(type == "object" and ((.statuses | type) == "array"))
-                        then {statuses: (map(.statuses) | add // [])}
-                        else error("not a combined-status page") end' \
+  # Validate every page BEFORE merging: a nonempty non-array page (an error
+  # object, a truncated body) would survive the zero-byte guard and then
+  # collapse to an empty status list, letting the predicate reach a verdict
+  # on broken evidence. A broken read is exit 2, never an empty-evidence
+  # verdict. `length > 0` guards the vacuous case: a whitespace-only
+  # response passes the -z check yet slurps to [], where all(...) is
+  # trivially true (vstack#1086).
+  status_resp="$(jq -s 'if (length > 0) and all(type == "array")
+                        then {statuses: (add // [])}
+                        else error("not a statuses page") end' \
                     <<<"$status_pages" 2>/dev/null)" || {
-    echo "::error::could not merge the combined commit status pages for $HEAD_SHA (each page must be an object with a statuses array)" >&2
+    echo "::error::could not merge the commit-status pages for $HEAD_SHA (each page must be a JSON array)" >&2
     exit 2
   }
 fi
@@ -439,25 +459,31 @@ while IFS= read -r ctx; do
     echo "::error::could not evaluate '$ctx' check-runs" >&2
     exit 2
   }
-  # Legacy commit statuses carry no app slug to reject on, but they do carry
-  # a creator: on repos whose PR-triggered workflows hold statuses:write, PR
-  # content can mint a status under ANY context through github-actions[bot] —
-  # the one publisher identity PR code can wield. The OPT-IN
-  # REVIEW_GATE_STATUS_PUBLISHER_REJECT list is the status-side mirror of the
-  # check-run app rejection above: a status whose creator login is listed is
-  # never evidence. It is a reject-list for the forgeable identity, NOT a
-  # provenance requirement — GitHub App statuses serialize creator as null,
-  # and null is not the forgeable identity, so a login entry never rejects
-  # it (deliberately unlike the no-app-slug check-run case, which fails
-  # closed). Empty (the shipped default) disables the filter: legitimate
-  # outage attestation is Actions-posted on some repos, so rejection is a
-  # per-repo choice.
+  # Commit statuses carry no app slug to reject on, but the LIST endpoint
+  # carries a real creator login (the combined endpoint does not — see the
+  # read above). On repos whose PR-triggered workflows hold statuses:write,
+  # PR content can mint a status under ANY context through
+  # github-actions[bot] — the one publisher identity PR code can wield. The
+  # OPT-IN REVIEW_GATE_STATUS_PUBLISHER_REJECT list is the status-side
+  # mirror of the check-run app rejection above: a status whose creator
+  # login is listed is never evidence.
+  #
+  # A status with NO creator login is not evidence either WHEN THE LIST IS
+  # CONFIGURED: on this endpoint every real publisher has a login, so a
+  # missing one is an anomaly, and treating anomalies as trusted is the
+  # fail-open direction this engine exists to avoid. With the list empty
+  # (the shipped default) the filter is off entirely and behavior is
+  # unchanged.
   check_status="$(jq --arg ctx "$ctx" --arg skips "$SKIP_PATTERNS" --arg reject "$PUBLISHER_REJECT" '
       ($skips | split(";") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0)) | map(ascii_downcase)) as $sk
       | ($reject | split(";") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))) as $rj
       | [ .statuses[]
           | select(.context == $ctx and .state == "success")
-          | select((.creator.login // "") as $l | ($rj | index($l)) == null)
+          # Bind the login BEFORE index(): inside index(...) the dot rebinds
+          # to $rj, so `.creator` would index the reject ARRAY, not the
+          # status. Same rebinding trap the comment-form matcher documents.
+          | (.creator.login // "") as $cl
+          | select(($rj | length) == 0 or ($cl != "" and ($rj | index($cl)) == null))
           | ((.description // "") | ascii_downcase) as $text
           | select(([ $sk[] | . as $p | select($text | contains($p)) ] | length) == 0)
         ] | length' <<<"$status_resp")" || {
@@ -542,21 +568,42 @@ fi
 # relaxation; trusted-publisher model identical to the trusted status
 # contexts above. See orch DEVELOPMENT.md "Reviewer-outage recognition".
 outageok=0
+outage_reason=""
 if [ -n "$OUTAGE_CONTEXT" ]; then
   # The publisher reject-list applies here too — the outage relaxation is
   # the highest-value status to forge, so a listed creator (typically
   # github-actions[bot] where PR workflows hold statuses:write) must not be
   # able to mint it. Same null-creator semantics as the trusted-context
-  # read above: App-posted statuses are never rejected by a login entry.
-  outageok="$(jq --arg ctx "$OUTAGE_CONTEXT" --arg reject "$PUBLISHER_REJECT" '
+  # read above: on the LIST endpoint every real publisher (Apps included)
+  # carries a creator login, so while the reject list is configured a
+  # status with NO login is an anomaly and is not evidence — trusting
+  # anomalies is the fail-open direction. List empty (the default) = filter
+  # off = unchanged behavior.
+  # The REASON is mandatory (plan Change 2, finding 9, carried from the
+  # outage semantics): an override with an empty description is not an
+  # attestation, it is an unexplained relaxation — and it is the
+  # highest-value status in the system to forge. Enforced here, not merely
+  # documented. The reason rides out in the verdict detail below, flattened
+  # at the source because it is API text travelling through a one-line
+  # contract and a one-line status description.
+  outageok_out="$(jq -r --arg ctx "$OUTAGE_CONTEXT" --arg reject "$PUBLISHER_REJECT" '
     ($reject | split(";") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))) as $rj
     | [ .statuses[]
         | select(.context == $ctx and .state == "success")
-        | select((.creator.login // "") as $l | ($rj | index($l)) == null)
-      ] | length' <<<"$status_resp")" || {
-    echo "::error::could not evaluate the reviewer-outage status" >&2
+        | (.creator.login // "") as $cl
+        | select(($rj | length) == 0 or ($cl != "" and ($rj | index($cl)) == null))
+        | select(((.description // "") | gsub("^\\s+|\\s+$"; "") | length) > 0)
+      ]
+    | [ length,
+        (if length == 0 then ""
+         else (sort_by(.created_at // "") | last | (.description // "") | gsub("[\n\r\t]"; " ")) end) ]
+    | "\(.[0])\t\(.[1])"' <<<"$status_resp")" || {
+    echo "::error::could not evaluate the operator-override status" >&2
     exit 2
   }
+  outageok_out="$(head -n 1 <<<"$outageok_out")"
+  outageok="$(cut -f1 <<<"$outageok_out")"
+  outage_reason="$(cut -f2- <<<"$outageok_out")"
 fi
 
 # Evidence carry-forward across carry-safe deltas (VST-57). Evidence is
@@ -739,6 +786,11 @@ elif [ "$unresolved" != "0" ]; then
   echo "verdict=threads-open detail=$unresolved unresolved review thread(s)"
 elif [ "$carried" = "1" ]; then
   echo "verdict=approved detail=review evidence at $carry_base carried to head across a $carry_kind"
+elif [ "$outageok" != "0" ] && [ "$got" = "0" ] && [ "$check" = "0" ] && [ "$comment_hits" = "0" ]; then
+  # The override is SUBSTITUTING for missing evidence (its only sanctioned
+  # use), so the attested reason is the verdict — it belongs in the gate
+  # status, where a reader sees why this PR merged without a review.
+  echo "verdict=approved detail=operator override ($OUTAGE_CONTEXT): $outage_reason"
 else
   echo "verdict=approved detail=reviewed at head with no unresolved threads"
 fi
