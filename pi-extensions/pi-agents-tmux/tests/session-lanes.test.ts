@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn as spawnChild } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import test from "node:test";
+import test, { after } from "node:test";
 import type { AgentConfig } from "../extensions/subagent/agents.js";
 import {
 	assignEphemeralSessionKeys,
@@ -23,16 +23,25 @@ import {
 import { recordProjectTrust } from "../extensions/subagent/settings.js";
 import {
 	runSingleAgent,
+	setBgSettledShutdownGraceMsForTests,
 	setBgTimeoutKillGraceMsForTests,
 	setGitExecFileForTests,
 	setSingleAgentSpawnForTests,
 } from "../extensions/subagent/runner.js";
 import { waitForIdleTransition } from "../extensions/subagent/wait.js";
-import type { SubagentDetails } from "../extensions/subagent/types.js";
+import type { SingleResult, SubagentDetails } from "../extensions/subagent/types.js";
+
+const tempRuntimeDirs = new Set<string>();
 
 function tempRuntime(): string {
-	return mkdtempSync(join(tmpdir(), "pi-agents-lanes-"));
+	const dir = mkdtempSync(join(tmpdir(), "pi-agents-lanes-"));
+	tempRuntimeDirs.add(dir);
+	return dir;
 }
+
+after(() => {
+	for (const dir of tempRuntimeDirs) rmSync(dir, { force: true, recursive: true });
+});
 
 function tempGitRepo(): string {
 	const cwd = tempRuntime();
@@ -95,11 +104,13 @@ function installMockSpawn(scenarios: Array<{ code?: number | null; delayMs?: num
 	return calls;
 }
 
-function installHangingMockSpawn(options: {
+function installLifecycleMockSpawn(options: {
+	closeAfterMs?: number;
 	closeOnSignal?: string;
-	kill?: (signal: string, count: number) => boolean;
+	kill?: (signal: string, count: number, proc: EventEmitter) => boolean;
 	pid?: number;
 	stdout?: string;
+	stdoutChunks?: Array<{ delayMs: number; text: string }>;
 } = {}) {
 	const calls: Array<{ args: string[]; detached?: boolean; kills: string[] }> = [];
 	setSingleAgentSpawnForTests(((command: string, args: string[], spawnOptions?: { detached?: boolean }) => {
@@ -115,12 +126,17 @@ function installHangingMockSpawn(options: {
 			proc.killed = true;
 			const normalizedSignal = signal ?? "SIGTERM";
 			call.kills.push(normalizedSignal);
-			if (options.closeOnSignal === normalizedSignal) {
+			const delivered = options.kill?.(normalizedSignal, call.kills.length, proc) ?? true;
+			if (delivered && options.closeOnSignal === normalizedSignal) {
 				queueMicrotask(() => proc.emit("close", null, normalizedSignal));
 			}
-			return options.kill?.(normalizedSignal, call.kills.length) ?? true;
+			return delivered;
 		};
 		if (options.stdout) queueMicrotask(() => proc.stdout.emit("data", Buffer.from(options.stdout!)));
+		for (const chunk of options.stdoutChunks ?? []) {
+			setTimeout(() => proc.stdout.emit("data", Buffer.from(chunk.text)), chunk.delayMs);
+		}
+		if (options.closeAfterMs !== undefined) setTimeout(() => proc.emit("close", 0, null), options.closeAfterMs);
 		return proc;
 	}) as any);
 	return calls;
@@ -170,6 +186,12 @@ function mockPiEvents(events: Array<{ name: string; payload: any }>) {
 
 function makeDetails(results: any[]): SubagentDetails {
 	return { mode: "single", agentScope: "project", projectAgentsDir: null, results };
+}
+
+function readTranscript(result: Pick<SingleResult, "transcriptPath">): string {
+	const transcriptPath = result.transcriptPath;
+	assert.ok(transcriptPath);
+	return readFileSync(transcriptPath, "utf8");
 }
 
 function withPollutedEnv(fn: () => void) {
@@ -276,7 +298,7 @@ test("oneshot transcript filters message_update and enriches agent_start for sup
 
 			assert.equal(result.exitCode, 0, shape);
 			assert.equal(result.messages.at(-1)?.role, "assistant", shape);
-			const content = readFileSync(result.transcriptPath!, "utf8");
+			const content = readTranscript(result);
 			assert.equal(content.includes("message_update"), false, shape);
 			assert.match(content, /message_start/, shape);
 			assert.match(content, /message_end/, shape);
@@ -329,7 +351,7 @@ test("failed oneshot transcript flushes latest filtered message_update after the
 					undefined,
 					makeDetails,
 				);
-				const content = readFileSync(result.transcriptPath!, "utf8");
+				const content = readTranscript(result);
 				const label = `${shape} ${failure.kind}`;
 				assert.equal(result.exitCode, failure.expectedExitCode, label);
 				assert.match(content, /message_update/, label);
@@ -378,7 +400,7 @@ test("failed oneshot transcript does not flush a message_update finalized by mes
 				undefined,
 				makeDetails,
 			);
-			const content = readFileSync(result.transcriptPath!, "utf8");
+			const content = readTranscript(result);
 			assert.equal(result.exitCode, 1, failure.kind);
 			assert.equal(content.includes("message_update"), false, failure.kind);
 			assert.equal(content.includes(`finalized partial ${failure.kind}`), false, failure.kind);
@@ -398,7 +420,7 @@ test("bg one-shot timeout returns failed result and kills hung child", async () 
 	const runtimeRoot = tempRuntime();
 	const events: Array<{ name: string; payload: any }> = [];
 	setBgTimeoutKillGraceMsForTests(1);
-	const calls = installHangingMockSpawn({
+	const calls = installLifecycleMockSpawn({
 		stdout: bridgeStdout([
 			shapedStreamEvent("top-level", "message_update", { message: { role: "assistant", content: [{ type: "text", text: "stuck in tool loop" }] } }),
 		]),
@@ -428,7 +450,7 @@ test("bg one-shot timeout returns failed result and kills hung child", async () 
 		assert.match(result.errorMessage ?? "", /Timeout termination unconfirmed/);
 		assert.equal(calls.length, 1);
 		assert.deepEqual(calls[0]?.kills, ["SIGTERM", "SIGKILL"]);
-		const content = readFileSync(result.transcriptPath!, "utf8");
+		const content = readTranscript(result);
 		assert.match(content, /stuck in tool loop/);
 		assert.match(content, /"buffered":true/);
 		assert.match(content, /"reason":"timeout"/);
@@ -448,7 +470,7 @@ test("bg one-shot timeout records termination failure diagnostics", async () => 
 	const cwd = tempRuntime();
 	writeSettings(cwd, { bgTaskTimeoutMs: 5 });
 	setBgTimeoutKillGraceMsForTests(1);
-	const calls = installHangingMockSpawn({ kill: () => false });
+	const calls = installLifecycleMockSpawn({ kill: () => false });
 	try {
 		const result = await runSingleAgent(
 			cwd,
@@ -469,7 +491,38 @@ test("bg one-shot timeout records termination failure diagnostics", async () => 
 		assert.deepEqual(calls[0]?.kills, ["SIGTERM", "SIGKILL"]);
 		assert.match(result.errorMessage ?? "", /SIGTERM child failed: proc.kill returned false/);
 		assert.match(result.errorMessage ?? "", /SIGKILL child failed: proc.kill returned false/);
-		assert.match(readFileSync(result.transcriptPath!, "utf8"), /proc.kill returned false/);
+		assert.match(readTranscript(result), /proc.kill returned false/);
+	} finally {
+		setSingleAgentSpawnForTests();
+		setBgTimeoutKillGraceMsForTests();
+	}
+});
+
+test("bg one-shot timeout still terminates and resolves when its update callback throws", async () => {
+	const cwd = tempRuntime();
+	writeSettings(cwd, { bgTaskTimeoutMs: 5 });
+	setBgTimeoutKillGraceMsForTests(1);
+	const calls = installLifecycleMockSpawn();
+	try {
+		const result = await runSingleAgent(
+			cwd,
+			tempRuntime(),
+			[testAgent()],
+			"reviewer-test",
+			"throw from timeout update",
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			mockPiEvents([]),
+			undefined,
+			() => { throw new Error("update callback exploded"); },
+			makeDetails,
+		);
+		assert.equal(result.exitCode, 1);
+		assert.equal(result.stopReason, "unresponsive_timeout");
+		assert.deepEqual(calls[0]?.kills, ["SIGTERM", "SIGKILL"]);
+		assert.match(result.errorMessage ?? "", /Timeout update callback failed: Error: update callback exploded/);
 	} finally {
 		setSingleAgentSpawnForTests();
 		setBgTimeoutKillGraceMsForTests();
@@ -480,7 +533,7 @@ test("bg one-shot timeout uses detached process-group termination when pid is av
 	const cwd = tempRuntime();
 	writeSettings(cwd, { bgTaskTimeoutMs: 5 });
 	setBgTimeoutKillGraceMsForTests(1);
-	const calls = installHangingMockSpawn({ pid: 12345 });
+	const calls = installLifecycleMockSpawn({ pid: 12345 });
 	const processKillCalls: Array<{ pid: number; signal?: string | number }> = [];
 	const previousKill = process.kill;
 	(process as unknown as { kill: typeof process.kill }).kill = ((pid: number, signal?: string | number) => {
@@ -523,7 +576,7 @@ test("bg one-shot timeout falls back to child kill when process-group signal fai
 	const cwd = tempRuntime();
 	writeSettings(cwd, { bgTaskTimeoutMs: 5 });
 	setBgTimeoutKillGraceMsForTests(1);
-	const calls = installHangingMockSpawn({ pid: 12345 });
+	const calls = installLifecycleMockSpawn({ pid: 12345 });
 	const previousKill = process.kill;
 	(process as unknown as { kill: typeof process.kill }).kill = ((pid: number, signal?: string | number) => {
 		throw new Error(`cannot signal ${pid} with ${String(signal)}`);
@@ -563,7 +616,7 @@ test("bg one-shot timeout observes close after SIGTERM without escalating to SIG
 	writeSettings(cwd, { bgTaskTimeoutMs: 5 });
 	setBgTimeoutKillGraceMsForTests(20);
 	const events: Array<{ name: string; payload: any }> = [];
-	const calls = installHangingMockSpawn({ closeOnSignal: "SIGTERM" });
+	const calls = installLifecycleMockSpawn({ closeOnSignal: "SIGTERM" });
 	try {
 		const result = await runSingleAgent(
 			cwd,
@@ -589,7 +642,7 @@ test("bg one-shot timeout observes close after SIGTERM without escalating to SIG
 		const failed = events.find((event) => event.name === "subagents:failed");
 		assert.match(failed?.payload.error ?? "", /Timeout termination SIGTERM/);
 		assert.doesNotMatch(failed?.payload.error ?? "", /Timeout termination SIGKILL/);
-		const content = readFileSync(result.transcriptPath!, "utf8");
+		const content = readTranscript(result);
 		assert.match(content, /Timeout termination SIGTERM/);
 		assert.doesNotMatch(content, /Timeout termination SIGKILL/);
 		assert.doesNotMatch(content, /Timeout termination unconfirmed/);
@@ -630,6 +683,708 @@ test("bg one-shot timeout disabled preserves a delayed successful exit", async (
 		assert.equal(events.some((event) => event.name === "subagents:failed"), false);
 		assert.equal(events.find((event) => event.name === "subagents:completed")?.payload.status, "completed");
 	} finally {
+		setSingleAgentSpawnForTests();
+	}
+});
+
+test("bg one-shot agent_settled stops a lingering print process and completes successfully", async () => {
+	const cwd = tempRuntime();
+	writeSettings(cwd, { bgTaskTimeoutMs: 100 });
+	const events: Array<{ name: string; payload: any }> = [];
+	setBgSettledShutdownGraceMsForTests(1);
+	const calls = installLifecycleMockSpawn({
+		closeOnSignal: "SIGTERM",
+		stdout: bridgeStdout([
+			bridgeEvent("agent_start"),
+			bridgeEvent("message_end", {
+				message: {
+					role: "assistant",
+					content: [{ type: "text", text: "done before the print process exits" }],
+					usage: { input: 1, output: 1, totalTokens: 2 },
+					stopReason: "stop",
+				},
+			}),
+			bridgeEvent("agent_end", { content: [{ type: "text", text: "done before the print process exits" }] }),
+			bridgeEvent("agent_settled"),
+		]),
+	});
+	try {
+		const result = await runSingleAgent(
+			cwd,
+			tempRuntime(),
+			[testAgent()],
+			"reviewer-test",
+			"finish semantically before process exit",
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			mockPiEvents(events),
+			undefined,
+			undefined,
+			makeDetails,
+		);
+		assert.equal(result.exitCode, 0);
+		assert.equal(result.stopReason, "stop");
+		assert.equal(result.errorMessage, undefined);
+		assert.deepEqual(calls[0]?.kills, ["SIGTERM"]);
+		assert.equal(events.some((event) => event.name === "subagents:failed"), false);
+		assert.equal(events.find((event) => event.name === "subagents:completed")?.payload.status, "completed");
+		const content = readTranscript(result);
+		assert.match(content, /"type":"settled_shutdown"/);
+		assert.match(content, /"semanticCompletion":"agent_settled"/);
+	} finally {
+		setBgSettledShutdownGraceMsForTests();
+		setSingleAgentSpawnForTests();
+	}
+});
+
+test("bg one-shot activity after agent_settled cancels the pending process shutdown", async () => {
+	const cwd = tempRuntime();
+	writeSettings(cwd, { bgTaskTimeoutMs: 100 });
+	setBgSettledShutdownGraceMsForTests(5);
+	const calls = installLifecycleMockSpawn({
+		closeAfterMs: 20,
+		stdout: bridgeStdout([
+			bridgeEvent("agent_start"),
+			bridgeEvent("message_end", {
+				message: {
+					role: "assistant",
+					content: [{ type: "text", text: "first settled response" }],
+					usage: { input: 1, output: 1, totalTokens: 2 },
+					stopReason: "stop",
+				},
+			}),
+			bridgeEvent("agent_end", { content: [{ type: "text", text: "first settled response" }] }),
+			bridgeEvent("agent_settled"),
+			bridgeEvent("agent_start"),
+			bridgeEvent("turn_start"),
+			bridgeEvent("message_end", {
+				message: {
+					role: "assistant",
+					content: [{ type: "text", text: "extension-started continuation" }],
+					usage: { input: 1, output: 1, totalTokens: 2 },
+					stopReason: "stop",
+				},
+			}),
+			bridgeEvent("agent_end", { content: [{ type: "text", text: "extension-started continuation" }] }),
+		]),
+	});
+	try {
+		const result = await runSingleAgent(
+			cwd,
+			tempRuntime(),
+			[testAgent()],
+			"reviewer-test",
+			"continue after settling",
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			mockPiEvents([]),
+			undefined,
+			undefined,
+			makeDetails,
+		);
+		assert.equal(result.exitCode, 0);
+		assert.deepEqual(calls[0]?.kills, []);
+		assert.equal(result.messages.at(-1)?.role, "assistant");
+		assert.deepEqual(result.messages.at(-1)?.content, [{ type: "text", text: "extension-started continuation" }]);
+		assert.doesNotMatch(readTranscript(result), /"type":"settled_shutdown"/);
+	} finally {
+		setBgSettledShutdownGraceMsForTests();
+		setSingleAgentSpawnForTests();
+	}
+});
+
+test("bg one-shot activity after agent_settled restores task timeout ownership", async () => {
+	const cwd = tempRuntime();
+	writeSettings(cwd, { bgTaskTimeoutMs: 5 });
+	setBgSettledShutdownGraceMsForTests(20);
+	const calls = installLifecycleMockSpawn({
+		closeAfterMs: 20,
+		closeOnSignal: "SIGTERM",
+		stdout: bridgeStdout([
+			bridgeEvent("agent_start"),
+			bridgeEvent("agent_end", { content: [{ type: "text", text: "first response" }] }),
+			bridgeEvent("agent_settled"),
+			bridgeEvent("agent_start"),
+			bridgeEvent("turn_start"),
+		]),
+	});
+	try {
+		const result = await runSingleAgent(
+			cwd,
+			tempRuntime(),
+			[testAgent()],
+			"reviewer-test",
+			"hang after continuation cancels settled shutdown",
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			mockPiEvents([]),
+			undefined,
+			undefined,
+			makeDetails,
+		);
+		assert.equal(result.exitCode, 1);
+		assert.equal(result.stopReason, "unresponsive_timeout");
+		assert.deepEqual(calls[0]?.kills, ["SIGTERM"]);
+	} finally {
+		setBgSettledShutdownGraceMsForTests();
+		setSingleAgentSpawnForTests();
+	}
+});
+
+test("bg one-shot settled cancellation re-arms at the ORIGINAL deadline, not a fresh window", async () => {
+	const cwd = tempRuntime();
+	writeSettings(cwd, { bgTaskTimeoutMs: 300 });
+	// Grace far beyond the test window: settlement suspends the timeout but
+	// never delivers its SIGTERM, so the only kill can come from the timeout.
+	setBgSettledShutdownGraceMsForTests(10_000);
+	setBgTimeoutKillGraceMsForTests(1);
+	// Margins are deliberately wide (>=140ms between every ordered pair) so
+	// only an extreme event-loop stall could reorder them: the immediate
+	// re-armed timeout at ~320ms races the 460ms close, and the 460ms close
+	// must land before a fresh-window mutant's 620ms deadline.
+	const calls = installLifecycleMockSpawn({
+		closeAfterMs: 460,
+		closeOnSignal: "SIGTERM",
+		stdout: bridgeStdout([
+			bridgeEvent("agent_start"),
+			bridgeEvent("agent_end", { content: [{ type: "text", text: "first response" }] }),
+		]),
+		stdoutChunks: [
+			{ delayMs: 10, text: bridgeStdout([bridgeEvent("agent_settled")]) },
+			{ delayMs: 320, text: bridgeStdout([bridgeEvent("agent_start"), bridgeEvent("turn_start")]) },
+		],
+	});
+	try {
+		const result = await runSingleAgent(
+			cwd,
+			tempRuntime(),
+			[testAgent()],
+			"reviewer-test",
+			"cancel settled shutdown after the original deadline passed",
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			mockPiEvents([]),
+			undefined,
+			undefined,
+			makeDetails,
+		);
+		// Settlement at 10ms suspends the 300ms deadline; the continuation at
+		// 320ms re-arms AGAINST THAT ORIGINAL deadline, which has already
+		// passed, so the timeout fires immediately — before the 460ms close.
+		// A fresh-window re-arm (320ms + 300ms = 620ms) would let close(0) at
+		// 460ms win and report success.
+		assert.equal(result.exitCode, 1);
+		assert.equal(result.stopReason, "unresponsive_timeout");
+		assert.deepEqual(calls[0]?.kills, ["SIGTERM"]);
+	} finally {
+		setBgSettledShutdownGraceMsForTests();
+		setBgTimeoutKillGraceMsForTests();
+		setSingleAgentSpawnForTests();
+	}
+});
+
+test("bg one-shot abort during settled grace clears the pending settled SIGTERM", async () => {
+	const cwd = tempRuntime();
+	writeSettings(cwd, { bgTaskTimeoutMs: 0 });
+	setBgSettledShutdownGraceMsForTests(60);
+	setBgTimeoutKillGraceMsForTests(10_000);
+	const controller = new AbortController();
+	const calls = installLifecycleMockSpawn({
+		closeAfterMs: 100,
+		stdout: bridgeStdout([
+			bridgeEvent("agent_start"),
+			bridgeEvent("agent_end", { content: [{ type: "text", text: "done" }] }),
+		]),
+		stdoutChunks: [
+			{ delayMs: 5, text: bridgeStdout([bridgeEvent("agent_settled")]) },
+		],
+	});
+	setTimeout(() => controller.abort(), 25);
+	try {
+		// The abort at 25ms lands inside the settled grace window (armed at
+		// 5ms, SIGTERM due at 65ms). Abort must take over the lifecycle: the
+		// run rejects as aborted — never a settled semantic completion — and
+		// exactly one SIGTERM is delivered by the abort path; a surviving
+		// settled grace timer would deliver a second one at 65ms before the
+		// 100ms close.
+		await assert.rejects(
+			runSingleAgent(
+				cwd,
+				tempRuntime(),
+				[testAgent()],
+				"reviewer-test",
+				"abort while a settled shutdown is pending",
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				mockPiEvents([]),
+				controller.signal,
+				undefined,
+				makeDetails,
+			),
+			/Agent was aborted/,
+		);
+		assert.deepEqual(calls[0]?.kills, ["SIGTERM"]);
+	} finally {
+		setBgSettledShutdownGraceMsForTests();
+		setBgTimeoutKillGraceMsForTests();
+		setSingleAgentSpawnForTests();
+	}
+});
+
+test("bg one-shot activity emitted after delivered settled SIGTERM cannot cancel shutdown", async () => {
+	const cwd = tempRuntime();
+	writeSettings(cwd, { bgTaskTimeoutMs: 0 });
+	setBgSettledShutdownGraceMsForTests(1);
+	setBgTimeoutKillGraceMsForTests(500);
+	const childPath = join(cwd, "sigterm-disposal-child.mjs");
+	writeFileSync(childPath, `
+const emit = (event, data = {}, callback) => process.stdout.write(JSON.stringify({ type: "event", event, data }) + "\\n", callback);
+process.on("SIGTERM", () => {
+	emit("agent_start");
+	emit("turn_start");
+	emit("agent_end", { content: [{ type: "text", text: "signal disposal" }] });
+	emit("agent_settled", {}, () => {
+		clearInterval(keepalive);
+		process.exitCode = 143;
+	});
+});
+emit("agent_start");
+emit("agent_end", { content: [{ type: "text", text: "done" }] });
+emit("agent_settled");
+const keepalive = setInterval(() => {}, 1000);
+`, "utf8");
+	let child: ReturnType<typeof spawnChild> | undefined;
+	setSingleAgentSpawnForTests(((_command: string, _args: string[], spawnOptions?: { detached?: boolean }) => {
+		child = spawnChild(process.execPath, [childPath], {
+			cwd,
+			detached: spawnOptions?.detached,
+			stdio: ["ignore", "pipe", "pipe"],
+		});
+		return child;
+	}) as any);
+	try {
+		const result = await runSingleAgent(
+			cwd,
+			tempRuntime(),
+			[testAgent()],
+			"reviewer-test",
+			"ignore disposal activity after settled SIGTERM",
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			mockPiEvents([]),
+			undefined,
+			undefined,
+			makeDetails,
+		);
+		assert.equal(result.exitCode, 0);
+		assert.equal(result.messages.length, 0);
+		const content = readTranscript(result);
+		assert.match(content, /"type":"settled_shutdown_cancellation_skipped"/);
+		assert.match(content, /"reason":"signal_delivered"/);
+		assert.match(content, /"type":"settled_shutdown_skipped"/);
+		assert.doesNotMatch(content, /"type":"settled_shutdown_cancelled"/);
+		assert.match(content, /"semanticCompletion":"agent_settled"/);
+	} finally {
+		if (child?.exitCode === null && child.pid) {
+			try {
+				if (process.platform === "win32") child.kill("SIGKILL");
+				else process.kill(-child.pid, "SIGKILL");
+			} catch {
+				child.kill("SIGKILL");
+			}
+		}
+		setBgSettledShutdownGraceMsForTests();
+		setBgTimeoutKillGraceMsForTests();
+		setSingleAgentSpawnForTests();
+	}
+});
+
+test("bg one-shot ignores stale agent_settled after a continuation starts", async () => {
+	const cwd = tempRuntime();
+	writeSettings(cwd, { bgTaskTimeoutMs: 100 });
+	setBgSettledShutdownGraceMsForTests(1);
+	const calls = installLifecycleMockSpawn({
+		closeOnSignal: "SIGTERM",
+		stdout: bridgeStdout([
+			bridgeEvent("agent_start"),
+			bridgeEvent("message_end", {
+				message: {
+					role: "assistant",
+					content: [{ type: "text", text: "first response" }],
+					usage: { input: 1, output: 1, totalTokens: 2 },
+					stopReason: "stop",
+				},
+			}),
+			bridgeEvent("agent_end", { content: [{ type: "text", text: "first response" }] }),
+			bridgeEvent("agent_start"),
+			bridgeEvent("turn_start"),
+			bridgeEvent("agent_settled"),
+		]),
+		stdoutChunks: [{
+			delayMs: 10,
+			text: bridgeStdout([
+				bridgeEvent("message_end", {
+					message: {
+						role: "assistant",
+						content: [{ type: "text", text: "continuation response" }],
+						usage: { input: 1, output: 1, totalTokens: 2 },
+						stopReason: "stop",
+					},
+				}),
+				bridgeEvent("agent_end", { content: [{ type: "text", text: "continuation response" }] }),
+				bridgeEvent("agent_settled"),
+			]),
+		}],
+	});
+	try {
+		const result = await runSingleAgent(
+			cwd,
+			tempRuntime(),
+			[testAgent()],
+			"reviewer-test",
+			"continue before stale settlement is published",
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			mockPiEvents([]),
+			undefined,
+			undefined,
+			makeDetails,
+		);
+		assert.equal(result.exitCode, 0);
+		assert.deepEqual(calls[0]?.kills, ["SIGTERM"]);
+		assert.deepEqual(result.messages.at(-1)?.content, [{ type: "text", text: "continuation response" }]);
+		const content = readTranscript(result);
+		assert.match(content, /"type":"settled_shutdown_skipped"/);
+		assert.match(content, /"reason":"agent_active"/);
+	} finally {
+		setBgSettledShutdownGraceMsForTests();
+		setSingleAgentSpawnForTests();
+	}
+});
+
+test("bg one-shot accepts one settlement after multiple low-level agent runs", async () => {
+	const cwd = tempRuntime();
+	writeSettings(cwd, { bgTaskTimeoutMs: 100 });
+	setBgSettledShutdownGraceMsForTests(1);
+	const calls = installLifecycleMockSpawn({
+		closeOnSignal: "SIGTERM",
+		stdout: bridgeStdout([
+			bridgeEvent("agent_start"),
+			bridgeEvent("agent_end", { content: [{ type: "text", text: "retryable response" }] }),
+			bridgeEvent("agent_start"),
+			bridgeEvent("message_end", {
+				message: {
+					role: "assistant",
+					content: [{ type: "text", text: "final response" }],
+					usage: { input: 1, output: 1, totalTokens: 2 },
+					stopReason: "stop",
+				},
+			}),
+			bridgeEvent("agent_end", { content: [{ type: "text", text: "final response" }] }),
+			bridgeEvent("agent_settled"),
+		]),
+	});
+	try {
+		const result = await runSingleAgent(
+			cwd,
+			tempRuntime(),
+			[testAgent()],
+			"reviewer-test",
+			"settle after retry chain",
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			mockPiEvents([]),
+			undefined,
+			undefined,
+			makeDetails,
+		);
+		assert.equal(result.exitCode, 0);
+		assert.deepEqual(calls[0]?.kills, ["SIGTERM"]);
+		assert.deepEqual(result.messages.at(-1)?.content, [{ type: "text", text: "final response" }]);
+		assert.doesNotMatch(readTranscript(result), /"type":"settled_shutdown_skipped"/);
+	} finally {
+		setBgSettledShutdownGraceMsForTests();
+		setSingleAgentSpawnForTests();
+	}
+});
+
+test("bg one-shot valid settlement owns shutdown before the task timeout", async () => {
+	const cwd = tempRuntime();
+	writeSettings(cwd, { bgTaskTimeoutMs: 1 });
+	setBgSettledShutdownGraceMsForTests(5);
+	setBgTimeoutKillGraceMsForTests(5);
+	const events: Array<{ name: string; payload: any }> = [];
+	const calls = installLifecycleMockSpawn({
+		closeOnSignal: "SIGKILL",
+		stdout: bridgeStdout([
+			bridgeEvent("agent_start"),
+			bridgeEvent("message_end", {
+				message: {
+					role: "assistant",
+					content: [{ type: "text", text: "settled before timeout" }],
+					usage: { input: 1, output: 1, totalTokens: 2 },
+					stopReason: "stop",
+				},
+			}),
+			bridgeEvent("agent_end", { content: [{ type: "text", text: "settled before timeout" }] }),
+			bridgeEvent("agent_settled"),
+		]),
+	});
+	try {
+		const result = await runSingleAgent(
+			cwd,
+			tempRuntime(),
+			[testAgent()],
+			"reviewer-test",
+			"settle before timeout ownership",
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			mockPiEvents(events),
+			undefined,
+			undefined,
+			makeDetails,
+		);
+		assert.equal(result.exitCode, 0);
+		assert.equal(result.stopReason, "stop");
+		assert.deepEqual(calls[0]?.kills, ["SIGTERM", "SIGKILL"]);
+		assert.equal(events.some((event) => event.name === "subagents:failed"), false);
+		assert.doesNotMatch(readTranscript(result), /"type":"timeout"/);
+	} finally {
+		setBgSettledShutdownGraceMsForTests();
+		setBgTimeoutKillGraceMsForTests();
+		setSingleAgentSpawnForTests();
+	}
+});
+
+test("bg one-shot failed settled shutdown delivery preserves a later nonzero exit", async () => {
+	const cwd = tempRuntime();
+	writeSettings(cwd, { bgTaskTimeoutMs: 0 });
+	setBgSettledShutdownGraceMsForTests(1);
+	const events: Array<{ name: string; payload: any }> = [];
+	const calls = installLifecycleMockSpawn({
+		kill: (signal, _count, proc) => {
+			if (signal === "SIGTERM") queueMicrotask(() => proc.emit("close", 1, null));
+			return false;
+		},
+		stdout: bridgeStdout([
+			bridgeEvent("agent_start"),
+			bridgeEvent("message_end", {
+				message: {
+					role: "assistant",
+					content: [{ type: "text", text: "semantic response before failed shutdown" }],
+					usage: { input: 1, output: 1, totalTokens: 2 },
+					stopReason: "stop",
+				},
+			}),
+			bridgeEvent("agent_end", { content: [{ type: "text", text: "semantic response before failed shutdown" }] }),
+			bridgeEvent("agent_settled"),
+		]),
+	});
+	try {
+		const result = await runSingleAgent(
+			cwd,
+			tempRuntime(),
+			[testAgent()],
+			"reviewer-test",
+			"fail settled signal delivery",
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			mockPiEvents(events),
+			undefined,
+			undefined,
+			makeDetails,
+		);
+		assert.equal(result.exitCode, 1);
+		assert.deepEqual(calls[0]?.kills, ["SIGTERM"]);
+		assert.equal(events.some((event) => event.name === "subagents:completed"), false);
+		assert.equal(events.find((event) => event.name === "subagents:failed")?.payload.status, "failed");
+		assert.doesNotMatch(readTranscript(result), /"semanticCompletion":"agent_settled"/);
+	} finally {
+		setBgSettledShutdownGraceMsForTests();
+		setSingleAgentSpawnForTests();
+	}
+});
+
+test("bg one-shot delivered settled signal does not mask an unrelated nonzero exit", async () => {
+	const cwd = tempRuntime();
+	writeSettings(cwd, { bgTaskTimeoutMs: 0 });
+	setBgSettledShutdownGraceMsForTests(1);
+	const events: Array<{ name: string; payload: any }> = [];
+	const calls = installLifecycleMockSpawn({
+		kill: (signal, _count, proc) => {
+			if (signal === "SIGTERM") queueMicrotask(() => proc.emit("close", 1, null));
+			return true;
+		},
+		stdout: bridgeStdout([
+			bridgeEvent("agent_start"),
+			bridgeEvent("agent_end", { content: [{ type: "text", text: "done" }] }),
+			bridgeEvent("agent_settled"),
+		]),
+	});
+	try {
+		const result = await runSingleAgent(
+			cwd,
+			tempRuntime(),
+			[testAgent()],
+			"reviewer-test",
+			"close nonzero after delivered settled signal",
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			mockPiEvents(events),
+			undefined,
+			undefined,
+			makeDetails,
+		);
+		assert.equal(result.exitCode, 1);
+		assert.deepEqual(calls[0]?.kills, ["SIGTERM"]);
+		assert.equal(events.some((event) => event.name === "subagents:completed"), false);
+		assert.doesNotMatch(readTranscript(result), /"semanticCompletion":"agent_settled"/);
+	} finally {
+		setBgSettledShutdownGraceMsForTests();
+		setSingleAgentSpawnForTests();
+	}
+});
+
+test("bg one-shot failed settled SIGTERM and SIGKILL resolve as bounded failure", async () => {
+	const cwd = tempRuntime();
+	writeSettings(cwd, { bgTaskTimeoutMs: 0 });
+	setBgSettledShutdownGraceMsForTests(1);
+	setBgTimeoutKillGraceMsForTests(1);
+	const calls = installLifecycleMockSpawn({
+		kill: () => false,
+		stdout: bridgeStdout([
+			bridgeEvent("agent_start"),
+			bridgeEvent("agent_end", { content: [{ type: "text", text: "done" }] }),
+			bridgeEvent("agent_settled"),
+		]),
+	});
+	try {
+		const result = await runSingleAgent(
+			cwd,
+			tempRuntime(),
+			[testAgent()],
+			"reviewer-test",
+			"fail all settled shutdown signals",
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			mockPiEvents([]),
+			undefined,
+			undefined,
+			makeDetails,
+		);
+		assert.equal(result.exitCode, 1);
+		assert.deepEqual(calls[0]?.kills, ["SIGTERM", "SIGKILL"]);
+		assert.match(result.errorMessage ?? "", /Settled shutdown failed/);
+		assert.match(readTranscript(result), /"type":"settled_shutdown_failed"/);
+	} finally {
+		setBgSettledShutdownGraceMsForTests();
+		setBgTimeoutKillGraceMsForTests();
+		setSingleAgentSpawnForTests();
+	}
+});
+
+test("bg one-shot delivered settled signals without close resolve as bounded failure", async () => {
+	const cwd = tempRuntime();
+	writeSettings(cwd, { bgTaskTimeoutMs: 0 });
+	setBgSettledShutdownGraceMsForTests(1);
+	setBgTimeoutKillGraceMsForTests(1);
+	const calls = installLifecycleMockSpawn({
+		kill: () => true,
+		stdout: bridgeStdout([
+			bridgeEvent("agent_start"),
+			bridgeEvent("agent_end", { content: [{ type: "text", text: "done" }] }),
+			bridgeEvent("agent_settled"),
+		]),
+	});
+	try {
+		const result = await runSingleAgent(
+			cwd,
+			tempRuntime(),
+			[testAgent()],
+			"reviewer-test",
+			"deliver settled signals without close",
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			mockPiEvents([]),
+			undefined,
+			undefined,
+			makeDetails,
+		);
+		assert.equal(result.exitCode, 1);
+		assert.deepEqual(calls[0]?.kills, ["SIGTERM", "SIGKILL"]);
+		assert.match(result.errorMessage ?? "", /did not emit close within .* after SIGKILL/);
+		assert.match(readTranscript(result), /"type":"settled_shutdown_failed"/);
+	} finally {
+		setBgSettledShutdownGraceMsForTests();
+		setBgTimeoutKillGraceMsForTests();
+		setSingleAgentSpawnForTests();
+	}
+});
+
+test("bg one-shot terminal resolution clears pending settled kill escalation", async () => {
+	const cwd = tempRuntime();
+	writeSettings(cwd, { bgTaskTimeoutMs: 0 });
+	setBgSettledShutdownGraceMsForTests(1);
+	setBgTimeoutKillGraceMsForTests(5);
+	const calls = installLifecycleMockSpawn({
+		kill: (signal, _count, proc) => {
+			if (signal === "SIGTERM") queueMicrotask(() => proc.emit("error", new Error("mock process error")));
+			return true;
+		},
+		stdout: bridgeStdout([
+			bridgeEvent("agent_start"),
+			bridgeEvent("agent_end", { content: [{ type: "text", text: "done" }] }),
+			bridgeEvent("agent_settled"),
+		]),
+	});
+	try {
+		const result = await runSingleAgent(
+			cwd,
+			tempRuntime(),
+			[testAgent()],
+			"reviewer-test",
+			"resolve before settled kill escalation",
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			mockPiEvents([]),
+			undefined,
+			undefined,
+			makeDetails,
+		);
+		assert.equal(result.exitCode, 1);
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		assert.deepEqual(calls[0]?.kills, ["SIGTERM"]);
+	} finally {
+		setBgSettledShutdownGraceMsForTests();
+		setBgTimeoutKillGraceMsForTests();
 		setSingleAgentSpawnForTests();
 	}
 });
@@ -698,7 +1453,7 @@ test("oneshot transcript keeps message_update snapshots when full stream env is 
 			undefined,
 			makeDetails,
 		);
-		const content = readFileSync(result.transcriptPath!, "utf8");
+		const content = readTranscript(result);
 		assert.match(content, /message_update/);
 	} finally {
 		setSingleAgentSpawnForTests();
