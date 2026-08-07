@@ -274,28 +274,33 @@ cli/scripts/integration-check.sh         # integration check in a throwaway temp
 
 ## Merge flow (review-gate self-adoption, VST-10)
 
-- This repo runs its own review-gate engine: `review-gate.yml` is the
-  PR-side gate pair (read-only self-evaluating evaluate + a no-checkout
-  post job) — both the latency path and the first-success source the
-  refire's rerun relies on. `REVIEW_GATE_TRUST_PR_WORKFLOWS = "true"` is the
-  engine's DELIBERATE self-evaluating re-affirmation, declared with eyes
-  open (see the settings comment): pull_request workflow definitions ride
-  the PR head, this is an effectively single-author steward-operated repo,
-  and the bootstrap property is wanted — a PR repairing a broken predicate
-  is judged by its own fixed copy and can open its own gate. The default-branch-defined `approval-rerun.yml`
-  (event-driven) and `approval-sweep.yml` (scheduled) converge drift and
-  remain the writers of record; trust values live in `vstack.settings.toml`.
-  `review-gate-queue.yml` posts the context on merge-group shas (queue
-  entries are post-approval by construction). Fork PRs: their read-only
-  token cannot post the gate, so they stay fail-closed at pending — this
-  repo's contribution model is collaborator branches; re-push a fork PR as
-  an in-repo branch to gate it.
+- This repo runs its own review-gate engine through ONE writer:
+  `.github/workflows/review-gate-writer.yml` evaluates
+  `skills/review-gate/scripts/review-predicate.sh` and posts the "Review
+  gate" commit status on its event legs (PR events, review events, status
+  events, a 15-minute cron floor). The separate merge-group leg posts an
+  unconditional success on queue shas — queue entries are post-approval by
+  construction, so no predicate runs there. The writer always runs the
+  DEFAULT-branch engine, so a PR cannot influence its own gate — a PR that
+  repairs the engine itself merges via the ruleset's bypass actor, stated
+  in the merge commit. Trust values live in `vstack.settings.toml`.
+- The gate answers review-only; CI is branch protection's job. The heavy
+  suite jobs run only in the merge queue (fast/full split — see
+  `.github/workflows/skill-tests.yml`); the queue runs the full suite once,
+  on the merged result, and refuses the merge if it fails. The refusal is
+  enforced by the queue ruleset's required contexts: `Review gate`,
+  `CLI (cargo test + integration check)`, and
+  `Skill suites (shell + node)`.
 - Merge via `github.sh pr-merge` as always. With the merge queue enabled,
   a successful merge returns exit 75 (`QUEUED IN MERGE QUEUE`) and completes
   asynchronously — confirm with `await-mergeable` / `state == MERGED`
   before propagation, and never force past a queue refusal.
-- A fresh head has no gate status until a trusted reviewer's evidence event
-  or the next sweep converges it (fail-closed latency, not an error).
+- A fresh head normally gets its pending gate status within moments — the
+  writer runs event-fast on every push (`pull_request_target`). The cron
+  tick is the FLOOR for transitions with no event (thread resolution, fork
+  review evidence). A head still missing its gate status after several
+  minutes means a failed or skipped writer run — investigate the runs, do
+  not wait out the cron.
   Ruleset/branch-protection changes (required checks, queue enablement,
   Copilot auto-review toggle) are owner actions.
 
