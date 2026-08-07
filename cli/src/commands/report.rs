@@ -47,7 +47,89 @@ pub struct ReportArgs {
     pub scope: Option<String>,
     pub global: bool,
     pub upstream: Option<String>,
+    pub area: Option<String>,
     pub dry_run: bool,
+}
+
+/// The vstack surface an issue belongs to. Emitted as a flat GitHub label on
+/// vstack-targeted issues; the GitHub->Linear sync carries it across, where a
+/// Linear triage rule routes the synced issue into the matching project.
+///
+/// Label names follow the workspace convention: bare subsystem words, no prefix
+/// and no exclusive parent group (only `agent:*` uses that shape). Three are
+/// existing workspace-wide labels reused as-is — `ci-infra`, `docs`, `chore` —
+/// and three are vstack subsystem labels on team VST, the same shape as
+/// memsira's `vault`/`claude-bridge`.
+///
+/// Project-local issues never get one: consuming repos have their own
+/// taxonomies, and `gh` fails outright on a label the target repo lacks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Area {
+    Cli,
+    Skills,
+    Harness,
+    ReviewGate,
+    Docs,
+    TechDebt,
+}
+
+impl Area {
+    /// The GitHub/Linear label name. Must match a label on
+    /// `vanillagreencom/vstack` AND a Linear label of the same name reachable
+    /// from team VST, or the sync drops it and the triage rule never fires.
+    fn label(self) -> &'static str {
+        match self {
+            Area::Cli => "cli",
+            Area::Skills => "skills",
+            Area::Harness => "harness",
+            // Workspace-wide label; its description ("CI, review gates, runners,
+            // and repo tooling") already covers this surface exactly.
+            Area::ReviewGate => "ci-infra",
+            Area::Docs => "docs",
+            Area::TechDebt => "chore",
+        }
+    }
+
+    /// Parse the `--area` value. Accepts either the surface name or the label
+    /// it maps to, so `--area review-gate` and `--area ci-infra` both work.
+    fn parse(raw: &str) -> Result<Self> {
+        let normalized = raw.trim().to_ascii_lowercase();
+        match normalized.as_str() {
+            "cli" => Ok(Area::Cli),
+            "skills" => Ok(Area::Skills),
+            "harness" => Ok(Area::Harness),
+            "review-gate" | "ci-infra" => Ok(Area::ReviewGate),
+            "docs" => Ok(Area::Docs),
+            "tech-debt" | "chore" => Ok(Area::TechDebt),
+            other => anyhow::bail!(
+                "unknown --area '{other}'; expected one of: \
+                 cli, skills, harness, review-gate, docs, tech-debt"
+            ),
+        }
+    }
+
+    /// Best-effort surface derivation from the asset selector, used when
+    /// `--area` is omitted. Deliberately coarse: a wrong-but-plausible area is
+    /// a triage-rule miss the TPM audit corrects, whereas no label at all leaves
+    /// the issue parked in Linear Triage.
+    ///
+    /// A selector-less report resolves project-local (`resolve_ownership`
+    /// rule 4) and project-local plans never carry a label, so the `Cli`
+    /// fallback below is computed and then discarded — it exists only to keep
+    /// the derivation total.
+    fn derive(selector: Option<&AssetSelector>, kind_label: &str) -> Self {
+        let Some(sel) = selector else {
+            return Area::Cli;
+        };
+        if sel.name.contains("review-gate") {
+            return Area::ReviewGate;
+        }
+        match kind_label {
+            "hook" | "pi-extension" | "pi-package" => Area::Harness,
+            "skill" | "agent" => Area::Skills,
+            _ => Area::Cli,
+        }
+    }
 }
 
 /// Where a report should be filed.
@@ -101,6 +183,15 @@ struct ReportPlan {
     target: Target,
     gh_args: Vec<String>,
     body_with_marker: String,
+    /// The routing label applied, or `None` for project-local reports (which
+    /// never carry one).
+    area: Option<Area>,
+}
+
+impl ReportPlan {
+    fn area_label(&self) -> Option<&'static str> {
+        self.area.map(Area::label)
+    }
 }
 
 /// Abstraction over the `gh issue create` call so tests can inject a fake and
@@ -151,6 +242,9 @@ fn run_with_filer(args: ReportArgs, filer: &dyn IssueFiler) -> Result<()> {
     let upstream = args
         .upstream
         .unwrap_or_else(|| DEFAULT_UPSTREAM.to_string());
+    // Validated before any filesystem or `gh` work so a typo fails immediately
+    // instead of after the lock load.
+    let area = args.area.as_deref().map(Area::parse).transpose()?;
 
     let lock = LockFile::load(&config::lock_file_path(global))?;
     let frontmatter = selector
@@ -171,11 +265,15 @@ fn run_with_filer(args: ReportArgs, filer: &dyn IssueFiler) -> Result<()> {
         &args.title,
         &body,
         &upstream,
+        area,
     );
 
     // Print the decision and target before doing anything.
     eprintln!("Ownership: {}", plan.ownership.label());
     eprintln!("Target repo: {}", target_label(&plan.target));
+    if let Some(label) = plan.area_label() {
+        eprintln!("Area label: {label}");
+    }
 
     if args.dry_run {
         eprintln!("[dry-run] would run: {}", render_gh_command(&plan.gh_args));
@@ -304,11 +402,13 @@ fn plan_for_inputs(
     title: &str,
     body: &str,
     upstream: &str,
+    area: Option<Area>,
 ) -> ReportPlan {
     let ownership = resolve_ownership(lock, selector, frontmatter, upstream);
     let name = selector.map(|s| s.name.as_str());
     let kind_label = kind_label_for(lock, selector);
-    build_plan(ownership, name, &kind_label, title, body, upstream)
+    let area = area.unwrap_or_else(|| Area::derive(selector, &kind_label));
+    build_plan(ownership, name, &kind_label, title, body, upstream, area)
 }
 
 /// Resolve the kind label used in the marker: the explicit kind selector, else
@@ -334,12 +434,13 @@ fn build_plan(
     title: &str,
     body: &str,
     upstream: &str,
+    area: Area,
 ) -> ReportPlan {
     match ownership {
         Ownership::Vstack => {
             let marker = marker_line(name.unwrap_or("unknown"), kind_label);
             let body_with_marker = format!("{body}{marker}");
-            let gh_args = vec![
+            let mut gh_args = vec![
                 "issue".to_string(),
                 "create".to_string(),
                 "--repo".to_string(),
@@ -349,11 +450,20 @@ fn build_plan(
                 "--body".to_string(),
                 body_with_marker.clone(),
             ];
+            // The routing labels exist only on the canonical repo; forks do
+            // not inherit labels, so an `--upstream` override must not carry
+            // one or `gh issue create` fails with "label not found".
+            let labeled = config::github_slug_eq(upstream, DEFAULT_UPSTREAM);
+            if labeled {
+                gh_args.push("--label".to_string());
+                gh_args.push(area.label().to_string());
+            }
             ReportPlan {
                 ownership,
                 target: Target::Upstream(upstream.to_string()),
                 gh_args,
                 body_with_marker,
+                area: labeled.then_some(area),
             }
         }
         Ownership::ProjectLocal => {
@@ -372,6 +482,7 @@ fn build_plan(
                 target: Target::Local,
                 gh_args,
                 body_with_marker: body.to_string(),
+                area: None,
             }
         }
     }
@@ -751,6 +862,7 @@ mod tests {
             global: false,
             scope: Some("project".to_string()),
             upstream: None,
+            area: None,
             dry_run,
         }
     }
@@ -767,6 +879,7 @@ mod tests {
             global: false,
             scope: Some("project".to_string()),
             upstream: None,
+            area: None,
             dry_run,
         }
     }
@@ -1139,6 +1252,7 @@ mod tests {
             "Title",
             "Body text",
             DEFAULT_UPSTREAM,
+            Area::Skills,
         );
         assert_eq!(plan.target, Target::Upstream(DEFAULT_UPSTREAM.to_string()));
         assert!(plan.gh_args.iter().any(|a| a == "--repo"));
@@ -1162,6 +1276,7 @@ mod tests {
             "Title",
             "Body text",
             DEFAULT_UPSTREAM,
+            Area::Skills,
         );
         assert_eq!(plan.target, Target::Local);
         assert!(!plan.gh_args.iter().any(|a| a == "--repo"));
@@ -1178,10 +1293,137 @@ mod tests {
             "T",
             "B",
             "myorg/fork",
+            Area::Skills,
         );
         assert_eq!(plan.target, Target::Upstream("myorg/fork".to_string()));
         let repo_idx = plan.gh_args.iter().position(|a| a == "--repo").unwrap();
         assert_eq!(plan.gh_args[repo_idx + 1], "myorg/fork");
+        // Routing labels exist only on the canonical repo — a fork override
+        // must not carry one, or `gh issue create` fails with an unknown label.
+        assert!(!plan.gh_args.iter().any(|a| a == "--label"));
+        assert_eq!(plan.area_label(), None);
+    }
+
+    // --- area routing label ---------------------------------------------------
+
+    #[test]
+    fn build_plan_vstack_attaches_area_label() {
+        let plan = build_plan(
+            Ownership::Vstack,
+            Some("review-gate"),
+            "skill",
+            "T",
+            "B",
+            DEFAULT_UPSTREAM,
+            Area::ReviewGate,
+        );
+        let label_idx = plan.gh_args.iter().position(|a| a == "--label").unwrap();
+        assert_eq!(plan.gh_args[label_idx + 1], "ci-infra");
+        assert_eq!(plan.area_label(), Some("ci-infra"));
+    }
+
+    #[test]
+    fn build_plan_project_local_carries_no_area_label() {
+        // The area:* labels are defined on the upstream repo only; attaching one
+        // to a consuming repo's issue would fail the `gh` call outright.
+        let plan = build_plan(
+            Ownership::ProjectLocal,
+            Some("visual-qa"),
+            "skill",
+            "T",
+            "B",
+            DEFAULT_UPSTREAM,
+            Area::Skills,
+        );
+        assert!(!plan.gh_args.iter().any(|a| a == "--label"));
+        assert_eq!(plan.area_label(), None);
+    }
+
+    #[test]
+    fn area_parse_accepts_surface_name_or_label_name() {
+        assert_eq!(Area::parse("cli").unwrap(), Area::Cli);
+        assert_eq!(Area::parse("  Tech-Debt  ").unwrap(), Area::TechDebt);
+        // The label a surface maps to is accepted as an alias, so callers can
+        // pass either vocabulary.
+        assert_eq!(Area::parse("ci-infra").unwrap(), Area::ReviewGate);
+        assert_eq!(Area::parse("chore").unwrap(), Area::TechDebt);
+    }
+
+    #[test]
+    fn area_parse_rejects_unknown_and_names_the_valid_set() {
+        let err = Area::parse("frontend").unwrap_err().to_string();
+        assert!(err.contains("unknown --area 'frontend'"));
+        assert!(err.contains("review-gate"));
+    }
+
+    #[test]
+    fn area_labels_follow_the_flat_workspace_convention() {
+        // No `area:` prefix and no exclusive parent group — only `agent:*` uses
+        // that shape. Regressing to a prefixed name would break the triage rules
+        // and diverge from memsira/hyprtrade.
+        for area in [
+            Area::Cli,
+            Area::Skills,
+            Area::Harness,
+            Area::ReviewGate,
+            Area::Docs,
+            Area::TechDebt,
+        ] {
+            assert!(
+                !area.label().contains(':'),
+                "{} must be a flat label",
+                area.label()
+            );
+        }
+    }
+
+    #[test]
+    fn area_derives_from_selector_kind() {
+        let skill = AssetSelector {
+            name: "github".to_string(),
+            kind: Some(ItemKind::Skill),
+        };
+        let hook = AssetSelector {
+            name: "session-guard".to_string(),
+            kind: Some(ItemKind::Hook),
+        };
+        assert_eq!(Area::derive(Some(&skill), "skill"), Area::Skills);
+        assert_eq!(Area::derive(Some(&hook), "hook"), Area::Harness);
+        assert_eq!(Area::derive(None, "unknown"), Area::Cli);
+    }
+
+    #[test]
+    fn area_derivation_prefers_review_gate_over_kind() {
+        // review-gate ships as a skill, but its issues belong to the review-gate
+        // surface, not the skills library.
+        let sel = AssetSelector {
+            name: "review-gate".to_string(),
+            kind: Some(ItemKind::Skill),
+        };
+        assert_eq!(Area::derive(Some(&sel), "skill"), Area::ReviewGate);
+    }
+
+    #[test]
+    fn explicit_area_overrides_derivation() {
+        let lock = LockFile::default();
+        let sel = AssetSelector {
+            name: "github".to_string(),
+            kind: Some(ItemKind::Skill),
+        };
+        let fm = AssetFrontmatter {
+            source: Some("vstack".to_string()),
+            repository: None,
+        };
+        let plan = plan_for_inputs(
+            &lock,
+            Some(&sel),
+            Some(&fm),
+            "T",
+            "B",
+            DEFAULT_UPSTREAM,
+            Some(Area::TechDebt),
+        );
+        assert_eq!(plan.area_label(), Some("chore"));
     }
 
     #[test]
@@ -1194,7 +1436,15 @@ mod tests {
             repository: None,
         };
         let sel = selector("github", Some(ItemKind::Skill));
-        let plan = plan_for_inputs(&lock, Some(&sel), Some(&fm), "T", "B", DEFAULT_UPSTREAM);
+        let plan = plan_for_inputs(
+            &lock,
+            Some(&sel),
+            Some(&fm),
+            "T",
+            "B",
+            DEFAULT_UPSTREAM,
+            None,
+        );
         assert_eq!(plan.ownership, Ownership::Vstack);
         assert_eq!(plan.target, Target::Upstream(DEFAULT_UPSTREAM.to_string()));
     }
@@ -1203,7 +1453,7 @@ mod tests {
     fn plan_for_inputs_routes_unknown_asset_to_local() {
         let lock = LockFile::default();
         let sel = selector("visual-qa", Some(ItemKind::Skill));
-        let plan = plan_for_inputs(&lock, Some(&sel), None, "T", "B", DEFAULT_UPSTREAM);
+        let plan = plan_for_inputs(&lock, Some(&sel), None, "T", "B", DEFAULT_UPSTREAM, None);
         assert_eq!(plan.ownership, Ownership::ProjectLocal);
         assert_eq!(plan.target, Target::Local);
     }
@@ -1218,7 +1468,7 @@ mod tests {
             Some("vanillagreencom/vstack"),
         );
         let sel = selector("dev", None);
-        let plan = plan_for_inputs(&lock, Some(&sel), None, "T", "B", DEFAULT_UPSTREAM);
+        let plan = plan_for_inputs(&lock, Some(&sel), None, "T", "B", DEFAULT_UPSTREAM, None);
         assert_eq!(plan.ownership, Ownership::Vstack);
         assert!(plan.body_with_marker.contains("kind=agent"));
     }
