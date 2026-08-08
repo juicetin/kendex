@@ -5,7 +5,7 @@ license: MIT
 user-invocable: true
 dependencies:
   required: [github, worktree, dev, project-management, decider]
-  optional: [linear]
+  optional: [linear, review-gate]
 metadata:
   author: vanillagreen
   source: vstack
@@ -98,6 +98,8 @@ Reference workflows (no command): `workflows/agent-sequencing.md` — cross-doma
 | `parallel-groups` | Local cache for safe parallel handoff analysis |
 
 The three waiters share a bounded env-first GitHub auth ladder and exit `3` on hard auth failure — [references/gates.md](references/gates.md).
+
+**Multi-PR watching (optional review-gate consumption).** The waiters are single-PR *foreground* waits. For watching MANY PRs across a long horizon, never hand-roll a monitor keyed on gate-state transitions — steady states (pending with open threads) transition nothing and the session sleeps through them. When the review-gate skill is installed (existence check on `.agents/skills/review-gate/scripts/pr-watch.sh`, the second-opinion pattern), run it as the single state reducer; without it, fall back to per-PR `approval-wait`/`queue-wait` polling. Contract, fallback limitations, and the wrap-in-anything loop: [references/gates.md § Multi-PR watching](references/gates.md).
 
 **`workflow-state`**: run it with no arguments for the full action reference (init/get/set/update/append/increment/set-git-head/set-now/new-round-id/path/exists). From a worktree, pass the global `--state-dir <path>` flag before the subcommand — a plain flag is classifier-safe under Codex `approval=never` where the `ORCH_STATE_DIR=…` env prefix is a rejected shape. State keys are the normalized issue IDs — `issue-N` for GitHub issues (per `start` routing), `PROJ-123` for Linear — never the bare GitHub issue number; every action except `init` aliases a bare numeric key to the `issue-N` state file when only that file exists, and errors (exit 2) instead of guessing when files exist under both keys.
 

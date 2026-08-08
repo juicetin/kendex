@@ -132,6 +132,15 @@ nothing else.
 # converge every open PR's gate status (env: GH_REPO)
 .agents/skills/review-gate/scripts/review-writer.sh
 
+# needs-attention reducer over open PRs (env: GH_REPO) — exit 0 nothing,
+# 1 attention lines on stdout, 2 read errors. Flags: --heal (one writer
+# dispatch on gate-stale, reported as an informational heal-dispatched
+# line), --no-evaluate (predicate-skipping mode: thread,
+# queue, and gate-status reads still run, so threads-open, disarmed, and
+# the threads-driven gate-stale form all fire; verdict-driven forms need
+# the predicate), --awaiting-after SECS (default: PR_REVIEW_WAIT_SECS)
+.agents/skills/review-gate/scripts/pr-watch.sh [PR# ...]
+
 # offline decision-table selftest (~1s, no network), run from the repo root
 .agents/skills/review-gate/scripts/review-predicate-selftest.sh
 
@@ -140,6 +149,13 @@ E2E_REPO=<owner>/<repo> .agents/skills/review-gate/tests/e2e-sandbox.sh
 ```
 
 ## Operations
+
+**Watching one or many PRs without stalling.** Never key a hand-rolled
+monitor on gate-state transitions — a PR sitting steadily at "pending with
+open threads" transitions nothing and you sleep through it. Run
+`scripts/pr-watch.sh` (optionally `--heal`) on the harness's wake-up
+mechanism instead: silence + exit 0 means nothing needs you; attention
+lines name exactly what does. See adoption.md § Watching PRs as an agent.
 
 **Reviewers are down / nothing is reviewing.** Run the internal review loop:
 fix findings, resolve every thread, then post the override status with a real
