@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **orch (breaking, removal): the legacy consumer script pair is gone.**
+  `skills/orch/scripts/ci/{review-predicate.sh,approval-refire.sh}` and
+  their tests existed only for pre-v2 hyprtrade, which completed its v2
+  cutover; the canonical engine is the review-gate skill (predicate +
+  single writer), vendored via `vstack refresh`. The orch DEVELOPMENT.md
+  "CI Triggering Patterns" section (including its "Review-gate engine"
+  bullet) is rewritten as v2 guidance and points there.
+
 - **review-gate v2 (breaking, consumer CI): one writer, review-only gate.**
   The gate now answers exactly one question — has this exact head been
   reviewed? — and never polices CI; whether untested code can merge is
