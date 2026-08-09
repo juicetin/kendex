@@ -26,7 +26,7 @@ adoption precondition below.
 
 | Verdict | Status | Meaning |
 |---|---|---|
-| `approved` | `success` | Evidence exists for this head; no standing objection; no unresolved threads. |
+| `approved` | `success` | Evidence exists for this head; no standing objection; no unresolved threads. Under `REVIEW_GATE_MODE = "off"` the predicate evaluates NO term — success there means only "gate disabled", stated in the status description. |
 | `awaiting` | `pending` | No review evidence for this head yet. |
 | `threads-open` | `pending` | Evidence exists, but review threads are unresolved. |
 | `changes-requested` | `failure` | A reviewer objects. Red means objection — never a build failure. |
