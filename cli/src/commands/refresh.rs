@@ -99,6 +99,29 @@ impl RefreshStats {
     pub fn has_missing(&self) -> bool {
         !self.missing.is_empty()
     }
+
+    /// Record an entry whose harness list produced no install attempt at all
+    /// (empty list, or ids this binary does not recognize / the hook does not
+    /// apply to). Without this the entry fell through its refresh pass with no
+    /// success, no failure, and no missing state, and the summary echoed the
+    /// recorded source hash as both old and new — "(unchanged)" for an entry
+    /// that was never re-copied from its source (VST-134).
+    fn fail_no_installable_harness(&mut self, item: &str, harnesses: &[String], global: bool) {
+        let remove_cmd = if global {
+            format!("vstack remove {item} --global")
+        } else {
+            format!("vstack remove {item}")
+        };
+        self.fail(
+            item,
+            None,
+            format!(
+                "no installable harness (recorded harnesses: [{}]); \
+                 re-add the item or run `{remove_cmd}` to drop the stale entry",
+                harnesses.join(", ")
+            ),
+        );
+    }
 }
 
 /// Content hash of an installed skill directory, resolving a symlinked install
@@ -348,6 +371,8 @@ pub fn refresh_items_in_scope(
             if content_changed {
                 stats.mark_content_changed(name);
             }
+        } else if succeeded == 0 && !failed {
+            stats.fail_no_installable_harness(name, &entry.harnesses, global);
         }
     }
 
@@ -421,6 +446,8 @@ pub fn refresh_items_in_scope(
             if content_changed {
                 stats.mark_content_changed(name);
             }
+        } else if succeeded == 0 && !failed {
+            stats.fail_no_installable_harness(name, &entry.harnesses, global);
         }
     }
 
@@ -473,6 +500,8 @@ pub fn refresh_items_in_scope(
         if succeeded > 0 && !failed {
             stats.hooks_refreshed += 1;
             stats.mark_success(name);
+        } else if succeeded == 0 && !failed {
+            stats.fail_no_installable_harness(name, &entry.harnesses, global);
         }
     }
 
@@ -953,6 +982,8 @@ pub fn prune_hook_harnesses(
             continue;
         };
         let mut new_harnesses = Vec::new();
+        let mut uninstalled_known = false;
+        let mut shed_unknown = false;
         for harness_id in &entry.harnesses {
             if hook.applies_to(harness_id) {
                 new_harnesses.push(harness_id.clone());
@@ -960,11 +991,22 @@ pub fn prune_hook_harnesses(
             }
 
             let Some(harness) = Harness::from_id(harness_id) else {
+                // Debug-format the id: it comes from the lock file (untrusted
+                // input) and must not inject control characters into logs.
+                eprintln!(
+                    "Warning: hook {} records unrecognized harness id {harness_id:?}; \
+                     dropping it from the lock (nothing this binary can uninstall)",
+                    entry.name
+                );
+                shed_unknown = true;
                 pruned_any = true;
                 continue;
             };
             match installer::remove_hook_install(&entry.name, harness, global) {
-                Ok(_) => pruned_any = true,
+                Ok(_) => {
+                    pruned_any = true;
+                    uninstalled_known = true;
+                }
                 Err(err) => {
                     eprintln!(
                         "Warning: failed to remove hook {} from {} during refresh: {err}",
@@ -975,11 +1017,20 @@ pub fn prune_hook_harnesses(
                 }
             }
         }
+        // Only an entry emptied by a COMPLETED self-heal — every dropped id
+        // was a recognized harness that actually uninstalled this run — is
+        // safe to drop. An entry that arrived already empty (the VST-134 bug
+        // shape), or that shed ANY unrecognized id no uninstall ever ran for
+        // (even alongside successful recognized uninstalls), stays in the
+        // lock so the refresh pass fails it loudly
+        // (`fail_no_installable_harness`) instead of silently unmanaging a
+        // possibly-stale install.
+        let arrived_empty = entry.harnesses.is_empty();
         if new_harnesses != entry.harnesses {
             entry.harnesses = new_harnesses;
             pruned_any = true;
         }
-        if entry.harnesses.is_empty() {
+        if entry.harnesses.is_empty() && !arrived_empty && uninstalled_known && !shed_unknown {
             remove_hook_entries.push(entry.name.clone());
         }
     }
@@ -1329,10 +1380,16 @@ fn run_one(global: bool, verbose: bool) -> Result<()> {
             .map(|(_, _, n, _, _)| n.len())
             .max()
             .unwrap_or(0);
+        let failed_items: HashSet<&str> = stats
+            .failures
+            .iter()
+            .map(|failure| failure.item.as_str())
+            .collect();
         for (_, kind, name, old, new) in &changes {
             let missing = stats.missing.contains_key(name);
-            let changed = !missing && is_updated(name, old, new);
-            let mark = if missing {
+            let failed = !missing && failed_items.contains(name.as_str());
+            let changed = !missing && !failed && is_updated(name, old, new);
+            let mark = if missing || failed {
                 "?"
             } else if changed {
                 "!"
@@ -1341,6 +1398,8 @@ fn run_one(global: bool, verbose: bool) -> Result<()> {
             };
             let label = if missing {
                 "missing"
+            } else if failed {
+                "failed"
             } else if changed {
                 "changed"
             } else {
@@ -1351,10 +1410,11 @@ fn run_one(global: bool, verbose: bool) -> Result<()> {
             } else {
                 old.chars().take(8).collect()
             };
-            // A missing item's stored hash is deliberately not echoed as the
-            // new value: printing "<hash> → <hash> (unchanged)" is exactly the
-            // masking this state exists to prevent.
-            let new_short: String = if missing {
+            // A missing or failed item's stored hash is deliberately not echoed
+            // as the new value: printing "<hash> → <hash> (unchanged)" is
+            // exactly the masking those states exist to prevent — an
+            // unrefreshed entry's record says nothing about the live source.
+            let new_short: String = if missing || failed {
                 "—".to_string()
             } else {
                 new.chars().take(8).collect()

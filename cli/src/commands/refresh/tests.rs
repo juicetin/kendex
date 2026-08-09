@@ -988,6 +988,157 @@ fn refresh_reports_items_missing_from_their_source_instead_of_skipping() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+/// VST-134: an entry whose harness list yields no installable harness (empty,
+/// or ids this binary does not recognize) used to fall through its refresh pass
+/// silently — no success, no failure, no missing. `run_one` then echoed the
+/// recorded source hash as both old and new and printed "(unchanged)" while the
+/// installed bytes stayed stale after the source advanced. Field signature:
+/// `review-gate c9df07f6 → c9df07f6 (unchanged)` in a fresh consumer worktree
+/// whose copied lock carried such an entry, with the cache already fast-forwarded.
+/// "Unchanged" must mean bytes-identical to the resolved source; an entry that
+/// cannot be re-copied must fail loudly instead.
+#[test]
+fn refresh_fails_loud_when_a_lock_entry_yields_no_harness_install() {
+    let root = tmpdir("no-installable-harness");
+    let project = root.join("project");
+    let source = make_source(&root, "source");
+    std::fs::create_dir_all(&project).unwrap();
+    write_colliding_source(&source, "2", "PreToolUse", "source-model");
+
+    let mut lock = LockFile::default();
+    // The repro shape: empty harness list on a skill (seen in the wild from the
+    // pre-#1047 apply lock bug, carried into a fresh worktree by the lock copy).
+    lock.add(lock_entry("shared", ItemKind::Skill, &source, vec![]));
+    // Unrecognized harness ids are the same silent no-op for agents and hooks.
+    lock.add(lock_entry(
+        "rust",
+        ItemKind::Agent,
+        &source,
+        vec!["not-a-harness"],
+    ));
+    lock.add(lock_entry(
+        "guard",
+        ItemKind::Hook,
+        &source,
+        vec!["not-a-harness"],
+    ));
+    let sources = vec![RefreshSource::from_root(&source)];
+
+    let stats = crate::test_util::with_project_root(&project, || {
+        let mut project_config = ProjectConfig::default();
+        refresh_items_in_scope(false, &lock, &sources, &mut project_config, &project, None)
+    });
+
+    assert!(
+        stats.has_failures(),
+        "zero-install entries must fail loudly, not disappear from the report"
+    );
+    for name in ["shared", "rust", "guard"] {
+        assert!(
+            stats.failures.iter().any(|failure| failure.item == name),
+            "{name} must be reported as a failure: {:?}",
+            stats.failures
+        );
+        assert!(
+            !stats.successful_items.contains(name),
+            "{name} must not count as refreshed"
+        );
+    }
+    assert_eq!(stats.skills_refreshed, 0);
+    assert_eq!(stats.agents_refreshed, 0);
+    assert_eq!(stats.hooks_refreshed, 0);
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// Caller-level companion to the test above for the hook shape: production
+/// callers (`run_one`, the TUI) run [`prune_hook_harnesses`] before the
+/// refresh passes, and pruning used to DELETE a hook entry whose harness list
+/// was already empty on arrival — silently unmanaging the bug-shaped entry
+/// (VST-134) before the loud-failure guard could ever see it. Pruning must
+/// only drop an entry it emptied itself (a completed allowlist self-heal);
+/// an arrived-empty entry stays in the lock and fails the refresh pass.
+#[test]
+fn prune_preserves_arrived_empty_hook_entry_for_loud_refresh_failure() {
+    let root = tmpdir("arrived-empty-hook");
+    let project = root.join("project");
+    let source = make_source(&root, "source");
+    std::fs::create_dir_all(&project).unwrap();
+    write_colliding_source(&source, "2", "PreToolUse", "source-model");
+
+    let mut lock = LockFile::default();
+    lock.add(lock_entry("guard", ItemKind::Hook, &source, vec![]));
+    let sources = vec![RefreshSource::from_root(&source)];
+    let source_hooks = all_source_hooks(&sources);
+
+    // run_one ordering: prune first, then the refresh passes.
+    assert!(
+        !prune_hook_harnesses(false, &mut lock, &source_hooks, None),
+        "an arrived-empty entry was not pruned by this run and must not count as pruned"
+    );
+    assert!(
+        lock.entries.contains_key("guard"),
+        "pruning must not silently unmanage an arrived-empty hook entry"
+    );
+
+    let stats = crate::test_util::with_project_root(&project, || {
+        let mut project_config = ProjectConfig::default();
+        refresh_items_in_scope(false, &lock, &sources, &mut project_config, &project, None)
+    });
+    assert!(
+        stats.failures.iter().any(|failure| failure.item == "guard"),
+        "the surviving entry must fail the refresh pass loudly: {:?}",
+        stats.failures
+    );
+    assert_eq!(stats.hooks_refreshed, 0);
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// An entry emptied SOLELY by shedding unrecognized harness ids had no
+/// uninstall run for it — deleting it from the lock would silently unmanage a
+/// possibly-stale install with no cleanup ever attempted. It must survive
+/// pruning (with an empty list) so the refresh pass fails it loudly; only a
+/// completed self-heal (a recognized harness actually uninstalled) may drop
+/// the entry.
+#[test]
+fn prune_keeps_hook_entry_emptied_only_by_unrecognized_ids() {
+    let mut lock = LockFile::default();
+    lock.add(lock_hook("guard", vec!["not-a-harness"]));
+    let hooks = vec![source_hook("guard", Some(vec!["codex"]))];
+
+    assert!(prune_hook_harnesses(false, &mut lock, &hooks, None));
+    let entry = lock
+        .entries
+        .get("guard")
+        .expect("entry emptied without any uninstall must stay in the lock");
+    assert!(
+        entry.harnesses.is_empty(),
+        "the unrecognized id itself is still shed from the list"
+    );
+}
+
+/// A MIXED list — a recognized harness that uninstalls fine plus an
+/// unrecognized id — must also survive entry removal: the successful pi
+/// uninstall says nothing about the unknown harness's install, which no
+/// cleanup ever ran for. Deleting the entry would silently unmanage it.
+#[test]
+fn prune_keeps_hook_entry_when_any_shed_id_was_unrecognized() {
+    let mut lock = LockFile::default();
+    lock.add(lock_hook("guard", vec!["pi", "not-a-harness"]));
+    let hooks = vec![source_hook("guard", Some(vec!["codex"]))];
+
+    assert!(prune_hook_harnesses(false, &mut lock, &hooks, None));
+    let entry = lock
+        .entries
+        .get("guard")
+        .expect("mixed-list entry must stay in the lock after shedding an unknown id");
+    assert!(
+        entry.harnesses.is_empty(),
+        "both ids are shed from the list; the entry itself survives for the loud failure"
+    );
+}
+
 /// The single-source fallback must not silently reinstall an entry from a
 /// source it was never installed from — it reports missing instead.
 #[test]
