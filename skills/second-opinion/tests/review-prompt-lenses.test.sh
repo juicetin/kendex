@@ -96,6 +96,12 @@ make_repo() {
 WITH="$TMP_ROOT/with-instructions"
 make_repo "$WITH"
 printf 'RULE-ALPHA: never merge on red CI\n' > "$WITH/review-bots.md"
+printf 'RULE-AGENTS: dev agents must run the suite\n' > "$WITH/AGENTS.md"
+mkdir -p "$WITH/services/api"
+printf 'RULE-NESTED: api handlers must be idempotent\n' > "$WITH/services/api/AGENTS.md"
+printf 'handler' > "$WITH/services/api/handler.txt"
+git -C "$WITH" add services/api/handler.txt
+printf 'changed' >> "$WITH/services/api/handler.txt"
 mkdir -p "$WITH/.github/instructions"
 printf 'RULE-BRAVO: quote all shell expansions\n' > "$WITH/.github/instructions/shell.instructions.md"
 printf 'RULE-NOMATCH: not an instructions file\n' > "$WITH/.github/instructions/notes.md"
@@ -142,6 +148,19 @@ echo "=== scenario 2: instruction files appended under default globs ==="
 assert_contains "$PROMPT_CAPTURE" "Repository review instructions" "instructions block present"
 assert_contains "$PROMPT_CAPTURE" "--- review-bots.md ---" "review-bots.md header present"
 assert_contains "$PROMPT_CAPTURE" "RULE-ALPHA" "review-bots.md content appended"
+assert_contains "$PROMPT_CAPTURE" "RULE-AGENTS" "AGENTS.md content appended (default glob)"
+assert_contains "$PROMPT_CAPTURE" "RULE-NESTED" "nested AGENTS.md governing a changed path appended"
+# Parent-before-child order: the more-specific file must appear LAST (deeper
+# agent files override shallower ones; prompt recency weights later content).
+# Guarded against errexit: a missing match must record a FAIL below, not
+# abort the script before the summary prints.
+root_pos="$(grep -n "RULE-AGENTS" "$PROMPT_CAPTURE" | head -1 | cut -d: -f1 || true)"
+nested_pos="$(grep -n "RULE-NESTED" "$PROMPT_CAPTURE" | head -1 | cut -d: -f1 || true)"
+if [[ -n "$root_pos" && -n "$nested_pos" && "$root_pos" -lt "$nested_pos" ]]; then
+  pass "root AGENTS.md emitted before the nested one (parents first)"
+else
+  fail "nested AGENTS.md must come after its parent (root=$root_pos nested=$nested_pos)"
+fi
 assert_contains "$PROMPT_CAPTURE" "--- .github/instructions/shell.instructions.md ---" "instructions/*.instructions.md matched"
 assert_contains "$PROMPT_CAPTURE" "RULE-BRAVO" "instructions file content appended"
 assert_contains "$PROMPT_CAPTURE" "RULE-CHARLIE" "copilot-instructions content appended"
