@@ -1,8 +1,10 @@
 # vstack issue-label taxonomy
 
 Linear team `vstack` (VST). GitHub `vanillagreencom/vstack` is the code and PR surface;
-issues sync GitHub → Linear one-way, so a label applied at file time arrives in Linear
-with the synced issue.
+issues sync GitHub ↔ Linear, so a label applied at file time arrives in Linear with the
+synced issue. Linear's per-link direction setting governs issue CREATION only (owner
+decision 2026-08-08: two-way creation for all teams/repos); updates and comments on an
+already-synced issue always propagate in both directions regardless of that setting.
 
 This is the project-side taxonomy the upstream
 [label-management contract](../skills/project-management/references/labels.md) expects
@@ -108,6 +110,7 @@ Classify what the work *is*; pair one with the routing label.
 | `needs-review` | Explicit review gate required before execution, merge, or close |
 | `critical-path` | Blocks or enables major project progress; align priority |
 | `owner-gated` | Needs an owner decision or owner-only action to proceed |
+| `re-triage` | Trigger handle for the Linear Loop triage janitor (`docs/linear-loops.md`): apply to any issue to request one triage pass; the loop removes it as its first action |
 
 ### Steward labels (team VST)
 
