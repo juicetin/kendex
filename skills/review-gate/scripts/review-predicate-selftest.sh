@@ -217,6 +217,7 @@ run() { # case-name, expected-verdict, expected-exit
     REVIEW_GATE_STATUS_SNAPSHOT_FILE="$CFG_SNAPSHOT" \
     REVIEW_GATE_CARRY_FORWARD="$CFG_CARRY" \
     REVIEW_GATE_CARRY_FORWARD_EXCLUDE="$CFG_CARRY_EXCLUDE" \
+    REVIEW_GATE_MODE="$CFG_GATE_MODE" \
     GH_REPO="owner/repo" PR_NUMBER=1 HEAD_SHA="$HEAD" PR_AUTHOR="$CFG_PR_AUTHOR" \
     "$predicate" 2>/dev/null)"
   rc=$?
@@ -247,6 +248,12 @@ reset() {
   CFG_API_DELAY="$ACTIVE_API_DELAY"
   CFG_CARRY="$ACTIVE_CARRY"
   CFG_CARRY_EXCLUDE="$ACTIVE_CARRY_EXCLUDE"
+  # PINNED to enforce, never the repo's ACTIVE value: mode "off" is a bypass
+  # switch, not a trust surface — under it every behavior case would answer
+  # approved and the suite would fail, turning a deliberately disabled gate
+  # into a red required CI job. The off/invalid arms are exercised by their
+  # own explicit cases below.
+  CFG_GATE_MODE="enforce"
   CFG_SNAPSHOT=""
   rm -f "$fixtures/compare.json"
   CFG_PR_AUTHOR="$AUTHOR"
@@ -1266,6 +1273,58 @@ else
   failures=$((failures + 1))
 fi
 
+# REVIEW_GATE_MODE (the one-switch gate disable, owner decision 2026-08-08):
+# "off" answers approved before ANY evidence read — the urls.log pin proves
+# zero API traffic, so a disabled gate can never leak reads or block on a
+# broken API. The detail is an attestation ("disabled by settings"), never
+# a review claim. An unknown value is exit 2: a typo cannot disable a gate.
+reset
+CFG_GATE_MODE="off"
+run "mode off: approved without evaluating anything" approved
+# The detail is the attestation CONTRACT, not decoration: statuses converged
+# from this verdict must say the gate is disabled, never imply a review
+# happened — pin the exact line.
+off_line="$(PATH="$shim:$PATH" GH_SHIM_FIXTURES="$fixtures" \
+  REVIEW_GATE_SETTINGS_FILE=/dev/null REVIEW_GATE_MODE=off \
+  GH_REPO="owner/repo" PR_NUMBER=1 HEAD_SHA="$HEAD" PR_AUTHOR="$AUTHOR" \
+  "$predicate" 2>/dev/null)"
+cases=$((cases + 1))
+if [ "$off_line" = "verdict=approved detail=review gate disabled by settings (REVIEW_GATE_MODE=off)" ]; then
+  echo "ok    mode off: the attestation detail is exact (statuses never imply a review)"
+else
+  echo "FAIL  mode off attestation detail drifted: '$off_line'" >&2
+  failures=$((failures + 1))
+fi
+if [ -f "$fixtures/.urls.log" ] && [ -s "$fixtures/.urls.log" ]; then
+  echo "FAIL  mode off must make ZERO API reads (urls.log: $(tr '\n' ' ' <"$fixtures/.urls.log"))" >&2
+  failures=$((failures + 1))
+else
+  echo "ok    mode off makes zero API reads (urls.log empty)"
+fi
+cases=$((cases + 1))
+
+reset
+CFG_GATE_MODE="off"
+reviews_set "$(review "objector" CHANGES_REQUESTED "2026-01-02T00:00:00Z")"
+threads false >"$fixtures/graphql.json"
+run "mode off: even standing objections and open threads are not read" approved
+
+reset
+CFG_GATE_MODE="offf"
+run "mode: an unknown value is a loud config error, never a disabled gate" "" 2
+
+# The newest-run projection must actually SORT: every other multi-run
+# fixture lists the newer run first (the API's usual shape), so an
+# implementation that dropped the id sort and took the FIRST row would
+# still pass them. This fixture lists the OLDER run first.
+reset
+CFG_CONTEXTS="mech-ctx"
+jq -n '{check_runs:[
+  {id:1,name:"mech-ctx",conclusion:"failure",app:{slug:"trusted-reviewer-app"},output:{title:null,summary:"findings posted"}},
+  {id:2,name:"mech-ctx",conclusion:"success",app:{slug:"trusted-reviewer-app"},output:{title:null,summary:"analysis complete"}}
+]}' >"$fixtures/checkruns.json"
+run "newest run decides with the OLDER row listed first (the sort is real)" approved
+
 # Evidence carry-forward across carry-safe deltas (VST-57): evidence at an
 # ancestor N extends to head ONLY when carry-forward is enabled AND the
 # N→head delta classifies entirely into the enabled classes (or the trees
@@ -1672,6 +1731,7 @@ if [ -n "$ACTIVE_OUTAGE" ]; then
     REVIEW_GATE_CONTEXT="$CFG_GATE_CONTEXT" REVIEW_GATE_THREADS="$CFG_THREADS" \
     REVIEW_GATE_CARRY_FORWARD="$CFG_CARRY" \
     REVIEW_GATE_CARRY_FORWARD_EXCLUDE="$CFG_CARRY_EXCLUDE" \
+    REVIEW_GATE_MODE="$CFG_GATE_MODE" \
     GH_REPO="owner/repo" PR_NUMBER=1 HEAD_SHA="$HEAD" PR_AUTHOR="$CFG_PR_AUTHOR" \
     "$predicate" 2>/dev/null)" || detail_rc=$?
   detail_line="$(head -n 1 <<<"$detail_line")"

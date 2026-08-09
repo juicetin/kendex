@@ -99,6 +99,16 @@ while [ $# -gt 0 ]; do
       case "$AWAITING_AFTER" in
         ''|*[!0-9]*) echo "::error::pr-watch: --awaiting-after needs a positive integer" >&2; exit 2 ;;
       esac
+      # Same bound as the settings path: past Bash's integer range the later
+      # [ -gt ] comparisons fail silently inside their ifs. Leading zeros
+      # are stripped first so a zero-padded fixed-width value is judged by
+      # its numeric magnitude, not its character count.
+      AWAITING_AFTER="$(printf '%s' "$AWAITING_AFTER" | sed 's/^0*//')"
+      [ -z "$AWAITING_AFTER" ] && AWAITING_AFTER=0
+      if [ "${#AWAITING_AFTER}" -gt 9 ]; then
+        echo "::error::pr-watch: --awaiting-after is out of range (max 9 digits)" >&2
+        exit 2
+      fi
       ;;
     -*) echo "::error::pr-watch: unknown flag $1" >&2; exit 2 ;;
     *)
@@ -119,6 +129,23 @@ if [ -z "$GATE_CONTEXT" ]; then
   exit 2
 fi
 THREADS_TERM="$(rg_setting REVIEW_GATE_THREADS "enforce")" || exit 2
+# REVIEW_GATE_MODE=off: the predicate answers approved unconditionally and
+# the writer keeps the gate green BY DESIGN, so the merge-enabling
+# stale-green class (green gate over open threads) is the designed state,
+# not a writer miss — same suppression as REVIEW_GATE_THREADS=off. Every
+# other class stands: threads-open stays real attention (a server-side
+# thread ruleset can still block the merge), pending-gate staleness still
+# heals (the writer should converge to the disabled-success), and the
+# predicate's own verdict arms never fire spuriously (it answers approved).
+# Validation parity with the predicate: an unknown value refuses reduction.
+GATE_MODE="$(rg_setting REVIEW_GATE_MODE "enforce")" || exit 2
+case "$GATE_MODE" in
+  enforce|off) ;;
+  *)
+    echo "::error::pr-watch: invalid REVIEW_GATE_MODE value '$GATE_MODE' (enforce|off) — refusing to reduce against unknown gate semantics" >&2
+    exit 2
+    ;;
+esac
 case "$THREADS_TERM" in
   enforce|off) ;;
   *)
@@ -131,12 +158,22 @@ if [ -z "$AWAITING_AFTER" ]; then
   # Fail-loud, same as --awaiting-after and every REVIEW_GATE config error:
   # a typo ("90s") must never silently become the 900 default — a silent
   # fallback CHANGES the review-silence policy the operator thinks they set.
+  # Digit-only AND bounded: a digit string beyond Bash's integer range
+  # (e.g. 20 digits) passes a pure [!0-9] check but then errors inside the
+  # later [ -gt ] comparisons — swallowed by the if, silently disabling the
+  # awaiting-stale alert. 9 digits (~31 years) is bound enough.
   case "$AWAITING_AFTER" in
     ''|*[!0-9]*)
       echo "::error::pr-watch: PR_REVIEW_WAIT_SECS must be a non-negative integer, got '$AWAITING_AFTER'" >&2
       exit 2
       ;;
   esac
+  AWAITING_AFTER="$(printf '%s' "$AWAITING_AFTER" | sed 's/^0*//')"
+  [ -z "$AWAITING_AFTER" ] && AWAITING_AFTER=0
+  if [ "${#AWAITING_AFTER}" -gt 9 ]; then
+    echo "::error::pr-watch: PR_REVIEW_WAIT_SECS is out of range (max 9 digits), got '$AWAITING_AFTER'" >&2
+    exit 2
+  fi
 fi
 WRITER_WORKFLOW="${PR_WATCH_WRITER_WORKFLOW:-Review gate writer}"
 
@@ -346,7 +383,7 @@ for number in $pr_numbers; do
     # the writer on every poll for a status it would only re-affirm.
     read_gate_state "$number" "$head" || continue
     stale_green_reported=0
-    if [ "$THREADS_TERM" != "off" ] && [ "$gate_state" = "success" ]; then
+    if [ "$THREADS_TERM" != "off" ] && [ "$GATE_MODE" != "off" ] && [ "$gate_state" = "success" ]; then
       emit "$number" "$head" gate-stale "threads are open but the newest '$GATE_CONTEXT' row is success — the writer has not converged the withdrawal$queued"
       heal "$number" "$head"
       stale_green_reported=1
@@ -425,7 +462,7 @@ for number in $pr_numbers; do
       # THREADS_TERM guard is belt-and-braces here: the predicate never
       # returns threads-open under off today, but a predicate/config
       # inconsistency must not become false stale alerts + dispatch churn.
-      if [ "$THREADS_TERM" != "off" ] && [ "$gate_state" = "success" ]; then
+      if [ "$THREADS_TERM" != "off" ] && [ "$GATE_MODE" != "off" ] && [ "$gate_state" = "success" ]; then
         emit "$number" "$head" gate-stale "threads are open but the newest '$GATE_CONTEXT' row is success — the writer has not converged the withdrawal$queued"
         heal "$number" "$head"
       fi
