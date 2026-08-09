@@ -264,6 +264,7 @@ export default function qol(pi: ExtensionAPI): void {
 
 	const budgetGuardDriver = new BudgetGuardDriver();
 	let budgetGuardStatus: string | undefined;
+	let budgetGuardSession: { generation: number; sessionManager: unknown } | undefined;
 
 	const setBudgetGuardStatus = (ctx: ExtensionContext, message: string | undefined) => {
 		budgetGuardStatus = message;
@@ -273,12 +274,32 @@ export default function qol(pi: ExtensionAPI): void {
 		}
 	};
 
-	const resetBudgetGuard = () => {
-		budgetGuardDriver.reset();
+	const budgetGuardGenerationForContext = (ctx: ExtensionContext): number | undefined => {
+		if (!budgetGuardSession) return undefined;
+		try {
+			return ctx.sessionManager === budgetGuardSession.sessionManager ? budgetGuardSession.generation : undefined;
+		} catch (error) {
+			if (isStaleCtxError(error)) return undefined;
+			throw error;
+		}
+	};
+
+	const startBudgetGuardSession = (ctx: ExtensionContext) => {
+		const generation = budgetGuardDriver.reset();
+		budgetGuardSession = { generation, sessionManager: ctx.sessionManager };
 		budgetGuardStatus = undefined;
 	};
 
-	const maybeFireBudgetGuard = (ctx: ExtensionContext) => {
+	const resetBudgetGuard = (ctx: ExtensionContext) => {
+		if (budgetGuardGenerationForContext(ctx) === undefined) return;
+		budgetGuardDriver.reset();
+		budgetGuardSession = undefined;
+		budgetGuardStatus = undefined;
+	};
+
+	const stageBudgetGuard = (ctx: ExtensionContext) => {
+		const generation = budgetGuardGenerationForContext(ctx);
+		if (generation === undefined) return;
 		let trigger;
 		try {
 			trigger = budgetGuardTrigger(ctx);
@@ -286,6 +307,12 @@ export default function qol(pi: ExtensionAPI): void {
 			if (isStaleCtxError(error)) return;
 			throw error;
 		}
+		budgetGuardDriver.stage(trigger, undefined, generation);
+	};
+
+	const fireStagedBudgetGuard = async (ctx: ExtensionContext) => {
+		const generation = budgetGuardGenerationForContext(ctx);
+		if (generation === undefined) return;
 		const notifySafely = (message: string, level: "info" | "warning" | "error") => {
 			try {
 				if (ctx.hasUI && settingBoolean("compaction.notify", true, ctx.cwd)) ctx.ui.notify(message, level);
@@ -294,12 +321,15 @@ export default function qol(pi: ExtensionAPI): void {
 				throw error;
 			}
 		};
-		budgetGuardDriver.dispatch({
+		const dispatch = budgetGuardDriver.dispatchPending({
 			compact: typeof ctx.compact === "function" ? ctx.compact.bind(ctx) : undefined,
+			generation,
 			notify: notifySafely,
 			onStatus: (message) => setBudgetGuardStatus(ctx, message),
-			trigger,
 		});
+		// Supported Pi hosts always route ctx.compact terminal success/failure to
+		// one callback. Await it so Pi cannot emit terminal settlement first.
+		await dispatch.completion;
 	};
 
 	const scheduleIdleCompaction = (ctx: ExtensionContext) => {
@@ -565,7 +595,7 @@ export default function qol(pi: ExtensionAPI): void {
 		subscribeCavemanBridge();
 		latestSystemPromptOptions = undefined;
 		resetAutoRename();
-		resetBudgetGuard();
+		startBudgetGuardSession(ctx);
 		resetThinkingTimer(ctx);
 		const scheduleEnabled = settingBoolean("enableScheduleCommand", true, ctx.cwd);
 		const rateLimitAutoResumeEnabled = rateLimitAutoResumeController.enabled(ctx);
@@ -639,7 +669,7 @@ export default function qol(pi: ExtensionAPI): void {
 		scheduleController.clearTimers();
 		rateLimitAutoResumeController.clearTimers();
 		resetAutoRename();
-		resetBudgetGuard();
+		resetBudgetGuard(ctx);
 		clearIdleCompactionTimer();
 		clearQuestionSubscribeTimer();
 		if (sessionSearchWarmupTimer) clearTimeout(sessionSearchWarmupTimer);
@@ -649,7 +679,6 @@ export default function qol(pi: ExtensionAPI): void {
 		questionUnsubscribe?.();
 		questionUnsubscribe = undefined;
 		currentCtx = undefined;
-		budgetGuardStatus = undefined;
 		const host = globalThis as unknown as Record<PropertyKey, unknown>;
 		if (host[QOL_NOTIFICATION_SERVICE_SYMBOL] === notificationService) delete host[QOL_NOTIFICATION_SERVICE_SYMBOL];
 		ctx.ui.setStatus(STATUS_KEY, undefined);
@@ -720,7 +749,7 @@ export default function qol(pi: ExtensionAPI): void {
 			requestRender();
 		}
 		rateLimitAutoResumeController.noteAgentEnd(event, ctx);
-		maybeFireBudgetGuard(ctx);
+		stageBudgetGuard(ctx);
 		scheduleIdleCompaction(ctx);
 		void attemptAutoRename(ctx);
 		const text = lastAssistantTextFromAgentEnd(event, ctx);
@@ -743,11 +772,16 @@ export default function qol(pi: ExtensionAPI): void {
 		}
 		sendQolNotification(ctx, "ready", settingString("notification.readyMessage", "Ready for input", ctx.cwd), "info", "ready");
 	});
+	pi.on("agent_settled", async (_event, ctx) => {
+		await fireStagedBudgetGuard(ctx);
+	});
 	pi.on("session_compact", (_event, ctx) => {
+		const generation = budgetGuardGenerationForContext(ctx);
+		if (generation === undefined) return;
 		if (budgetGuardStatus) setBudgetGuardStatus(ctx, "QOL budget guard finalizing compaction…");
-		// After a successful compaction usage drops below the budget, so reset the
-		// crossing key so the next threshold crossing re-fires the guard.
-		budgetGuardDriver.noteSessionCompacted();
+		// Pi core can compact after agent_end but before agent_settled. Mark the
+		// staged or in-flight trigger satisfied so the same crossing cannot refire.
+		budgetGuardDriver.noteSessionCompacted(generation);
 		if (!ctx.hasUI) return;
 		void refreshStatusline(ctx);
 		requestRender();
