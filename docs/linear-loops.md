@@ -8,8 +8,10 @@ so they are configured manually in the Linear UI at **Loops → New loop**.
 **How to use this template:** copy this file to `docs/linear-loops-local.md`
 (the `docs/*-local.md` gitignore rule keeps it out of version control), fill
 in every `[BRACKETED]` placeholder — each one says what to put there — and
-paste the finished sections into the Linear UI. Your filled copy is the
-working document; this template only changes when the loop design changes.
+paste the finished sections into the Linear UI. Angle-bracket `<...>` slots
+inside the instructions text are runtime values the loop substitutes per
+issue — leave those untouched. Your filled copy is the working document;
+this template only changes when the loop design changes.
 
 Scope boundary: Loops handle cheap per-issue hygiene only (labels, team
 routing, duplicate flagging, actionability nudges). Batch work — bundling,
@@ -77,9 +79,9 @@ making a change, and never take destructive action.
 
 Use this map for routing decisions. It overrides guesses from team names.
 
-[One bullet per team, format: "- <team name> (<KEY>): <what it owns —
-repos, components, work types>". Where two teams sound alike or share a
-product name, add an explicit "NOT ..." disambiguation. Close with any
+[One bullet per team, format: "- TEAM_NAME (KEY): WHAT_IT_OWNS — repos,
+components, work types". Where two teams sound alike or share a product
+name, add an explicit "NOT ..." disambiguation. Close with any
 cross-cutting rules, for example: "An issue about agent workflows, CI
 harness behavior, or shared tooling belongs on the infrastructure team even
 if filed on a product team, and vice versa."]
@@ -107,8 +109,8 @@ Search existing issues (all states, all accessible teams) for issues
 describing the same problem or the same component change. Match on component
 or module names, not just title keywords. If a likely duplicate exists:
 - Add a "related" relation between the two issues.
-- Comment on the triggering issue: "Possible duplicate of [ID] — [one-line
-  reason]."
+- Comment on the triggering issue: "Possible duplicate of <ID> — <one-line
+  reason>", substituting the issue you found and why.
 Do not close, merge, or mark either issue as a duplicate yourself. Flag only.
 
 ## Task 4 — Actionability nudge
