@@ -221,6 +221,34 @@ Resolution rules:
   `UNSTABLE`, `HAS_HOOKS`) → resolved.
 - `mergeable` alone is never used for termination.
 
+### Watching many PRs (optional review-gate reference)
+
+`await-mergeable` is a single-PR foreground wait. For watching MANY PRs
+across a long horizon — open threads, standing objections, gate staleness,
+disarmed auto-merge, silent reviewers — do not hand-roll a poll loop keyed
+on state transitions (steady states transition nothing and the watcher
+sleeps through them). When the review-gate skill is installed (existence
+check on `.agents/skills/review-gate/scripts/pr-watch.sh`), run it as the
+needs-attention reducer:
+
+```bash
+GH_REPO=OWNER/REPO .agents/skills/review-gate/scripts/pr-watch.sh [PR_NUMBER...]
+```
+
+(`GH_REPO` is required — the watcher exits 2 immediately without it.)
+Exit 0 = nothing needs you. Exit 1 = tab-separated
+`<pr> <head8> <kind> <detail>` attention lines on stdout — act on those.
+Exit 2 = a read failed, in two shapes: per-PR failures emit `error` rows ON
+STDOUT alongside any other PRs' attention rows (act on the healthy rows;
+retry the errored PR), while GLOBAL failures (missing GH_REPO, broken PR
+listing) report on stderr only with no rows — so surface BOTH streams,
+never just stdout. `--heal` adds one bounded writer dispatch for
+gate-stale findings. Without the skill installed there is NO shipped
+multi-PR watcher: fall back to per-PR polling (`await-mergeable` for
+merge-state; thread and review state need direct reads), knowing that
+fallback cannot detect a stale gate (a missed writer run) — a PR that
+reads clean but sits unmerged then warrants a manual gate-status check.
+
 ## Output Formats
 
 `--format` is command-specific, not a global flag. Only the commands listed
