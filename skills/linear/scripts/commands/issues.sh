@@ -149,6 +149,15 @@ Create Options:
   --cycle <id>          Cycle (sprint) ID
   --format=ids          Print ONLY the created issue identifier (for capture;
                         default output is the full JSON create response)
+  --no-agent-label      Permit a deliberate bare create (e.g. intake
+                        mirroring) in a project that declares its agent-label
+                        taxonomy. When LINEAR_AGENT_LABELS is set in
+                        vstack.settings.toml [env], create refuses without an
+                        agent:* label from that set: an unlabeled issue is
+                        invisible to agent routing. Route normal issue
+                        creation through the TPM pipeline (project-management
+                        skill), which owns labels, project, priority, and
+                        relations — do not create tracked issues directly.
 
 Update Options:
   --state <name>        New state
@@ -819,6 +828,59 @@ get_issue() {
     esac
 }
 
+# Agent-routing guard (VST-147). A create with no agent:* label lands
+# invisible to agent routing — no labels, project, or routing — while the CLI
+# prints a URL that looks like success. When the project declares its
+# agent-label set (LINEAR_AGENT_LABELS in vstack.settings.toml [env],
+# comma- or space-separated), refuse a bare create before any API call.
+# An undeclared/empty set keeps the guard off; --no-agent-label opts a
+# single deliberate bare create out (e.g. intake mirroring).
+require_agent_routing_label() {
+    local labels="$1" opt_out="$2"
+    local declared="${LINEAR_AGENT_LABELS:-}"
+    [ -n "$declared" ] || return 0
+    [ "$opt_out" = "1" ] && return 0
+
+    local declared_names=()
+    IFS=', ' read -ra declared_names <<<"$declared"
+
+    # Supplied labels split on commas only — label names may contain spaces.
+    local supplied_names=()
+    [ -n "$labels" ] && IFS=',' read -ra supplied_names <<<"$labels"
+
+    local supplied declared_name agent_matched=0 unknown_agent=""
+    for supplied in ${supplied_names[@]+"${supplied_names[@]}"}; do
+        supplied="$(vstack_trim "$supplied")"
+        [ -n "$supplied" ] || continue
+        local is_declared=0
+        for declared_name in ${declared_names[@]+"${declared_names[@]}"}; do
+            if [ "$supplied" = "$declared_name" ]; then
+                is_declared=1
+                break
+            fi
+        done
+        if [ "$is_declared" = "1" ]; then
+            agent_matched=1
+        elif [[ "$supplied" == agent:* ]]; then
+            unknown_agent="${unknown_agent:+$unknown_agent, }$supplied"
+        fi
+    done
+
+    # A typoed agent label would otherwise be warn-and-skipped by
+    # resolve_label_id, creating an unrouted issue that looks routed.
+    if [ -n "$unknown_agent" ]; then
+        jq -cn --arg unknown "$unknown_agent" --arg declared "$declared" \
+            '{error: ("Unknown agent label(s): " + $unknown + " - not in this project declared agent-label set (LINEAR_AGENT_LABELS in vstack.settings.toml [env]): " + $declared + ". Label resolution silently skips unknown names, so this would create an issue that is invisible to agent routing. Fix the label name, or pass --no-agent-label for a deliberate bare create.")}' >&2
+        return 1
+    fi
+    if [ "$agent_matched" != "1" ]; then
+        jq -cn --arg declared "$declared" \
+            '{error: ("Refusing to create an unrouted issue: this project declares an agent-label taxonomy (LINEAR_AGENT_LABELS in vstack.settings.toml [env]) and no agent:* label was supplied. An issue created without one gets no agent routing - the create would print a URL and look like success while the issue sits invisible to every agent. Route tracked issue creation through the TPM pipeline (project-management skill), which owns labels, project, priority, and relations. Direct create is for exceptions only: pass --labels with one of [" + $declared + "], or --no-agent-label for a deliberate bare create (e.g. intake mirroring).")}' >&2
+        return 1
+    fi
+    return 0
+}
+
 create_issue() {
     if cache_test_isolation_violation; then
         cache_test_isolation_refusal
@@ -839,6 +901,7 @@ create_issue() {
     local estimate=""
     local requested_parent_id=""
     local output_format=""
+    local no_agent_label=0
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -906,6 +969,10 @@ create_issue() {
             cycle="$2"
             shift 2
             ;;
+        --no-agent-label)
+            no_agent_label=1
+            shift
+            ;;
         --)
             shift
             break
@@ -937,6 +1004,26 @@ create_issue() {
         return 1
     fi
 
+    # Normalize the label list ONCE, before the guard: split on commas, trim
+    # each name, drop empties, rejoin. The guard and the resolver below must
+    # see identical tokens — the guard trimming a copy while the resolver got
+    # the raw " agent:rust" made the natural "bug, agent:rust" input pass the
+    # guard and then be warn-skipped by resolution: an unrouted create that
+    # looked routed.
+    if [ -n "$labels" ]; then
+        local normalized_labels="" raw_label_name
+        local raw_label_names=()
+        IFS=',' read -ra raw_label_names <<<"$labels"
+        for raw_label_name in "${raw_label_names[@]}"; do
+            raw_label_name="$(vstack_trim "$raw_label_name")"
+            [ -n "$raw_label_name" ] || continue
+            normalized_labels="${normalized_labels:+$normalized_labels,}$raw_label_name"
+        done
+        labels="$normalized_labels"
+    fi
+
+    require_agent_routing_label "$labels" "$no_agent_label" || return 1
+
     # Build input object - use jq for proper JSON escaping
     local escaped_title
     escaped_title=$(echo -n "$title" | jq -Rs '.')
@@ -962,13 +1049,25 @@ create_issue() {
     [ -n "$priority" ] && input_parts+=("\"priority\": $priority")
     [ -n "$estimate" ] && input_parts+=("\"estimate\": $estimate")
 
-    # Handle labels (warn + skip on miss per label)
+    # Handle labels (warn + skip on miss per label — EXCEPT agent:* labels:
+    # the routing guard's promise is routed-or-refused, so an agent label
+    # that fails to resolve, e.g. one declared in LINEAR_AGENT_LABELS but
+    # since deleted in Linear, must fail the create rather than silently
+    # produce an unrouted issue that already passed the guard)
     if [ -n "$labels" ]; then
         IFS=',' read -ra label_names <<<"$labels"
         local label_ids=()
         for label_name in "${label_names[@]}"; do
             local label_id
-            label_id=$(resolve_label_id "$label_name") && label_ids+=("\"$label_id\"")
+            if label_id=$(resolve_label_id "$label_name"); then
+                label_ids+=("\"$label_id\"")
+            elif [[ "$label_name" == agent:* ]] && [ -n "${LINEAR_AGENT_LABELS:-}" ]; then
+                # Hard-fail only under a declared taxonomy — undeclared repos
+                # keep the historical warn-and-skip for every label.
+                jq -cn --arg label "$label_name" \
+                    '{error: ("Agent label failed to resolve in Linear: " + $label + " - refusing to create an issue that would look routed but is not. Create the label in Linear (or fix LINEAR_AGENT_LABELS), then retry.")}' >&2
+                return 1
+            fi
         done
         if [ ${#label_ids[@]} -gt 0 ]; then
             local label_json
