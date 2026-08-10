@@ -65,14 +65,16 @@ artifacts — with no production caller; the orch workflows always use round mod
 There is one identity model (round id); the mtime freshness gate and the old
 legacy positional mode are gone (vstack#776).
 
---expect-items (fix rounds): the delegated review-item numbers. items[] must cover
+--expect-items (fix rounds): the delegated review-item NUMBERS as a comma-
+separated set (e.g. 1,2,3,4,5,6) — never a count. items[] must cover
 EXACTLY that set — each expected n present once, no unknown/duplicate n, every
 decision ∈ {Applied,Skipped,Blocked}, every reasoning non-empty. Without it, a
 fix/bundled artifact only needs a non-empty, well-formed items[].
 
 Prints JSON: {ok: bool, path: string|null,
               reason: "valid"|"missing"|"invalid"|"commit_unresolvable"|"incomplete",
-              warning: "commit_unreachable"|null}
+              warning: "commit_unreachable"|null,
+              hint: usage diagnosis (count-vs-set --expect-items misuse)|null}
 
 Gates ordered: missing → (round_id mismatch → invalid) → scalars → invalid →
 commit object → commit_unresolvable → items → incomplete → valid.
@@ -132,15 +134,17 @@ check_id_token() {
 # one that was never recorded (vstack#884). Both are null when the artifact is
 # missing or unparseable.
 emit() {
-  local ok="$1" path="$2" reason="$3" warning="${4:-}" validate=null validate_note=null
+  local ok="$1" path="$2" reason="$3" warning="${4:-}" hint="${5:-}" validate=null validate_note=null
   if [[ -n "$path" && -f "$path" ]]; then
     validate="$(jq -c 'if (.validate? | type) == "string" then .validate else null end' "$path" 2>/dev/null || printf 'null')"
     validate_note="$(jq -c 'if (.validate_note? | type) == "string" then .validate_note else null end' "$path" 2>/dev/null || printf 'null')"
   fi
   jq -n --argjson ok "$ok" --arg path "$path" --arg reason "$reason" --arg warning "$warning" \
+    --arg hint "$hint" \
     --argjson validate "${validate:-null}" --argjson validate_note "${validate_note:-null}" \
     '{ok: $ok, path: (if $path == "" then null else $path end), reason: $reason,
       warning: (if $warning == "" then null else $warning end),
+      hint: (if $hint == "" then null else $hint end),
       validate: $validate, validate_note: $validate_note}'
 }
 
@@ -272,6 +276,26 @@ validate_artifact() {
   fi
   if [[ -n "$expect_items" ]]; then
     if ! items_exact_ok "$file" "$expect_items"; then
+      # Count-vs-set misuse reads as "the dev agent skipped items" and points
+      # at the wrong party. The unambiguous signature: a bare integer N > 1
+      # while the artifact's item numbers are EXACTLY 1..N — a legitimate
+      # singleton re-fix (--expect-items 2) or a shifted set never matches.
+      # The hint rides in its own field; `warning` keeps its documented
+      # commit_unreachable|null contract.
+      if [[ "$expect_items" =~ ^[0-9]+$ ]] && [ "$expect_items" -gt 1 ] \
+        && jq -e --argjson n "$expect_items" \
+          '((.items? | type) == "array")
+             and (all(.items[];
+                   (type == "object")
+                   and ((.n | type) == "number")
+                   and ((.decision as $d | ["Applied","Skipped","Blocked"] | index($d)) != null)
+                   and ((.reasoning | type) == "string") and (.reasoning != "")))
+             and (([ .items[].n ] | sort) == [range(1; $n + 1)])' \
+          "$file" >/dev/null 2>&1; then
+        emit false "$file" "incomplete" "" \
+          "if this delegation covered $expect_items items, then '$expect_items' was a COUNT — --expect-items takes the delegated item NUMBERS (e.g. 1,2,...,$expect_items); if it genuinely delegated only item #$expect_items, the artifact carries extra items 1..$expect_items"
+        return 1
+      fi
       emit false "$file" "incomplete"
       return 1
     fi
