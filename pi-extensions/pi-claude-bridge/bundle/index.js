@@ -45771,24 +45771,43 @@ async function consumeQuery(sdkQuery, queryCtx, customToolNameToPi, model, bridg
 }
 
 // src/agents-md.ts
-import { existsSync as existsSync5, readFileSync as readFileSync7 } from "fs";
+import { lstatSync as lstatSync2, readFileSync as readFileSync7, statSync as statSync5 } from "fs";
 import { dirname as dirname5, join as join9, resolve as resolve3 } from "path";
-function globalAgentsPath() {
-  return join9(piUserDir(), "AGENTS.md");
+var CONTEXT_FILE_CANDIDATES = ["AGENTS.override.md", "AGENTS.md", "AGENTS.MD"];
+function contextFileInDir(dir) {
+  for (const filename of CONTEXT_FILE_CANDIDATES) {
+    const candidate = join9(dir, filename);
+    try {
+      if (statSync5(candidate).isFile()) return candidate;
+    } catch (error51) {
+      let lstatCode;
+      let entryExists = false;
+      try {
+        lstatSync2(candidate);
+        entryExists = true;
+      } catch (lstatError) {
+        lstatCode = lstatError.code;
+      }
+      if (entryExists || lstatCode !== "ENOENT") {
+        const detail = error51.code ?? String(error51);
+        const suffix = entryExists ? "" : ` (lstat: ${lstatCode ?? "unknown"})`;
+        debug(`agents-md: skipping unusable ${candidate}: ${detail}${suffix}`);
+      }
+    }
+  }
+  return void 0;
 }
 function resolveAgentsMdPath() {
   if (isolatedFromEnv()) return void 0;
   const fromCwd = findAgentsMdInParents(process.cwd());
   if (fromCwd) return fromCwd;
-  const globalPath = globalAgentsPath();
-  if (existsSync5(globalPath)) return globalPath;
-  return void 0;
+  return contextFileInDir(piUserDir());
 }
 function findAgentsMdInParents(startDir) {
   let current = resolve3(startDir);
   while (true) {
-    const candidate = join9(current, "AGENTS.md");
-    if (existsSync5(candidate)) return candidate;
+    const candidate = contextFileInDir(current);
+    if (candidate) return candidate;
     const parent = dirname5(current);
     if (parent === current) break;
     current = parent;
@@ -45820,11 +45839,11 @@ function sanitizeAgentsContent(content) {
 }
 
 // src/prompt-context.ts
-import { existsSync as existsSync6, readFileSync as readFileSync8 } from "fs";
+import { existsSync as existsSync5, readFileSync as readFileSync8 } from "fs";
 import { dirname as dirname6, join as join10, resolve as resolve4 } from "path";
 function readTrimmed(path) {
   try {
-    if (!existsSync6(path)) return void 0;
+    if (!existsSync5(path)) return void 0;
     const content = readFileSync8(path, "utf8").trim();
     return content.length > 0 ? content : void 0;
   } catch (error51) {
@@ -45836,7 +45855,7 @@ function findProjectAppendSystem(startDir) {
   let current = resolve4(startDir);
   while (true) {
     const candidate = join10(current, ".pi", "APPEND_SYSTEM.md");
-    if (existsSync6(candidate)) return candidate;
+    if (existsSync5(candidate)) return candidate;
     const parent = dirname6(current);
     if (parent === current) break;
     current = parent;

@@ -43,7 +43,14 @@ import {
 	type BgSessionSelection,
 } from "./sessions.js";
 import { createTaskId, emitSubagentEvent, tryEmitSubagentEvent } from "./tasks.js";
-import { normalizePiStreamEvent } from "./transcripts.js";
+import {
+	applyPartialAssistantMessage,
+	createPartialAssistantMessageState,
+	normalizePiStreamEvent,
+	partialAssistantMessage,
+	partialAssistantMessageDiagnostic,
+	resetPartialAssistantMessage,
+} from "./transcripts.js";
 import {
 	DETAIL_STRING_MAX_CHARS,
 	type CwdSnapshot,
@@ -699,6 +706,7 @@ async function runSingleAgentAttempt(
 			let settledShutdownOwnsLifecycle = false;
 			const deliveredSettledSignals = new Set<NodeJS.Signals>();
 			let latestFilteredMessageUpdate: any;
+			const partialMessageState = createPartialAssistantMessageState();
 			const timeoutMs = bgTaskTimeoutMs(cwd ?? defaultCwd);
 			const timeoutDeadline = timeoutMs > 0 ? Date.now() + timeoutMs : undefined;
 			let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
@@ -881,15 +889,49 @@ async function runSingleAgentAttempt(
 			};
 
 			const flushFilteredMessageUpdate = (reason: "nonzero_exit" | "process_error" | "timeout") => {
-				if (keepFullTranscript || !latestFilteredMessageUpdate) return;
+				// Pi's delta-only wire event leaves the newest update holding one delta, so restore the
+				// cumulative `message` Pi used to send. Every transcript reader (summary backfill,
+				// dashboard activity, transcript display) already looks there, so putting the
+				// reconstruction anywhere else leaves the record unreadable.
+				const partialMessage = partialAssistantMessage(partialMessageState);
+				// Computed before any early return. A stream whose shapes we no longer recognize
+				// produces NO partialMessage, so the diagnostic is the only signal that the wire
+				// format moved -- skipping it on any path restores the silent failure this
+				// accumulator exists to prevent.
+				const diagnostic = partialAssistantMessageDiagnostic(partialMessageState);
+				// Route through result diagnostics, not the transcript alone: appendTranscript drops
+				// write failures, so a transcript-only signal has no second chance to surface.
+				const emitDiagnostic = () => {
+					if (!diagnostic) return;
+					appendResultDiagnostic(currentResult, diagnostic);
+					appendTranscript({ type: "diagnostic", diagnostic, attempt });
+				};
+				// Full-stream mode keeps every raw update, so there is no buffered event to flush --
+				// but the reconstruction is still the only readable form of the partial answer.
+				if (keepFullTranscript && !latestFilteredMessageUpdate) {
+					if (partialMessage) {
+						const reconstructed = { type: "message_update", message: partialMessage };
+						appendTranscript({ stream: "stdout", raw: JSON.stringify(reconstructed), event: reconstructed, buffered: true, reason, partialMessage });
+					}
+					emitDiagnostic();
+					if (partialMessage || diagnostic) resetPartialAssistantMessage(partialMessageState);
+					return;
+				}
+				if (!latestFilteredMessageUpdate) return;
+				const flushedEvent = partialMessage
+					? { ...latestFilteredMessageUpdate, message: partialMessage }
+					: latestFilteredMessageUpdate;
 				appendTranscript({
 					stream: "stdout",
-					raw: JSON.stringify(latestFilteredMessageUpdate),
-					event: latestFilteredMessageUpdate,
+					raw: JSON.stringify(flushedEvent),
+					event: flushedEvent,
 					buffered: true,
 					reason,
+					...(partialMessage ? { partialMessage } : {}),
 				});
+				emitDiagnostic();
 				latestFilteredMessageUpdate = undefined;
+				resetPartialAssistantMessage(partialMessageState);
 			};
 
 			const appendTimeoutDiagnostic = (diagnostics: string[], diagnostic: string) => {
@@ -985,7 +1027,19 @@ async function runSingleAgentAttempt(
 				}
 				const normalized = normalizePiStreamEvent(event);
 				const eventName = normalized.name;
-				if (eventName === "message_update" && !keepFullTranscript) latestFilteredMessageUpdate = normalized.event;
+				if (eventName === "message_start") {
+					// Both halves of "pending unflushed partial output" reset together; clearing only the
+					// accumulator would pair a stale event with a fresh reconstruction.
+					latestFilteredMessageUpdate = undefined;
+					resetPartialAssistantMessage(partialMessageState);
+				}
+				if (eventName === "message_update") {
+					// Accumulate in both modes. In full-stream mode the raw deltas are already in the
+					// transcript, but no reader folds deltas, so without the reconstruction a failed
+					// agent's partial answer is just as unrecoverable there as in filtered mode.
+					if (!keepFullTranscript) latestFilteredMessageUpdate = normalized.event;
+					applyPartialAssistantMessage(partialMessageState, normalized.payload);
+				}
 				if (shouldAppendTranscriptEvent(eventName, keepFullTranscript)) {
 					const transcriptEvent = eventName === "agent_start"
 						? withAgentStartTranscriptMetadata(normalized.event, { agent: agent.name, model: selectedModel, args })
@@ -1019,7 +1073,10 @@ async function runSingleAgentAttempt(
 					compactThenEmptyAgentEnd = sawSessionCompact && !postCompactAssistantHasText && agentEndHasTextlessContent(payload);
 				}
 
-				if (eventName === "message_end") latestFilteredMessageUpdate = undefined;
+				if (eventName === "message_end") {
+					latestFilteredMessageUpdate = undefined;
+					resetPartialAssistantMessage(partialMessageState);
+				}
 				if (eventName === "message_end" && payload.message) {
 					const msg = payload.message as Message;
 					currentResult.messages.push(msg);

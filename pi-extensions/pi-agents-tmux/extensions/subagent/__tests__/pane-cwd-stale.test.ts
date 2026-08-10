@@ -2,7 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdtempSync, readlinkSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 
 import type { AgentConfig } from "../agents.js";
 import { runPersistentPaneAgent, setPaneExecCaptureForTests } from "../pane.js";
@@ -104,6 +104,19 @@ afterEach(() => {
 });
 
 describe("persistent pane cwd preflight", () => {
+	// ensureTmux() reads $TMUX and then runs `tmux display-message -p #S`, and that call is
+	// stubbed through setPaneExecCaptureForTests below. The env var is therefore the only
+	// real dependency, so a synthetic value lets these run deterministically on a bare CI
+	// runner instead of needing a live tmux session (or being skipped and losing coverage).
+	const originalTmux = process.env.TMUX;
+	beforeEach(() => {
+		process.env.TMUX = "/tmp/tmux-test-socket,0,0";
+	});
+	afterEach(() => {
+		if (originalTmux === undefined) delete process.env.TMUX;
+		else process.env.TMUX = originalTmux;
+	});
+
 	test("refuses to queue into a live pane whose process cwd was deleted", async () => {
 		if (process.platform !== "linux") return;
 		const runtimeRoot = tempDir("pi-agents-pane-cwd-runtime-");
