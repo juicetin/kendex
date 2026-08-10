@@ -18,6 +18,15 @@ vstack_load_project_env "$PROJECT_ROOT"
 WORKTREE_CLI="${WORKTREE_CLI:-$SKILLS_DIR/worktree/scripts/worktree}"
 LANES_CLI="${LANES_CLI:-$SCRIPT_DIR/lanes}"
 GH_ISSUE_PATTERN="${GH_ISSUE_PATTERN:-[A-Z]+-[0-9]+}"
+# Permission posture rendered into claude handoff-lane launch commands
+# (vstack#1173). Handoff is launch-only autonomy — nobody is attached to
+# answer a permission prompt — so the default bypasses permission checks, the
+# claude-path peer of the codex generalist's danger-full-access sandbox. The
+# `-` (not `:-`) expansion keeps an explicitly-empty override observable so
+# the prompting-mode warning below still fires on it.
+CLAUDE_PERMISSION_ARG="${ORCH_LANE_CLAUDE_PERMISSION_ARG-"--dangerously-skip-permissions"}"
+# Bounded seconds per brief-delivery verification pass on tmux lanes.
+TMUX_VERIFY_SECS="${ORCH_TMUX_VERIFY_SECS:-15}"
 
 TRACKER="linear"
 REPO=""
@@ -44,6 +53,13 @@ Options:
                     config dir. Refuses to launch when no lane is under the
                     usage threshold, rather than launching into a wall.
   --lane-max-pct N  Threshold for --lane auto (default: 90, or $ORCH_LANE_MAX_PCT)
+
+Claude handoff lanes launch with the permission argument from
+$ORCH_LANE_CLAUDE_PERMISSION_ARG (default: --dangerously-skip-permissions —
+handoff is launch-only autonomy, nobody is attached to answer prompts). On
+tmux lanes the brief's delivery is verified against the pane and re-sent once
+if a first-run dialog consumed it ($ORCH_TMUX_VERIFY_SECS per pass, default 15,
+positive integer clamped to 120).
 USAGE
 }
 
@@ -73,6 +89,68 @@ done
 [[ "$TRACKER" == "linear" || "$TRACKER" == "github" ]] || { echo "Error: --tracker must be linear or github" >&2; exit 1; }
 [[ -n "$HARNESS" || -n "$CMD_TEMPLATE" ]] || { echo "Error: --harness or --cmd required" >&2; exit 1; }
 [[ "$HARNESS" != "codex-app" ]] || { echo "Error: codex-app handoff requires Codex Desktop codex_app thread tools; open-terminal only launches terminal harnesses" >&2; exit 1; }
+
+# ORCH_TMUX_VERIFY_SECS feeds a per-pass sleep loop (two passes per tmux
+# lane): a runaway value hangs every lane in the launch and a non-integer
+# breaks the loop arithmetic, so anything but a positive integer is a config
+# error and oversized values are clamped to a bound that still fails fast.
+# Validated after argument parsing so --help never dies on project settings,
+# and ONLY for tmux launches — GUI/custom-command lanes never read it, and a
+# broken tmux-only setting must not abort unrelated launches. The implicit
+# mode (no flag, $TMUX set → tmux) resolves HERE, before this gate, so an
+# implicit tmux launch validates instead of silently taking the default.
+if [[ -z "$TERMINAL_MODE" ]]; then
+  if [[ -n "${TMUX:-}" ]]; then TERMINAL_MODE="tmux"; else TERMINAL_MODE="gui"; fi
+fi
+# Only Claude tmux lanes run brief verification (other harnesses and
+# custom --cmd launches pass an empty brief and never read the timeout),
+# so only they validate it.
+if [[ "$TERMINAL_MODE" != "tmux" || "$HARNESS" != "claude" || -n "$CMD_TEMPLATE" ]]; then
+  TMUX_VERIFY_SECS=15
+elif [[ ! "$TMUX_VERIFY_SECS" =~ ^[0-9]+$ ]]; then
+  echo "Error: ORCH_TMUX_VERIFY_SECS must be a positive integer (seconds), got '$TMUX_VERIFY_SECS'." >&2
+  exit 1
+fi
+# Strip leading zeros (octal hazard), then bound the digit count BEFORE any
+# arithmetic: a huge value would overflow signed math to negative, dodge the
+# 120 clamp, and zero out both verification loops.
+TMUX_VERIFY_SECS="$(printf '%s' "$TMUX_VERIFY_SECS" | sed 's/^0*//')"
+TMUX_VERIFY_SECS="${TMUX_VERIFY_SECS:-0}"
+if (( ${#TMUX_VERIFY_SECS} > 9 )); then
+  echo "WARNING: ORCH_TMUX_VERIFY_SECS is absurdly large; clamped to 120 seconds per verification pass." >&2
+  TMUX_VERIFY_SECS=120
+fi
+TMUX_VERIFY_SECS=$((10#$TMUX_VERIFY_SECS))
+if ((TMUX_VERIFY_SECS == 0)); then
+  echo "Error: ORCH_TMUX_VERIFY_SECS must be a positive integer (seconds), got '0'." >&2
+  exit 1
+fi
+if (( TMUX_VERIFY_SECS > 120 )); then
+  echo "WARNING: ORCH_TMUX_VERIFY_SECS=$TMUX_VERIFY_SECS clamped to 120 seconds per verification pass." >&2
+  TMUX_VERIFY_SECS=120
+fi
+
+if [[ "$HARNESS" == "claude" && -z "$CMD_TEMPLATE" ]]; then
+  # $CLAUDE_PERMISSION_ARG is interpolated verbatim into a shell-executed
+  # launch command (bash -lc on GUI lanes, keystrokes into the pane shell on
+  # tmux lanes) and its value comes from project [env] settings — a shell
+  # metacharacter here is arbitrary command execution at launch. Only plain
+  # flag words may pass; anything else is a config error, not a launch.
+  perm_arg_pattern='^[A-Za-z0-9._=/-]+( [A-Za-z0-9._=/-]+)*$'
+  if [[ -n "$CLAUDE_PERMISSION_ARG" && ! "$CLAUDE_PERMISSION_ARG" =~ $perm_arg_pattern ]]; then
+    echo "Error: ORCH_LANE_CLAUDE_PERMISSION_ARG='$CLAUDE_PERMISSION_ARG' contains characters outside [A-Za-z0-9._=/-] words separated by single spaces — refusing to interpolate it into a shell command." >&2
+    exit 1
+  fi
+  # A prompting permission mode makes every launched lane stall at its first
+  # tool call with nobody attached — warn loudly, but launch: the override is
+  # the operator's explicit call (vstack#1173).
+  case "$CLAUDE_PERMISSION_ARG" in
+    *dangerously-skip-permissions*|*bypassPermissions*|*dontAsk*) ;;
+    *)
+      echo "WARNING: ORCH_LANE_CLAUDE_PERMISSION_ARG='$CLAUDE_PERMISSION_ARG' is a prompting permission mode — every lane will stall at its first tool call with nobody attached to answer; handoff autonomy is void." >&2
+      ;;
+  esac
+fi
 
 # Resolve the launch lane BEFORE creating any worktree. A fleet launch that
 # discovers "every account is full" after spawning three worktrees has already
@@ -113,9 +191,7 @@ if [[ -n "$LANE" ]]; then
   echo "Lane: $LANE_ENV"
 fi
 
-if [[ -z "$TERMINAL_MODE" ]]; then
-  if [[ -n "${TMUX:-}" ]]; then TERMINAL_MODE="tmux"; else TERMINAL_MODE="gui"; fi
-fi
+
 
 resolve_repo() {
   if [[ -n "$REPO" ]]; then printf '%s\n' "$REPO"; return; fi
@@ -138,11 +214,11 @@ start_cmd() {
   # its single quotes gets expanded there and codex launches with no prompt at
   # all (vstack#976).
   case "$TRACKER:$HARNESS" in
-    linear:claude)   printf "claude -n %q --model 'opus[1m]' --effort max '/orch start %s'\n" "$item" "$item" ;;
+    linear:claude)   printf "claude -n %q --model 'opus[1m]' --effort max %s '/orch start %s'\n" "$item" "$CLAUDE_PERMISSION_ARG" "$item" ;;
     linear:codex)    printf "codex 'Read .agents/skills/orch/SKILL.md and execute the orch start workflow for %s'\n" "$item" ;;
     linear:opencode) printf "opencode --prompt '/orch start %s'\n" "$item" ;;
     linear:pi)       printf "pi '/skill:orch start %s'\n" "$item" ;;
-    github:claude)   printf "claude -n github-%q --model 'opus[1m]' --effort max '/orch start github %s#%s'\n" "$item" "$repo" "$item" ;;
+    github:claude)   printf "claude -n github-%q --model 'opus[1m]' --effort max %s '/orch start github %s#%s'\n" "$item" "$CLAUDE_PERMISSION_ARG" "$repo" "$item" ;;
     github:codex)    printf "codex 'Read .agents/skills/orch/SKILL.md and execute the orch start workflow for github %s#%s'\n" "$repo" "$item" ;;
     github:opencode) printf "opencode --prompt '/orch start github %s#%s'\n" "$repo" "$item" ;;
     github:pi)       printf "pi '/skill:orch start github %s#%s'\n" "$repo" "$item" ;;
@@ -150,16 +226,113 @@ start_cmd() {
   esac
 }
 
+# Delivered means SUBMITTED, not merely present: the brief echoed in the
+# launch command (`claude -n` line) or sitting unsent in the composer's
+# │-bordered input box is not delivery. The predicate requires the brief on a
+# plain transcript line (neither of those) AND a transcript-activity marker
+# proving the TUI accepted the prompt: a ●/⏺ response bullet, a ✻/✳ working
+# spinner, or the esc-to-interrupt processing hint. -J joins wrapped lines so
+# a narrow pane cannot split the brief across a line break and fake an
+# undelivered screen.
+tmux_brief_visible() {
+  local pane="$1" brief="$2" screen
+  # -S -: capture from the start of history, not just the visible viewport —
+  # a fast response can scroll the submitted prompt out of view before the
+  # first poll, and a viewport-only capture would misread that as
+  # undelivered and queue a duplicate brief into a running session.
+  screen="$(tmux capture-pane -pJ -S - -t "$pane" 2>/dev/null)" || return 1
+  # No short-circuiting `grep -q` pipelines over the capture: with -S - a
+  # retained pane can exceed a pipe buffer, an early -q match SIGPIPEs the
+  # upstream printf, and pipefail turns a FOUND brief into exit 141 — a
+  # submitted prompt then reads as missing and gets duplicated. grep -v
+  # always reads its whole input; the containment checks are bash matches.
+  local filtered
+  filtered="$(printf '%s\n' "$screen" | grep -vF 'claude -n' | grep -vF '│')" || true
+  [[ "$filtered" == *"$brief"* ]] || return 1
+  [[ "$screen" == *'●'* || "$screen" == *'⏺'* || "$screen" == *'✻'* ||
+     "$screen" == *'✳'* || "$screen" == *'esc to interrupt'* ]]
+}
+
+tmux_verify_brief() {
+  local pane="$1" brief="$2" waited=0
+  while (( waited < TMUX_VERIFY_SECS )); do
+    sleep 1
+    waited=$((waited + 1))
+    tmux_brief_visible "$pane" "$brief" && return 0
+  done
+  return 1
+}
+
+# Before re-typing the brief, get the TUI to a ready composer: while a
+# first-run dialog (theme / trust / browser integration) is still up, brief
+# characters land in the DIALOG and are lost — only the trailing Enter
+# survives to dismiss it, leaving an empty composer and a dead lane. Each
+# pass sends one Enter (accepting the dialog's default, which is also what
+# an unattended lane needs) and waits for the main TUI's composer footer.
+# An Enter into an already-ready empty composer is a no-op, so the nudge is
+# safe when the screen is merely slow.
+tmux_wait_composer() {
+  local pane="$1" waited=0 screen
+  while (( waited < TMUX_VERIFY_SECS )); do
+    # VISIBLE viewport only (no -S -): readiness is a property of the
+    # current screen — a footer buried in scrollback behind a first-run
+    # dialog must not read as "composer ready" and send the brief into the
+    # dialog again.
+    screen="$(tmux capture-pane -pJ -t "$pane" 2>/dev/null)" || return 1
+    [[ "$screen" == *'? for shortcuts'* ]] && return 0
+    tmux send-keys -t "$pane" Enter || return 1
+    sleep 1
+    waited=$((waited + 1))
+  done
+  return 1
+}
+
 open_tmux() {
-  local dir="$1" title="$2" cmd="$3"
+  local dir="$1" title="$2" cmd="$3" brief="${4:-}"
+  # Called on the left of `||` at the launch loop, which suspends errexit for
+  # this whole function body — every tmux step is checked explicitly so a
+  # failed window creation or keystroke cannot fall through to a success
+  # return (most visibly on briefless lanes, whose early return would
+  # otherwise count a broken window as launched).
   [[ -n "${TMUX:-}" ]] || { echo "Error: not inside tmux" >&2; return 1; }
-  local last_idx
-  last_idx=$(tmux list-windows -F '#{window_index}' | tail -1)
-  tmux new-window -a -t ":${last_idx}" -n "$title" -c "$dir"
-  tmux send-keys "clear" Enter
-  tmux send-keys -l "$cmd"
-  tmux send-keys Enter
+  local last_idx pane
+  if ! last_idx=$(tmux list-windows -F '#{window_index}' | tail -1) || [[ -z "$last_idx" ]]; then
+    echo "Error: tmux list-windows failed; cannot place window '$title'" >&2
+    return 1
+  fi
+  if ! pane=$(tmux new-window -a -t ":${last_idx}" -n "$title" -c "$dir" -P -F '#{pane_id}') || [[ -z "$pane" ]]; then
+    echo "Error: tmux new-window failed for '$title'" >&2
+    return 1
+  fi
+  if ! tmux send-keys -t "$pane" "clear" Enter ||
+     ! tmux send-keys -t "$pane" -l "$cmd" ||
+     ! tmux send-keys -t "$pane" Enter; then
+    echo "Error: tmux send-keys failed launching '$title'" >&2
+    return 1
+  fi
   echo "Opened tmux window '$title' in $dir"
+  [[ -n "$brief" ]] || return 0
+  # Delivery verification (vstack#1173): a first-run dialog (theme / trust /
+  # browser integration) can consume the CLI-arg brief, leaving a healthy TUI
+  # at an empty composer while the launch looks successful. Confirm the brief
+  # actually reached the TUI; if not, re-send it once into the composer and
+  # re-verify; if still absent, fail this lane loudly instead of reporting
+  # success. Sibling of the codex kickoff fix in vstack#976.
+  tmux_verify_brief "$pane" "$brief" && return 0
+  if ! tmux_wait_composer "$pane"; then
+    echo "Error: '$title' never reached a ready composer (first-run dialog stuck?) — attach and start it manually: $brief" >&2
+    return 1
+  fi
+  if ! tmux send-keys -t "$pane" -l "$brief" || ! tmux send-keys -t "$pane" Enter; then
+    echo "Error: tmux send-keys failed re-delivering the brief to '$title'" >&2
+    return 1
+  fi
+  if tmux_verify_brief "$pane" "$brief"; then
+    echo "Re-delivered brief to '$title' (initial CLI-arg prompt was consumed at boot)"
+    return 0
+  fi
+  echo "Error: brief undelivered to '$title' after one re-send — the session is likely sitting at a first-run dialog or an empty composer. Attach and start it manually: $brief" >&2
+  return 1
 }
 
 open_gui() {
@@ -178,6 +351,7 @@ open_gui() {
 
 repo="$(resolve_repo)"
 launched=0
+failed=0
 for raw in "${ITEMS[@]}"; do
   item="$raw"
   if [[ "$TRACKER" == "linear" ]]; then
@@ -204,13 +378,28 @@ for raw in "${ITEMS[@]}"; do
     title="gh-$item"
   fi
   cmd="$(start_cmd "$item" "$repo")"
+  # The brief the claude arms pass as the initial CLI prompt, restated for the
+  # tmux delivery check (and its one re-send). Empty for other harnesses and
+  # custom --cmd templates, which disables the check.
+  brief=""
+  if [[ -z "$CMD_TEMPLATE" && "$HARNESS" == "claude" ]]; then
+    if [[ "$TRACKER" == "linear" ]]; then brief="/orch start $item"; else brief="/orch start github $repo#$item"; fi
+  fi
   # The lane is recorded in the launched command itself, so `ps` and the tmux
   # window both show which account a stalled session belongs to.
   [[ -n "$LANE_ENV" ]] && cmd="env $LANE_ENV $cmd"
-  if [[ "$TERMINAL_MODE" == "tmux" ]]; then open_tmux "$wt" "$title" "$cmd"; else open_gui "$wt" "$title" "$cmd"; fi
+  if [[ "$TERMINAL_MODE" == "tmux" ]]; then
+    open_tmux "$wt" "$title" "$cmd" "$brief" || { failed=$((failed + 1)); continue; }
+  else
+    open_gui "$wt" "$title" "$cmd" || { failed=$((failed + 1)); continue; }
+  fi
   launched=$((launched + 1))
 done
 
+if [[ "$failed" -gt 0 ]]; then
+  echo "Error: $failed handoff lane(s) failed; launched $launched successfully." >&2
+  exit 1
+fi
 if [[ -n "$LANE_ENV" ]]; then
   echo "Done: launched $launched handoff session(s) on lane $LANE_ENV."
 else
