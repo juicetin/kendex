@@ -105,6 +105,28 @@ fn default_hook_agents() -> CustomHookTarget {
     CustomHookTarget::All("all".into())
 }
 
+/// Key in `[agent-launch-instructions]`, `[agent-additional-instructions]`,
+/// and `[skill-instructions]` whose value applies to every agent/skill.
+/// `"*"` is accepted as an alias. The name is reserved for new installs
+/// (enforced in `path_safety::validate_new_item_name`); removal accepts it so
+/// legacy items installed before the reservation stay deletable.
+pub const SHARED_INSTRUCTIONS_KEY: &str = "all";
+pub(crate) const SHARED_INSTRUCTIONS_KEY_ALIAS: &str = "*";
+
+/// Invisible markers wrapped around the shared (`all`) portion when it is
+/// rendered into a generated agent file. Extraction drops the marked region
+/// unconditionally, so a later change or removal of the `all` value can never
+/// leave stale fleet-wide text behind as a per-agent entry.
+pub const SHARED_INSTRUCTIONS_START: &str = "<!-- vstack:shared-instructions:start -->";
+pub const SHARED_INSTRUCTIONS_END: &str = "<!-- vstack:shared-instructions:end -->";
+
+fn shared_instruction_entry(map: &HashMap<String, String>) -> Option<&str> {
+    map.get(SHARED_INSTRUCTIONS_KEY)
+        .or_else(|| map.get(SHARED_INSTRUCTIONS_KEY_ALIAS))
+        .map(|s| s.as_str())
+        .filter(|s| !s.is_empty())
+}
+
 fn is_agent_frontmatter_override(value: &toml::Value) -> bool {
     let Some(table) = value.as_table() else {
         return false;
@@ -293,22 +315,136 @@ impl ProjectConfig {
             .unwrap_or_default()
     }
 
-    /// Get guidance text for an agent
+    /// Get guidance text for an agent (per-agent entry only; the shared
+    /// `all` entry is merged in by [`Self::merge_shared_and_specific`]).
     pub fn guidance_for(&self, agent_name: &str) -> Option<&str> {
         self.agent_guidance.get(agent_name).map(|s| s.as_str())
     }
 
-    /// Get additional instructions for an agent
+    /// Get additional instructions for an agent (per-agent entry only).
     pub fn instructions_for(&self, agent_name: &str) -> Option<&str> {
         self.agent_instructions.get(agent_name).map(|s| s.as_str())
     }
 
-    /// Get project-specific instructions for a skill
-    pub fn skill_instructions_for(&self, skill_name: &str) -> Option<&str> {
-        self.skill_instructions
+    /// Shared `[agent-launch-instructions]` value applied to every agent.
+    pub fn shared_guidance(&self) -> Option<&str> {
+        shared_instruction_entry(&self.agent_guidance)
+    }
+
+    /// Shared `[agent-additional-instructions]` value applied to every agent.
+    pub fn shared_instructions(&self) -> Option<&str> {
+        shared_instruction_entry(&self.agent_instructions)
+    }
+
+    /// Get project-specific instructions for a skill: the shared `all` entry
+    /// (if any) followed by the skill's own entry, blank-line separated.
+    pub fn skill_instructions_for(&self, skill_name: &str) -> Option<String> {
+        let specific = self
+            .skill_instructions
             .get(skill_name)
             .map(|s| s.as_str())
+            .filter(|s| !s.is_empty());
+        Self::merge_shared_and_specific(
+            shared_instruction_entry(&self.skill_instructions),
+            specific,
+        )
+    }
+
+    /// Merge a shared (`all`) instruction value with an item-specific one:
+    /// both render, shared first, separated by a blank line.
+    pub fn merge_shared_and_specific(
+        shared: Option<&str>,
+        specific: Option<&str>,
+    ) -> Option<String> {
+        match (shared, specific) {
+            (Some(shared), Some(specific)) => {
+                Some(format!("{}\n\n{}", shared.trim(), specific.trim()))
+            }
+            (Some(text), None) | (None, Some(text)) => Some(text.trim().to_string()),
+            (None, None) => None,
+        }
+    }
+
+    /// Wrap a shared instruction value in the invisible markers used by
+    /// generated agent files. HTML comments do not render in markdown, so the
+    /// markers never read as instructions; they let extraction identify the
+    /// shared region structurally instead of by comparing against whatever
+    /// `all` value happens to be configured at extraction time.
+    pub fn mark_shared(shared: &str) -> String {
+        format!(
+            "{SHARED_INSTRUCTIONS_START}\n{}\n{SHARED_INSTRUCTIONS_END}",
+            shared.trim()
+        )
+    }
+
+    /// Merge for rendering into a generated agent file: like
+    /// [`Self::merge_shared_and_specific`], but the shared portion is wrapped
+    /// in markers so [`Self::strip_shared_block`] can drop it unconditionally
+    /// on re-extraction, even after the `all` value changes or is removed.
+    pub fn merge_marked_shared_and_specific(
+        shared: Option<&str>,
+        specific: Option<&str>,
+    ) -> Option<String> {
+        let marked = shared
+            .map(str::trim)
             .filter(|s| !s.is_empty())
+            .map(Self::mark_shared);
+        Self::merge_shared_and_specific(marked.as_deref(), specific)
+    }
+
+    /// Remove the shared (`all`) portion from text extracted out of a
+    /// generated agent file, so re-extraction never persists or re-merges the
+    /// fleet-wide text as an item-specific entry. Marked regions (rendered by
+    /// [`Self::merge_marked_shared_and_specific`]) are dropped unconditionally
+    /// — robust to the `all` value having changed or been removed since the
+    /// file was generated. Files generated before markers existed fall back to
+    /// [`Self::strip_shared_prefix`] against the currently configured value.
+    pub fn strip_shared_block(shared: Option<&str>, extracted: &str) -> Option<String> {
+        let mut text = extracted.to_string();
+        let mut stripped_marked_region = false;
+        while let Some(start) = text.find(SHARED_INSTRUCTIONS_START) {
+            let Some(rel_end) = text[start..].find(SHARED_INSTRUCTIONS_END) else {
+                break;
+            };
+            text.replace_range(start..start + rel_end + SHARED_INSTRUCTIONS_END.len(), "");
+            stripped_marked_region = true;
+        }
+        if stripped_marked_region {
+            let rest = text.trim();
+            return (!rest.is_empty()).then(|| rest.to_string());
+        }
+        Self::strip_shared_prefix(shared, extracted).map(String::from)
+    }
+
+    /// Value-comparison fallback for files generated before the shared region
+    /// was marked: strip the currently configured shared value as a prefix.
+    ///
+    /// A merged render always separates shared from specific with a blank
+    /// line, so the prefix is only stripped when the remainder starts at that
+    /// boundary (or the text equals the shared value exactly). Authored text
+    /// that merely starts with the shared value — shared "Run tests" against
+    /// "Run tests before X" — passes through untouched.
+    pub fn strip_shared_prefix<'a>(shared: Option<&str>, extracted: &'a str) -> Option<&'a str> {
+        let Some(shared) = shared.map(str::trim).filter(|s| !s.is_empty()) else {
+            return Some(extracted);
+        };
+        let trimmed = extracted.trim();
+        if trimmed == shared {
+            return None;
+        }
+        if let Some(rest) = trimmed.strip_prefix(shared) {
+            let blank_line_boundary = rest
+                .chars()
+                .take_while(|c| c.is_whitespace())
+                .filter(|&c| c == '\n')
+                .count()
+                >= 2;
+            if blank_line_boundary {
+                let rest = rest.trim();
+                return (!rest.is_empty()).then_some(rest);
+            }
+        }
+        Some(extracted)
     }
 
     /// Get custom hooks that apply to a specific agent, as CustomHookEntry for agent frontmatter
@@ -343,21 +479,32 @@ impl ProjectConfig {
         agent_name: &str,
         extracted: &crate::agent::AgentExtras,
     ) {
+        // A generated file renders the merged shared+specific value; only the
+        // specific remainder may be persisted as this agent's own entry.
+        let extracted_guidance = extracted
+            .guidance
+            .as_deref()
+            .and_then(|text| Self::strip_shared_block(self.shared_guidance(), text));
+        let extracted_instructions = extracted
+            .instructions
+            .as_deref()
+            .and_then(|text| Self::strip_shared_block(self.shared_instructions(), text));
+
         let needs_guidance =
-            extracted.guidance.is_some() && self.guidance_for(agent_name).is_none();
+            extracted_guidance.is_some() && self.guidance_for(agent_name).is_none();
         let needs_instructions =
-            extracted.instructions.is_some() && self.instructions_for(agent_name).is_none();
+            extracted_instructions.is_some() && self.instructions_for(agent_name).is_none();
         if !needs_guidance && !needs_instructions {
             return;
         }
 
-        if let Some(ref text) = extracted.guidance
+        if let Some(ref text) = extracted_guidance
             && needs_guidance
         {
             self.agent_guidance
                 .insert(agent_name.to_string(), text.clone());
         }
-        if let Some(ref text) = extracted.instructions
+        if let Some(ref text) = extracted_instructions
             && needs_instructions
         {
             self.agent_instructions
@@ -369,7 +516,7 @@ impl ProjectConfig {
         let existing = std::fs::read_to_string(&path).unwrap_or_default();
         let mut out = existing.clone();
 
-        if needs_guidance && let Some(ref text) = extracted.guidance {
+        if needs_guidance && let Some(ref text) = extracted_guidance {
             out = upsert_agent_value_in_section(
                 &out,
                 "[agent-launch-instructions]",
@@ -378,7 +525,7 @@ impl ProjectConfig {
             );
         }
 
-        if needs_instructions && let Some(ref text) = extracted.instructions {
+        if needs_instructions && let Some(ref text) = extracted_instructions {
             out = upsert_agent_value_in_section(
                 &out,
                 "[agent-additional-instructions]",
@@ -1800,7 +1947,10 @@ fn launch_instructions_heading() -> String {
     out.push_str("# Adds a \"## Launch Instructions\" section near the top\n");
     out.push_str("# of each agent file. Use this for startup tasks, required\n");
     out.push_str("# reading, or project-specific operating notes.\n");
+    out.push_str("# The reserved key `all` applies to every agent, rendered\n");
+    out.push_str("# before that agent's own entry.\n");
     out.push_str("# Examples:\n");
+    out.push_str("# all = \"Run `just setup` before anything else.\"\n");
     out.push_str("# rust = \"Read docs/architecture.md before coding.\"\n");
     out.push_str("# iced = \"\"\"\n");
     out.push_str("# Read docs/ui.md.\n");
@@ -1868,9 +2018,7 @@ fn normalize_attached_section_headers(content: &str) -> String {
             let found = HEADERS
                 .iter()
                 .filter_map(|header| pending.find(header).map(|idx| (idx, *header)))
-                .filter(|(idx, _)| {
-                    *idx > 0 && !index_is_inside_inline_string(&pending, *idx)
-                })
+                .filter(|(idx, _)| *idx > 0 && !index_is_inside_inline_string(&pending, *idx))
                 .min_by_key(|(idx, _)| *idx);
             let Some((idx, header)) = found else {
                 out.push(pending);
@@ -2492,7 +2640,9 @@ fn create_project_config(path: &Path, agents: &[String], skills: &[String]) {
     out.push_str("\n\n# ── Additional Instructions ──────────────────────────\n");
     out.push_str("# Adds a \"## Additional Instructions\" section at the\n");
     out.push_str("# bottom of each agent file. Project-specific rules,\n");
-    out.push_str("# conventions, or reminders for this agent.\n");
+    out.push_str("# conventions, or reminders for this agent. The reserved\n");
+    out.push_str("# key `all` applies to every agent, rendered before that\n");
+    out.push_str("# agent's own entry.\n");
     out.push_str("#\n");
     out.push_str("[agent-additional-instructions]\n\n");
     for (i, name) in agents.iter().enumerate() {
@@ -2508,6 +2658,8 @@ fn create_project_config(path: &Path, agents: &[String], skills: &[String]) {
     out.push_str("# top of each skill's SKILL.md. Project-specific\n");
     out.push_str("# context for how this skill applies to your codebase.\n");
     out.push_str("# Won't overwrite the skill author's own instructions.\n");
+    out.push_str("# The reserved key `all` applies to every skill,\n");
+    out.push_str("# rendered before that skill's own entry.\n");
     out.push_str("#\n");
     out.push_str("[skill-instructions]\n\n");
     for (i, name) in skills.iter().enumerate() {
@@ -2869,7 +3021,10 @@ mod tests {
         );
         let out = super::sync_project_config_header(&content);
         assert!(out.starts_with(super::project_config_header().trim_end()));
-        assert!(!out.contains("old banner line"), "stale banner must go:\n{out}");
+        assert!(
+            !out.contains("old banner line"),
+            "stale banner must go:\n{out}"
+        );
         assert!(
             out.contains("project-skills-dir = \"p\""),
             "user content after the banner must stay:\n{out}"
@@ -2900,10 +3055,8 @@ mod tests {
         // Integration-level check that the filename alone routes the
         // preserve/rewrite decision, matching project_config_path()'s
         // vstack.toml vs vstack-local.toml split (VST-40).
-        let dir = std::env::temp_dir().join(format!(
-            "vstack_test_repair_header_{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("vstack_test_repair_header_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
@@ -2941,7 +3094,10 @@ mod tests {
         let content = format!("# some other file\n\nproject-skills-dir = \"p\"\n\n{LAUNCH_BODY}");
         assert_eq!(super::sync_project_config_header(&content), content);
         // Banner but no recognizable body: also untouched.
-        let no_body = format!("{}\n\n\nkey = 1\n", super::project_config_header().trim_end());
+        let no_body = format!(
+            "{}\n\n\nkey = 1\n",
+            super::project_config_header().trim_end()
+        );
         assert_eq!(super::sync_project_config_header(&no_body), no_body);
     }
 
@@ -2956,6 +3112,237 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn shared_instruction_key_parses_in_all_three_tables() {
+        let toml = r#"
+[agent-launch-instructions]
+all = "Run just setup first."
+rust = "Read docs/architecture.md."
+
+[agent-additional-instructions]
+all = "Fleet-wide rule."
+
+[skill-instructions]
+all = "Shared skill rule."
+trading-design = "Dark theme."
+"#;
+        let config: ProjectConfig = toml::from_str(toml).unwrap();
+        assert_eq!(config.shared_guidance(), Some("Run just setup first."));
+        assert_eq!(config.shared_instructions(), Some("Fleet-wide rule."));
+        // Per-agent accessors stay item-specific.
+        assert_eq!(
+            config.guidance_for("rust"),
+            Some("Read docs/architecture.md.")
+        );
+        assert_eq!(config.guidance_for("iced"), None);
+        // Skill lookup merges shared-first with the skill's own entry.
+        assert_eq!(
+            config.skill_instructions_for("trading-design").as_deref(),
+            Some("Shared skill rule.\n\nDark theme.")
+        );
+        // Skills without their own entry still get the shared value.
+        assert_eq!(
+            config.skill_instructions_for("github").as_deref(),
+            Some("Shared skill rule.")
+        );
+    }
+
+    #[test]
+    fn shared_instruction_key_accepts_star_alias() {
+        let toml = "[agent-launch-instructions]\n\"*\" = \"Star rule.\"\n";
+        let config: ProjectConfig = toml::from_str(toml).unwrap();
+        assert_eq!(config.shared_guidance(), Some("Star rule."));
+        // `all` wins over the alias when both are present.
+        let toml = "[agent-launch-instructions]\nall = \"All rule.\"\n\"*\" = \"Star rule.\"\n";
+        let config: ProjectConfig = toml::from_str(toml).unwrap();
+        assert_eq!(config.shared_guidance(), Some("All rule."));
+    }
+
+    #[test]
+    fn merge_shared_and_specific_orders_shared_first() {
+        assert_eq!(
+            ProjectConfig::merge_shared_and_specific(Some("shared"), Some("specific")).as_deref(),
+            Some("shared\n\nspecific")
+        );
+        assert_eq!(
+            ProjectConfig::merge_shared_and_specific(Some("shared"), None).as_deref(),
+            Some("shared")
+        );
+        assert_eq!(
+            ProjectConfig::merge_shared_and_specific(None, Some("specific")).as_deref(),
+            Some("specific")
+        );
+        assert_eq!(ProjectConfig::merge_shared_and_specific(None, None), None);
+    }
+
+    #[test]
+    fn strip_shared_prefix_removes_merged_render_remainder() {
+        // Extracted text that IS the shared value: nothing agent-specific.
+        assert_eq!(
+            ProjectConfig::strip_shared_prefix(Some("shared"), "shared"),
+            None
+        );
+        // Merged render round-trips back to the specific remainder.
+        assert_eq!(
+            ProjectConfig::strip_shared_prefix(Some("shared"), "shared\n\nmine"),
+            Some("mine")
+        );
+        // Unrelated text passes through untouched.
+        assert_eq!(
+            ProjectConfig::strip_shared_prefix(Some("shared"), "custom"),
+            Some("custom")
+        );
+        // No shared value configured: extraction is untouched.
+        assert_eq!(
+            ProjectConfig::strip_shared_prefix(None, "anything"),
+            Some("anything")
+        );
+    }
+
+    #[test]
+    fn strip_shared_prefix_requires_blank_line_boundary() {
+        // Authored text that merely STARTS with the shared value is not a
+        // merged render and must pass through unmodified — stripping would
+        // corrupt "Run tests before X" into "before X".
+        assert_eq!(
+            ProjectConfig::strip_shared_prefix(Some("Run tests"), "Run tests before X"),
+            Some("Run tests before X")
+        );
+        // A single newline is not the merged-render blank-line boundary.
+        assert_eq!(
+            ProjectConfig::strip_shared_prefix(Some("Run tests"), "Run tests\nbefore X"),
+            Some("Run tests\nbefore X")
+        );
+        // Blank line with interior spaces still counts as the boundary.
+        assert_eq!(
+            ProjectConfig::strip_shared_prefix(Some("Run tests"), "Run tests\n  \nmine"),
+            Some("mine")
+        );
+        // Exact equality (whitespace-trimmed) strips to None.
+        assert_eq!(
+            ProjectConfig::strip_shared_prefix(Some("Run tests"), "  Run tests\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn strip_shared_block_drops_marked_region_regardless_of_configured_value() {
+        let marked_old = ProjectConfig::mark_shared("Old shared.");
+
+        // Value changed since render: marker wins, no comparison involved.
+        assert_eq!(
+            ProjectConfig::strip_shared_block(
+                Some("New shared."),
+                &format!("{marked_old}\n\nmine")
+            )
+            .as_deref(),
+            Some("mine")
+        );
+        // Value removed since render: marked region still dropped.
+        assert_eq!(
+            ProjectConfig::strip_shared_block(None, &format!("{marked_old}\n\nmine")).as_deref(),
+            Some("mine")
+        );
+        // Marked-only render leaves nothing to persist.
+        assert_eq!(ProjectConfig::strip_shared_block(None, &marked_old), None);
+        // Pre-marker legacy render: falls back to prefix-stripping the
+        // currently configured value.
+        assert_eq!(
+            ProjectConfig::strip_shared_block(Some("Old shared."), "Old shared.\n\nmine")
+                .as_deref(),
+            Some("mine")
+        );
+        // Legacy render whose shared value has changed is the known-lossy
+        // fallback case: the text passes through untouched.
+        assert_eq!(
+            ProjectConfig::strip_shared_block(Some("New shared."), "custom").as_deref(),
+            Some("custom")
+        );
+    }
+
+    #[test]
+    fn save_extracted_drops_marked_shared_after_value_change() {
+        let dir = std::env::temp_dir().join(format!(
+            "vstack_test_marked_save_extracted_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("vstack.toml"),
+            "[agent-launch-instructions]\nall = \"New shared.\"\n",
+        )
+        .unwrap();
+        let mut config = ProjectConfig::load(&dir);
+
+        // The extracted render carries the OLD shared value inside markers;
+        // a marked shared-only render must not become a per-agent key.
+        let extracted = crate::agent::AgentExtras {
+            guidance: Some(ProjectConfig::mark_shared("Old shared.")),
+            ..Default::default()
+        };
+        config.save_extracted(&dir, "rust", &extracted);
+        assert_eq!(config.guidance_for("rust"), None);
+
+        // A marked merged render persists only the specific remainder.
+        let extracted = crate::agent::AgentExtras {
+            guidance: Some(format!(
+                "{}\n\nmine",
+                ProjectConfig::mark_shared("Old shared.")
+            )),
+            ..Default::default()
+        };
+        config.save_extracted(&dir, "rust", &extracted);
+        assert_eq!(config.guidance_for("rust"), Some("mine"));
+        let on_disk = std::fs::read_to_string(dir.join("vstack.toml")).unwrap();
+        assert!(on_disk.contains("rust = \"mine\""), "on disk: {on_disk}");
+        assert!(!on_disk.contains("Old shared."), "on disk: {on_disk}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_extracted_never_persists_shared_text_as_per_agent_entry() {
+        let dir = std::env::temp_dir().join(format!(
+            "vstack_test_shared_save_extracted_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("vstack.toml"),
+            "[agent-launch-instructions]\nall = \"shared\"\n",
+        )
+        .unwrap();
+        let mut config = ProjectConfig::load(&dir);
+
+        // Re-extraction of a shared-only render must not create a per-agent key.
+        let extracted = crate::agent::AgentExtras {
+            guidance: Some("shared".into()),
+            ..Default::default()
+        };
+        config.save_extracted(&dir, "rust", &extracted);
+        assert_eq!(config.guidance_for("rust"), None);
+
+        // Re-extraction of a merged render persists only the specific remainder.
+        let extracted = crate::agent::AgentExtras {
+            guidance: Some("shared\n\nmine".into()),
+            ..Default::default()
+        };
+        config.save_extracted(&dir, "rust", &extracted);
+        assert_eq!(config.guidance_for("rust"), Some("mine"));
+        let on_disk = std::fs::read_to_string(dir.join("vstack.toml")).unwrap();
+        assert!(on_disk.contains("rust = \"mine\""), "on disk: {on_disk}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     // vstack: regression. `normalize_attached_section_headers` used to
     // split any line containing a known section header substring, including
@@ -3937,10 +4324,8 @@ rust = "Always use thiserror for errors."
 
     #[test]
     fn migrate_section_names_preserves_bracketed_prose_in_inline_strings() {
-        let dir = std::env::temp_dir().join(format!(
-            "vstack_test_migrate_prose_{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("vstack_test_migrate_prose_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("vstack.toml");
@@ -3962,10 +4347,8 @@ rust = "Always use thiserror for errors."
 
     #[test]
     fn migrate_section_names_preserves_crlf_line_endings() {
-        let dir = std::env::temp_dir().join(format!(
-            "vstack_test_migrate_crlf_{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("vstack_test_migrate_crlf_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("vstack.toml");
@@ -4018,8 +4401,7 @@ rust = "Always use thiserror for errors."
 
     #[test]
     fn repair_still_splits_real_attached_section_headers() {
-        let input =
-            "[agent-launch-instructions]\nrust = \"\" [agent-additional-instructions]\niced = \"\"\n";
+        let input = "[agent-launch-instructions]\nrust = \"\" [agent-additional-instructions]\niced = \"\"\n";
         let out = normalize_attached_section_headers(input);
         assert!(out.contains("rust = \"\"\n[agent-additional-instructions]\niced = \"\"\n"));
 
@@ -4029,10 +4411,8 @@ rust = "Always use thiserror for errors."
 
     #[test]
     fn ensure_project_config_leaves_bracketed_prose_untouched_end_to_end() {
-        let dir = std::env::temp_dir().join(format!(
-            "vstack_test_prose_brackets_{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("vstack_test_prose_brackets_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("vstack.toml");
@@ -4329,10 +4709,8 @@ command = \"./scripts/x.sh\"\n";
 
     #[test]
     fn refresh_skips_write_when_identical_with_trailing_newline() {
-        let dir = std::env::temp_dir().join(format!(
-            "vstack_test_identical_skip_{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("vstack_test_identical_skip_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("vstack.toml");

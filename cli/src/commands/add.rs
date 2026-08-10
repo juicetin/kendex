@@ -4,10 +4,10 @@ use crate::harness::Harness;
 use crate::hook::Hook;
 use crate::installer;
 use crate::pi_extension::PiExtension;
+use crate::resolve::{same_path, source_from_project_lock};
 use crate::skill;
 use crate::skill::Skill;
 use crate::tui;
-use crate::resolve::{same_path, source_from_project_lock};
 use anyhow::Context;
 use anyhow::Result;
 use std::collections::HashSet;
@@ -1490,7 +1490,10 @@ role: engineer
     fn noninteractive_harnesses_rejects_all_unknown_ids_naming_the_flag() {
         let err = noninteractive_harnesses(Some(&["nope".to_string()])).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("--harness"), "hint must name the real flag: {msg}");
+        assert!(
+            msg.contains("--harness"),
+            "hint must name the real flag: {msg}"
+        );
         let ids: Vec<&str> = Harness::ALL.iter().map(Harness::id).collect();
         assert!(
             msg.contains(&ids.join(",")),
@@ -1926,8 +1929,7 @@ source (e.g. switching vstack repos, or starting clean), pass --clobber:
             pi_extension_filter.as_deref(),
             &|name| {
                 all_pi_extensions.iter().any(|e| {
-                    e.name == name
-                        || crate::pi_extension::legacy_names_for(&e.name).contains(&name)
+                    e.name == name || crate::pi_extension::legacy_names_for(&e.name).contains(&name)
                 })
             },
         );
@@ -2064,7 +2066,6 @@ source (e.g. switching vstack repos, or starting clean), pass --clobber:
                 false,
             );
         } else if let Some(harnesses) = noninteractive_harness_selection {
-
             // In non-interactive mode, only auto-install Pi packages when Pi
             // is one of the chosen harnesses. The agents/skills/hooks loops
             // run per-harness, but Pi packages are scope-only — they go to
@@ -2153,6 +2154,21 @@ source (e.g. switching vstack repos, or starting clean), pass --clobber:
             eprintln!("Auto-installed dependent skills: {}", added.join(", "));
         }
         auto_included_skill_names.extend(added);
+    }
+
+    // Preflight every name — including auto-included skills — before the
+    // first mutation: a reserved name failing only inside an install loop
+    // would leave earlier items installed and the project config mutated with
+    // no lock entries written. The per-installer checks stay as defense in
+    // depth.
+    for name in selected_agents
+        .iter()
+        .map(|a| a.name.as_str())
+        .chain(selected_skills.iter().map(|s| s.name.as_str()))
+        .chain(selected_hooks.iter().map(|h| h.name.as_str()))
+    {
+        crate::path_safety::validate_new_item_name(name)
+            .with_context(|| format!("cannot install {name:?}"))?;
     }
     if add_writes_project_skill_root(
         global,
@@ -2374,7 +2390,13 @@ source (e.g. switching vstack repos, or starting clean), pass --clobber:
                 .get(&s.name)
                 .copied()
                 .unwrap_or(method);
-            let result = installer::install_skill(s, *harness, global, skill_method, skill_instr)?;
+            let result = installer::install_skill(
+                s,
+                *harness,
+                global,
+                skill_method,
+                skill_instr.as_deref(),
+            )?;
             log_lines.push(result.detail.clone());
             results.push(result);
         }
@@ -2782,6 +2804,14 @@ fn reconcile_agents(
     let mut regenerated_codex_agent_names = std::collections::HashSet::new();
 
     for (name, entry) in &agent_entries {
+        // Same reservation refresh enforces: never regenerate (or
+        // save_extracted under) a name that now collides with the shared
+        // instruction key — a legacy `all` agent would render as both shared
+        // and item-specific text.
+        if let Err(err) = crate::path_safety::validate_new_item_name(name) {
+            eprintln!("Warning: skipping agent reconciliation for {name:?}: {err:#}");
+            continue;
+        }
         let Some(agent) = source_agents.iter().find(|a| &a.name == *name) else {
             continue;
         };

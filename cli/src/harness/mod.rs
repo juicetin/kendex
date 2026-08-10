@@ -270,6 +270,14 @@ impl Harness {
                     .unwrap_or("Global scope is unsupported")
             );
         }
+        // Every generated agent body points at the canonical failure-reporting
+        // reference; make sure a copy exists and is current, then substitute
+        // its scope-resolved path for the source body's placeholder. The
+        // installed scope can differ from `global`: a project `.agents` that
+        // escapes the project root falls back to the global copy.
+        let reference_global = crate::agent::install_failure_reporting_reference(global)?;
+        let agent = crate::agent::resolve_failure_reference(agent, reference_global);
+        let agent = &agent;
         let dir = self.agents_dir(global);
         match self {
             Harness::ClaudeCode => claude::generate_agent(agent, &dir, skills, hooks, extras),
@@ -339,6 +347,241 @@ impl std::fmt::Display for Harness {
 mod tests {
     use super::Harness;
     use crate::agent::{Agent, AgentRole};
+
+    fn agent_fixture(name: &str) -> Agent {
+        Agent {
+            name: name.into(),
+            description: "Test agent".into(),
+            model: "sonnet".into(),
+            role: AgentRole::Engineer,
+            color: None,
+            effort: None,
+            body: format!("# {name}\n\nIntro.\n\n## Capabilities\n\n- Testing\n"),
+            source_path: Default::default(),
+        }
+    }
+
+    #[test]
+    fn generate_agent_installs_failure_reporting_reference() {
+        let root = std::env::temp_dir().join(format!(
+            "vstack_failure_reporting_ref_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let project = root.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+
+        crate::test_util::with_project_root(&project, || {
+            Harness::ClaudeCode
+                .generate_agent(
+                    &agent_fixture("rust"),
+                    false,
+                    &[],
+                    &[],
+                    &crate::agent::AgentExtras::default(),
+                )
+                .unwrap();
+        });
+
+        let reference = project.join(".agents").join("skill-failure-reporting.md");
+        let content = std::fs::read_to_string(&reference).expect("reference installed");
+        assert_eq!(content, crate::agent::FAILURE_REPORTING_DOC);
+        assert!(
+            content.contains("provenly incorrect guidance"),
+            "canonical doc must carry the full decision tree"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn generate_agent_renders_shared_and_specific_instructions_in_order() {
+        let root = std::env::temp_dir().join(format!(
+            "vstack_shared_key_render_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let project = root.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+
+        let config: crate::project_config::ProjectConfig = toml::from_str(
+            "[agent-launch-instructions]\nall = \"Shared launch.\"\nrust = \"Rust launch.\"\n\
+             [agent-additional-instructions]\nall = \"Shared extra.\"\n",
+        )
+        .unwrap();
+        let agent = agent_fixture("rust");
+        let extras = crate::resolve::build_agent_extras(&config, &agent.name, &agent.role, None);
+
+        let content = crate::test_util::with_project_root(&project, || {
+            let path = Harness::ClaudeCode
+                .generate_agent(&agent, false, &[], &[], &extras)
+                .unwrap();
+            std::fs::read_to_string(path).unwrap()
+        });
+
+        let marked_launch = crate::project_config::ProjectConfig::mark_shared("Shared launch.");
+        assert!(
+            content.contains(&format!(
+                "## Launch Instructions\n\n{marked_launch}\n\nRust launch."
+            )),
+            "merged launch instructions render marked shared first: {content}"
+        );
+        let marked_extra = crate::project_config::ProjectConfig::mark_shared("Shared extra.");
+        assert!(
+            content.contains(&format!("## Additional Instructions\n\n{marked_extra}")),
+            "shared-only additional instructions render marked: {content}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn generate_agent_substitutes_failure_reference_token_per_scope() {
+        let root = std::env::temp_dir().join(format!(
+            "vstack_failure_ref_token_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let project = root.join("project");
+        let home = root.join("home");
+        let config_dir = root.join("config");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&config_dir).unwrap();
+
+        let mut agent = agent_fixture("rust");
+        agent.body = format!(
+            "# rust\n\nIntro. Full rules: `{}`.\n\n## Capabilities\n\n- Testing\n",
+            crate::agent::FAILURE_REF_TOKEN
+        );
+
+        // Project scope: the token becomes the project-relative path.
+        let content = crate::test_util::with_project_root(&project, || {
+            let path = Harness::ClaudeCode
+                .generate_agent(
+                    &agent,
+                    false,
+                    &[],
+                    &[],
+                    &crate::agent::AgentExtras::default(),
+                )
+                .unwrap();
+            std::fs::read_to_string(path).unwrap()
+        });
+        assert!(
+            content.contains("`<project-root>/.agents/skill-failure-reporting.md`"),
+            "project scope substitutes the project-root-anchored path: {content}"
+        );
+        assert!(
+            !content.contains("{{"),
+            "no unsubstituted placeholder may leak: {content}"
+        );
+
+        // Global scope: the token becomes the resolved config-dir path.
+        let content = crate::test_util::with_home_and_config(&home, &config_dir, || {
+            let path = Harness::ClaudeCode
+                .generate_agent(
+                    &agent,
+                    true,
+                    &[],
+                    &[],
+                    &crate::agent::AgentExtras::default(),
+                )
+                .unwrap();
+            std::fs::read_to_string(path).unwrap()
+        });
+        let expected = crate::config::display_path(
+            &config_dir.join("vstack").join("skill-failure-reporting.md"),
+        );
+        assert!(
+            content.contains(&format!("`{expected}`")),
+            "global scope substitutes the config-dir path {expected}: {content}"
+        );
+        assert!(
+            !content.contains("{{"),
+            "no unsubstituted placeholder may leak: {content}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn generate_agent_falls_back_to_global_reference_through_symlinked_agents_ancestor() {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!(
+            "vstack_failure_ref_symlink_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let project = root.join("project");
+        let home = root.join("home");
+        let config_dir = root.join("config");
+        let outside_agents = root.join("outside-agents");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::create_dir_all(&outside_agents).unwrap();
+        symlink(&outside_agents, project.join(".agents")).unwrap();
+
+        let mut agent = agent_fixture("rust");
+        agent.body = format!(
+            "# rust\n\nIntro. Full rules: `{}`.\n\n## Capabilities\n\n- Testing\n",
+            crate::agent::FAILURE_REF_TOKEN
+        );
+
+        // Generation itself is not `.agents`-routed for claude-code and must
+        // still succeed; the project reference write is withheld and the body
+        // pointer falls back to the global copy so it never dangles.
+        let content = crate::test_util::with_home_and_config(&home, &config_dir, || {
+            crate::test_util::with_project_root(&project, || {
+                let path = Harness::ClaudeCode
+                    .generate_agent(
+                        &agent,
+                        false,
+                        &[],
+                        &[],
+                        &crate::agent::AgentExtras::default(),
+                    )
+                    .unwrap();
+                std::fs::read_to_string(path).unwrap()
+            })
+        });
+
+        assert!(
+            !outside_agents.join("skill-failure-reporting.md").exists(),
+            "reference must not be written outside the project"
+        );
+        let global_reference = config_dir.join("vstack").join("skill-failure-reporting.md");
+        assert!(
+            global_reference.is_file(),
+            "global fallback copy must be installed at {global_reference:?}"
+        );
+        let expected = crate::config::display_path(&global_reference);
+        assert!(
+            content.contains(&format!("`{expected}`")),
+            "body must point at the global fallback {expected}: {content}"
+        );
+        assert!(
+            !content.contains(".agents/skill-failure-reporting.md"),
+            "body must not point at the withheld project path: {content}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn cursor_is_project_scope_only() {

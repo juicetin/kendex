@@ -742,46 +742,76 @@ fn extract_toml_table_section(path: &Path, table: &str) -> Vec<u8> {
     result
 }
 
-/// Extract the relevant section for a given name from a TOML file.
-/// Returns the raw text of lines belonging to that key, or empty if not found.
-/// This avoids hashing the entire config when only one agent/skill's section matters.
-fn extract_toml_section_for(path: &Path, name: &str) -> Vec<u8> {
+/// Extract the shared `all`/`"*"` values from the instruction tables that
+/// apply to one item kind, canonically serialized. Scoped to the named tables
+/// on purpose: a shared agent-instruction edit must not stale skill installs
+/// (and vice versa) — table-agnostic key lookup would cross-invalidate.
+fn extract_shared_instruction_sections(path: &Path, tables: &[&str]) -> Vec<u8> {
     let Ok(content) = std::fs::read_to_string(path) else {
         return Vec::new();
     };
+    let Ok(toml::Value::Table(root)) = content.parse::<toml::Value>() else {
+        return Vec::new();
+    };
     let mut result = Vec::new();
-    let mut capturing = false;
-    for line in content.lines() {
-        let trimmed = line.trim();
-        // Match: name = ... (start of this key's value)
-        if trimmed.starts_with(&format!("{} =", name))
-            || trimmed.starts_with(&format!("\"{}\" =", name))
-        {
-            capturing = true;
-            result.extend_from_slice(line.as_bytes());
-            result.push(b'\n');
+    for table_name in tables {
+        let Some(toml::Value::Table(table)) = root.get(*table_name) else {
             continue;
-        }
-        if capturing {
-            // Stop at next top-level key or section header
-            if trimmed.starts_with('[')
-                || (!trimmed.is_empty()
-                    && !trimmed.starts_with('#')
-                    && !trimmed.starts_with('"')
-                    && !trimmed.starts_with('{')
-                    && !trimmed.starts_with(']')
-                    && !trimmed.starts_with(',')
-                    && !line.starts_with(' ')
-                    && !line.starts_with('\t'))
-            {
-                capturing = false;
-            } else {
-                result.extend_from_slice(line.as_bytes());
-                result.push(b'\n');
+        };
+        // Same precedence as shared_instruction_entry: `all` shadows `"*"`,
+        // so only the effective entry feeds the hash — editing a shadowed
+        // alias changes no rendered output and must not stale installs.
+        for key in [
+            crate::project_config::SHARED_INSTRUCTIONS_KEY,
+            crate::project_config::SHARED_INSTRUCTIONS_KEY_ALIAS,
+        ] {
+            if let Some(value) = table.get(key) {
+                result.extend_from_slice(format!("{table_name}.{key} = {value}\n").as_bytes());
+                break;
             }
         }
     }
     result
+}
+
+/// The instruction tables whose shared `all`/`"*"` entries render into items
+/// of each kind, including the legacy serde aliases ProjectConfig accepts
+/// (`agent-guidance`, `agent-instructions`).
+const AGENT_SHARED_TABLES: &[&str] = &[
+    "agent-launch-instructions",
+    "agent-guidance",
+    "agent-additional-instructions",
+    "agent-instructions",
+];
+const SKILL_SHARED_TABLES: &[&str] = &["skill-instructions"];
+
+/// Extract the values for a given key from a TOML file, wherever the key
+/// appears: top level or inside any (nested) table. Values are canonically
+/// re-serialized so the hash tracks content rather than source formatting —
+/// the real TOML parser handles multiline bodies and escaped quotes that a
+/// line scanner cannot. Returns empty bytes if the file is missing,
+/// unparsable, or the key absent.
+fn extract_toml_section_for(path: &Path, name: &str) -> Vec<u8> {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let Ok(toml::Value::Table(table)) = content.parse::<toml::Value>() else {
+        return Vec::new();
+    };
+    let mut result = Vec::new();
+    collect_key_values("", &table, name, &mut result);
+    result
+}
+
+fn collect_key_values(prefix: &str, table: &toml::value::Table, name: &str, out: &mut Vec<u8>) {
+    for (key, value) in table {
+        if key == name {
+            out.extend_from_slice(format!("{prefix}{key} = {value}\n").as_bytes());
+        }
+        if let toml::Value::Table(nested) = value {
+            collect_key_values(&format!("{prefix}{key}."), nested, name, out);
+        }
+    }
 }
 
 /// Refresh cached repos for all remote sources found in installed lock entries.
@@ -938,11 +968,19 @@ pub fn compute_source_hash(entry: &LockEntry) -> String {
             {
                 state = fnv1a_chain(state, &hash_dir_bytes(dir).to_le_bytes());
             }
-            // Only hash this skill's section from project vstack.toml
-            let project_config = proj_root.join("vstack.toml");
+            // Hash this skill's section plus the shared `all`/`*` entries of
+            // the skill instruction table — a shared-key edit changes every
+            // rendered skill, so it must stale every skill install.
+            // project_config_path honors the vstack-local.toml redirect for
+            // source-catalog projects.
+            let project_config = crate::project_config::project_config_path(&proj_root);
             let section = extract_toml_section_for(&project_config, &entry.name);
             if !section.is_empty() {
                 state = fnv1a_chain(state, &section);
+            }
+            let shared = extract_shared_instruction_sections(&project_config, SKILL_SHARED_TABLES);
+            if !shared.is_empty() {
+                state = fnv1a_chain(state, &shared);
             }
         }
         ItemKind::Agent => {
@@ -952,14 +990,30 @@ pub fn compute_source_hash(entry: &LockEntry) -> String {
             {
                 state = fnv1a_chain(state, &hash_file_bytes(file).to_le_bytes());
             }
-            // Hash this agent's sections from both configs
+            // Hash this agent's sections plus the shared `all`/`*` entries of
+            // the agent instruction tables from both configs — a shared-key
+            // edit changes every rendered agent, so it must stale every agent
+            // install. project_config_path honors the vstack-local.toml
+            // redirect for source-catalog projects.
             let source_config = source_root.join("vstack.toml");
-            for config_path in [&source_config, &proj_root.join("vstack.toml")] {
+            for config_path in [
+                &source_config,
+                &crate::project_config::project_config_path(&proj_root),
+            ] {
                 let section = extract_toml_section_for(config_path, &entry.name);
                 if !section.is_empty() {
                     state = fnv1a_chain(state, &section);
                 }
+                let shared = extract_shared_instruction_sections(config_path, AGENT_SHARED_TABLES);
+                if !shared.is_empty() {
+                    state = fnv1a_chain(state, &shared);
+                }
             }
+            // The failure-reporting reference renders into every agent (and
+            // is installed alongside them); a release that changes only the
+            // canonical document must stale agent installs so refresh rewrites
+            // the on-disk copy.
+            state = fnv1a_chain(state, crate::agent::FAILURE_REPORTING_DOC.as_bytes());
         }
         ItemKind::Hook => {
             let file = crate::catalog::find_item_path(&source_root, entry.kind, &entry.name);
@@ -1964,7 +2018,10 @@ mod source_registry_tests {
         // guards already neutralize a stale self-pointer there, and dropping a
         // user's sticky per-project choice is riskier than cleaning the
         // picker-facing entries list.
-        assert_eq!(reg.current.as_deref(), Some(project.display().to_string()).as_deref());
+        assert_eq!(
+            reg.current.as_deref(),
+            Some(project.display().to_string()).as_deref()
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -2030,7 +2087,10 @@ mod source_registry_tests {
         let loaded = SourceRegistry::load(&path).unwrap();
         assert_eq!(
             loaded.entries,
-            vec!["vanillagreencom/vstack".to_string(), plain.display().to_string()],
+            vec![
+                "vanillagreencom/vstack".to_string(),
+                plain.display().to_string()
+            ],
             "load drops dead local paths (worktree hygiene), keeps live ones"
         );
         let _ = fs::remove_dir_all(&dir);
@@ -2165,6 +2225,114 @@ mod source_registry_tests {
 
         assert!(!h1.is_empty());
         assert_ne!(h1, h2);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn agent_source_hash_tracks_shared_instruction_key() {
+        let dir = sandbox("shared_key_hash_agent");
+        let agents_dir = dir.join("agents");
+        fs::create_dir_all(&agents_dir).unwrap();
+        fs::write(
+            agents_dir.join("demo.md"),
+            "---\nname: demo\ndescription: Demo\n---\n# Demo\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.join("vstack.toml"),
+            "[agent-additional-instructions]\nall = \"Fleet rule v1\"\n",
+        )
+        .unwrap();
+
+        let entry = LockEntry {
+            name: "demo".to_string(),
+            kind: ItemKind::Agent,
+            source: dir.display().to_string(),
+            source_repo: None,
+            harnesses: vec!["claude-code".to_string()],
+            method: InstallMethod::Symlink,
+            installed_at: "2026-08-09T00:00:00Z".to_string(),
+            source_hash: String::new(),
+        };
+
+        let h1 = compute_source_hash(&entry);
+        fs::write(
+            dir.join("vstack.toml"),
+            "[agent-additional-instructions]\nall = \"Fleet rule v2\"\n",
+        )
+        .unwrap();
+        let h2 = compute_source_hash(&entry);
+        assert!(!h1.is_empty());
+        assert_ne!(
+            h1, h2,
+            "editing the shared `all` entry must stale every agent install"
+        );
+
+        // The `\"*\"` alias spelling must stale installs the same way.
+        fs::write(
+            dir.join("vstack.toml"),
+            "[agent-additional-instructions]\n\"*\" = \"Fleet rule v3\"\n",
+        )
+        .unwrap();
+        let h3 = compute_source_hash(&entry);
+        assert_ne!(h2, h3);
+
+        // A shared key in the SKILL instruction table must not stale agents:
+        // cross-kind invalidation would report unrelated items outdated.
+        fs::write(
+            dir.join("vstack.toml"),
+            "[agent-additional-instructions]\n\"*\" = \"Fleet rule v3\"\n\n[skill-instructions]\nall = \"Skill rule v1\"\n",
+        )
+        .unwrap();
+        let h4 = compute_source_hash(&entry);
+        fs::write(
+            dir.join("vstack.toml"),
+            "[agent-additional-instructions]\n\"*\" = \"Fleet rule v3\"\n\n[skill-instructions]\nall = \"Skill rule v2\"\n",
+        )
+        .unwrap();
+        let h5 = compute_source_hash(&entry);
+        assert_eq!(
+            h4, h5,
+            "editing [skill-instructions].all must not stale agent installs"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn agent_source_hash_tracks_multiline_shared_body() {
+        let dir = sandbox("shared_key_hash_multiline");
+        let agents_dir = dir.join("agents");
+        fs::create_dir_all(&agents_dir).unwrap();
+        fs::write(
+            agents_dir.join("demo.md"),
+            "---\nname: demo\ndescription: Demo\n---\n# Demo\n",
+        )
+        .unwrap();
+        // The body contains an escaped quote run (`""\"`) — a naive scanner
+        // would treat it as the closing delimiter and stop hashing there.
+        let toml_v1 = "[agent-additional-instructions]\nall = \"\"\"\nFleet rule body v1\nquote run: \"\"\\\" done\nSecond line\n\"\"\"\n";
+        fs::write(dir.join("vstack.toml"), toml_v1).unwrap();
+
+        let entry = LockEntry {
+            name: "demo".to_string(),
+            kind: ItemKind::Agent,
+            source: dir.display().to_string(),
+            source_repo: None,
+            harnesses: vec!["claude-code".to_string()],
+            method: InstallMethod::Symlink,
+            installed_at: "2026-08-09T00:00:00Z".to_string(),
+            source_hash: String::new(),
+        };
+
+        let h1 = compute_source_hash(&entry);
+        // Edit ONLY an unindented body line AFTER the escaped quote run.
+        let toml_v2 = "[agent-additional-instructions]\nall = \"\"\"\nFleet rule body v1\nquote run: \"\"\\\" done\nSecond line EDITED\n\"\"\"\n";
+        fs::write(dir.join("vstack.toml"), toml_v2).unwrap();
+        let h2 = compute_source_hash(&entry);
+        assert_ne!(
+            h1, h2,
+            "editing a multiline shared body (past escaped quotes) must stale the agent install"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 

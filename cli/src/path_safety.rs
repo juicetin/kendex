@@ -3,6 +3,10 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// Path-safety validation for any code path that joins an item name into a
+/// filesystem path. Removal must stay on this check alone: an item named after
+/// a later-reserved word may have been installed by a previous release, and
+/// deleting it has to keep working.
 pub(crate) fn validate_item_name(name: &str) -> Result<()> {
     if name.is_empty() {
         bail!("item name must not be empty");
@@ -16,6 +20,20 @@ pub(crate) fn validate_item_name(name: &str) -> Result<()> {
     }
     if !chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')) {
         bail!("item name {name:?} must contain only ASCII letters, digits, '.', '_', or '-'");
+    }
+    Ok(())
+}
+
+/// Install/add-time validation: path safety plus the reserved shared key.
+/// Only paths that create or regenerate an install reject `all`.
+pub(crate) fn validate_new_item_name(name: &str) -> Result<()> {
+    validate_item_name(name)?;
+    if name.eq_ignore_ascii_case(crate::project_config::SHARED_INSTRUCTIONS_KEY) {
+        bail!(
+            "item name {name:?} is reserved: `all` is the shared key in \
+             [agent-launch-instructions], [agent-additional-instructions], and \
+             [skill-instructions] that applies to every agent/skill"
+        );
     }
     Ok(())
 }
@@ -50,6 +68,102 @@ pub(crate) fn write_file_no_follow(path: &Path, contents: impl AsRef<[u8]>) -> R
         let _ = std::fs::remove_file(&tmp);
     }
     write_result
+}
+
+/// `git rev-parse --git-common-dir` for `dir`, canonicalized. `None` when `dir`
+/// is not inside a Git repository, when git is unavailable, or when the answer
+/// cannot be resolved — every one of which must fail closed at the call site.
+fn git_common_dir(dir: &Path) -> Option<PathBuf> {
+    let output = std::process::Command::new("git")
+        .args(["-C", dir.to_str()?, "rev-parse", "--git-common-dir"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if raw.is_empty() {
+        return None;
+    }
+    // `--git-common-dir` is relative to the queried directory unless git is new
+    // enough to have been asked for an absolute path, so resolve it against
+    // `dir` rather than the process cwd.
+    let reported = Path::new(&raw);
+    let absolute = if reported.is_absolute() {
+        reported.to_path_buf()
+    } else {
+        dir.join(reported)
+    };
+    absolute.canonicalize().ok()
+}
+
+/// Positive proof that `target` lives in a working tree of the SAME repository
+/// as `project_root` — both resolve to one `--git-common-dir`.
+///
+/// This is not a relaxation of the containment boundary; it answers a different
+/// and stronger question. Lexical containment asks "is this path under the
+/// project directory", which cannot tell another checkout of the repository the
+/// operator is already working in from an arbitrary directory elsewhere on
+/// disk. vstack's own `worktree` skill provisions the first case: every issue
+/// worktree gets a `.agents` symlink into the main checkout so a ~100 MB harness
+/// library is shared rather than copied per branch (vstack#886). Refusing that
+/// made refresh unusable from any worktree.
+///
+/// Everything else still fails closed. A target that is not a repository has no
+/// common dir; a target in a DIFFERENT repository has a different one.
+pub(crate) fn is_same_repository_worktree(project_root: &Path, target: &Path) -> bool {
+    // `git -C` needs a directory. `target` is normally the canonical
+    // `.agents`/`.agents/skills` directory, but probe its parent if it is not.
+    let probe = if target.is_dir() {
+        target
+    } else {
+        match target.parent() {
+            Some(parent) => parent,
+            None => return false,
+        }
+    };
+    match (git_common_dir(project_root), git_common_dir(probe)) {
+        (Some(project_common), Some(target_common)) => project_common == target_common,
+        _ => false,
+    }
+}
+
+/// Reject a project `.agents` directory that resolves outside the project
+/// root before anything is written beneath it. [`write_file_no_follow`] only
+/// guards the final path component; this closes the symlinked-ancestor escape
+/// for callers that write under `.agents` without a refresh preflight (TUI
+/// scope moves, agent-only adds). A `.agents` resolving into another worktree
+/// of the same repository stays allowed — vstack's own `worktree` skill
+/// provisions that layout (vstack#886).
+pub(crate) fn ensure_agents_dir_within_project(project_root: &Path) -> Result<()> {
+    let agents_dir = project_root.join(".agents");
+    match std::fs::symlink_metadata(&agents_dir) {
+        // Missing is fine: create_dir_all will make it inside the project.
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => bail!("failed to inspect project .agents directory: {err}"),
+        Ok(_) => {}
+    }
+    let project_root_canon = project_root
+        .canonicalize()
+        .map_err(|err| anyhow::anyhow!("failed to resolve project root: {err}"))?;
+    let agents_dir_canon = agents_dir
+        .canonicalize()
+        .map_err(|err| anyhow::anyhow!("failed to resolve .agents directory: {err}"))?;
+    if !agents_dir_canon.starts_with(&project_root_canon)
+        && !is_same_repository_worktree(&project_root_canon, &agents_dir_canon)
+    {
+        bail!(
+            "refusing .agents path outside project root: {}",
+            agents_dir.display()
+        );
+    }
+    if !agents_dir_canon.is_dir() {
+        bail!(
+            "project .agents path is not a directory: {}",
+            agents_dir.display()
+        );
+    }
+    Ok(())
 }
 
 pub(crate) fn ensure_file_write_target_safe(path: &Path) -> Result<()> {
@@ -99,6 +213,23 @@ mod tests {
         }
         assert!(validate_item_name("guard-hook").is_ok());
         assert!(validate_item_name("guard.hook_1").is_ok());
+    }
+
+    #[test]
+    fn validate_new_item_name_rejects_reserved_shared_instruction_key() {
+        for name in ["all", "All", "ALL"] {
+            let err = validate_new_item_name(name).unwrap_err();
+            assert!(
+                err.to_string().contains("reserved"),
+                "expected reserved-name error for {name:?}, got: {err}"
+            );
+            // Path-safety validation (used by removal) must keep accepting the
+            // name so legacy installs stay deletable.
+            assert!(validate_item_name(name).is_ok(), "rejected {name:?}");
+        }
+        // Names merely containing "all" stay valid everywhere.
+        assert!(validate_new_item_name("allow").is_ok());
+        assert!(validate_new_item_name("all-agents").is_ok());
     }
 
     #[cfg(unix)]

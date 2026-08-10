@@ -439,21 +439,76 @@ pub fn extract_frontmatter_color(content: &str) -> Option<String> {
 
 /// Extract a markdown section's body text between its heading and the next `## ` heading.
 fn extract_section(content: &str, header: &str) -> Option<String> {
-    let start = content.find(header)?;
+    let start = find_outside_marked(content, header)?;
     let after_header = &content[start + header.len()..];
     // Find the body text (skip leading whitespace)
     let trimmed = after_header.trim_start();
     if trimmed.is_empty() {
         return None;
     }
-    // End at next ## heading or end of content
-    let end = trimmed.find("\n## ").unwrap_or(trimmed.len());
-    let text = trimmed[..end].trim();
+    let text = trimmed[..section_end(trimmed)].trim();
     if text.is_empty() {
         None
     } else {
         Some(text.to_string())
     }
+}
+
+/// End of a section body: the next `\n## ` heading, or end of content.
+/// Headings inside a marked shared-instructions region never terminate the
+/// section — a shared `all` value may itself contain `## ` headings, and
+/// splitting the region there would leave an unmatched start marker that
+/// `ProjectConfig::strip_shared_block` cannot drop, persisting a truncated
+/// shared fragment as item-specific text on re-extraction.
+fn section_end(text: &str) -> usize {
+    let mut from = 0;
+    loop {
+        let Some(rel) = text[from..].find("\n## ") else {
+            return text.len();
+        };
+        let candidate = from + rel;
+        match enclosing_marked_region_end(text, candidate) {
+            Some(region_end) => from = region_end,
+            None => return candidate,
+        }
+    }
+}
+
+/// First occurrence of `needle` that does not fall inside a marked
+/// shared-instructions region. The section header lookup needs this too:
+/// shared text may contain a literal `## Additional Instructions` line, and
+/// selecting that nested occurrence would extract the tail of the shared
+/// block as item-specific text.
+fn find_outside_marked(text: &str, needle: &str) -> Option<usize> {
+    let mut from = 0;
+    loop {
+        let pos = from + text[from..].find(needle)?;
+        match enclosing_marked_region_end(text, pos) {
+            Some(region_end) => from = region_end,
+            None => return Some(pos),
+        }
+    }
+}
+
+/// If `pos` falls inside a `SHARED_INSTRUCTIONS_START`..`SHARED_INSTRUCTIONS_END`
+/// region of `text`, return the offset just past that region's end marker.
+fn enclosing_marked_region_end(text: &str, pos: usize) -> Option<usize> {
+    use crate::project_config::{SHARED_INSTRUCTIONS_END, SHARED_INSTRUCTIONS_START};
+    let mut from = 0;
+    while let Some(rel_start) = text[from..].find(SHARED_INSTRUCTIONS_START) {
+        let start = from + rel_start;
+        if start > pos {
+            return None;
+        }
+        let end = start
+            + text[start..].find(SHARED_INSTRUCTIONS_END)?
+            + SHARED_INSTRUCTIONS_END.len();
+        if pos > start && pos < end {
+            return Some(end);
+        }
+        from = end;
+    }
+    None
 }
 
 /// Extract the developer_instructions body from a Codex TOML agent file.
@@ -488,6 +543,97 @@ pub fn custom_hooks_section(hooks: &[CustomHookEntry]) -> String {
         ));
     }
     section
+}
+
+/// Canonical skill-failure routing rules referenced by the short reporting
+/// directive in every agent body. One copy per install scope replaces the
+/// former ~300-word blockquote repeated in every generated agent file.
+pub const FAILURE_REPORTING_DOC: &str = include_str!("../../docs/skill-failure-reporting.md");
+
+/// Where the failure-reporting reference lives for a scope: next to the
+/// skills install root (`.agents/` for projects, the platform config dir's
+/// `vstack/` for global installs).
+pub fn failure_reporting_reference_path(global: bool) -> std::path::PathBuf {
+    if global {
+        crate::config::global_state_dir().join("skill-failure-reporting.md")
+    } else {
+        crate::config::project_root()
+            .join(".agents")
+            .join("skill-failure-reporting.md")
+    }
+}
+
+/// Placeholder carried by source agent bodies where the failure-reporting
+/// reference path belongs; [`resolve_failure_reference`] substitutes the real
+/// scope-resolved path at generation time so the sources stay platform- and
+/// scope-agnostic.
+pub const FAILURE_REF_TOKEN: &str = "{{VSTACK_FAILURE_REF}}";
+
+/// The path substituted for [`FAILURE_REF_TOKEN`]: project-root-anchored for
+/// project scope, the resolved platform config-dir path for global scope.
+/// The project spelling stays relative on purpose — generated agent files are
+/// committed and synced across machines, so an absolute path would embed one
+/// machine's checkout location. The `<project-root>/` anchor tells sessions
+/// started in a subdirectory where to resolve it from.
+pub fn failure_reference_display(global: bool) -> String {
+    if global {
+        crate::config::display_path(&failure_reporting_reference_path(true))
+    } else {
+        "<project-root>/.agents/skill-failure-reporting.md".to_string()
+    }
+}
+
+/// Resolve [`FAILURE_REF_TOKEN`] in an agent body for the scope being
+/// generated.
+pub fn resolve_failure_reference(agent: &Agent, global: bool) -> Agent {
+    let mut resolved = agent.clone();
+    resolved.body = resolved
+        .body
+        .replace(FAILURE_REF_TOKEN, &failure_reference_display(global));
+    resolved
+}
+
+/// Install or refresh the canonical failure-reporting reference for a scope.
+/// Idempotent: only writes when the on-disk copy is missing or stale.
+///
+/// Returns the scope generated bodies must point at: normally the requested
+/// scope, but a project `.agents` that resolves outside the project falls
+/// back to the global copy — the global config dir cannot be redirected by a
+/// project symlink — so the substituted path never dangles.
+pub fn install_failure_reporting_reference(global: bool) -> Result<bool> {
+    // The project-scope reference lands under `.agents`; a symlinked `.agents`
+    // ancestor must not let the write (or the freshness read) escape the
+    // project, no matter which command path triggered generation. Fall back
+    // rather than fail: installs that never write through `.agents` (e.g.
+    // claude-code copy-method) stay allowed with an escaped `.agents`, and
+    // only the `.agents`-routed write is withheld.
+    if !global
+        && let Err(err) =
+            crate::path_safety::ensure_agents_dir_within_project(&crate::config::project_root())
+    {
+        eprintln!(
+            "Warning: skipping project skill-failure reference install ({err}); \
+             generated agents will point at the global copy instead"
+        );
+        return install_failure_reporting_reference(true);
+    }
+    let path = failure_reporting_reference_path(global);
+    if reference_is_fresh(&path) {
+        return Ok(global);
+    }
+    crate::path_safety::write_file_no_follow(&path, FAILURE_REPORTING_DOC)
+        .with_context(|| format!("installing {}", path.display()))?;
+    Ok(global)
+}
+
+/// Freshness fast path for the on-disk reference copy. Never follows a
+/// symlink: a link whose target currently matches the expected text would
+/// bypass `write_file_no_follow`'s rejection and leave the reference
+/// externally mutable after generation.
+fn reference_is_fresh(path: &std::path::Path) -> bool {
+    let is_symlink = std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink());
+    !is_symlink
+        && std::fs::read_to_string(path).is_ok_and(|existing| existing == FAILURE_REPORTING_DOC)
 }
 
 /// Emit the load-skills preamble injected into every generated agent body.
@@ -546,6 +692,80 @@ mod tests {
         assert_eq!(
             model_id_for("openai", "openai-codex/gpt-5.6-sol"),
             "openai-codex/gpt-5.6-sol"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn reference_freshness_rejects_symlink_even_with_matching_target() {
+        let dir = std::env::temp_dir().join(format!(
+            "vstack_test_ref_symlink_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("external.md");
+        std::fs::write(&target, FAILURE_REPORTING_DOC).unwrap();
+
+        let regular = dir.join("regular.md");
+        std::fs::write(&regular, FAILURE_REPORTING_DOC).unwrap();
+        assert!(reference_is_fresh(&regular));
+
+        let link = dir.join("link.md");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        // A symlink is never fresh, even when its target matches: accepting it
+        // would leave the reference externally mutable after generation.
+        assert!(!reference_is_fresh(&link));
+
+        std::fs::write(&regular, "tampered").unwrap();
+        assert!(!reference_is_fresh(&regular));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn extract_section_skips_header_occurrence_inside_marked_region() {
+        use crate::project_config::ProjectConfig;
+        // Shared launch text contains the literal header of a LATER section.
+        let shared = "Read this.\n\n## Additional Instructions\n\nShared tail.";
+        let launch = ProjectConfig::merge_marked_shared_and_specific(Some(shared), None).unwrap();
+        let content = format!(
+            "# Agent\n\n## Launch Instructions\n\n{launch}\n\n## Additional Instructions\n\nReal specific text.\n"
+        );
+        // The nested occurrence inside the marked region must not be selected
+        // as the section header — the real appended section is.
+        assert_eq!(
+            extract_section(&content, "## Additional Instructions").as_deref(),
+            Some("Real specific text.")
+        );
+        // And the launch section keeps its full marked region.
+        let launch_extracted = extract_section(&content, "## Launch Instructions").unwrap();
+        assert!(launch_extracted.contains("Shared tail."));
+        assert!(
+            ProjectConfig::strip_shared_block(Some(shared), &launch_extracted).is_none(),
+            "extracted launch section is shared-only; stripping must leave nothing"
+        );
+    }
+
+    #[test]
+    fn extract_section_keeps_marked_shared_region_with_nested_headings() {
+        use crate::project_config::ProjectConfig;
+        let shared = "Fleet rules.\n\n## Escalation\n\nPing the owner.";
+        let body = ProjectConfig::merge_marked_shared_and_specific(Some(shared), Some("Own text."))
+            .unwrap();
+        let content = format!("# Agent\n\n## Additional Instructions\n\n{body}\n\n## Hook Rules\n\nSome hook.\n");
+        let extracted = extract_section(&content, "## Additional Instructions").unwrap();
+        // The `## Escalation` heading inside the marked region must not
+        // terminate extraction: both markers and the specific text survive.
+        assert!(extracted.contains(crate::project_config::SHARED_INSTRUCTIONS_END));
+        assert!(extracted.contains("Own text."));
+        assert!(!extracted.contains("Some hook."));
+        // Round trip: stripping the marked region leaves only the specific text.
+        assert_eq!(
+            ProjectConfig::strip_shared_block(Some(shared), &extracted).as_deref(),
+            Some("Own text.")
         );
     }
 
