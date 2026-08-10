@@ -14,17 +14,25 @@ const RUN_TMP_ROOT = mkdtempSync(join(tmpdir(), "pi-agents-tmux-run-"));
 process.env.TMPDIR = RUN_TMP_ROOT;
 
 afterAll(async () => {
+	// The guard REPORTS leftovers — it never forgives them: a test that
+	// forgets teardown must fail even when its directory is trivially
+	// removable (removal drains belong in the creating test via
+	// tests/remove-settled.ts). Settle first so in-flight writers are
+	// measured at rest, and require two consecutive EMPTY polls before
+	// declaring the run clean — a writer that has not created its
+	// directory yet must not slip through the first empty read.
 	let entries = readdirSync(RUN_TMP_ROOT);
-	for (let i = 0; i < 10; i += 1) {
-		await new Promise((resolve) => setTimeout(resolve, 30));
+	for (let i = 0; i < 20; i += 1) {
+		await new Promise((resolve) => setTimeout(resolve, 40));
 		const next = readdirSync(RUN_TMP_ROOT);
-		if (next.length === entries.length && next.every((name, idx) => name === entries[idx])) break;
+		if (next.length === 0 && entries.length === 0) break;
+		if (next.length === entries.length && next.every((name, idx) => name === entries[idx]) && i >= 1) break;
 		entries = next;
 	}
 	try {
 		if (entries.length > 0) {
 			throw new Error(
-				`pi-agents-tmux tests leaked ${entries.length} tmp dir(s); add teardown in the creating test file: ${entries.slice(0, 12).join(", ")}`,
+				`pi-agents-tmux tests leaked ${entries.length} tmp dir(s); add teardown in the creating test file (see tests/remove-settled.ts): ${entries.slice(0, 12).join(", ")}`,
 			);
 		}
 	} finally {
