@@ -158,6 +158,23 @@ case "$OUT" in *"threshold 11"*) ok ".env.local beats vstack.settings.toml (quot
 printf 'export SIZE_RATCHET_THRESHOLD=13\n' > "$R/.env.local"
 run_raw || true
 case "$OUT" in *"threshold 13"*) ok "export-form dotenv assignment is recognized" ;; *) bad "export-form dotenv" "rc=$RC out=$OUT" ;; esac
+printf 'SIZE_RATCHET_THRESHOLD="17" # ratchet\n' > "$R/.env.local"
+run_raw || true
+case "$OUT" in *"threshold 17"*) ok "double-quoted dotenv value with inline comment extracts the content" ;; *) bad "quoted+comment dotenv (.env.local)" "rc=$RC out=$OUT" ;; esac
+printf 'SIZE_RATCHET_THRESHOLD="23" # say "ratchet"\n' > "$R/.env.local"
+run_raw || true
+case "$OUT" in *"threshold 23"*) ok "quote inside the trailing comment never leaks into the value" ;; *) bad "comment-quote dotenv (.env.local)" "rc=$RC out=$OUT" ;; esac
+rm -f "$R/.env.local" "$R/vstack.settings.toml"
+printf "SIZE_RATCHET_THRESHOLD='19' # note\n" > "$R/.env"
+run_raw || true
+case "$OUT" in *"threshold 19"*) ok "single-quoted .env value with inline comment extracts the content" ;; *) bad "quoted+comment dotenv (.env)" "rc=$RC out=$OUT" ;; esac
+printf "SIZE_RATCHET_THRESHOLD='29' # don't raise\n" > "$R/.env"
+run_raw || true
+case "$OUT" in *"threshold 29"*) ok "apostrophe in the trailing comment never leaks into a single-quoted value" ;; *) bad "comment-apostrophe dotenv (.env)" "rc=$RC out=$OUT" ;; esac
+printf 'SIZE_RATCHET_THRESHOLD="17".5\n' > "$R/.env"
+run_raw || true
+if [ "$RC" -ne 0 ] && case "$OUT" in *"unsupported syntax"*) true ;; *) false ;; esac; then ok "adjacent segment after a quoted value fails loud, never truncates"; else bad "adjacent-segment dotenv (.env)" "rc=$RC out=$OUT"; fi
+rm -f "$R/.env"
 
 echo "=== option-like configured paths ==="
 new_repo optpath
