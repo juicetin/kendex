@@ -115,7 +115,23 @@ while [ $# -gt 0 ]; do
       # cursor VALUE is kept so cursor-keyed fixtures
       # (graphql.cursor-<value>.json) can drive an arbitrarily deep walk —
       # the page-budget bound cannot be proven with a single follow-up page.
-      case "$1" in after=*) graphql_page2=1; graphql_after="${1#after=}" ;; esac
+      case "$1" in
+        after=*)
+          graphql_page2=1
+          graphql_after="${1#after=}"
+          # Cursor-keyed fixtures embed the cursor in a pathname, so the
+          # namespace is enforced, not assumed: every cursor this suite
+          # authors is [A-Za-z0-9_-]. Anything else would silently fall
+          # back to the page-2/default fixture and a case could claim a
+          # deep walk it never drove — refuse loudly instead.
+          case "$graphql_after" in
+            *[!A-Za-z0-9_-]*)
+              echo "shim: cursor value unusable as a fixture key (allowed: A-Za-z0-9_-): $graphql_after" >&2
+              exit 92
+              ;;
+          esac
+          ;;
+      esac
       ;;
     --jq) shift; filter="$1" ;;
     graphql) url="graphql" ;;
@@ -744,6 +760,19 @@ done
 jq -n '{data:{repository:{pullRequest:{reviewThreads:{pageInfo:{hasNextPage:false},nodes:[{isResolved:true}]}}}}}' \
   >"$fixtures/graphql.cursor-C20.json"
 run "exactly 20 advancing resolved pages approve (bound is >20)" approved
+
+# The shim's cursor-namespace refusal, red-first: a page-1 endCursor outside
+# [A-Za-z0-9_-] must abort the walk as a loud read failure (the shim exits
+# 92, the gh read fails, the predicate exits 2). With the refusal deleted,
+# the slash cursor keys no fixture, the shim silently falls back to page 1,
+# and the non-advancing guard answers threads-open instead — so this case
+# distinguishes the guard's presence, not just "something failed".
+reset
+CFG_CONTEXTS="mech-ctx"; CFG_THREADS="enforce"
+status_ctx "mech-ctx" success "analysis complete"
+jq -n '{data:{repository:{pullRequest:{reviewThreads:{pageInfo:{hasNextPage:true,endCursor:"bad/value"},nodes:[{isResolved:true}]}}}}}' \
+  >"$fixtures/graphql.json"
+run "cursor outside the fixture-key namespace is a loud read failure" "" 2
 
 # Zero bytes from the thread read is a BROKEN READ (VST-46 family), never an
 # authoritative verdict in either direction — pr-watch parity.
