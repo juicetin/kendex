@@ -16,7 +16,10 @@
 #                      REVIEW_GATE_THREADS=off gets approved verdicts with
 #                      threads open, and thread transitions have no webhook
 #                      anywhere — seeing them is this tool's reason to
-#                      exist). Over 100 threads fails CLOSED as attention.
+#                      exist). Counted across pages (bound: 20 pages / 2000
+#                      threads); past the bound, or on pagination metadata
+#                      that cannot advance, the count fails CLOSED as
+#                      attention.
 #                      QUEUED PRs are annotated — a queued PR needs a
 #                      DEQUEUE before any fix push, GitHub rejects pushes
 #                      to queued branches
@@ -334,42 +337,85 @@ for number in $pr_numbers; do
   # the predicate with threads open (thread hygiene is server-side there),
   # and the watcher's whole reason to exist is that thread transitions have
   # no webhook — the reducer must see them regardless of the repo's
-  # enforcement point. Over 100 threads fails CLOSED as attention, the same
-  # posture as the predicate's own overflow.
-  threads_resp="$(gh api graphql -f query="query{repository(owner:\"${GH_REPO%%/*}\",name:\"${GH_REPO#*/}\"){pullRequest(number:$number){reviewThreads(first:100){pageInfo{hasNextPage} nodes{isResolved}}}}}" 2>/dev/null)" || {
-    emit "$number" "$head" error "thread read failed"
-    errored=1
-    continue
-  }
-  if [ -z "$threads_resp" ]; then
-    emit "$number" "$head" error "thread read produced zero bytes (broken read)"
+  # enforcement point. The count PAGINATES (long-lived PRs accumulate
+  # hundreds of RESOLVED threads; failing closed at 100 total made
+  # attention permanent regardless of unresolved count) — the fail-closed
+  # overflow posture now starts at the 20-page/2000-thread bound, or at a
+  # truthy hasNextPage whose cursor cannot advance, matching the predicate.
+  unresolved=0
+  overflow=false
+  t_cursor=""
+  t_pages=0
+  t_error=""
+  while :; do
+    t_pages=$((t_pages + 1))
+    if [ "$t_pages" -gt 20 ]; then
+      overflow=true
+      break
+    fi
+    # The cursor rides a proper GraphQL VARIABLE, never string
+    # interpolation — an opaque cursor must not be able to break query
+    # syntax. $after:String is nullable: on the first page it is simply
+    # not passed and resolves to null (page one).
+    if [ -n "$t_cursor" ]; then
+      threads_resp="$(gh api graphql \
+        -f query='query($owner:String!,$name:String!,$number:Int!,$after:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$after){pageInfo{hasNextPage endCursor} nodes{isResolved}}}}}' \
+        -f owner="${GH_REPO%%/*}" -f name="${GH_REPO#*/}" -F number="$number" -f after="$t_cursor" 2>/dev/null)" || {
+        t_error="thread read failed"
+        break
+      }
+    else
+      threads_resp="$(gh api graphql \
+        -f query='query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100){pageInfo{hasNextPage endCursor} nodes{isResolved}}}}}' \
+        -f owner="${GH_REPO%%/*}" -f name="${GH_REPO#*/}" -F number="$number" 2>/dev/null)" || {
+        t_error="thread read failed"
+        break
+      }
+    fi
+    if [ -z "$threads_resp" ]; then
+      t_error="thread read produced zero bytes (broken read)"
+      break
+    fi
+    # Predicate-parity validation: a node whose isResolved is not a boolean
+    # (or a non-boolean hasNextPage) is a malformed response — counting it
+    # as resolved would report health from untrustworthy data.
+    page_unresolved="$(jq -r 'if ((.errors? // []) | length) > 0 then error("graphql errors present")
+        elif (.data.repository.pullRequest.reviewThreads | type) != "object"
+           or (.data.repository.pullRequest.reviewThreads.nodes | type) != "array"
+        then error("malformed thread container")
+        elif ([.data.repository.pullRequest.reviewThreads.nodes[] | select((.isResolved | type) != "boolean")] | length) > 0
+        then error("malformed thread node")
+        else [.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved==false)] | length end' <<<"$threads_resp" 2>/dev/null)" || {
+      t_error="thread response malformed (non-boolean isResolved) or unparsable"
+      break
+    }
+    page_next="$(jq -r 'if (.data.repository.pullRequest.reviewThreads.pageInfo.hasNextPage | type) != "boolean"
+        then error("malformed pageInfo")
+        else .data.repository.pullRequest.reviewThreads.pageInfo.hasNextPage end' <<<"$threads_resp" 2>/dev/null)" || {
+      t_error="thread pagination metadata malformed (non-boolean hasNextPage)"
+      break
+    }
+    unresolved=$((unresolved + page_unresolved))
+    [ "$page_next" = "true" ] || break
+    t_cursor_next="$(jq -r '.data.repository.pullRequest.reviewThreads.pageInfo.endCursor // empty' <<<"$threads_resp" 2>/dev/null)"
+    if [ -z "$t_cursor_next" ] || [ "$t_cursor_next" = "$t_cursor" ]; then
+      # hasNextPage with no ADVANCING cursor (missing, or identical to the
+      # page just read): cannot verify the remainder — fail closed as
+      # overflow immediately instead of burning the page budget on
+      # re-reads of the same page.
+      overflow=true
+      break
+    fi
+    t_cursor="$t_cursor_next"
+  done
+  if [ -n "$t_error" ]; then
+    emit "$number" "$head" error "$t_error"
     errored=1
     continue
   fi
-  # Predicate-parity validation: a node whose isResolved is not a boolean
-  # (or a non-boolean hasNextPage) is a malformed response — counting it as
-  # resolved would report health from untrustworthy data.
-  unresolved="$(jq -r 'if ((.errors? // []) | length) > 0 then error("graphql errors present")
-      elif (.data.repository.pullRequest.reviewThreads | type) != "object"
-         or (.data.repository.pullRequest.reviewThreads.nodes | type) != "array"
-      then error("malformed thread container")
-      elif ([.data.repository.pullRequest.reviewThreads.nodes[] | select((.isResolved | type) != "boolean")] | length) > 0
-      then error("malformed thread node")
-      else [.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved==false)] | length end' <<<"$threads_resp" 2>/dev/null)" || {
-    emit "$number" "$head" error "thread response malformed (non-boolean isResolved) or unparsable"
-    errored=1
-    continue
-  }
-  overflow="$(jq -r 'if (.data.repository.pullRequest.reviewThreads.pageInfo.hasNextPage | type) != "boolean"
-      then error("malformed pageInfo")
-      else .data.repository.pullRequest.reviewThreads.pageInfo.hasNextPage end' <<<"$threads_resp" 2>/dev/null)" || {
-    emit "$number" "$head" error "thread pagination metadata malformed (non-boolean hasNextPage)"
-    errored=1
-    continue
-  }
   if [ "$overflow" = "true" ] || [ "$unresolved" -gt 0 ]; then
     if [ "$overflow" = "true" ]; then
-      emit "$number" "$head" threads-open "over 100 review threads (count overflow — fail closed)$queued"
+      emit "$number" "$head" threads-open "review threads beyond the pagination bound (count overflow — fail closed)$queued"
     else
       emit "$number" "$head" threads-open "$unresolved unresolved review thread(s)$queued"
     fi

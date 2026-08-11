@@ -141,6 +141,14 @@ case "$args" in
       exit 1
     fi
     if [[ "${STUB_THREADS_RAW:-}" == "emptybytes" ]]; then exit 0; fi
+    if [[ "$args" == *"after="* && -n "${STUB_THREADS_PAGE2:-}" ]]; then
+      # Cursor-dependent page: a call passing the after= CLI variable
+      # (`-f after=CURSOR` — the watcher sends the cursor as a GraphQL
+      # variable, never interpolated) gets page two, so tests prove the
+      # walk advances instead of refetching page one.
+      printf '%s\n' "$STUB_THREADS_PAGE2"
+      exit 0
+    fi
     if [[ -n "${STUB_THREADS_RAW:-}" ]]; then
       printf '%s\n' "$STUB_THREADS_RAW"
       exit 0
@@ -448,6 +456,43 @@ rc=$?
 set -e
 assert_eq "$rc" "1" "pw17: thread overflow exits 1"
 assert_contains "$out" "overflow" "pw17: named as overflow (fail closed)"
+
+# pw17b: a pageable response that never advances (same page, same cursor,
+# hasNextPage=true every time) must terminate at the pagination bound as
+# overflow — proves the paging loop is bounded and cannot hang the watcher.
+set +e
+out=$(run_watch STUB_OPEN_PRS="$(jq -cn --argjson r "$(pr_row 7)" '[$r]')" \
+  STUB_THREADS_RAW='{"data":{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":true,"endCursor":"CUR1"},"nodes":[{"isResolved":false}]}}}}}' \
+  STUB_VERDICT_LINE="verdict=approved detail=unused")
+rc=$?
+set -e
+assert_eq "$rc" "1" "pw17b: bounded pagination exits 1"
+assert_contains "$out" "overflow" "pw17b: bound reached reads as overflow (fail closed)"
+
+# pw17c: an unresolved thread on page TWO is counted — the walk advances by
+# cursor and sums across pages instead of trusting page one.
+set +e
+out=$(run_watch STUB_OPEN_PRS="$(jq -cn --argjson r "$(pr_row 7)" '[$r]')" \
+  STUB_THREADS_RAW='{"data":{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":true,"endCursor":"CUR1"},"nodes":[{"isResolved":true},{"isResolved":true}]}}}}}' \
+  STUB_THREADS_PAGE2='{"data":{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":false},"nodes":[{"isResolved":false}]}}}}}' \
+  STUB_VERDICT_LINE="verdict=approved detail=unused")
+rc=$?
+set -e
+assert_eq "$rc" "1" "pw17c: later-page unresolved thread exits 1"
+assert_contains "$out" "1 unresolved review thread(s)" "pw17c: page-two thread counted"
+
+# pw17d: resolved history spanning pages is HEALTHY — over-one-page totals
+# must not read as overflow when every thread is resolved.
+set +e
+out=$(run_watch STUB_OPEN_PRS="$(jq -cn --argjson r "$(pr_row 7)" '[$r]')" \
+  STUB_THREADS_RAW='{"data":{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":true,"endCursor":"CUR1"},"nodes":[{"isResolved":true},{"isResolved":true}]}}}}}' \
+  STUB_THREADS_PAGE2='{"data":{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":false},"nodes":[{"isResolved":true}]}}}}}' \
+  STUB_VERDICT_LINE="verdict=approved detail=review evidence at head" \
+  STUB_GATE_HISTORY='[{"context":"Review gate","state":"success"}]')
+rc=$?
+set -e
+assert_eq "$rc" "0" "pw17d: resolved multi-page history exits 0"
+assert_eq "$out" "" "pw17d: and prints nothing"
 
 # pw18: a failed queue-membership read is a loud error, never "not queued".
 set +e

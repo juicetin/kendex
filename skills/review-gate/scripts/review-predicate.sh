@@ -1000,8 +1000,9 @@ EOF_CARRY
 fi
 
 # A genuine GraphQL failure must NOT fall through as unresolved threads — fail
-# loudly instead. `pageInfo.hasNextPage` (>100 threads) is a SUCCESSFUL read
-# we cannot fully verify, so it reports "overflow" and fails closed to
+# loudly instead. Thread pages are WALKED and summed (100 per page, 20-page/
+# 2000-thread bound); past the bound, or on a truthy hasNextPage whose cursor
+# cannot advance, the count reports "overflow" and fails closed to
 # threads-open. Same posture for a thread node whose isResolved is not a
 # boolean ("malformed"): null/missing nodes must never count as resolved —
 # that direction is a false approval on a merge gate.
@@ -1016,15 +1017,70 @@ fi
 # fail closed exactly as before.
 unresolved=0
 if [ "$THREADS_MODE" = "enforce" ]; then
-unresolved="$(gh_read graphql \
-  -f query='query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){reviewThreads(first:100){pageInfo{hasNextPage} nodes{isResolved}}}}}' \
-  -F owner="${GH_REPO%/*}" -F repo="${GH_REPO#*/}" -F number="$PR_NUMBER" \
-  --jq 'if .data.repository.pullRequest.reviewThreads.pageInfo.hasNextPage then "overflow"
-        elif ([.data.repository.pullRequest.reviewThreads.nodes[] | select((.isResolved | type) != "boolean")] | length) > 0 then "malformed"
-        else ([.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false)] | length) end')" || {
-  echo "::error::could not read review threads" >&2
-  exit 2
-}
+# Threads are counted across PAGES: long-lived PRs accumulate hundreds of
+# resolved threads, and failing closed at the first page's hasNextPage made
+# the gate permanently red once total threads passed 100 — regardless of
+# how many were unresolved. The bound moves to 20 pages (2000 threads);
+# past it, and on a truthy hasNextPage with no advancing cursor, the old
+# fail-closed "overflow" posture still applies. Malformed nodes keep
+# failing closed per page exactly as before.
+t_threads_page_jq='if ((.data.repository.pullRequest.reviewThreads.pageInfo.hasNextPage | type) != "boolean")
+    or ([.data.repository.pullRequest.reviewThreads.nodes[] | select((.isResolved | type) != "boolean")] | length) > 0
+  then "malformed"
+  else ([.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false)] | length | tostring)
+    + " " + (.data.repository.pullRequest.reviewThreads.pageInfo.hasNextPage | tostring)
+    + " " + (.data.repository.pullRequest.reviewThreads.pageInfo.endCursor // "END")
+  end'
+t_cursor=""
+t_pages=0
+while :; do
+  t_pages=$((t_pages + 1))
+  if [ "$t_pages" -gt 20 ]; then
+    unresolved="overflow"
+    break
+  fi
+  if [ -n "$t_cursor" ]; then
+    t_page="$(gh_read graphql \
+      -f query='query($owner:String!,$repo:String!,$number:Int!,$after:String){repository(owner:$owner,name:$repo){pullRequest(number:$number){reviewThreads(first:100,after:$after){pageInfo{hasNextPage endCursor} nodes{isResolved}}}}}' \
+      -F owner="${GH_REPO%/*}" -F repo="${GH_REPO#*/}" -F number="$PR_NUMBER" -f after="$t_cursor" \
+      --jq "$t_threads_page_jq")" || {
+      echo "::error::could not read review threads" >&2
+      exit 2
+    }
+  else
+    t_page="$(gh_read graphql \
+      -f query='query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){reviewThreads(first:100){pageInfo{hasNextPage endCursor} nodes{isResolved}}}}}' \
+      -F owner="${GH_REPO%/*}" -F repo="${GH_REPO#*/}" -F number="$PR_NUMBER" \
+      --jq "$t_threads_page_jq")" || {
+      echo "::error::could not read review threads" >&2
+      exit 2
+    }
+  fi
+  if [ "$t_page" = "malformed" ]; then
+    unresolved="malformed"
+    break
+  fi
+  t_count="${t_page%% *}"
+  t_rest="${t_page#* }"
+  t_next="${t_rest%% *}"
+  t_cursor_next="${t_rest#* }"
+  case "$t_count" in
+    '' | *[!0-9]*)
+      unresolved="malformed"
+      break
+      ;;
+  esac
+  unresolved=$((unresolved + t_count))
+  [ "$t_next" = "true" ] || break
+  if [ "$t_cursor_next" = "END" ] || [ -z "$t_cursor_next" ] || [ "$t_cursor_next" = "$t_cursor" ]; then
+    # hasNextPage with no ADVANCING cursor (missing, or identical to the
+    # page just read): cannot verify the remainder — fail closed now
+    # instead of burning the page budget on re-reads of the same page.
+    unresolved="overflow"
+    break
+  fi
+  t_cursor="$t_cursor_next"
+done
 fi
 
 echo "PR #$PR_NUMBER head $HEAD_SHA: reviews=$got clean-analysis=$check comment-form=$comment_hits outage-marker=$outageok carried=$carried changes-requested=$cr unresolved-threads=$unresolved (threads=$THREADS_MODE)" >&2
