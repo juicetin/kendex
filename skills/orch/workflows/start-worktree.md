@@ -19,13 +19,24 @@ If invoked as `start github OWNER/REPO#N`, parse it before initialization:
 - `ISSUE_ID=issue-N`
 - `GITHUB_REPO=OWNER/REPO`
 
-1. **Invoke workflow**: `⤵ workflows/initialize.md § 1-2 → § 1 step 2` with context:
+1. **Refuse containers** — Linear only, and BEFORE initialization: the next step claims the session-guard lease and creates workflow state, and containers never hold state. Resolve `[ISSUE_ID]` from the argument (or the worktree branch name when none was given), then resolve the tracker BEFORE any Linear command — when `TRACKER` was not passed in caller context, run `.agents/skills/orch/scripts/tracker-for-issue [ISSUE_ID]` and use its output. `TRACKER` = `github` → skip this whole step (a GitHub-only project must not abort on Linear auth/sync in a guard that cannot apply to it). For Linear items, reconcile the cache (children added since the last sync must not slip a container through a stale read), then check the marker:
+   ```bash
+   .agents/skills/linear/scripts/linear.sh sync --reconcile
+   .agents/skills/linear/scripts/linear.sh cache issues get [ISSUE_ID] --with-bundle
+   ```
+   Check the title FIRST: a `(one PR)` marker always wins and opts the bundle into single-PR delegation, even when it carries the `agent:multi` label. Without the marker, the issue is a CONTAINER when it has children or carries the `agent:multi` label. A container is never orchestrated directly and never gets a PR — each child is the PR unit and the container closes last.
+
+   The guard covers BOTH directions, exactly like `start.md` § 3 — this route bypasses that section, so a leaf with a `parent_id` gets the Ancestor gate (SKILL.md → Coordination) HERE: walk the FULL `parent_id` chain (`.agents/skills/linear/scripts/linear.sh cache issues get [ANCESTOR_ID]` per hop — a child's bundle carries neither titles nor labels of its ancestors), classifying each. Any ancestor WITH the `(one PR)` marker → that bundle is the work item unless the user explicitly chose the child — and a PROMOTION here is terminal for this worktree: this tree is named for the child, the bundle's single session belongs in the parent's own worktree, and continuing would initialize the child and split the bundle. STOP without leasing or initializing anything, and point the operator at the parent (`/orch start [PARENT_ID]` — it resolves or creates the parent-named worktree); do NOT fall through to step 2 with the child's ID. All ancestors containers → gate the child on the union of its own `blocked_by` and EVERY container ancestor's (states via `.agents/skills/linear/scripts/linear.sh issues bulk-get [BLOCKER_IDS]`, only non-terminal `state_type` blocks — a top-container blocker stops a directly selected grandchild). Blocked → stop here — no lease, no workflow state — and name the live blockers.
+
+   If the work item is a container: stop here — no lease, no workflow state — list its unblocked children (non-terminal `state_type`; every blocker from the child's own `blocked_by` plus the container's `blocked_by` resolved — the bundle carries blocker IDs only, so fetch their states (`issues bulk-get [BLOCKER_IDS]`, or `cache issues get` per id) and treat only a NON-terminal `state_type` as blocking), and tell the operator to start a child instead (`/orch start [CHILD_ID]`); this worktree should not exist for the container.
+
+2. **Invoke workflow**: `⤵ workflows/initialize.md § 1-2 → § 1 step 3` with context:
    - `lifecycle`: `"managed"`
-   - `issue_id`: normalized issue ID from argument or branch
+   - `issue_id`: normalized issue ID from argument or branch (never a child superseded by a `(one PR)` promotion — step 1 already stopped that case)
    - `tracker`: `[TRACKER]` when parsed
    - `github_repo`: `[GITHUB_REPO]` when parsed
 
-2. **Gate on base freshness.** This expedited path reuses a worktree created earlier, so prove the base is current before any agent spends budget on it:
+3. **Gate on base freshness.** This expedited path reuses a worktree created earlier, so prove the base is current before any agent spends budget on it:
    ```bash
    .agents/skills/orch/scripts/base-freshness [WORKTREE_PATH]
    ```

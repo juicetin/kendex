@@ -14,6 +14,7 @@ Delegate development work to specialist agent(s). Handles single issues and bund
 - `worktree`: worktree path
 - `lifecycle` (optional): `"managed"` (return to caller at § 4) | `"self"` (default, standalone).
 - `issue_id` (optional): workflow-state key — the normalized issue ID (`issue-N` for GitHub, `PROJ-123` for Linear), never the bare GitHub issue number. If absent, extracted from branch.
+- `audit_bundle` (optional): `true` only from review-pr's post-audit path — the mechanical single-PR opt-in for children the calling session's audit just created (see the container preflight; carried into the delegation as `Audit Bundle: yes`).
 
 **Standalone init** (`lifecycle: "self"` only):
 ```bash
@@ -22,15 +23,71 @@ Delegate development work to specialist agent(s). Handles single issues and bund
 ```
 Use the output as `ISSUE_ID`.
 
-Apply [Worktree Scope](../SKILL.md#worktree-scope): if in a worktree and `ISSUE_ID` ≠ the current branch's issue, ask the user before proceeding. Resolve `WT_PATH`:
-- Inside a worktree → use current directory as `WT_PATH`
-- Main repo, worktree exists → run `.agents/skills/worktree/scripts/worktree path [ISSUE_ID]` and use the output as `WT_PATH`
-- Main repo, worktree missing → ask the user before creating
+Resolve the tracker FIRST — before any Linear command can run:
 
 ```bash
 .agents/skills/orch/scripts/tracker-for-issue [ISSUE_ID]
 ```
-Use the output as `TRACKER`.
+Use the output as `TRACKER`. `TRACKER` = `github` → skip the container
+preflight below entirely (it is Linear-only; running its commands on a
+GitHub-only project without Linear credentials would abort the workflow
+before this skip could apply).
+
+**Container preflight** (`TRACKER` = `linear` only, before any
+workflow-state initialization): fetch the issue and its children — the default single-issue
+output omits children entirely, so the bundle read is mandatory:
+
+```bash
+.agents/skills/linear/scripts/linear.sh issues get [ISSUE_ID]
+.agents/skills/linear/scripts/linear.sh sync --reconcile
+.agents/skills/linear/scripts/linear.sh cache issues get [ISSUE_ID] --with-bundle
+```
+
+(The bundle read carries each child's `blocked_by` and `depth` — the plain
+children listing lacks the blocker fields the unblocked test needs.)
+
+(The sync precedes the children read: the cache can predate children added
+since the last reconcile, and a stale empty read would wave a container
+through.)
+
+Caller context `audit_bundle: true` (review-pr's post-audit path) is a
+mechanical single-PR opt-in equivalent to the `(one PR)` marker: the
+children were created by the calling session's audit to be worked inside
+the PR's own session — skip the container refusal for that parent and
+carry `Audit Bundle: yes` in the bundled delegation prompt (dev-implement
+accepts it as the same sanctioned exception). Otherwise: check the title
+FIRST — `(one PR)` always wins, even over `agent:multi`. Otherwise, an
+issue with the `agent:multi` label or with children is a CONTAINER —
+refuse before initializing anything (containers never hold
+workflow state) and surface its unblocked children as the startable work
+items. Unblocked is a mechanical test, not a guess: the bundle emits
+`blocked_by` as bare IDs, so fetch those blockers' states
+(`issues bulk-get [BLOCKER_IDS]`, or `cache issues get` per id — the
+child's own `blocked_by` plus the container's, which applies to every
+child) and treat only a NON-terminal `state_type` as blocking — a Done or
+canceled blocker never hides a startable child. The guard covers BOTH
+directions via the Ancestor gate (SKILL.md → Coordination): when the
+target is a LEAF whose `parent_id` is set (explicit argument or
+branch-derived), walk the FULL chain
+(`.agents/skills/linear/scripts/linear.sh cache issues get
+[ANCESTOR_ID]` per hop) and classify each ancestor. Any ancestor WITH
+the `(one PR)` marker → that bundle is the work item, and the promotion
+is TERMINAL for this invocation (unless the user explicitly chose the
+child): STOP before any workflow state exists — do not continue the
+remaining steps with the child's `ISSUE_ID` — and route to the parent
+(`/orch start [PARENT_ID]`, which resolves the parent-named worktree
+and delegates the bundle as one session), exactly as `start-worktree.md`
+stops. A branch-derived child under a single-PR parent is never
+delegated alone. All ancestors containers → gate the
+child on the union of its own and every container ancestor's blockers
+before any workflow state exists; blocked → stop and name the live
+blockers. Managed
+callers already ran this check in start/start-worktree.
+
+Apply [Worktree Scope](../SKILL.md#worktree-scope): if in a worktree and `ISSUE_ID` ≠ the current branch's issue, ask the user before proceeding. Resolve `WT_PATH`:
+- Inside a worktree → use current directory as `WT_PATH`
+- Main repo, worktree exists → run `.agents/skills/worktree/scripts/worktree path [ISSUE_ID]` and use the output as `WT_PATH`
+- Main repo, worktree missing → ask the user before creating
 
 If workflow state already exists, skip initialization:
 
@@ -174,6 +231,11 @@ Worktree: [WORKTREE_PATH]
 Round ID: [DEV_ROUND_ID]
 Artifact Key: [ISSUE_ID]
 Labels: [parent labels]
+Audit Bundle: [yes — only when caller context `audit_bundle: true`; omit otherwise]
+Parent Title: [PARENT_TITLE — the `.title` field from the preflight's
+`cache issues get [ISSUE_ID] --with-bundle` read of this parent,
+verbatim, so the dev agent can apply the container guard itself: the
+`(one PR)` marker in this title is the decisive single-PR override]
 Blocks: [blocked-issue-ids or "none"]
 
 **Work pending issues only** (completed listed for context). Respect blocking order: complete blockers before blocked issues.
@@ -219,6 +281,8 @@ git -C "[WORKTREE_PATH]" status --porcelain
 # Linear only: check state + summary (auto-includes pending children from bundle)
 .agents/skills/linear/scripts/linear.sh issues validate-completion [ISSUE_ID] --include-children-of [ISSUE_ID]
 ```
+
+The `--include-children-of` expansion is for explicit single-PR bundles (`(one PR)` title marker) and audit-created sub-issues worked inside this session. A session whose work item is the child of a CONTAINER parent validates alone — the flag expands `[ISSUE_ID]`'s own children (it has none as a leaf), and sibling or parent state never gates this session's completion; the container closes later, via `merge-pr.md`, when its final child merges.
 
 **GitHub/ad-hoc**: no tracker validation — `B` requires a new commit (`HEAD` advanced from `pre_delegate_sha`) and a clean worktree.
 

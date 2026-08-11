@@ -56,16 +56,29 @@ issue_record() {
   issue_record CC-920 'In Review' started ""
   issue_record CC-921 Done completed CC-920
   issue_record CC-922 Canceled canceled CC-920
+  issue_record CC-930 Todo unstarted ""
+  issue_record CC-931 Done completed CC-930
+  issue_record CC-932 Done completed CC-930
+  issue_record CC-940 Todo unstarted ""
+  issue_record CC-941 Done completed CC-940
+  issue_record CC-942 'In Progress' started CC-940
+  # (one PR) single-PR bundle — must REFUSE --container (scenario G).
+  printf '{"id":"uuid-CC-950","identifier":"CC-950","title":"Ship the thing (one PR)","description":null,"state":{"name":"In Review","type":"started"},"assignee":null,"labels":{"nodes":[]},"project":null,"projectMilestone":null,"cycle":null,"priority":3,"estimate":null,"parent":null,"relations":{"nodes":[]},"inverseRelations":{"nodes":[]},"archivedAt":null,"trashed":false}\n'
+  issue_record CC-951 Done completed CC-950
+  issue_record CC-952 Done completed CC-950
 } | jq -s '.' >"$TMP_ROOT/.cache/linear/issues.json"
 
 # Every issue except the canceled one carries a Completion Summary comment, so
 # scenario B's pending child fails on state alone (mirrors the live test).
+# Container parents CC-930/CC-940 get no comment: their summary is posted by
+# `issues complete` at completion time, after validation.
 seed_summary_comment() {
   cat >"$TMP_ROOT/.cache/linear/comments/$1.json" <<'JSON'
 [{"id":"c1","body":"## Completion Summary\n\nShipped.","createdAt":"2026-07-14T00:00:00Z","updatedAt":"2026-07-14T00:00:00Z","user":{"name":"Test"}}]
 JSON
 }
-for id in CC-900 CC-901 CC-902 CC-910 CC-911 CC-912 CC-920 CC-921; do
+for id in CC-900 CC-901 CC-902 CC-910 CC-911 CC-912 CC-920 CC-921 \
+  CC-931 CC-932 CC-941 CC-942; do
   seed_summary_comment "$id"
 done
 
@@ -116,6 +129,72 @@ check "C: Done child CC-921 passes" "$outC" \
 check "C: canceled child CC-922 is NOT in results" "$outC" \
   '([.results[] | select(.id == "CC-922")] | length) == 0'
 check "C: all_ok true (canceled child does not block)" "$outC" '.all_ok == true'
+
+# --- Scenario D: container parent, all children Done (--container) ---------
+# Containers close LAST: the parent never runs as a session, so at completion
+# time it sits in an unstarted state with no pre-posted summary. With
+# --container the root must validate cleanly on children-all-Done alone.
+outD="$(run_validate CC-930 --include-children-of CC-930 --container 2>/dev/null)"
+check "D: three results (container root + 2 Done children)" "$outD" \
+  '(.results | length) == 3'
+check "D: container root CC-930 passes in Todo without a summary" "$outD" \
+  '.results[] | select(.id == "CC-930") | .state == "Todo" and .state_ok == true and .has_summary == false and .ok == true'
+check "D: child CC-931 passes as Done" "$outD" \
+  '.results[] | select(.id == "CC-931") | .ok == true'
+check "D: child CC-932 passes as Done" "$outD" \
+  '.results[] | select(.id == "CC-932") | .ok == true'
+check "D: all_ok true — container may complete" "$outD" '.all_ok == true'
+
+# --- Scenario E: container with a still-pending child must not complete ----
+outE="$(run_validate CC-940 --include-children-of CC-940 --container 2>/dev/null)"
+check "E: container root CC-940 itself passes state check" "$outE" \
+  '.results[] | select(.id == "CC-940") | .state_ok == true'
+check "E: pending child CC-942 fails" "$outE" \
+  '.results[] | select(.id == "CC-942") | .state_ok == false and .ok == false'
+check "E: all_ok false while a child is open" "$outE" '.all_ok == false'
+
+# --- Scenario G: --container refuses an explicit (one PR) bundle -----------
+# The marker always wins: a single-PR bundle validates with plain
+# validate-completion (session-root pre-merge state + summary checks), and
+# --container would silently swap in the permissive container role.
+set +e
+outG="$(run_validate CC-950 --include-children-of CC-950 --container 2>&1 >/dev/null)"
+rcG=$?
+set -e
+if [ "$rcG" -eq 0 ]; then
+  echo "FAIL: G: (one PR) bundle accepted under --container (rc=0)"
+  fail=1
+fi
+case "$outG" in
+  *"(one PR)"*) ;;
+  *) echo "FAIL: G: refusal does not name the marker: $outG"; fail=1 ;;
+esac
+
+# --- Scenario F: --container fails closed on misuse ------------------------
+# The flag asserts "this bundle may complete now", so it must name exactly one
+# target, pair with --include-children-of for that same target, and expand to
+# at least one non-canceled child. A leaf or mismatched invocation is a caller
+# error (nonzero exit), never a passing validation.
+set +e
+run_validate CC-901 --include-children-of CC-901 --container >/dev/null 2>&1
+rcF1=$?
+run_validate CC-930 --container >/dev/null 2>&1
+rcF2=$?
+run_validate CC-930 --include-children-of CC-910 --container >/dev/null 2>&1
+rcF3=$?
+set -e
+if [[ "$rcF1" -eq 0 ]]; then
+  echo "FAIL: F: leaf --container (no children in cache) must exit nonzero"
+  fail=1
+fi
+if [[ "$rcF2" -eq 0 ]]; then
+  echo "FAIL: F: --container without --include-children-of must exit nonzero"
+  fail=1
+fi
+if [[ "$rcF3" -eq 0 ]]; then
+  echo "FAIL: F: --container with mismatched --include-children-of must exit nonzero"
+  fail=1
+fi
 
 # --- Preserve single-issue behavior (no --include-children-of) -------------
 outS="$(run_validate CC-901 2>/dev/null)"

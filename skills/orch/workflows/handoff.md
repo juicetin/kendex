@@ -19,6 +19,63 @@ Launch one or more independent work item sessions. This is launch-only.
 
 ## 1. Confirm Launch
 
+**Container preflight** — before any worktree is created. Fetch the data
+first (Linear items only):
+
+```bash
+.agents/skills/linear/scripts/linear.sh sync --reconcile
+.agents/skills/linear/scripts/linear.sh cache issues get [ITEM] --with-bundle
+```
+
+Per item, check the title FIRST — a `(one PR)` marker always makes it
+launchable, even with `agent:multi`. Otherwise, an item with the
+`agent:multi` label, or with children in the bundle read, is a CONTAINER:
+drop it from the launch list and surface its unblocked DIRECT children
+(`depth == 0` in the bundle's flattened `.children`) as the launchable
+items instead — then rerun this preflight on each replacement, since a
+direct child can itself be a container. Containers are never orchestrated
+and never own a worktree; open-terminal would create one before the
+launched session could refuse. The guard covers directly supplied
+children too, via the Ancestor gate (SKILL.md → Coordination): EVERY
+final launch item with a `parent_id` walks its full ancestor chain
+(`.agents/skills/linear/scripts/linear.sh cache issues get
+[ANCESTOR_ID]` per hop), classifying each — an enclosing `(one PR)`
+ancestor makes that bundle the launch item ONLY for container-expanded
+entries: an item the USER supplied explicitly stays the launch item (the
+Ancestor gate's explicit-choice exception, as in `start.md`), still
+gated on the unioned blockers below; all-container ancestry →
+the item stays launchable only if it passes the unblocked test below
+with the UNION of its own and every container ancestor's blockers;
+blocked → drop it from the launch list and name its live blockers.
+After all expansion and gating, DEDUPLICATE the final launch list by
+issue id (expanding `PARENT` beside an explicitly supplied `CHILD`
+re-adds the child — launching both would race one worktree: the second
+create exits 75 after the first session already started, or Codex
+Desktop opens two threads for one item), keeping ONE entry per id whose
+classification is EXPLICIT whenever any duplicate was user-supplied
+(explicit wins — the explicit-choice exception must survive the merge;
+expanded-only duplicates stay expanded). Then collapse ANCESTRY: when
+one final item is an ancestor bundle of another (an explicit `(one PR)`
+parent beside its own explicitly supplied child — the same PR unit
+twice), keep ONE launch unit — the bundle — and note the collapse;
+two worktrees must never launch for work sharing one session/PR.
+
+Resolve "unblocked" mechanically: collect each child's `blocked_by` ids
+plus the container's own `blocked_by` (parent-carried cross-bundle
+relations apply to every child), fetch those blockers' live states — in
+chunks of at most 50 ids (the command caps at 50 rows; verify every
+requested id came back, and a MISSING lookup keeps its item blocked,
+never launchable on a truncated read) —
+
+```bash
+.agents/skills/linear/scripts/linear.sh issues bulk-get [BLOCKER_IDS]
+```
+
+— and a child is dispatchable only when its own `state_type` is
+non-terminal and every collected blocker's `state_type` IS terminal
+(`completed` or `canceled`) — terminality by type, never by
+workspace-configurable state names.
+
 Present:
 
 <output_format>
