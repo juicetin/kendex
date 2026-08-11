@@ -10,6 +10,11 @@ pub(super) struct DiskMutationReport {
     pub attempted: usize,
     pub completed: usize,
     pub failed: Vec<String>,
+    /// Non-failure information the user must still see (e.g. anchored
+    /// canonicals left in another checkout). Collected here — never printed
+    /// from the worker thread, which runs while the TUI owns the terminal
+    /// in raw mode — and rendered by the main thread's flash line.
+    pub notices: Vec<String>,
 }
 
 impl DiskMutationReport {
@@ -18,6 +23,7 @@ impl DiskMutationReport {
             attempted,
             completed: 0,
             failed: Vec::new(),
+            notices: Vec::new(),
         }
     }
 
@@ -60,7 +66,16 @@ fn rollback_destination_install(
         return String::new();
     }
     match crate::installer::remove_item(name, Some(kind), harnesses, scope_global) {
-        Ok(_) => String::new(),
+        Ok(outcome) if outcome.anchored_left.is_empty() => String::new(),
+        Ok(outcome) => format!(
+            "; rollback left anchored canonical(s) in place (another checkout's): {}",
+            outcome
+                .anchored_left
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
         Err(err) => format!("; rollback failed: {err:#}"),
     }
 }
@@ -71,13 +86,13 @@ pub(super) fn perform_remove_plans(plans: &[RemovePlan]) -> DiskMutationReport {
         let mut removed_any = false;
         let mut failures = Vec::new();
         if plan.from_project {
-            match remove_one(&plan.name, false) {
+            match remove_one(&plan.name, false, &mut report.notices) {
                 Ok(removed) => removed_any |= removed,
                 Err(err) => failures.push(format!("project scope: {err:#}")),
             }
         }
         if plan.from_global {
-            match remove_one(&plan.name, true) {
+            match remove_one(&plan.name, true, &mut report.notices) {
                 Ok(removed) => removed_any |= removed,
                 Err(err) => failures.push(format!("global scope: {err:#}")),
             }
@@ -93,7 +108,11 @@ pub(super) fn perform_remove_plans(plans: &[RemovePlan]) -> DiskMutationReport {
     report
 }
 
-fn remove_one(name: &str, scope_global: bool) -> anyhow::Result<bool> {
+fn remove_one(
+    name: &str,
+    scope_global: bool,
+    notices: &mut Vec<String>,
+) -> anyhow::Result<bool> {
     let lock_path = config::lock_file_path(scope_global);
     let mut lock = config::LockFile::load(&lock_path)
         .map_err(|err| anyhow::anyhow!("failed to load lock {}: {err:#}", lock_path.display()))?;
@@ -122,7 +141,14 @@ fn remove_one(name: &str, scope_global: bool) -> anyhow::Result<bool> {
             .iter()
             .filter_map(|h| Harness::from_id(h))
             .collect();
-        crate::installer::remove_item(name, Some(entry.kind), &harnesses, scope_global)?;
+        let outcome =
+            crate::installer::remove_item(name, Some(entry.kind), &harnesses, scope_global)?;
+        for anchored in &outcome.anchored_left {
+            notices.push(format!(
+                "{name}: anchored canonical left in place (another checkout's): {}",
+                anchored.display()
+            ));
+        }
     }
     lock.remove(name);
     lock.save(&lock_path)?;
@@ -395,7 +421,7 @@ pub(super) fn perform_move_plans(
     // Remove files + lock entries at the source scope only for items that
     // actually made it to the destination.
     for name in &moved_names {
-        match remove_one(name, from_global) {
+        match remove_one(name, from_global, &mut report.notices) {
             Ok(true) => report.completed += 1,
             Ok(false) => report.fail(name, "source lock entry missing after destination install"),
             Err(err) => report.fail(name, format!("failed to remove source install: {err:#}")),

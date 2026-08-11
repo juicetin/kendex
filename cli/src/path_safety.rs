@@ -70,31 +70,106 @@ pub(crate) fn write_file_no_follow(path: &Path, contents: impl AsRef<[u8]>) -> R
     write_result
 }
 
-/// `git rev-parse --git-common-dir` for `dir`, canonicalized. `None` when `dir`
-/// is not inside a Git repository, when git is unavailable, or when the answer
-/// cannot be resolved — every one of which must fail closed at the call site.
-fn git_common_dir(dir: &Path) -> Option<PathBuf> {
+/// Interpret one line of `git rev-parse` output as a path, preserving raw
+/// bytes on Unix: a non-UTF-8 checkout path must not be lossy-mangled into
+/// U+FFFD (canonicalize would then fail and same-repository detection would
+/// silently collapse to None). Strips ONLY the record terminator (`\n` /
+/// `\r\n`) — a path legitimately ending in a space or tab must survive.
+fn git_output_path(bytes: &[u8]) -> Option<PathBuf> {
+    let mut end = bytes.len();
+    if end > 0 && bytes[end - 1] == b'\n' {
+        end -= 1;
+    }
+    if end > 0 && bytes[end - 1] == b'\r' {
+        end -= 1;
+    }
+    let trimmed = &bytes[..end];
+    if trimmed.is_empty() {
+        return None;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        Some(PathBuf::from(std::ffi::OsStr::from_bytes(trimmed)))
+    }
+    #[cfg(not(unix))]
+    {
+        Some(PathBuf::from(String::from_utf8_lossy(trimmed).into_owned()))
+    }
+}
+
+/// `git rev-parse --show-toplevel` for `dir`, canonicalized. `None` when `dir`
+/// is not inside a Git repository or the answer cannot be resolved — callers
+/// fail closed.
+pub(crate) fn git_toplevel(dir: &Path) -> Option<PathBuf> {
+    // `.arg(dir)` passes the path as raw OS bytes — a non-UTF-8 path must
+    // not silently skip repository detection (to_str() would return None
+    // and defeat anchoring on a perfectly valid Unix path).
     let output = std::process::Command::new("git")
-        .args(["-C", dir.to_str()?, "rev-parse", "--git-common-dir"])
+        .arg("-C")
+        .arg(dir)
+        .args(["rev-parse", "--show-toplevel"])
         .output()
         .ok()?;
     if !output.status.success() {
         return None;
     }
-    let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if raw.is_empty() {
+    git_output_path(&output.stdout)?.canonicalize().ok()
+}
+
+/// `git rev-parse --git-common-dir` for `dir`, canonicalized. `None` when `dir`
+/// is not inside a Git repository, when git is unavailable, or when the answer
+/// cannot be resolved — every one of which must fail closed at the call site.
+pub(crate) fn git_common_dir(dir: &Path) -> Option<PathBuf> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["rev-parse", "--git-common-dir"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
         return None;
     }
+    let reported = git_output_path(&output.stdout)?;
     // `--git-common-dir` is relative to the queried directory unless git is new
     // enough to have been asked for an absolute path, so resolve it against
     // `dir` rather than the process cwd.
-    let reported = Path::new(&raw);
     let absolute = if reported.is_absolute() {
-        reported.to_path_buf()
+        reported
     } else {
         dir.join(reported)
     };
     absolute.canonicalize().ok()
+}
+
+/// Repository identity of the working tree physically containing `dir`, from
+/// a single `git rev-parse` invocation: `(--git-common-dir, --show-toplevel)`,
+/// both canonicalized. `None` when `dir` is not inside a working tree, when
+/// git is unavailable, or when either answer cannot be resolved — callers
+/// must fail closed.
+pub(crate) fn git_repo_identity(dir: &Path) -> Option<(PathBuf, PathBuf)> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["rev-parse", "--git-common-dir", "--show-toplevel"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let mut lines = output.stdout.splitn(2, |b| *b == b'\n');
+    let common_reported = git_output_path(lines.next()?)?;
+    let toplevel_reported = git_output_path(lines.next()?)?;
+    // `--git-common-dir` may be reported relative to the queried directory;
+    // resolve it against `dir` rather than the process cwd.
+    let common_absolute = if common_reported.is_absolute() {
+        common_reported
+    } else {
+        dir.join(common_reported)
+    };
+    let common = common_absolute.canonicalize().ok()?;
+    let toplevel = toplevel_reported.canonicalize().ok()?;
+    Some((common, toplevel))
 }
 
 /// Positive proof that `target` lives in a working tree of the SAME repository
@@ -126,6 +201,26 @@ pub(crate) fn is_same_repository_worktree(project_root: &Path, target: &Path) ->
         (Some(project_common), Some(target_common)) => project_common == target_common,
         _ => false,
     }
+}
+
+/// Is `claimed_checkout` the OTHER checkout's copy of this project's root?
+/// The project root may sit below the git toplevel (a project marker in a
+/// subdirectory); the repo layout is identical in every checkout, so the
+/// legitimate shared `.agents` parent is `<other toplevel>/<this project's
+/// repo-relative suffix>` — for a toplevel project that degenerates to the
+/// toplevel itself. Anything else (a nested decoy, a sibling project's
+/// root) is refused; unresolvable answers fail closed.
+fn is_corresponding_project_root(project_root_canon: &Path, claimed_checkout: &Path) -> bool {
+    let Some(own_toplevel) = git_toplevel(project_root_canon) else {
+        return false;
+    };
+    let Ok(suffix) = project_root_canon.strip_prefix(&own_toplevel) else {
+        return false;
+    };
+    let Some(claimed_toplevel) = git_toplevel(claimed_checkout) else {
+        return false;
+    };
+    claimed_toplevel.join(suffix) == *claimed_checkout
 }
 
 /// Reject a project `.agents` directory that resolves outside the project
@@ -161,6 +256,118 @@ pub(crate) fn ensure_agents_dir_within_project(project_root: &Path) -> Result<()
         bail!(
             "project .agents path is not a directory: {}",
             agents_dir.display()
+        );
+    }
+    // `.agents` itself must be a checkout-owned canonical root BEFORE the
+    // skills child is considered: an alias like `.agents -> cli/src` with no
+    // `skills` child yet would otherwise ride the NotFound early-return
+    // below, and the subsequent install creates (and later recursively
+    // replaces) `<aliased-dir>/skills/<name>` inside repository sources.
+    if agents_dir_canon.starts_with(&project_root_canon) {
+        if agents_dir_canon != project_root_canon.join(".agents") {
+            bail!(
+                "refusing .agents that resolves to a non-canonical in-project directory: {} -> {}",
+                agents_dir.display(),
+                agents_dir_canon.display()
+            );
+        }
+    } else {
+        let claimed_checkout = agents_dir_canon
+            .parent()
+            .map(Path::to_path_buf)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "cannot derive a checkout root from {}",
+                    agents_dir_canon.display()
+                )
+            })?;
+        if !agents_dir_canon.ends_with(Path::new(".agents"))
+            || !is_corresponding_project_root(&project_root_canon, &claimed_checkout)
+        {
+            bail!(
+                "refusing .agents that does not resolve to the corresponding project root's .agents in another checkout: {} -> {}",
+                agents_dir.display(),
+                agents_dir_canon.display()
+            );
+        }
+    }
+    // Same boundary one level down: a real in-repo .agents whose skills
+    // subdir symlinks outside the repository would otherwise pass, and every
+    // skill write goes through .agents/skills.
+    let skills_dir = agents_dir.join("skills");
+    match std::fs::symlink_metadata(&skills_dir) {
+        // Missing is fine: create_dir_all will make it inside the project.
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => bail!("failed to inspect project .agents/skills directory: {err}"),
+        Ok(_) => {}
+    }
+    let skills_dir_canon = skills_dir
+        .canonicalize()
+        .map_err(|err| anyhow::anyhow!("failed to resolve .agents/skills directory: {err}"))?;
+    if !skills_dir_canon.starts_with(&project_root_canon)
+        && !is_same_repository_worktree(&project_root_canon, &skills_dir_canon)
+    {
+        bail!(
+            "refusing .agents/skills path outside project root: {}",
+            skills_dir.display()
+        );
+    }
+    // Same-repository containment is necessary but not sufficient: a
+    // `.agents/skills` symlinked to an arbitrary in-repo directory (e.g.
+    // `../cli/src`, or `.agents -> .` making it the project's own `skills/`
+    // source) would make install treat `<target>/<name>` as canonical and
+    // recursively DELETE it on refresh. The resolved target must be exactly
+    // the corresponding project root's `.agents/skills` in a checkout
+    // sharing this project's Git common directory — the spelling suffix
+    // alone would still admit a nested decoy like `<repo>/decoy/.agents/skills`.
+    if skills_dir_canon.starts_with(&project_root_canon) {
+        // In-project, the ONLY legitimate resolution is this project's own
+        // `.agents/skills` — an alias like `.agents -> .` (making it the
+        // project's `skills/` source dir) or a nested decoy such as
+        // `<root>/decoy/.agents/skills` would otherwise become a canonical
+        // destination that refresh recursively deletes.
+        if skills_dir_canon != project_root_canon.join(".agents").join("skills") {
+            bail!(
+                "refusing .agents/skills that resolves to a non-canonical in-project directory: {} -> {}",
+                skills_dir.display(),
+                skills_dir_canon.display()
+            );
+        }
+    } else {
+        // Out-of-project (same-repository worktree sharing): the target must
+        // be exactly the corresponding project root's `.agents/skills` in
+        // the other checkout — the spelling suffix alone would still admit
+        // a nested decoy in that worktree.
+        if !skills_dir_canon.ends_with(Path::new(".agents/skills")) {
+            bail!(
+                "refusing .agents/skills that resolves to a non-skills-root directory: {} -> {}",
+                skills_dir.display(),
+                skills_dir_canon.display()
+            );
+        }
+        let claimed_checkout = skills_dir_canon
+            .parent()
+            .and_then(Path::parent)
+            .map(Path::to_path_buf)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "cannot derive a checkout root from {}",
+                    skills_dir_canon.display()
+                )
+            })?;
+        if !is_corresponding_project_root(&project_root_canon, &claimed_checkout) {
+            bail!(
+                "refusing .agents/skills whose parent is not the corresponding project root in another checkout: {} -> {} (expected {} at the checkout's copy of this project's repo-relative root)",
+                skills_dir.display(),
+                skills_dir_canon.display(),
+                claimed_checkout.display()
+            );
+        }
+    }
+    if !skills_dir_canon.is_dir() {
+        bail!(
+            "project .agents/skills path is not a directory: {}",
+            skills_dir.display()
         );
     }
     Ok(())
@@ -258,6 +465,138 @@ mod tests {
                 .contains("refusing to write through symlink")
         );
         assert_eq!(std::fs::read_to_string(&outside).unwrap(), "keep");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `.agents` aliased to an arbitrary in-repo directory must refuse even
+    /// when its `skills` child does not exist yet — the NotFound early
+    /// return must not skip root validation, or install creates (and later
+    /// recursively replaces) `<aliased>/skills/<name>` inside sources.
+    #[cfg(unix)]
+    #[test]
+    fn agents_alias_without_skills_child_is_rejected() {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!(
+            "vstack_agents_alias_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let decoy = root.join("src");
+        std::fs::create_dir_all(&decoy).unwrap();
+        symlink(&decoy, root.join(".agents")).unwrap();
+
+        let err = ensure_agents_dir_within_project(&root).unwrap_err();
+        assert!(
+            err.to_string().contains("non-canonical in-project"),
+            "expected the .agents alias refusal, got: {err}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The supported sharing layout must keep working when the vstack
+    /// project root sits BELOW the git toplevel: `<wt>/apps/foo/.agents ->
+    /// <main>/apps/foo/.agents` is the corresponding project root's
+    /// `.agents`, while a SIBLING project's `.agents` in the same checkout
+    /// is not and must refuse.
+    #[cfg(unix)]
+    #[test]
+    fn nested_project_agents_shared_with_corresponding_checkout_root() {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!(
+            "vstack_nested_share_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let main = root.join("main");
+        std::fs::create_dir_all(main.join("apps/foo/.agents/skills")).unwrap();
+        std::fs::create_dir_all(main.join("apps/bar/.agents")).unwrap();
+        std::fs::write(main.join("apps/foo/keep.txt"), "x").unwrap();
+        let git = |args: &[&str], cwd: &Path| {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?} failed");
+        };
+        git(&["init", "-q"], &main);
+        git(&["add", "."], &main);
+        git(
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-qm",
+                "init",
+            ],
+            &main,
+        );
+        git(&["worktree", "add", "-q", "--detach", "../wt"], &main);
+        let wt_project = root.join("wt/apps/foo");
+        // `.agents` dirs are untracked, so the worktree has none — share
+        // the main checkout's, exactly as the worktree skill provisions.
+        symlink(main.join("apps/foo/.agents"), wt_project.join(".agents")).unwrap();
+        ensure_agents_dir_within_project(&wt_project).unwrap();
+
+        std::fs::remove_file(wt_project.join(".agents")).unwrap();
+        symlink(main.join("apps/bar/.agents"), wt_project.join(".agents")).unwrap();
+        let err = ensure_agents_dir_within_project(&wt_project).unwrap_err();
+        assert!(
+            err.to_string().contains("corresponding project root"),
+            "expected the corresponding-root refusal, got: {err}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Same-repository containment alone must not admit a `.agents/skills`
+    /// symlinked to an arbitrary in-repo directory: install would treat
+    /// `<target>/<name>` as canonical and recursively delete it on refresh
+    /// (e.g. `.agents/skills -> ../cli/src` destroying `cli/src/<name>`).
+    #[cfg(unix)]
+    #[test]
+    fn agents_skills_resolving_to_non_skills_root_is_rejected() {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!(
+            "vstack_skills_nonroot_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let agents = root.join(".agents");
+        let decoy = root.join("src");
+        std::fs::create_dir_all(&agents).unwrap();
+        std::fs::create_dir_all(&decoy).unwrap();
+        symlink(&decoy, agents.join("skills")).unwrap();
+
+        let err = ensure_agents_dir_within_project(&root).unwrap_err();
+        assert!(
+            err.to_string().contains("non-canonical in-project"),
+            "expected the in-project refusal, got: {err}"
+        );
+
+        // The ordinary real layout stays accepted.
+        std::fs::remove_file(agents.join("skills")).unwrap();
+        std::fs::create_dir_all(agents.join("skills")).unwrap();
+        ensure_agents_dir_within_project(&root).unwrap();
 
         let _ = std::fs::remove_dir_all(&root);
     }

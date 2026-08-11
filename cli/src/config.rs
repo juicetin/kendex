@@ -1070,6 +1070,12 @@ pub fn is_source_changed(entry: &LockEntry) -> bool {
 pub struct DiskItem {
     pub name: String,
     pub kind: ItemKind,
+    /// For a skill admitted through an anchored root's gate: the harnesses
+    /// whose artifacts resolve to that canonical. Recovery must scope the
+    /// entry to exactly these — a same-named non-resolving harness dir is an
+    /// independent copy-mode install, and recording it under the recovered
+    /// Symlink entry would let the next refresh replace the copy.
+    pub anchored_harnesses: Option<Vec<String>>,
 }
 
 /// Discovered hook artifacts on disk that match hooks available in the source.
@@ -1085,18 +1091,48 @@ struct DiskHookItem {
 pub fn scan_installed_skills_on_disk(global: bool) -> Vec<DiskItem> {
     let mut items = Vec::new();
 
-    // Canonical skill location: .agents/skills/<name>/
-    let canonical_skills = if global {
+    // Canonical skill location: .agents/skills/<name>/. Project scope also
+    // consults checkout-anchored roots so a copy anchored in the main
+    // checkout by a worktree-run install (VST-195) is still discovered — but
+    // a copy there belongs to this project's view only when a harness that
+    // shares into that checkout actually references it, so anchored roots
+    // carry the sharing harnesses as a gate.
+    let canonical_skills: Vec<(PathBuf, Option<crate::installer::AnchorSharing>)> = if global {
         vec![
-            global_state_dir().join("skills"),
-            codex_home_dir().join("skills"),
+            (global_state_dir().join("skills"), None),
+            (codex_home_dir().join("skills"), None),
         ]
     } else {
-        vec![project_root().join(".agents").join("skills")]
+        // The project-spelled canonical root can PHYSICALLY live in another
+        // checkout (fully shared .agents): scanning it ungated would treat
+        // the owner's canonicals as local. Gate it by reference like any
+        // anchored root in that case.
+        let own_skills = project_root().join(".agents").join("skills");
+        let own_skills_shared = own_skills
+            .canonicalize()
+            .ok()
+            .zip(project_root().canonicalize().ok())
+            .is_some_and(|(skills, root)| !skills.starts_with(&root));
+        let local_gate: Option<crate::installer::AnchorSharing> = if own_skills_shared {
+            Some(
+                crate::harness::Harness::ALL
+                    .iter()
+                    .map(|harness| (*harness, crate::installer::AnchorEvidence::SharedDir))
+                    .collect(),
+            )
+        } else {
+            None
+        };
+        let mut roots = vec![(own_skills, local_gate)];
+        for (root, sharing) in
+            crate::installer::anchored_canonical_skill_roots(crate::harness::Harness::ALL)
+        {
+            roots.push((root, Some(sharing)));
+        }
+        roots
     };
 
-    let mut seen = std::collections::HashSet::new();
-    for skills_dir in canonical_skills {
+    for (skills_dir, gate) in canonical_skills {
         if !skills_dir.is_dir() {
             continue;
         }
@@ -1108,16 +1144,172 @@ pub fn scan_installed_skills_on_disk(global: bool) -> Vec<DiskItem> {
             if !path.is_dir() {
                 continue;
             }
-            // Only count directories with a .vstack-refreshed marker
-            if !path.join(".vstack-refreshed").exists() {
+            // Local roots require the managed marker. Anchored roots admit
+            // an UNMARKED canonical too — a foreign worktree's removal
+            // deliberately clears the marker while the owning checkout's
+            // references survive, and those references (checked below) are
+            // the recovery evidence; requiring the marker there made
+            // `vstack check` report a still-installed skill as missing.
+            if gate.is_none() && !path.join(".vstack-refreshed").exists() {
                 continue;
             }
-            if let Some(name) = path.file_name().and_then(|n| n.to_str())
-                && seen.insert(name.to_string())
+            // An UNMARKED anchored canonical is admitted only when it also
+            // LOOKS like a vstack-managed install: a REAL directory with
+            // SKILL.md. Reference evidence alone would adopt a manually
+            // maintained same-named directory, and a SYMLINK canonical is
+            // the owner's project-skills-dir wiring (every project-owned
+            // skill has SKILL.md too) — neither is vstack's to claim.
+            if gate.is_some() && !path.join(".vstack-refreshed").exists() {
+                let is_symlink = std::fs::symlink_metadata(&path)
+                    .is_ok_and(|meta| meta.file_type().is_symlink());
+                if is_symlink || !path.join("SKILL.md").exists() {
+                    continue;
+                }
+            }
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            let anchored_harnesses = match &gate {
+                Some(sharing) => {
+                    // A reference must RESOLVE to this canonical dir. A
+                    // same-named copy-mode dir in a harness dir is that
+                    // harness's own install, not a reference — recovering
+                    // through it would re-type the skill as symlink-mode and
+                    // let the next refresh replace the copy. Only the
+                    // resolving harnesses are recorded, so recovery cannot
+                    // attach that independent install to the anchored entry.
+                    // Only SYMLINK artifacts are references: a direct
+                    // Codex/Pi artifact in a shared layout IS the canonical
+                    // dir itself, and counting that self-identity would let
+                    // a lockless worktree recover every main-checkout
+                    // canonical as its own install.
+                    let referencing: Vec<String> = match path.canonicalize() {
+                        Ok(canonical) => sharing
+                            .iter()
+                            .filter(|(harness, _)| {
+                                let artifact = harness.skills_dir(false).join(name);
+                                std::fs::symlink_metadata(&artifact)
+                                    .is_ok_and(|meta| meta.file_type().is_symlink())
+                                    && artifact
+                                        .canonicalize()
+                                        .is_ok_and(|resolved| resolved == canonical)
+                            })
+                            .map(|(harness, _)| harness.id().to_string())
+                            .collect(),
+                        Err(_) => Vec::new(),
+                    };
+                    if referencing.is_empty() {
+                        continue;
+                    }
+                    Some(referencing)
+                }
+                None => {
+                    // Child-level anchor in the ungated local root: a real
+                    // `.agents/skills` whose `<name>` entry is a symlink into
+                    // another checkout (partial sharing). This root scans
+                    // FIRST, so an unscoped entry here would win `seen` and
+                    // recovery would claim every same-named harness artifact
+                    // — retyping an independent copy-mode install as
+                    // Symlink. Scope it to the resolving harnesses, exactly
+                    // like root-level anchors.
+                    let is_link = std::fs::symlink_metadata(&path)
+                        .is_ok_and(|meta| meta.file_type().is_symlink());
+                    if is_link {
+                        match path.canonicalize() {
+                            Ok(canonical) => {
+                                let referencing: Vec<String> = crate::harness::Harness::ALL
+                                    .iter()
+                                    .filter(|harness| {
+                                        harness
+                                            .skills_dir(false)
+                                            .join(name)
+                                            .canonicalize()
+                                            .is_ok_and(|resolved| resolved == canonical)
+                                    })
+                                    .map(|harness| harness.id().to_string())
+                                    .collect();
+                                if referencing.is_empty() {
+                                    continue;
+                                }
+                                Some(referencing)
+                            }
+                            Err(_) => continue,
+                        }
+                    } else {
+                        // Plain LOCAL canonical: when a same-named harness
+                        // artifact resolves somewhere ELSE (an independent
+                        // install in another checkout), an unscoped entry
+                        // would let recovery claim it. Scope to the
+                        // harnesses actually attached here in that case —
+                        // symlink artifacts resolving to this canonical AND
+                        // direct-canonical harnesses (Codex/Pi, whose
+                        // artifact IS this directory). No locally attached
+                        // harness at all means the foreign install owns
+                        // every artifact: skip rather than mint a
+                        // zero-harness entry. Without a foreign-resolving
+                        // artifact, keep the legacy full detection.
+                        let local_canonical = path.canonicalize().ok();
+                        let mut resolving: Vec<String> = Vec::new();
+                        let mut foreign_resolving = false;
+                        for harness in crate::harness::Harness::ALL.iter() {
+                            let artifact = harness.skills_dir(false).join(name);
+                            let Ok(meta) = std::fs::symlink_metadata(&artifact) else {
+                                continue;
+                            };
+                            match (artifact.canonicalize().ok(), &local_canonical) {
+                                (Some(resolved), Some(local)) if resolved == *local => {
+                                    resolving.push(harness.id().to_string());
+                                }
+                                // A symlink resolving elsewhere OR a real
+                                // copy-mode directory at a different
+                                // physical place — both are independent
+                                // installs the recovered entry must not
+                                // claim.
+                                (Some(_), _)
+                                    if meta.file_type().is_symlink()
+                                        || meta.file_type().is_dir() =>
+                                {
+                                    foreign_resolving = true;
+                                }
+                                _ => {}
+                            }
+                        }
+                        if foreign_resolving {
+                            if resolving.is_empty() {
+                                continue;
+                            }
+                            Some(resolving)
+                        } else {
+                            None
+                        }
+                    }
+                }
+            };
+            // A skill can hold canonicals in MORE than one root (split
+            // layout: Codex/Pi local, Claude anchored in main): merge
+            // harness scopes across roots instead of first-root-wins. An
+            // unscoped (None) side means full legacy detection and absorbs
+            // any scoped one.
+            if let Some(existing) = items
+                .iter_mut()
+                .find(|item: &&mut DiskItem| item.name == name && item.kind == ItemKind::Skill)
             {
+                match (&mut existing.anchored_harnesses, anchored_harnesses) {
+                    (Some(current), Some(mut incoming)) => {
+                        for harness_id in incoming.drain(..) {
+                            if !current.contains(&harness_id) {
+                                current.push(harness_id);
+                            }
+                        }
+                    }
+                    (current @ Some(_), None) => *current = None,
+                    (None, _) => {}
+                }
+            } else {
                 items.push(DiskItem {
                     name: name.to_string(),
                     kind: ItemKind::Skill,
+                    anchored_harnesses,
                 });
             }
         }
@@ -1426,8 +1618,33 @@ fn prune_broken_skill_symlinks_in_dirs(dirs: &[PathBuf], managed_roots: &[PathBu
 }
 
 fn prune_broken_skill_symlinks(global: bool) -> bool {
-    let dirs = harness_skill_dirs(global);
-    let roots = managed_skill_roots(global);
+    let mut dirs = harness_skill_dirs(global);
+    let mut roots = managed_skill_roots(global);
+    if !global {
+        // Also sweep the harness dirs of same-repo checkouts that shared
+        // harness dirs anchor into: a link dangling in a main-side dir the
+        // worktree does NOT share is invisible to the local walk, and their
+        // canonical roots must count as managed targets.
+        let project_root = project_root();
+        for (anchored_root, _) in
+            crate::installer::anchored_canonical_skill_roots(crate::harness::Harness::ALL)
+        {
+            let Some(checkout_root) = anchored_root.parent().and_then(Path::parent) else {
+                continue;
+            };
+            for harness in crate::harness::Harness::ALL {
+                if let Ok(rel) = harness.skills_dir(false).strip_prefix(&project_root) {
+                    let dir = checkout_root.join(rel);
+                    if !dirs.contains(&dir) {
+                        dirs.push(dir);
+                    }
+                }
+            }
+            if !roots.contains(&anchored_root) {
+                roots.push(anchored_root);
+            }
+        }
+    }
     prune_broken_skill_symlinks_in_dirs(&dirs, &roots)
 }
 
@@ -1608,18 +1825,27 @@ pub fn reconcile_lock_with_disk(lock: &mut LockFile, global: bool, source: &str)
     let now = now_iso();
     for item in &disk_skills {
         if !lock.entries.contains_key(&item.name) {
-            // Determine which harnesses have this skill by checking dirs
-            let mut harnesses = Vec::new();
-            for harness in crate::harness::Harness::ALL {
-                let skill_path = harness.skills_dir(global).join(&item.name);
-                if skill_path.exists() || skill_path.is_symlink() {
-                    harnesses.push(harness.id().to_string());
+            // Determine which harnesses have this skill by checking dirs.
+            // An anchored item carries the harnesses that resolve to its
+            // canonical; a same-named artifact for any OTHER harness is an
+            // independent install this entry must not claim.
+            let harnesses = match &item.anchored_harnesses {
+                Some(referencing) => referencing.clone(),
+                None => {
+                    let mut harnesses = Vec::new();
+                    for harness in crate::harness::Harness::ALL {
+                        let skill_path = harness.skills_dir(global).join(&item.name);
+                        if skill_path.exists() || skill_path.is_symlink() {
+                            harnesses.push(harness.id().to_string());
+                        }
+                    }
+                    if harnesses.is_empty() {
+                        // At minimum it's in the canonical location
+                        harnesses.push("claude-code".to_string());
+                    }
+                    harnesses
                 }
-            }
-            if harnesses.is_empty() {
-                // At minimum it's in the canonical location
-                harnesses.push("claude-code".to_string());
-            }
+            };
             let mut entry = LockEntry {
                 name: item.name.clone(),
                 kind: item.kind,
@@ -1643,23 +1869,59 @@ pub fn reconcile_lock_with_disk(lock: &mut LockFile, global: bool, source: &str)
     // Remove lock entries for skills whose files no longer exist on disk
     let disk_names: std::collections::HashSet<&str> =
         disk_skills.iter().map(|d| d.name.as_str()).collect();
-    let stale_skills: Vec<String> = lock
+    let stale_skills: Vec<(String, Vec<String>)> = lock
         .entries
         .iter()
         .filter(|(_, e)| e.kind == ItemKind::Skill && !disk_names.contains(e.name.as_str()))
-        .map(|(name, _)| name.clone())
+        .map(|(name, e)| (name.clone(), e.harnesses.clone()))
         .collect();
-    for name in stale_skills {
-        // Verify the canonical dir is actually gone (not just missing the marker)
-        let canonical = if global {
-            global_state_dir().join("skills").join(&name)
+    if !stale_skills.is_empty() {
+        // Verify the canonical dir is actually gone (not just missing the
+        // marker) in every root a copy may live in — anchored roots count
+        // for an entry only when one of ITS harnesses shares into them.
+        let anchored = if global {
+            Vec::new()
         } else {
-            project_root().join(".agents").join("skills").join(&name)
+            crate::installer::anchored_canonical_skill_roots(crate::harness::Harness::ALL)
         };
-        if !canonical.exists() {
-            eprintln!("  Removed stale lock entry (files missing): {name}");
-            lock.remove(&name);
-            modified = true;
+        let own_root = if global {
+            global_state_dir().join("skills")
+        } else {
+            project_root().join(".agents").join("skills")
+        };
+        // Invariant across the loop — resolve once, not per stale entry.
+        let own_root_is_local = global
+            || own_root
+                .canonicalize()
+                .ok()
+                .zip(std::fs::canonicalize(project_root()).ok())
+                .is_none_or(|(root, project)| root.starts_with(&project));
+        for (name, entry_harnesses) in stale_skills {
+            // Entry ids may use supported aliases ("claude" for claude-code);
+            // normalize through the same resolution the rest of the CLI uses.
+            let entry_harnesses: Vec<crate::harness::Harness> = entry_harnesses
+                .iter()
+                .filter_map(|id| crate::harness::Harness::from_id(id))
+                .collect();
+            // A fully shared `.agents` makes own_root resolve into the
+            // OTHER checkout — its contents are anchored evidence (gated
+            // per-harness/per-name below), not unconditional local proof:
+            // counting them here would keep any stale entry alive merely
+            // because the main checkout has a same-named canonical.
+            let exists = (own_root_is_local && own_root.join(&name).exists())
+                || anchored.iter().any(|(root, sharing)| {
+                    // Child-link evidence is per-skill: an anchored root
+                    // keeps an entry alive only when it is evidenced for
+                    // THIS name, not by an unrelated skill's child link.
+                    sharing.iter().any(|(harness, evidence)| {
+                        entry_harnesses.contains(harness) && evidence.covers(&name)
+                    }) && root.join(&name).exists()
+                });
+            if !exists {
+                eprintln!("  Removed stale lock entry (files missing): {name}");
+                lock.remove(&name);
+                modified = true;
+            }
         }
     }
 
