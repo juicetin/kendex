@@ -255,6 +255,27 @@ enum Commands {
         scope: Option<String>,
     },
 
+    /// Refresh stale installed items for consumer propagation PRs.
+    /// Updates recorded remote source caches to origin/HEAD, compares lock
+    /// hashes, then runs refresh + verify only when propagation is needed.
+    Propagate {
+        /// Report drift only; do not refresh.
+        #[arg(short, long)]
+        check: bool,
+        /// Stage existing vstack-managed project paths after a successful refresh.
+        #[arg(long)]
+        stage: bool,
+        /// Shortcut for `--scope global`.
+        #[arg(short, long)]
+        global: bool,
+        /// project | global | all (default: project)
+        #[arg(long)]
+        scope: Option<String>,
+        /// Print per-item hash old->new during refresh.
+        #[arg(short, long)]
+        verbose: bool,
+    },
+
     /// Scaffold a new agent, skill, or hook template in a vstack source repo.
     /// Run from the repo root; writes to ./agents/, ./skills/, or ./hooks/.
     Init {
@@ -406,6 +427,17 @@ fn main() -> Result<()> {
             commands::verify::run(scope, &names)
         }
         Some(Commands::UpdatePi { check, scope }) => commands::update_pi::run(check, scope),
+        Some(Commands::Propagate {
+            check,
+            stage,
+            global,
+            scope,
+            verbose,
+        }) => {
+            let scope =
+                scope::ScopeFilter::resolve(scope.as_deref(), global, scope::ScopeFilter::Project)?;
+            commands::propagate::run(scope, check, verbose, stage)
+        }
         Some(Commands::Init { name, kind }) => {
             commands::init::run(name.as_deref(), kind.as_deref())
         }

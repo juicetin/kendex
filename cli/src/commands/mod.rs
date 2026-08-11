@@ -3,6 +3,7 @@ pub mod apply;
 pub mod check;
 pub mod init;
 pub mod list;
+pub mod propagate;
 pub mod refresh;
 pub mod remove;
 pub mod report;

@@ -168,6 +168,21 @@ When a project install includes a skill that ships `vstack.settings.toml.example
 
 Secret values may also be injected by the parent process at launch time. GitHub and Linear helpers preserve already-resolved `GH_TOKEN`, `GITHUB_TOKEN`, `GH_BOT_TOKEN`, and `LINEAR_API_KEY` values before reading local files or resolving `op://` references.
 
+### Automated Consumer Refresh PRs
+
+Consumer repos can schedule `vstack propagate --scope project --stage` to keep tracked vstack installs current. The command updates recorded remote source caches to `origin/HEAD`, compares the lock hashes, runs `vstack refresh`, verifies the result only when source drift exists, and stages existing vstack-managed project paths. Repos then commit the staged diff with their normal PR bot.
+
+Keep any repo-owned follow-up steps between propagation and the commit:
+
+```bash
+vstack propagate --scope project --stage
+git commit -m "chore(vstack): refresh installed assets"
+git push -u origin HEAD
+gh pr create --title "chore(vstack): refresh installed assets" --body "Automated vstack propagation refresh."
+```
+
+Have the workflow skip the commit/PR steps when `git diff --cached --quiet --exit-code` reports no staged diff. Put repo-specific copy or manifest-pin steps after `vstack propagate` and before that diff check, then stage those repo-owned paths explicitly. The propagation command does not absorb review threads or bypass merge queues; keep those policies in the consumer repo's PR workflow.
+
 ## Supported Tools
 
 | Tool | Notes |
