@@ -196,6 +196,22 @@ if (cd "$work/brokenmktemp/repo" && PATH="$work/brokenmktemp/bin:$PATH" "$SELFTE
 else
   grep -q "refusing to degrade to synthetic probes" "$work/brokenmktemp.out" \
     || note "broken-mktemp failure does not carry the refusing-to-degrade diagnostic"
+  # The CAUSE must be the right one: reverting the cause-carrying flag to
+  # the old hard-coded git advice would still print the generic suffix, so
+  # require the mktemp wording and reject the git-failure diagnosis.
+  grep -q "staging file creation failed (mktemp)" "$work/brokenmktemp.out" \
+    || note "broken-mktemp failure does not name the mktemp/staging cause"
+  # Absence assertion via explicit status: 0 = misattribution present,
+  # >=2 = grep itself failed to read — both are failures, distinctly named.
+  set +e
+  grep -q "'git ls-files' failed" "$work/brokenmktemp.out"
+  _g=$?
+  set -e
+  if [ "$_g" -eq 0 ]; then
+    note "broken-mktemp failure misattributes the cause to git ls-files"
+  elif [ "$_g" -ge 2 ]; then
+    note "could not read brokenmktemp.out for the misattribution check (grep exit $_g)"
+  fi
 fi
 
 # --- layer 2e: the harness namespace is not the over-broad namespace --------
@@ -216,11 +232,33 @@ fi
 grep -q "outside every committed glob and still carries" "$work/probeglob.out" \
   || note "harness-namespace fixture did not exercise the exclude-free carry case"
 
+# A structurally universal exclusion must FAIL in TRACKED mode too — with
+# one committed, no path today or ever can carry, so the tracked-mode
+# "future files still carry" note would understate a dead config. Run inside
+# a real repository with a tracked carry-class file and a '*' exclusion.
+mkdir -p "$work/trackeduniv/repo"
+(cd "$work/trackeduniv/repo" && git init -q . \
+  && printf '# probe\n' > README.md \
+  && git add README.md \
+  && git -c user.email=t@t -c user.name=t commit -qm probe)
+grep -v '^REVIEW_GATE_CARRY_FORWARD = ' "$work/configured/vstack.settings.toml" \
+  >"$work/trackeduniv/repo/vstack.settings.toml"
+printf 'REVIEW_GATE_CARRY_FORWARD = "docs"\nREVIEW_GATE_CARRY_FORWARD_EXCLUDE = "*"\n' \
+  >>"$work/trackeduniv/repo/vstack.settings.toml"
+if (cd "$work/trackeduniv/repo" && "$SELFTEST") >"$work/trackeduniv.out" 2>&1; then
+  note "selftest passed with a '*' exclusion in TRACKED mode — structural universality is only enforced hermetically"
+else
+  grep -q "can never apply" "$work/trackeduniv.out" \
+    || note "the tracked-mode '*' failure does not carry the can-never-apply diagnostic"
+fi
+
 # --- layer 2f: probe exhaustion without a structurally universal glob ------
 # A glob set spanning BOTH harness namespaces exhausts every synthetic
 # candidate while ordinary paths still carry — that is UNPROVEN universality,
 # not an over-broad failure. The run must PASS and say so out loud; only a
-# literal '*'/'**' entry may fail as "can never apply" (layer below).
+# structurally universal all-wildcard entry (only '*'/'?' characters, at
+# least one '*', at most one '?' — '*', '***', '?*', '*?') may fail as
+# "can never apply" (layer below).
 mkdir -p "$work/bothns"
 grep -v '^REVIEW_GATE_CARRY_FORWARD = ' "$work/configured/vstack.settings.toml" \
   >"$work/bothns/vstack.settings.toml"
@@ -247,6 +285,42 @@ if (cd "$work/allstars" && "$SELFTEST") >"$work/allstars.out" 2>&1; then
 else
   grep -q "can never apply" "$work/allstars.out" \
     || note "the '***' failure does not carry the can-never-apply diagnostic"
+fi
+
+# The '?' boundary, both directions: exactly one '?' beside a star is still
+# universal (every path has one character) and must FAIL; two '?'s impose a
+# minimum length one-character paths escape and must downgrade to UNPROVEN.
+mkdir -p "$work/oneq" "$work/twoq"
+grep -v '^REVIEW_GATE_CARRY_FORWARD = ' "$work/configured/vstack.settings.toml" \
+  >"$work/oneq/vstack.settings.toml"
+printf 'REVIEW_GATE_CARRY_FORWARD = "docs"\nREVIEW_GATE_CARRY_FORWARD_EXCLUDE = "?*"\n' \
+  >>"$work/oneq/vstack.settings.toml"
+if (cd "$work/oneq" && "$SELFTEST") >"$work/oneq.out" 2>&1; then
+  note "selftest passed with a '?*' exclusion — the one-? universal shape is being read as unproven"
+else
+  grep -q "can never apply" "$work/oneq.out" \
+    || note "the '?*' failure does not carry the can-never-apply diagnostic"
+fi
+# '??*' excludes every >=2-char filename, so it legitimately breaks the
+# run's own carry-positive battery — the run's EXIT is not the assertion
+# here. The classification is: '??*' must take the UNPROVEN note, never the
+# can-never-apply FAIL (one-character paths escape its minimum length).
+grep -v '^REVIEW_GATE_CARRY_FORWARD = ' "$work/configured/vstack.settings.toml" \
+  >"$work/twoq/vstack.settings.toml"
+printf 'REVIEW_GATE_CARRY_FORWARD = "docs"\nREVIEW_GATE_CARRY_FORWARD_EXCLUDE = "??*"\n' \
+  >>"$work/twoq/vstack.settings.toml"
+(cd "$work/twoq" && "$SELFTEST") >"$work/twoq.out" 2>&1 || true
+grep -q "universality is UNPROVEN" "$work/twoq.out" \
+  || note "the '??*' fixture did not report the unproven-universality note"
+# Same explicit-status shape as the misattribution check above.
+set +e
+grep -q "can never apply" "$work/twoq.out"
+_g=$?
+set -e
+if [ "$_g" -eq 0 ]; then
+  note "'??*' was over-classified as structurally universal (minimum-length patterns are not)"
+elif [ "$_g" -ge 2 ]; then
+  note "could not read twoq.out for the over-classification check (grep exit $_g)"
 fi
 
 # One combined FAILING run pins BOTH guards (each fixture run replays the
