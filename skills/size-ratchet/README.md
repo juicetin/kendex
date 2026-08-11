@@ -52,6 +52,14 @@ pass — the file is reviewed input, so it fails loud.
 
 ### Seeding a first baseline
 
+In a sparse checkout that omits the baseline file, checks still run against
+the index copy, but `--update` refuses (it will not rewrite a file the
+worktree cannot show): materialize it first with
+`git update-index --no-skip-worktree -- <baseline-path> && git checkout-index -- <baseline-path>`
+(literal file paths in both commands — works in cone and non-cone mode for
+any path shape; a later `git sparse-checkout reapply` re-hides the file),
+then rerun.
+
 `--update` never adds rows, so the first baseline is created explicitly:
 run the check, and turn each reported `new offender` line (path and count)
 into a `path<TAB>lines` row, `LC_ALL=C` sorted. That the initial freeze is
