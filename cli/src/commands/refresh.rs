@@ -1069,6 +1069,14 @@ pub fn regenerate_agents_after_hook_removal(
 /// re-copy skills, hooks, and Pi packages. Use after editing source files
 /// to push changes to the install scope without re-running `vstack add`.
 pub fn run(scope: crate::scope::ScopeFilter, verbose: bool) -> Result<()> {
+    run_with_source_records(scope, verbose, &[])
+}
+
+pub(crate) fn run_with_source_records(
+    scope: crate::scope::ScopeFilter,
+    verbose: bool,
+    resolved_records: &[(bool, Vec<ResolvedSource>)],
+) -> Result<()> {
     let mut any_action = false;
     for &global in scope.globals() {
         let lock_path = config::lock_file_path(global);
@@ -1086,7 +1094,11 @@ pub fn run(scope: crate::scope::ScopeFilter, verbose: bool) -> Result<()> {
         any_action = true;
         let scope_label = if global { "GLOBAL" } else { "PROJECT" };
         eprintln!("\n─ refresh ({scope_label}) ─");
-        run_one(global, verbose)?;
+        let source_records = resolved_records
+            .iter()
+            .find(|(scope_global, _)| *scope_global == global)
+            .map(|(_, records)| records.as_slice());
+        run_one_with_source_records(global, verbose, source_records)?;
     }
     if !any_action {
         eprintln!("Nothing installed in selected scope(s). Run `vstack add` first.");
@@ -1094,7 +1106,11 @@ pub fn run(scope: crate::scope::ScopeFilter, verbose: bool) -> Result<()> {
     Ok(())
 }
 
-fn run_one(global: bool, verbose: bool) -> Result<()> {
+fn run_one_with_source_records(
+    global: bool,
+    verbose: bool,
+    resolved_records: Option<&[ResolvedSource]>,
+) -> Result<()> {
     let lock_path = config::lock_file_path(global);
     let lock_existed = lock_path.exists();
     let mut lock = config::LockFile::load(&lock_path)?;
@@ -1119,10 +1135,12 @@ fn run_one(global: bool, verbose: bool) -> Result<()> {
         lock.save(&lock_path)?;
     }
 
-    // Resolve source directories once per refresh. Cached remote sources update
-    // during resolution; reusing this list avoids duplicate git fetch/reset
-    // cycles for pruning and aggregation.
-    let source_records = resolve_source_records(&lock);
+    // Resolve source directories once per refresh. Callers that already ran a
+    // strict remote update can pass those records so refresh does not fetch
+    // the same remote cache a second time.
+    let source_records = resolved_records
+        .map(|records| records.to_vec())
+        .unwrap_or_else(|| resolve_source_records(&lock));
     let source_dirs: Vec<_> = source_records
         .iter()
         .map(|source| source.root.clone())

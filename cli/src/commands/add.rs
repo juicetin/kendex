@@ -2660,7 +2660,9 @@ source (e.g. switching vstack repos, or starting clean), pass --clobber:
 fn resolve_source(source: Option<&str>) -> Result<PathBuf> {
     match source {
         Some(path) if Path::new(path).exists() => Ok(std::fs::canonicalize(path)?),
-        Some(source) if looks_like_remote(source) => clone_or_update(source),
+        Some(source) if crate::refresh_sources::looks_like_remote_source(source) => {
+            clone_or_update(source)
+        }
         Some(source) => {
             anyhow::bail!(
                 "Source not found: {source}\n\
@@ -2684,80 +2686,10 @@ fn resolve_source(source: Option<&str>) -> Result<PathBuf> {
     }
 }
 
-fn looks_like_remote(source: &str) -> bool {
-    // owner/repo, https://github.com/..., git@github.com:...
-    source.contains('/') && !source.starts_with('.') && !source.starts_with('/')
-        || source.starts_with("https://")
-        || source.starts_with("git@")
-}
-
-/// Clone or update a remote repo into ~/.vstack/cache/<owner>/<repo>
 fn clone_or_update(source: &str) -> Result<PathBuf> {
-    let cache_dir = crate::config::global_base_dir()
-        .join(".vstack")
-        .join("cache");
-    std::fs::create_dir_all(&cache_dir)?;
-
-    // Normalize source to a git URL and a cache key
-    let (git_url, cache_key) = if source.starts_with("https://") || source.starts_with("git@") {
-        // Full URL — extract owner/repo for cache key
-        let key = source
-            .trim_end_matches('/')
-            .trim_end_matches(".git")
-            .rsplit('/')
-            .take(2)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect::<Vec<_>>()
-            .join("_");
-        (source.to_string(), key)
-    } else {
-        // owner/repo shorthand
-        let url = format!("https://github.com/{}.git", source);
-        let key = source.replace('/', "_");
-        (url, key)
+    let Some(repo_dir) = crate::refresh_sources::clone_or_update_remote_source(source)? else {
+        anyhow::bail!("Source is not a supported GitHub remote: {source}");
     };
-
-    let repo_dir = cache_dir.join(&cache_key);
-
-    if repo_dir.join(".git").exists() {
-        // Update existing clone (handles force-pushed histories)
-        eprintln!("Updating cached repo...");
-        let fetch = std::process::Command::new("git")
-            .args(["fetch", "origin", "--quiet"])
-            .current_dir(&repo_dir)
-            .status();
-        if fetch.is_ok_and(|s| s.success()) {
-            let _ = std::process::Command::new("git")
-                .args(["reset", "--hard", "origin/HEAD"])
-                .current_dir(&repo_dir)
-                .stderr(std::process::Stdio::null())
-                .status();
-        }
-    } else {
-        // Fresh shallow clone
-        eprintln!("Cloning {}...", git_url);
-        let status = std::process::Command::new("git")
-            .args([
-                "clone",
-                "--depth",
-                "1",
-                &git_url,
-                repo_dir.to_str().unwrap(),
-            ])
-            .status()
-            .context("failed to run git clone — is git installed?")?;
-        if !status.success() {
-            anyhow::bail!(
-                "git clone failed. For private repos, make sure you have access:\n\
-                 \n\
-                 SSH:   git clone git@github.com:{source}.git\n\
-                 HTTPS: gh auth login\n\
-                 Token: export GH_TOKEN=<your-token>"
-            );
-        }
-    }
 
     if !crate::resolve::is_vstack_source(&repo_dir) {
         anyhow::bail!(

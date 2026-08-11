@@ -258,11 +258,12 @@ enum Commands {
     /// Refresh stale installed items for consumer propagation PRs.
     /// Updates recorded remote source caches to origin/HEAD, compares lock
     /// hashes, then runs refresh + verify only when propagation is needed.
+    /// With --check, exits non-zero when drift or legacy lock hashes need a refresh.
     Propagate {
         /// Report drift only; do not refresh.
         #[arg(short, long)]
         check: bool,
-        /// Stage existing vstack-managed project paths after a successful refresh.
+        /// Stage only vstack-managed project paths after a successful refresh.
         #[arg(long)]
         stage: bool,
         /// Shortcut for `--scope global`.
@@ -434,9 +435,10 @@ fn main() -> Result<()> {
             scope,
             verbose,
         }) => {
+            let explicit_scope = scope.is_some() || global;
             let scope =
                 scope::ScopeFilter::resolve(scope.as_deref(), global, scope::ScopeFilter::Project)?;
-            commands::propagate::run(scope, check, verbose, stage)
+            commands::propagate::run(scope, check, verbose, stage, explicit_scope)
         }
         Some(Commands::Init { name, kind }) => {
             commands::init::run(name.as_deref(), kind.as_deref())

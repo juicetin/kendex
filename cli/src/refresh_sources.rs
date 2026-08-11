@@ -4,6 +4,7 @@ use crate::hook::Hook;
 use crate::mapping::MappingConfig;
 use crate::pi_extension::PiExtension;
 use crate::skill::Skill;
+use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug)]
@@ -60,6 +61,21 @@ pub(crate) fn resolve_sources(lock: &config::LockFile) -> Vec<PathBuf> {
 
 pub(crate) fn resolve_source_records(lock: &config::LockFile) -> Vec<ResolvedSource> {
     resolve_source_records_with(lock, resolve_recorded_source)
+}
+
+pub(crate) fn resolve_source_records_strict_remote(
+    lock: &config::LockFile,
+) -> Result<Vec<ResolvedSource>> {
+    let mut seen = std::collections::BTreeSet::new();
+    for entry in lock.entries.values() {
+        if seen.insert(entry.source.clone()) {
+            clone_or_update_remote_source(&entry.source)?;
+        }
+    }
+    Ok(resolve_source_records_with(
+        lock,
+        resolve_recorded_source_without_remote_update,
+    ))
 }
 
 fn resolve_source_records_with(
@@ -252,6 +268,17 @@ pub(crate) fn resolve_recorded_source(source: &str) -> Option<PathBuf> {
     resolve_single_source(source)
 }
 
+fn resolve_recorded_source_without_remote_update(source: &str) -> Option<PathBuf> {
+    let path = Path::new(source);
+    if path.is_absolute() && path.is_dir() {
+        return Some(path.to_path_buf());
+    }
+    if let Some(path) = resolve_recorded_local_source(source) {
+        return Some(path);
+    }
+    resolve_single_source_with(source, false, true)
+}
+
 /// Whether an entry's recorded source still names a usable directory on disk.
 ///
 /// Deliberately side-effect free (no remote fetch): callers use it in per-entry
@@ -282,8 +309,7 @@ fn resolve_single_source_with(
         return Some(p.to_path_buf());
     }
 
-    let looks_like_remote =
-        source.contains('/') && !source.starts_with('.') && !source.starts_with('/');
+    let looks_like_remote = looks_like_remote_source(source);
 
     // Explicit relative local source tokens in locks/registries are
     // project-scoped. Treating them as "walk upward to any vstack source" can
@@ -304,14 +330,12 @@ fn resolve_single_source_with(
         return find_vstack_source_from_cwd();
     }
 
-    // Remote shorthand (owner/repo) — update once during top-level source resolution,
+    // Remote shorthand/URL: update once during top-level source resolution,
     // then use the cached clone without side effects from pure attribution/hash paths.
-    let cache_dir = config::global_base_dir().join(".vstack").join("cache");
-    let key = source.replace('/', "_");
-    let cached = cache_dir.join(&key);
+    let cached = remote_cache_dir(source)?;
     if cached.join(".git").exists() {
         if update_remote {
-            update_cached_repo(&cached);
+            update_cached_repo_best_effort(source, &cached);
         }
         return Some(cached);
     }
@@ -331,8 +355,7 @@ fn is_bare_local_source(source: &str, looks_like_remote: bool) -> bool {
 }
 
 fn resolve_recorded_local_source(source: &str) -> Option<PathBuf> {
-    let looks_like_remote =
-        source.contains('/') && !source.starts_with('.') && !source.starts_with('/');
+    let looks_like_remote = looks_like_remote_source(source);
     if !is_explicit_relative_local_source(source)
         && !is_bare_local_source(source, looks_like_remote)
     {
@@ -367,27 +390,191 @@ fn find_vstack_source_from_cwd() -> Option<PathBuf> {
     }
 }
 
-/// Pull latest changes for a cached remote repo.
-fn update_cached_repo(repo_dir: &std::path::Path) {
-    eprintln!("Updating cached repo...");
+pub(crate) fn looks_like_remote_source(source: &str) -> bool {
+    (source.contains('/') && !source.starts_with('.') && !source.starts_with('/'))
+        || source.starts_with("https://")
+        || source.starts_with("git@")
+}
+
+pub(crate) fn clone_or_update_remote_source(source: &str) -> Result<Option<PathBuf>> {
+    let Some(git_url) = remote_git_url(source) else {
+        return Ok(None);
+    };
+    let display = remote_source_display(source);
+    let cache_dir = remote_cache_dir(source).expect("remote source has cache dir");
+    clone_or_update_remote_source_at(&display, &git_url, &cache_dir).map(Some)
+}
+
+fn clone_or_update_remote_source_at(
+    display: &str,
+    git_url: &str,
+    cache_dir: &Path,
+) -> Result<PathBuf> {
+    if let Some(parent) = cache_dir.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating source cache {}", parent.display()))?;
+    }
+
+    if cache_dir.join(".git").exists() {
+        update_cached_repo_strict(&display, &cache_dir)?;
+        return Ok(cache_dir.to_path_buf());
+    }
+
+    eprintln!("Cloning {display} into vstack source cache...");
+    let status = std::process::Command::new("git")
+        .args(["clone", "--depth", "1", &git_url])
+        .arg(cache_dir)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .with_context(|| format!("running git clone for {display}"))?;
+    if !status.success() {
+        bail!(
+            "git clone failed while caching source {display}. For private repos, verify Git access with gh auth login or SSH credentials."
+        );
+    }
+    Ok(cache_dir.to_path_buf())
+}
+
+fn remote_git_url(source: &str) -> Option<String> {
+    if source.starts_with("https://") || source.starts_with("git@") {
+        return Some(source.to_string());
+    }
+    let slug = config::parse_github_slug(source)?;
+    Some(format!("https://github.com/{slug}.git"))
+}
+
+pub(crate) fn remote_source_display(source: &str) -> String {
+    if let Some(slug) = config::parse_github_slug(source) {
+        return slug;
+    }
+    if source.starts_with("https://") {
+        return "https://<redacted>".to_string();
+    }
+    if source.starts_with("git@") {
+        return "git@<redacted>".to_string();
+    }
+    source.to_string()
+}
+
+pub(crate) fn remote_cache_dir(source: &str) -> Option<PathBuf> {
+    if remote_git_url(source).is_none() {
+        return None;
+    }
+    Some(
+        config::global_base_dir()
+            .join(".vstack")
+            .join("cache")
+            .join(remote_cache_key(source)),
+    )
+}
+
+pub(crate) fn remote_cache_key(source: &str) -> String {
+    if let Some(slug) = config::parse_github_slug(source) {
+        return sanitize_cache_component(&slug.replace('/', "_"));
+    }
+    format!("remote_{}", fnv64_hex(source))
+}
+
+fn sanitize_cache_component(input: &str) -> String {
+    let mut out = String::new();
+    let mut last_was_sep = false;
+    for ch in input.chars() {
+        let next = if ch.is_ascii_alphanumeric() {
+            Some(ch.to_ascii_lowercase())
+        } else if ch == '-' || ch == '_' {
+            Some(ch)
+        } else {
+            Some('_')
+        };
+        if let Some(next) = next {
+            if next == '_' {
+                if last_was_sep {
+                    continue;
+                }
+                last_was_sep = true;
+            } else {
+                last_was_sep = false;
+            }
+            out.push(next);
+        }
+    }
+    let trimmed = out.trim_matches('_').to_string();
+    if trimmed.is_empty() || is_windows_reserved_name(&trimmed) {
+        "source".to_string()
+    } else {
+        trimmed
+    }
+}
+
+fn is_windows_reserved_name(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or(name).to_ascii_lowercase();
+    matches!(
+        stem.as_str(),
+        "con"
+            | "prn"
+            | "aux"
+            | "nul"
+            | "com1"
+            | "com2"
+            | "com3"
+            | "com4"
+            | "com5"
+            | "com6"
+            | "com7"
+            | "com8"
+            | "com9"
+            | "lpt1"
+            | "lpt2"
+            | "lpt3"
+            | "lpt4"
+            | "lpt5"
+            | "lpt6"
+            | "lpt7"
+            | "lpt8"
+            | "lpt9"
+    )
+}
+
+fn fnv64_hex(input: &str) -> String {
+    let mut state = 0xcbf29ce484222325u64;
+    for byte in input.as_bytes() {
+        state ^= u64::from(*byte);
+        state = state.wrapping_mul(0x100000001b3);
+    }
+    format!("{state:016x}")
+}
+
+fn update_cached_repo_best_effort(source: &str, repo_dir: &Path) {
+    let display = remote_source_display(source);
+    if let Err(err) = update_cached_repo_strict(&display, repo_dir) {
+        eprintln!("  Warning: {err}; using cached version");
+    }
+}
+
+fn update_cached_repo_strict(display: &str, repo_dir: &Path) -> Result<()> {
+    eprintln!("Updating cached repo {display}...");
     let fetch = std::process::Command::new("git")
         .args(["fetch", "origin", "--quiet"])
         .current_dir(repo_dir)
-        .status();
-    match fetch {
-        Ok(s) if s.success() => {
-            let reset = std::process::Command::new("git")
-                .args(["reset", "--hard", "origin/HEAD"])
-                .current_dir(repo_dir)
-                .stderr(std::process::Stdio::null())
-                .status();
-            if !reset.is_ok_and(|s| s.success()) {
-                eprintln!("  Warning: git reset failed — cached repo may be stale");
-            }
-        }
-        Ok(_) => eprintln!("  Warning: git fetch failed — using cached version"),
-        Err(_) => eprintln!("  Warning: git not available — using cached version"),
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .with_context(|| format!("running git fetch for cached source {display}"))?;
+    if !fetch.success() {
+        bail!("git fetch failed for cached source {display}");
     }
+    let reset = std::process::Command::new("git")
+        .args(["reset", "--hard", "origin/HEAD"])
+        .current_dir(repo_dir)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .with_context(|| format!("running git reset for cached source {display}"))?;
+    if !reset.success() {
+        bail!("git reset failed for cached source {display}");
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -677,5 +864,128 @@ mod tests {
         assert_eq!(counts.borrow().get("other/repo"), Some(&1));
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn git(repo: &Path, args: &[&str]) -> bool {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .status()
+            .unwrap()
+            .success()
+    }
+
+    fn git_output(repo: &Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "git {:?} failed", args);
+        String::from_utf8(output.stdout).unwrap()
+    }
+
+    fn write_skill(root: &Path, body: &str) {
+        let skill_dir = root.join("skills").join("demo");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            format!("---\nname: demo\ndescription: Demo\n---\n\n{body}"),
+        )
+        .unwrap();
+    }
+
+    fn init_git_repo(repo: &Path) {
+        std::fs::create_dir_all(repo).unwrap();
+        assert!(git(repo, &["init"]));
+        assert!(git(repo, &["checkout", "-B", "main"]));
+        assert!(git(repo, &["config", "user.email", "test@example.com"]));
+        assert!(git(repo, &["config", "user.name", "VStack Test"]));
+    }
+
+    #[test]
+    fn remote_helpers_redact_urls_and_use_windows_safe_keys() {
+        assert_eq!(
+            remote_git_url("owner/repo").unwrap(),
+            "https://github.com/owner/repo.git"
+        );
+        assert_eq!(
+            remote_git_url("https://token@github.com/Owner/Repo.git").unwrap(),
+            "https://token@github.com/Owner/Repo.git"
+        );
+        assert!(remote_git_url("../local-source").is_none());
+
+        assert_eq!(
+            remote_source_display("https://token@github.com/Owner/Repo.git"),
+            "owner/repo"
+        );
+        assert_eq!(
+            remote_source_display("https://token@example.com/Owner/Repo.git"),
+            "https://<redacted>"
+        );
+
+        let github_key = remote_cache_key("https://token@github.com/Owner/Repo.git");
+        assert_eq!(github_key, "owner_repo");
+
+        let opaque_key = remote_cache_key("https://token@example.com/Owner/Repo.git");
+        assert!(opaque_key.starts_with("remote_"));
+        assert!(!opaque_key.contains("token"));
+        assert!(!opaque_key.contains(':'));
+        assert!(!opaque_key.contains('/'));
+        assert!(!opaque_key.contains('\\'));
+    }
+
+    #[test]
+    fn clone_or_update_remote_source_at_clones_updates_and_fails_closed() {
+        let root = tmpdir("remote-clone");
+        let remote = root.join("remote.git");
+        let source = root.join("source");
+        let cache = root.join("cache").join("owner_repo");
+        std::fs::create_dir_all(&root).unwrap();
+        assert!(git(&root, &["init", "--bare", remote.to_str().unwrap()]));
+
+        init_git_repo(&source);
+        write_skill(&source, "v1\n");
+        assert!(git(&source, &["add", "."]));
+        assert!(git(&source, &["commit", "-m", "initial"]));
+        assert!(git(
+            &source,
+            &["remote", "add", "origin", remote.to_str().unwrap()]
+        ));
+        assert!(git(&source, &["push", "origin", "main"]));
+        assert!(git(&remote, &["symbolic-ref", "HEAD", "refs/heads/main"]));
+
+        let remote_url = remote.to_string_lossy().to_string();
+        let cloned = clone_or_update_remote_source_at("owner/repo", &remote_url, &cache).unwrap();
+        assert_eq!(cloned, cache);
+        assert!(cache.join(".git").is_dir());
+        assert!(
+            std::fs::read_to_string(cache.join("skills/demo/SKILL.md"))
+                .unwrap()
+                .contains("v1")
+        );
+
+        write_skill(&source, "v2\n");
+        assert!(git(&source, &["add", "."]));
+        assert!(git(&source, &["commit", "-m", "update"]));
+        assert!(git(&source, &["push", "origin", "main"]));
+        clone_or_update_remote_source_at("owner/repo", &remote_url, &cache).unwrap();
+        assert!(
+            std::fs::read_to_string(cache.join("skills/demo/SKILL.md"))
+                .unwrap()
+                .contains("v2")
+        );
+
+        assert!(git(
+            &cache,
+            &["remote", "set-url", "origin", "/missing/vstack.git"]
+        ));
+        let err = clone_or_update_remote_source_at("owner/repo", &remote_url, &cache)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("git fetch failed"));
+
+        let log = git_output(&cache, &["log", "--oneline", "-1"]);
+        assert!(log.contains("update"));
     }
 }
