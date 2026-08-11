@@ -216,6 +216,39 @@ fi
 grep -q "outside every committed glob and still carries" "$work/probeglob.out" \
   || note "harness-namespace fixture did not exercise the exclude-free carry case"
 
+# --- layer 2f: probe exhaustion without a structurally universal glob ------
+# A glob set spanning BOTH harness namespaces exhausts every synthetic
+# candidate while ordinary paths still carry — that is UNPROVEN universality,
+# not an over-broad failure. The run must PASS and say so out loud; only a
+# literal '*'/'**' entry may fail as "can never apply" (layer below).
+mkdir -p "$work/bothns"
+grep -v '^REVIEW_GATE_CARRY_FORWARD = ' "$work/configured/vstack.settings.toml" \
+  >"$work/bothns/vstack.settings.toml"
+printf 'REVIEW_GATE_CARRY_FORWARD = "docs"\nREVIEW_GATE_CARRY_FORWARD_EXCLUDE = "carry-probe*;unexcluded-sample*"\n' \
+  >>"$work/bothns/vstack.settings.toml"
+if ! (cd "$work/bothns" && "$SELFTEST") >"$work/bothns.out" 2>&1; then
+  cat "$work/bothns.out"
+  note "selftest failed under a both-namespaces exclusion set — probe exhaustion is being read as proof of universality again"
+fi
+grep -q "universality is UNPROVEN" "$work/bothns.out" \
+  || note "both-namespaces fixture did not report the unproven-universality note"
+
+# Structural universality is not spelled '*' alone: any all-wildcard entry
+# with at least one asterisk ('***' here) matches every non-empty path under
+# the predicate's bash-case matcher and must FAIL as over-broad, never be
+# downgraded to the unproven note.
+mkdir -p "$work/allstars"
+grep -v '^REVIEW_GATE_CARRY_FORWARD = ' "$work/configured/vstack.settings.toml" \
+  >"$work/allstars/vstack.settings.toml"
+printf 'REVIEW_GATE_CARRY_FORWARD = "docs"\nREVIEW_GATE_CARRY_FORWARD_EXCLUDE = "***"\n' \
+  >>"$work/allstars/vstack.settings.toml"
+if (cd "$work/allstars" && "$SELFTEST") >"$work/allstars.out" 2>&1; then
+  note "selftest passed with a '***' exclusion — the all-wildcard universal shape is being read as unproven"
+else
+  grep -q "can never apply" "$work/allstars.out" \
+    || note "the '***' failure does not carry the can-never-apply diagnostic"
+fi
+
 # One combined FAILING run pins BOTH guards (each fixture run replays the
 # full decision table, so failure cases share a run): a leading-'/' glob can
 # never match a repository-relative compare filename (dead anchoring), and a

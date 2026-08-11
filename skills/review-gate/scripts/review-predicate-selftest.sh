@@ -124,9 +124,13 @@ while [ $# -gt 0 ]; do
           # authors is [A-Za-z0-9_-]. Anything else would silently fall
           # back to the page-2/default fixture and a case could claim a
           # deep walk it never drove — refuse loudly instead.
+          # Empty is refused with the same teeth: an empty after= cannot
+          # select a cursor fixture and would silently fall through to the
+          # page-2/default fixture — the false coverage this guard exists
+          # to prevent.
           case "$graphql_after" in
-            *[!A-Za-z0-9_-]*)
-              echo "shim: cursor value unusable as a fixture key (allowed: A-Za-z0-9_-): $graphql_after" >&2
+            '' | *[!A-Za-z0-9_-]*)
+              echo "shim: cursor value unusable as a fixture key (allowed: non-empty A-Za-z0-9_-): $graphql_after" >&2
               exit 92
               ;;
           esac
@@ -173,10 +177,18 @@ file="$GH_SHIM_FIXTURES/$name.json"
 if [ "$name" = "graphql" ] && [ -n "$graphql_after" ] && [ -f "$GH_SHIM_FIXTURES/graphql.cursor-$graphql_after.json" ]; then
   # Cursor-keyed page: the fixture named by the requested cursor wins, so a
   # case can lay out a distinct advancing page per cursor and walk the full
-  # page budget. Falls through to the single page-2 fixture when absent.
+  # page budget. Falls through to the single page-2 fixture when absent —
+  # the two-page pattern's shape.
   file="$GH_SHIM_FIXTURES/graphql.cursor-$graphql_after.json"
 elif [ "$name" = "graphql" ] && [ "$graphql_page2" = "1" ] && [ -f "$GH_SHIM_FIXTURES/graphql.page2.json" ]; then
   file="$GH_SHIM_FIXTURES/graphql.page2.json"
+elif [ "$name" = "graphql" ] && [ -n "$graphql_after" ]; then
+  # A follow-up request with NEITHER a cursor-keyed fixture NOR a page-2
+  # fixture would silently re-serve page one — a deep-walk case missing one
+  # of its files (a valid-looking cursor with a fixture gap) must refuse,
+  # not fabricate coverage.
+  echo "shim: follow-up page requested (after=$graphql_after) but no graphql.cursor-$graphql_after.json or graphql.page2.json fixture exists" >&2
+  exit 93
 fi
 [ -f "$file" ] || { echo "shim: no fixture $file" >&2; exit 91; }
 if [ -n "$filter" ]; then jq -r "$filter" <"$file"; else cat "$file"; fi
@@ -185,6 +197,24 @@ if [ "$paginate" = "1" ] && [ -f "$GH_SHIM_FIXTURES/$name.page2.json" ] && [ -z 
 fi
 SHIM
 chmod +x "$shim/gh"
+
+# Shim refusal self-check, red-first: the three fixture-integrity refusals
+# must fire before any case relies on them — deleting a refusal arm fails
+# the whole run HERE, instead of leaving a case green against a fixture it
+# never drove. Each exit code is pinned exactly.
+# The scratch dir is removed BEFORE the assertions so a failed exit-code
+# check cannot leak it — the recorded rcs carry the evidence.
+_shimcheck_dir="$(mktemp -d)"
+GH_SHIM_FIXTURES="$_shimcheck_dir" "$shim/gh" api graphql -f query=q -f after=bad/value >/dev/null 2>&1
+_shimcheck_ns=$?
+GH_SHIM_FIXTURES="$_shimcheck_dir" "$shim/gh" api graphql -f query=q -f after= >/dev/null 2>&1
+_shimcheck_empty=$?
+GH_SHIM_FIXTURES="$_shimcheck_dir" "$shim/gh" api graphql -f query=q -f after=C9 >/dev/null 2>&1
+_shimcheck_gap=$?
+rm -rf "$_shimcheck_dir"
+[ "$_shimcheck_ns" -eq 92 ] || { echo "FATAL: shim did not refuse an out-of-namespace cursor (want exit 92, got $_shimcheck_ns)" >&2; exit 1; }
+[ "$_shimcheck_empty" -eq 92 ] || { echo "FATAL: shim did not refuse an EMPTY cursor (want exit 92, got $_shimcheck_empty)" >&2; exit 1; }
+[ "$_shimcheck_gap" -eq 93 ] || { echo "FATAL: shim did not refuse a fixture-less follow-up page (want exit 93, got $_shimcheck_gap)" >&2; exit 1; }
 
 # ------------------------------------------------------------------ helpers ---
 list_items() { # ';'-separated string -> one trimmed non-empty item per line
@@ -769,6 +799,10 @@ run "exactly 20 advancing resolved pages approve (bound is >20)" approved
 # distinguishes the guard's presence, not just "something failed".
 reset
 CFG_CONTEXTS="mech-ctx"; CFG_THREADS="enforce"
+# Single attempt, no delay: the refusal is deterministic, and under a
+# configured retry budget every re-attempt would just re-refuse after a
+# sleep — pure suite-runtime inflation.
+CFG_API_ATTEMPTS="1"; CFG_API_DELAY="0"
 status_ctx "mech-ctx" success "analysis complete"
 jq -n '{data:{repository:{pullRequest:{reviewThreads:{pageInfo:{hasNextPage:true,endCursor:"bad/value"},nodes:[{isResolved:true}]}}}}}' \
   >"$fixtures/graphql.json"
@@ -1845,15 +1879,18 @@ load_exclude_tracked() {
     # mktemp checked too: with no staging file the tracked read cannot be
     # VERIFIED, and unverifiable takes the same refuse-to-degrade branch as
     # failed — never a silent slide into hermetic probing.
+    # The flag carries the CAUSE: its one consumer prints it, and telling
+    # an operator to fix git when mktemp failed sends them at the wrong
+    # subsystem.
     if _elt_tmp="$(mktemp)"; then
       if git ls-files -z >"$_elt_tmp" 2>/dev/null; then
         EXCLUDE_TRACKED="$(tr '\0' '\n' <"$_elt_tmp")"
       else
-        EXCLUDE_TRACKED_ERROR=1
+        EXCLUDE_TRACKED_ERROR="'git ls-files' failed (fix git, or run the harness outside a repository)"
       fi
       rm -f "$_elt_tmp"
     else
-      EXCLUDE_TRACKED_ERROR=1
+      EXCLUDE_TRACKED_ERROR="staging file creation failed (mktemp) — the tracked read cannot be verified"
     fi
   fi
 }
@@ -1968,7 +2005,7 @@ if [ -n "$ACTIVE_CARRY" ]; then
     load_exclude_tracked
     if [ -n "$EXCLUDE_TRACKED_ERROR" ]; then
       cases=$((cases + 1))
-      echo "FAIL  configured: carry-exclude — this IS a git repository but 'git ls-files' failed; refusing to degrade to synthetic probes (fix git, or run the harness outside a repository)" >&2
+      echo "FAIL  configured: carry-exclude — this IS a git repository but the tracked-tree read is unusable: $EXCLUDE_TRACKED_ERROR; refusing to degrade to synthetic probes" >&2
       failures=$((failures + 1))
     fi
     # Probe extensions span EVERY enabled class — docs alone must not leave
@@ -2043,11 +2080,47 @@ EOF_EXCLUDE_BATTERY
       compare_fix ahead "[$(delta_file "$probe_free" modified "$(probe_patch_for "$probe_free")")]"
       run "configured: carry-exclude — '$probe_free' is outside every committed glob and still carries" approved
     elif [ -z "$EXCLUDE_TRACKED" ]; then
-      # Hermetic mode with every synthetic candidate matched: only a
-      # universal exclusion does that — dead config, FAIL.
-      cases=$((cases + 1))
-      echo "FAIL  configured: carry-exclude — the committed exclusions match every carry-class ($probe_exts) path; the enabled carry class can never apply (over-broad exclusion set, or disable REVIEW_GATE_CARRY_FORWARD instead)" >&2
-      failures=$((failures + 1))
+      # Hermetic mode with every synthetic candidate matched. Finite probes
+      # cannot PROVE universality — a glob set that merely spans both
+      # harness namespaces exhausts the candidates while ordinary paths
+      # still carry — so only a STRUCTURALLY universal entry is a FAIL
+      # here; anything else is reported unproven, out loud, never silently
+      # green. Structurally universal under the predicate's bash-case
+      # matcher: an entry built ONLY of '*'/'?' wildcards, with at least
+      # one '*' and AT MOST one '?' — '*', '***', '?*', '*?' match every
+      # non-empty path by construction, while two or more '?'s impose a
+      # minimum length that one-character paths escape, and '?'-only
+      # entries pin an exact length; neither is universal.
+      #
+      # PER-ENTRY only, deliberately: a SET of globs can be jointly
+      # universal ('?;??*' by length split, 'a*;[!a]*' by first-character
+      # partition), and detecting that in general is glob-coverage
+      # analysis with no bounded implementation. Such sets take the
+      # UNPROVEN note below — loud and fail-safe, never a silent green —
+      # and tracked mode (every run inside a real repository) judges the
+      # same set against real paths with no heuristic at all.
+      probe_universal=""
+      while IFS= read -r probe_pat_u; do
+        [ -z "$probe_pat_u" ] && continue
+        case "$probe_pat_u" in
+          *[!*?]*) : ;;
+          *'*'*)
+            probe_pat_u_qs="${probe_pat_u//\*/}"
+            case "$probe_pat_u_qs" in
+              '' | '?') probe_universal="$probe_pat_u" ;;
+            esac
+            ;;
+        esac
+      done <<EOF_UNIVERSAL
+$(list_items "$ACTIVE_CARRY_EXCLUDE")
+EOF_UNIVERSAL
+      if [ -n "$probe_universal" ]; then
+        cases=$((cases + 1))
+        echo "FAIL  configured: carry-exclude — '$probe_universal' matches every path; the enabled carry class can never apply (over-broad exclusion set, or disable REVIEW_GATE_CARRY_FORWARD instead)" >&2
+        failures=$((failures + 1))
+      else
+        echo "note  configured: carry-exclude — every synthetic carry-class ($probe_exts) probe is excluded but no committed glob is structurally universal: universality is UNPROVEN by synthetic probes (run inside the repository for tracked-path evidence); positive carry case not exercised here"
+      fi
     else
       # Tracked mode: the CURRENT tree has no carry-free carry-class file,
       # but future files outside the globs can still carry (a repo whose
