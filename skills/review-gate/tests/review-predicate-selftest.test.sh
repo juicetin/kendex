@@ -152,7 +152,21 @@ mkdir -p "$work/brokengit/bin" "$work/brokengit/repo"
 real_git="$(command -v git)"
 cat >"$work/brokengit/bin/git" <<BROKENGIT
 #!/usr/bin/env bash
-if [ "\${1:-}" = "ls-files" ]; then
+# The SUBCOMMAND may ride behind global options (git -C <root> ls-files):
+# skip option flags and their operands, and fail only when the first
+# non-option argument — the actual subcommand — is ls-files, so a path
+# operand literally named "ls-files" cannot false-trigger.
+_sub=""
+_skip=""
+for _a in "\$@"; do
+  if [ -n "\$_skip" ]; then _skip=""; continue; fi
+  case "\$_a" in
+    -C|--git-dir|--work-tree|-c) _skip=1 ;;
+    -*) ;;
+    *) _sub="\$_a"; break ;;
+  esac
+done
+if [ "\$_sub" = "ls-files" ]; then
   echo "fatal: planted index failure" >&2
   exit 128
 fi
@@ -169,6 +183,46 @@ if (cd "$work/brokengit/repo" && PATH="$work/brokengit/bin:$PATH" "$SELFTEST") \
 else
   grep -q "refusing to degrade to synthetic probes" "$work/brokengit.out" \
     || note "broken-ls-files failure does not carry the refusing-to-degrade diagnostic"
+fi
+
+# --- layer 2c2: rev-parse's STATUS decides the root, never its stdout ------
+# A git shim fails `rev-parse --show-toplevel` (exit 128) while PLANTING a
+# path on stdout, delegating everything else (--is-inside-work-tree must
+# still pass to reach the root resolution). An output-only guard accepts
+# the planted root and marches on to ls-files against a directory git never
+# vouched for; the producer's own exit status must refuse it.
+mkdir -p "$work/brokenroot/bin" "$work/brokenroot/repo"
+cat >"$work/brokenroot/bin/git" <<BROKENROOT
+#!/usr/bin/env bash
+_sub=""
+_skip=""
+for _a in "\$@"; do
+  if [ -n "\$_skip" ]; then _skip=""; continue; fi
+  case "\$_a" in
+    -C|--git-dir|--work-tree|-c) _skip=1 ;;
+    -*) ;;
+    *) _sub="\$_a"; break ;;
+  esac
+done
+if [ "\$_sub" = "rev-parse" ]; then
+  for _a in "\$@"; do
+    if [ "\$_a" = "--show-toplevel" ]; then
+      echo "/planted/never-vouched-root"
+      exit 128
+    fi
+  done
+fi
+exec "$real_git" "\$@"
+BROKENROOT
+chmod +x "$work/brokenroot/bin/git"
+(cd "$work/brokenroot/repo" && "$real_git" init -q .)
+cp "$work/excludes/vstack.settings.toml" "$work/brokenroot/repo/vstack.settings.toml"
+if (cd "$work/brokenroot/repo" && PATH="$work/brokenroot/bin:$PATH" "$SELFTEST") \
+  >"$work/brokenroot.out" 2>&1; then
+  note "selftest passed with a failing rev-parse that planted a root on stdout — git's status no longer decides the root"
+else
+  grep -q "could not resolve the repository root" "$work/brokenroot.out" \
+    || note "planted-root failure does not carry the root-resolution diagnostic"
 fi
 
 # --- layer 2d: a failed mktemp is unverifiable, same refuse-to-degrade -----
@@ -231,6 +285,127 @@ if ! (cd "$work/probeglob" && "$SELFTEST") >"$work/probeglob.out" 2>&1; then
 fi
 grep -q "outside every committed glob and still carries" "$work/probeglob.out" \
   || note "harness-namespace fixture did not exercise the exclude-free carry case"
+
+# --- layer 2g: tracked evidence is ROOT-relative and dead globs fail -------
+# One fixture repo, three runs. (a) From a SUBDIRECTORY the battery must
+# still probe the full tracked tree — the pre-fix subtree-scoped ls-files
+# quietly downgraded every glob to its no-match note. (b) An exclusion glob
+# matching no tracked path is dead config and must FAIL undeclared. (c) The
+# same glob declared prophylactic notes and passes.
+mkdir -p "$work/rooted/repo/guides" "$work/rooted/repo/sub"
+(cd "$work/rooted/repo" && git init -q . \
+  && printf '# intro\n' > guides/intro.md \
+  && printf '# readme\n' > README.md \
+  && git add guides/intro.md README.md \
+  && git -c user.email=t@t -c user.name=t commit -qm probe)
+grep -v '^REVIEW_GATE_CARRY_FORWARD = ' "$work/configured/vstack.settings.toml" \
+  >"$work/rooted/repo/vstack.settings.toml"
+printf 'REVIEW_GATE_CARRY_FORWARD = "docs"\nREVIEW_GATE_CARRY_FORWARD_EXCLUDE = "guides/*"\n' \
+  >>"$work/rooted/repo/vstack.settings.toml"
+if ! (cd "$work/rooted/repo/sub" && REVIEW_GATE_SETTINGS_FILE="$work/rooted/repo/vstack.settings.toml" "$SELFTEST") \
+  >"$work/rooted.out" 2>&1; then
+  cat "$work/rooted.out"
+  note "selftest failed when run from a repository SUBDIRECTORY"
+fi
+grep -q "evidence mode: tracked" "$work/rooted.out" \
+  || note "subdirectory run did not report tracked evidence mode"
+grep -q "carry-exclude — 'guides/\*' matches 'guides/intro.md', refusing the carry" "$work/rooted.out" \
+  || note "subdirectory run did not probe the full tracked tree (root-relative evidence base regressed)"
+
+printf 'REVIEW_GATE_CARRY_FORWARD = "docs"\nREVIEW_GATE_CARRY_FORWARD_EXCLUDE = "gudies/*"\n' \
+  >"$work/rooted/repo/typo.settings.toml"
+grep -v '^REVIEW_GATE_CARRY_FORWARD = ' "$work/configured/vstack.settings.toml" \
+  >>"$work/rooted/repo/typo.settings.toml"
+if (cd "$work/rooted/repo" && REVIEW_GATE_SETTINGS_FILE="$work/rooted/repo/typo.settings.toml" "$SELFTEST") \
+  >"$work/rootedtypo.out" 2>&1; then
+  note "selftest passed with a typo'd exclusion glob matching nothing — the dead-glob gate no longer fires"
+else
+  grep -q "matches NO tracked carry-class" "$work/rootedtypo.out" \
+    || note "the typo'd-glob failure does not carry the no-match diagnostic"
+fi
+
+printf 'REVIEW_GATE_CARRY_FORWARD = "docs"\nREVIEW_GATE_CARRY_FORWARD_EXCLUDE = "gudies/*"\nREVIEW_GATE_CARRY_FORWARD_EXCLUDE_PROPHYLACTIC = "gudies/*"\n' \
+  >"$work/rooted/repo/declared.settings.toml"
+grep -v '^REVIEW_GATE_CARRY_FORWARD = ' "$work/configured/vstack.settings.toml" \
+  >>"$work/rooted/repo/declared.settings.toml"
+if ! (cd "$work/rooted/repo" && REVIEW_GATE_SETTINGS_FILE="$work/rooted/repo/declared.settings.toml" "$SELFTEST") \
+  >"$work/rooteddecl.out" 2>&1; then
+  cat "$work/rooteddecl.out"
+  note "selftest failed with a DECLARED prophylactic glob — the declaration is not honored"
+fi
+grep -q "DECLARED prophylactic" "$work/rooteddecl.out" \
+  || note "declared prophylactic glob did not report the declared note"
+
+# A glob matching tracked paths only OUTSIDE the enabled carry classes is
+# INERT, not dead: it provably names real paths (no typo to catch), and the
+# prophylactic declaration would be false for it (its contract is "no
+# tracked match today"). The run must PASS with the inert note — neither
+# the dead-glob FAIL nor a demand for a false declaration.
+(cd "$work/rooted/repo" && printf '[package]\n' > Cargo.toml \
+  && git add Cargo.toml \
+  && git -c user.email=t@t -c user.name=t commit -qm cargo)
+printf 'REVIEW_GATE_CARRY_FORWARD = "docs"\nREVIEW_GATE_CARRY_FORWARD_EXCLUDE = "*Cargo.toml"\n' \
+  >"$work/rooted/repo/inert.settings.toml"
+grep -v '^REVIEW_GATE_CARRY_FORWARD = ' "$work/configured/vstack.settings.toml" \
+  >>"$work/rooted/repo/inert.settings.toml"
+if ! (cd "$work/rooted/repo" && REVIEW_GATE_SETTINGS_FILE="$work/rooted/repo/inert.settings.toml" "$SELFTEST") \
+  >"$work/rootedinert.out" 2>&1; then
+  cat "$work/rootedinert.out"
+  note "selftest failed on a glob matching tracked paths outside the enabled carry classes — inert config is being treated as dead"
+fi
+grep -q "matches tracked paths but none in the enabled carry classes" "$work/rootedinert.out" \
+  || note "inert non-carry-class glob did not report the inert note"
+
+# A SYMLINKED override anchors evidence at its TARGET's repository. The
+# symlink lives in a non-repository directory (the common install shape:
+# settings symlinked from elsewhere); anchoring at the symlink's own
+# directory finds no work tree and silently demotes the run to hermetic
+# synthetic probing, where a dead glob manufactures its own match. The
+# relative link target also exercises the link-joining branch.
+mkdir -p "$work/symlinked/outside"
+ln -s ../../rooted/repo/vstack.settings.toml "$work/symlinked/outside/settings.toml"
+if ! (cd "$work/symlinked/outside" && REVIEW_GATE_SETTINGS_FILE="$work/symlinked/outside/settings.toml" "$SELFTEST") \
+  >"$work/symlinked.out" 2>&1; then
+  cat "$work/symlinked.out"
+  note "selftest failed under a symlinked settings override"
+fi
+grep -q "evidence mode: tracked" "$work/symlinked.out" \
+  || note "symlinked override did not anchor tracked evidence at the target's repository (hermetic demotion is back)"
+grep -q "carry-exclude — 'guides/\*' matches 'guides/intro.md', refusing the carry" "$work/symlinked.out" \
+  || note "symlinked override did not probe the target repository's tracked tree"
+
+# An OPTION-LOOKING override (cwd-relative, dash-leading, no slash) names a
+# symlink: an unnormalized `readlink -settings` parses the path as an option
+# and fails, silently stranding the anchor at the invoking directory —
+# hermetic demotion again, by spelling rather than by location.
+ln -s "$work/rooted/repo/vstack.settings.toml" "$work/symlinked/outside/-settings"
+if ! (cd "$work/symlinked/outside" && REVIEW_GATE_SETTINGS_FILE="-settings" "$SELFTEST") \
+  >"$work/symlinkdash.out" 2>&1; then
+  cat "$work/symlinkdash.out"
+  note "selftest failed under a dash-leading relative symlinked override"
+fi
+grep -q "evidence mode: tracked" "$work/symlinkdash.out" \
+  || note "dash-leading symlinked override did not anchor tracked evidence at the target's repository (readlink option-parse regression)"
+
+# A repository with ZERO tracked files is still tracked mode — payload
+# emptiness must not demote the run to hermetic synthetic probing, where a
+# manufactured path would let a dead glob pass. The banner must say tracked
+# and the undeclared glob must FAIL with the no-match diagnostic.
+mkdir -p "$work/emptyrepo/repo"
+(cd "$work/emptyrepo/repo" && git init -q . \
+  && git -c user.email=t@t -c user.name=t commit -qm empty --allow-empty)
+grep -v '^REVIEW_GATE_CARRY_FORWARD = ' "$work/configured/vstack.settings.toml" \
+  >"$work/emptyrepo/repo/vstack.settings.toml"
+printf 'REVIEW_GATE_CARRY_FORWARD = "docs"\nREVIEW_GATE_CARRY_FORWARD_EXCLUDE = "guides/*"\n' \
+  >>"$work/emptyrepo/repo/vstack.settings.toml"
+if (cd "$work/emptyrepo/repo" && "$SELFTEST") >"$work/emptyrepo.out" 2>&1; then
+  note "selftest passed in a zero-tracked-file repository with an undeclared glob — payload emptiness demoted tracked mode to hermetic"
+else
+  grep -q "evidence mode: tracked" "$work/emptyrepo.out" \
+    || note "zero-tracked-file repository did not report tracked evidence mode"
+  grep -q "matches NO tracked carry-class" "$work/emptyrepo.out" \
+    || note "zero-tracked-file repository did not fail the undeclared glob with the no-match diagnostic"
+fi
 
 # A structurally universal exclusion must FAIL in TRACKED mode too — with
 # one committed, no path today or ever can carry, so the tracked-mode

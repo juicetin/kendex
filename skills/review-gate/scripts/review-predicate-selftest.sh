@@ -62,6 +62,7 @@ ACTIVE_API_ATTEMPTS="$(rg_setting REVIEW_GATE_API_ATTEMPTS "1")" || exit 1
 ACTIVE_API_DELAY="$(rg_setting REVIEW_GATE_API_RETRY_DELAY_SECONDS "2")" || exit 1
 ACTIVE_CARRY="$(rg_setting REVIEW_GATE_CARRY_FORWARD "")" || exit 1
 ACTIVE_CARRY_EXCLUDE="$(rg_setting REVIEW_GATE_CARRY_FORWARD_EXCLUDE "")" || exit 1
+ACTIVE_CARRY_EXCLUDE_PROPHYLACTIC="$(rg_setting REVIEW_GATE_CARRY_FORWARD_EXCLUDE_PROPHYLACTIC "")" || exit 1
 # The repo's ACTIVE mode is validated here but NEVER copied into behavior
 # cases (reset() pins enforce — under a committed "off" every awaiting/
 # objection case would answer approved and red the required selftest job).
@@ -1865,6 +1866,8 @@ glob_matches() { # path, glob — the predicate's exact `case` matcher
 # unusual pathnames round-trip instead of mis-probing globs.
 EXCLUDE_TRACKED=""
 EXCLUDE_TRACKED_ERROR=""
+EXCLUDE_TRACKED_ROOT=""
+EXCLUDE_TRACKED_MODE=""
 exclude_tracked_loaded=""
 load_exclude_tracked() {
   [ -n "$exclude_tracked_loaded" ] && return 0
@@ -1872,7 +1875,66 @@ load_exclude_tracked() {
   # A real repository whose ls-files FAILS must not silently degrade into
   # hermetic synthetic probing — that would shrink coverage exactly when
   # git is broken. Only a genuinely-not-a-repo cwd is hermetic.
-  if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  # The evidence ANCHOR is the repository containing the RESOLVED settings
+  # file: the committed exclude list under test belongs to that repo, and
+  # REVIEW_GATE_SETTINGS_FILE legitimately points a run at another
+  # checkout — deriving the root from the invoking cwd would judge B's
+  # globs against A's tree. /dev/null (force-defaults) and the plain
+  # relative default both anchor at the invoking directory.
+  _elt_anchor="."
+  case "${REVIEW_GATE_SETTINGS_FILE:-}" in
+    '' | /dev/null) : ;;
+    *)
+      # Only an EXISTING override moves the anchor: when the named file is
+      # absent, rg_setting falls back to built-in defaults, and anchoring
+      # evidence at a nonexistent path's directory would judge defaults
+      # against the wrong tree (or silently force hermetic mode).
+      if [ -f "$REVIEW_GATE_SETTINGS_FILE" ]; then
+        # Resolve a SYMLINK override to its target first: installs routinely
+        # symlink settings files, and the evidence repository is the one
+        # CONTAINING the real file — anchoring at the symlink's directory
+        # judges the wrong tree, or (outside any repo) silently demotes a
+        # tracked run to hermetic probing where a dead glob can manufacture
+        # its own match. Bounded walk; an unreadable link stops at the last
+        # resolvable path, and the -f gate above proved the chain terminates.
+        _elt_settings="$REVIEW_GATE_SETTINGS_FILE"
+        _elt_hops=0
+        while [ -L "$_elt_settings" ] && [ "$_elt_hops" -lt 40 ]; do
+          # An option-looking path (dash-leading, no slash — a cwd-relative
+          # `-settings`, or a bare dash-leading link target) would parse as
+          # a readlink OPTION and fail the walk, stranding the anchor at
+          # the wrong checkout: normalize with ./ first.
+          case "$_elt_settings" in -*) _elt_settings="./$_elt_settings" ;; esac
+          _elt_link="$(readlink "$_elt_settings")" || break
+          case "$_elt_link" in
+            /*) _elt_settings="$_elt_link" ;;
+            *)
+              case "$_elt_settings" in
+                */*) _elt_settings="${_elt_settings%/*}/$_elt_link" ;;
+                *) _elt_settings="$_elt_link" ;;
+              esac
+              ;;
+          esac
+          _elt_hops=$((_elt_hops + 1))
+        done
+        # Containing directory via parameter expansion, not dirname: BSD
+        # dirname can reject `--`, and without `--` an option-looking path
+        # would be misparsed — the expansion has no dialect to disagree with.
+        case "$_elt_settings" in
+          */*) _elt_anchor="${_elt_settings%/*}" ;;
+          *) _elt_anchor="." ;;
+        esac
+        [ -n "$_elt_anchor" ] || _elt_anchor="/"
+      fi
+      ;;
+  esac
+  if git -C "$_elt_anchor" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    # ROOT-relative, never cwd-relative: `git ls-files` is subtree-scoped,
+    # so a run from a subdirectory compared every committed glob against a
+    # partial file list — each glob quietly downgraded to its no-match
+    # note while the run stayed green. The evidence base is the repository
+    # root, resolved explicitly; failing to resolve it is as unusable as a
+    # failed read.
     # git's OWN status must decide the error, not the pipeline tail's: a
     # `git | tr` assignment reports tr's status, so a failed ls-files with
     # a happy tr would silently degrade into hermetic synthetic probing —
@@ -1885,9 +1947,26 @@ load_exclude_tracked() {
     # The flag carries the CAUSE: its one consumer prints it, and telling
     # an operator to fix git when mktemp failed sends them at the wrong
     # subsystem.
-    if _elt_tmp="$(mktemp)"; then
-      if git ls-files -z >"$_elt_tmp" 2>/dev/null; then
+    # Both checks are load-bearing: the exit status is git's own verdict
+    # (a failing rev-parse that still printed something must not smuggle a
+    # root past the guard), and the empty-output guard catches a success
+    # that produced nothing usable.
+    if ! EXCLUDE_TRACKED_ROOT="$(git -C "$_elt_anchor" rev-parse --show-toplevel 2>/dev/null)" \
+      || [ -z "$EXCLUDE_TRACKED_ROOT" ]; then
+      EXCLUDE_TRACKED_ERROR="could not resolve the repository root (git rev-parse --show-toplevel failed inside a work tree)"
+    elif _elt_tmp="$(mktemp)"; then
+      if git -C "$EXCLUDE_TRACKED_ROOT" ls-files -z >"$_elt_tmp" 2>/dev/null; then
+        # STATED LIMITATION: the NUL-delimited read is converted to a
+        # newline-delimited list for the probe loops, so a tracked
+        # filename CONTAINING a newline splits into fragments — a glob
+        # matching such a file can false-FAIL as no-match. The failure
+        # direction is loud (never a silent pass), and newline filenames
+        # in a reviewed repository are their own defect.
         EXCLUDE_TRACKED="$(tr '\0' '\n' <"$_elt_tmp")"
+        # Mode is a SEPARATE flag: a successful read in a zero-tracked-file
+        # repository leaves the payload empty, and payload-emptiness must
+        # not demote a tracked run to hermetic synthetic probing.
+        EXCLUDE_TRACKED_MODE="tracked"
       else
         EXCLUDE_TRACKED_ERROR="'git ls-files' failed (fix git, or run the harness outside a repository)"
       fi
@@ -1904,12 +1983,13 @@ exclude_glob_probe() { # glob, ext... -> a carry-class path this glob matches
   # match returns 2 so the caller can say so out loud. Hermetic mode (no
   # repository): the '*'-filler fallback keeps harness runs deterministic,
   # and the concrete path is still re-proven against its source glob.
-  local pat="$1" ext candidate
+  local pat="$1" ext candidate any_tracked_match=""
   shift
-  if [ -n "$EXCLUDE_TRACKED" ]; then
+  if [ "$EXCLUDE_TRACKED_MODE" = "tracked" ]; then
     while IFS= read -r candidate; do
       [ -z "$candidate" ] && continue
       glob_matches "$candidate" "$pat" || continue
+      any_tracked_match=1
       for ext in "$@"; do
         case "$candidate" in *"$ext")
           printf '%s\n' "$candidate"
@@ -1919,6 +1999,12 @@ exclude_glob_probe() { # glob, ext... -> a carry-class path this glob matches
     done <<EOF_TRACKED_PROBE
 $EXCLUDE_TRACKED
 EOF_TRACKED_PROBE
+    # 2 and 3 are DIFFERENT verdicts: matching nothing tracked at all is
+    # the typo/dead-config shape, while matching tracked paths that just
+    # sit outside the enabled carry classes proves the glob names real
+    # paths — inert today, not dead, and never a candidate for the
+    # prophylactic declaration (whose contract is "no tracked match").
+    [ -n "$any_tracked_match" ] && return 3
     return 2
   fi
   case "$pat" in *'?'*|*'['*|*'\'*) return 1 ;; esac
@@ -1940,7 +2026,7 @@ exclude_free_path() { # ext... -> a path NO committed glob matches
   # "nothing can carry" while README.md still carries). Hermetic mode:
   # synthetic candidates per extension.
   local ext candidate pat hit
-  if [ -n "$EXCLUDE_TRACKED" ]; then
+  if [ "$EXCLUDE_TRACKED_MODE" = "tracked" ]; then
     while IFS= read -r candidate; do
       [ -z "$candidate" ] && continue
       hit=""
@@ -2011,6 +2097,14 @@ if [ -n "$ACTIVE_CARRY" ]; then
       echo "FAIL  configured: carry-exclude — this IS a git repository but the tracked-tree read is unusable: $EXCLUDE_TRACKED_ERROR; refusing to degrade to synthetic probes" >&2
       failures=$((failures + 1))
     fi
+    # The evidence MODE is printed, not inferred: a degraded run and a full
+    # one used to be distinguishable only by the case total, which moves on
+    # every re-vendor for unrelated reasons. One line makes it readable.
+    if [ "$EXCLUDE_TRACKED_MODE" = "tracked" ]; then
+      echo "info  carry-exclude evidence mode: tracked (root: $EXCLUDE_TRACKED_ROOT, $(printf '%s\n' "$EXCLUDE_TRACKED" | grep -c .) tracked paths)"
+    elif [ -z "$EXCLUDE_TRACKED_ERROR" ]; then
+      echo "info  carry-exclude evidence mode: hermetic-synthetic (not inside a repository)"
+    fi
     # Probe extensions span EVERY enabled class — docs alone must not leave
     # a comments-class exclusion (`src/*.sh`) untested, and an exclusion set
     # covering all Markdown is not "carry disabled" while comment-only
@@ -2068,7 +2162,33 @@ if [ -n "$ACTIVE_CARRY" ]; then
         compare_fix ahead "[$(delta_file "$probe_match" modified "$(probe_patch_for "$probe_match")")]"
         run "configured: carry-exclude — '$probe_pat' matches '$probe_match', refusing the carry" awaiting
       elif [ "$probe_rc" -eq 2 ]; then
-        echo "note  configured: carry-exclude — '$probe_pat' matches NO tracked carry-class ($probe_exts) path in this repository: prophylactic, or a typo/wrong anchor — verify the spelling; not exercised here"
+        # A no-match glob is dead in the same way a leading-'/' anchor is —
+        # and used to exit 0 with a note textually identical to a
+        # deliberate prophylactic entry's, training operators to scroll
+        # past real typos. Posture symmetry: an UNDECLARED no-match glob
+        # FAILs; a glob listed in
+        # REVIEW_GATE_CARRY_FORWARD_EXCLUDE_PROPHYLACTIC notes as declared.
+        probe_declared=""
+        while IFS= read -r probe_proph; do
+          [ -z "$probe_proph" ] && continue
+          [ "$probe_proph" = "$probe_pat" ] && probe_declared=1
+        done <<EOF_PROPHYLACTIC
+$(list_items "$ACTIVE_CARRY_EXCLUDE_PROPHYLACTIC")
+EOF_PROPHYLACTIC
+        if [ -n "$probe_declared" ]; then
+          echo "note  configured: carry-exclude — '$probe_pat' matches NO tracked carry-class ($probe_exts) path and is DECLARED prophylactic; not exercised here"
+        else
+          cases=$((cases + 1))
+          echo "FAIL  configured: carry-exclude — '$probe_pat' matches NO tracked carry-class ($probe_exts) path in this repository: a typo or wrong anchor is dead config (declare it in REVIEW_GATE_CARRY_FORWARD_EXCLUDE_PROPHYLACTIC if it deliberately guards paths that do not exist yet)" >&2
+          failures=$((failures + 1))
+        fi
+      elif [ "$probe_rc" -eq 3 ]; then
+        # Matching tracked paths OUTSIDE the enabled carry classes is not
+        # a typo — the glob provably names real paths — and steering it
+        # into the prophylactic declaration would make that declaration
+        # false (its contract: no tracked match today). Inert for today's
+        # classes, legitimately kept for other or future ones: loud note.
+        echo "note  configured: carry-exclude — '$probe_pat' matches tracked paths but none in the enabled carry classes ($probe_exts): inert for today's carry classes (kept for other or future classes); not exercised here"
       else
         echo "note  configured: carry-exclude — '$probe_pat' derives no carry-class ($probe_exts) probe: it guards paths the enabled carry class never carries, or uses ?/[/\\ metacharacters; not exercised here"
       fi
@@ -2119,7 +2239,7 @@ EOF_UNIVERSAL
         cases=$((cases + 1))
         echo "FAIL  configured: carry-exclude — '$probe_universal' matches every path; the enabled carry class can never apply to any DELTA (identical-tree/rebase-residue carries alone would remain, which exclusions never touch). Overwhelmingly a misconfiguration: narrow the exclusions to the real policy surfaces, or disable REVIEW_GATE_CARRY_FORWARD instead of excluding everything" >&2
         failures=$((failures + 1))
-      elif [ -z "$EXCLUDE_TRACKED" ]; then
+      elif [ "$EXCLUDE_TRACKED_MODE" != "tracked" ]; then
         # Hermetic mode: finite synthetic probes cannot PROVE universality
         # — a glob set that merely spans both harness namespaces exhausts
         # the candidates while ordinary paths still carry.
