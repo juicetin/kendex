@@ -398,7 +398,7 @@ pub(crate) fn looks_like_remote_source(source: &str) -> bool {
 
 pub(crate) fn clone_or_update_remote_source(source: &str) -> Result<Option<PathBuf>> {
     reject_plaintext_http_remote(source)?;
-    let Some(git_url) = remote_git_url(source) else {
+    let Some(git_url) = remote_git_url_for_subprocess(source) else {
         return Ok(None);
     };
     let display = remote_source_display(source);
@@ -408,7 +408,7 @@ pub(crate) fn clone_or_update_remote_source(source: &str) -> Result<Option<PathB
 
 pub(crate) fn clone_or_update_remote_source_best_effort(source: &str) -> Result<Option<PathBuf>> {
     reject_plaintext_http_remote(source)?;
-    let Some(git_url) = remote_git_url(source) else {
+    let Some(git_url) = remote_git_url_for_subprocess(source) else {
         return Ok(None);
     };
     let display = remote_source_display(source);
@@ -454,7 +454,7 @@ pub(crate) fn refresh_remote_cache_update_only_best_effort(source: &str) {
         }
         return;
     }
-    let Some(git_url) = remote_git_url(source) else {
+    let Some(git_url) = remote_git_url_for_subprocess(source) else {
         return;
     };
     let display = remote_source_display(source);
@@ -534,6 +534,16 @@ fn remote_git_url(source: &str) -> Option<String> {
     Some(format!("https://github.com/{slug}.git"))
 }
 
+fn remote_git_url_for_subprocess(source: &str) -> Option<String> {
+    remote_git_url(source).map(|url| git_subprocess_url(&url))
+}
+
+fn git_subprocess_url(url: &str) -> String {
+    url.strip_prefix("git+ssh://")
+        .map(|rest| format!("ssh://{rest}"))
+        .unwrap_or_else(|| url.to_string())
+}
+
 pub(crate) fn remote_source_display(source: &str) -> String {
     if let Some(slug) = config::parse_github_slug(source)
         && !source.contains("://")
@@ -558,7 +568,7 @@ pub(crate) fn remote_cache_dir(source: &str) -> Option<PathBuf> {
 
 fn existing_remote_cache_dir(source: &str) -> Option<PathBuf> {
     let cache_dir = remote_cache_dir(source)?;
-    let git_url = remote_git_url(source)?;
+    let git_url = remote_git_url_for_subprocess(source)?;
     let display = remote_source_display(source);
     if cache_dir.join(".git").exists() {
         if validate_cached_repo_origin(&display, &git_url, &cache_dir).is_ok() {
@@ -729,7 +739,9 @@ fn validate_cached_repo_origin(display: &str, expected_url: &str, repo_dir: &Pat
         );
     }
     let actual = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if remote_cache_identity(&actual) != remote_cache_identity(expected_url) {
+    if remote_cache_identity(&git_subprocess_url(&actual))
+        != remote_cache_identity(&git_subprocess_url(expected_url))
+    {
         bail!(
             "cached source {display} has origin {}, expected {}; remove the cache directory and retry",
             remote_source_display(&actual),
@@ -740,7 +752,7 @@ fn validate_cached_repo_origin(display: &str, expected_url: &str, repo_dir: &Pat
 }
 
 fn update_existing_remote_cache(source: &str, repo_dir: &Path) -> Result<()> {
-    let git_url = remote_git_url(source).context("not a remote source")?;
+    let git_url = remote_git_url_for_subprocess(source).context("not a remote source")?;
     let display = remote_source_display(source);
     validate_cached_repo_origin(&display, &git_url, repo_dir)?;
     update_cached_repo_strict(&display, repo_dir)

@@ -461,6 +461,16 @@ fn remote_helpers_redact_urls_and_use_collision_resistant_safe_keys() {
         remote_git_url("git+ssh://git@github.com/Owner/Repo.git").unwrap(),
         "git+ssh://git@github.com/Owner/Repo.git"
     );
+    assert_eq!(
+        remote_git_url_for_subprocess("git+ssh://git@github.com/Owner/Repo.git").unwrap(),
+        "ssh://git@github.com/Owner/Repo.git",
+        "git subprocesses must not see the unsupported git+ssh scheme"
+    );
+    assert_ne!(
+        remote_cache_key("git+ssh://git@example.com/Owner/Repo.git"),
+        remote_cache_key("ssh://git@example.com/Owner/Repo.git"),
+        "normalizing the Git invocation URL must not collapse canonical cache identity"
+    );
     assert!(remote_git_url("http://token@example.com/Owner/Repo.git").is_none());
     assert!(looks_like_remote_source(
         "http://token@example.com/Owner/Repo.git"
@@ -519,6 +529,29 @@ fn remote_helpers_redact_urls_and_use_collision_resistant_safe_keys() {
         .to_string();
     assert!(err.contains("plaintext HTTP"), "{err}");
     assert!(!err.contains("token"), "{err}");
+}
+
+#[test]
+fn cached_repo_origin_validation_accepts_git_ssh_source_after_git_url_normalization() {
+    let root = TempDir::new("git-ssh-origin-normalization");
+    let cache = root.path().join("cache").join("remote");
+    init_git_repo(&cache);
+    git(
+        &cache,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "ssh://git@example.com/Owner/Repo.git",
+        ],
+    );
+
+    validate_cached_repo_origin(
+        &remote_source_display("git+ssh://git@example.com/Owner/Repo.git"),
+        &remote_git_url_for_subprocess("git+ssh://git@example.com/Owner/Repo.git").unwrap(),
+        &cache,
+    )
+    .unwrap();
 }
 
 #[test]

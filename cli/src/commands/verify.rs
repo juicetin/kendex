@@ -24,6 +24,7 @@
 use crate::config::{self, ItemKind, LockEntry};
 use crate::scope::ScopeFilter;
 use anyhow::{Result, bail};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 /// Per-item verification result.
@@ -128,7 +129,7 @@ fn verify_entry(entry: &LockEntry, global: bool) -> VerifyRow {
     // Per-kind install check.
     let (install_ok, note) = match entry.kind {
         ItemKind::PiExtension => verify_pi_install(&entry.name, global),
-        ItemKind::Skill => verify_skill_install(&entry.name, &entry.harnesses, global),
+        ItemKind::Skill => verify_skill_install(entry, global),
         ItemKind::Agent => verify_agent_install(&entry.name, &entry.harnesses, global),
         ItemKind::Hook => verify_hook_install(&entry.name, &entry.harnesses, global),
         ItemKind::Extra => (None, None),
@@ -168,29 +169,15 @@ fn verify_pi_install(name: &str, global: bool) -> (Option<bool>, Option<String>)
     (Some(ok), note)
 }
 
-fn verify_skill_install(
-    name: &str,
-    harnesses: &[String],
-    global: bool,
-) -> (Option<bool>, Option<String>) {
+fn verify_skill_install(entry: &LockEntry, global: bool) -> (Option<bool>, Option<String>) {
     let mut missing = Vec::new();
-    let canonical = if global {
-        config::global_state_dir().join("skills").join(name)
-    } else {
-        config::project_root()
-            .join(".agents")
-            .join("skills")
-            .join(name)
-    };
-    if !canonical.join("SKILL.md").is_file() {
-        missing.push("canonical".to_string());
-    }
-    for h in harnesses {
+    let mut seen_paths = BTreeSet::new();
+    for h in &entry.harnesses {
         let Some(harness) = crate::harness::Harness::from_id(h) else {
             continue;
         };
-        let path = harness.skills_dir(global).join(name);
-        if !path.join("SKILL.md").is_file() {
+        let path = harness.skills_dir(global).join(&entry.name);
+        if seen_paths.insert(path.clone()) && !path.join("SKILL.md").is_file() {
             missing.push(h.clone());
         }
     }
@@ -377,4 +364,61 @@ fn locate_pi_source(name: &str, global: bool) -> Option<PathBuf> {
     let source_path = entry.get("sourcePath").and_then(|v| v.as_str())?;
     let p = PathBuf::from(source_path);
     if p.is_dir() { Some(p) } else { None }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{InstallMethod, LockEntry, LockFile};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn tmpdir(label: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before UNIX epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "vstack-verify-{label}-{}-{nanos}",
+            std::process::id()
+        ))
+    }
+
+    fn write_file(path: &Path, content: &str) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, content).unwrap();
+    }
+
+    #[test]
+    fn verify_skill_allows_harness_only_copy_install_without_canonical() {
+        let project = tmpdir("harness-only-copy-skill");
+        let source = tmpdir("harness-only-copy-source");
+        std::fs::create_dir_all(&project).unwrap();
+        write_file(
+            &source.join("skills/demo/SKILL.md"),
+            "---\nname: demo\ndescription: Demo skill\nlicense: MIT\n---\n\n# Demo\n",
+        );
+
+        crate::test_util::with_project_root(&project, || {
+            let mut entry = LockEntry {
+                name: "demo".to_string(),
+                kind: ItemKind::Skill,
+                source: source.display().to_string(),
+                source_repo: None,
+                harnesses: vec!["claude-code".to_string()],
+                method: InstallMethod::Copy,
+                installed_at: "2026-08-11T00:00:00Z".to_string(),
+                source_hash: String::new(),
+            };
+            entry.source_hash = config::compute_source_hash(&entry);
+            let mut lock = LockFile::default();
+            lock.add(entry);
+            lock.save(&config::lock_file_path(false)).unwrap();
+            write_file(
+                &project.join(".claude/skills/demo/SKILL.md"),
+                "---\nname: demo\ndescription: Demo skill\nlicense: MIT\n---\n\n# Demo\n",
+            );
+
+            run(ScopeFilter::Project, &[]).unwrap();
+        });
+    }
 }

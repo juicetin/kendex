@@ -178,9 +178,10 @@ fn verify_hook_auxiliary_install(name: &str, harness: Harness, failures: &mut Ve
                 .join("hooks")
                 .join(format!("{name}.sh"));
             if config::project_root().join(&script).exists() {
+                let wire_path = hook_script_wire_path(&script);
                 require_json_string_fragment(
                     Path::new(".claude").join("settings.json").as_path(),
-                    &script.to_string_lossy(),
+                    &wire_path,
                     &format!("Claude hook {name}"),
                     failures,
                 );
@@ -189,9 +190,10 @@ fn verify_hook_auxiliary_install(name: &str, harness: Harness, failures: &mut Ve
         Harness::Codex => {
             let script = Path::new(".codex").join("hooks").join(format!("{name}.sh"));
             if config::project_root().join(&script).exists() {
+                let wire_path = hook_script_wire_path(&script);
                 require_json_string_fragment(
                     Path::new(".codex").join("hooks.json").as_path(),
-                    &script.to_string_lossy(),
+                    &wire_path,
                     &format!("Codex hook {name}"),
                     failures,
                 );
@@ -199,6 +201,10 @@ fn verify_hook_auxiliary_install(name: &str, harness: Harness, failures: &mut Ve
         }
         _ => {}
     }
+}
+
+fn hook_script_wire_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
 }
 
 fn verify_pi_auxiliary_install(name: &str, failures: &mut Vec<String>) -> Result<()> {
@@ -749,15 +755,18 @@ fn push_pi_package_stage_paths(
     package_dir: &Path,
     include_missing: bool,
 ) -> Result<()> {
-    let source_package_dir = config::resolve_source_path(&entry.source).and_then(|source_root| {
-        crate::catalog::find_item_path(&source_root, entry.kind, &entry.name)
-    });
-    let enumerate_root = source_package_dir.as_deref().unwrap_or(package_dir);
+    let Some(source_package_dir) =
+        config::resolve_source_path(&entry.source).and_then(|source_root| {
+            crate::catalog::find_item_path(&source_root, entry.kind, &entry.name)
+        })
+    else {
+        return Ok(());
+    };
     push_pi_package_files_from(
         paths,
         project_root,
         package_dir,
-        enumerate_root,
+        &source_package_dir,
         include_missing,
     )
 }
@@ -966,8 +975,10 @@ fn git_literal_command() -> Command {
 fn managed_paths_from_git_status(seed_paths: &BTreeSet<PathBuf>) -> Result<Vec<PathBuf>> {
     let git = git_project()?;
     let committed_locked_skill_paths = committed_locked_skill_stage_paths(&git)?;
+    let committed_pi_package_paths = committed_pi_package_stage_paths(&git)?;
     let mut committed_paths = committed_project_stage_paths(&git)?;
     committed_paths.extend(committed_locked_skill_paths.iter().cloned());
+    committed_paths.extend(committed_pi_package_paths.iter().cloned());
     let owned_exact_paths = owned_exact_status_paths(seed_paths);
     let committed_pi_bin_paths = committed_pi_bin_paths(&git)?;
     let owned_shared_paths = owned_shared_status_paths(seed_paths, &committed_paths);
@@ -981,12 +992,12 @@ fn managed_paths_from_git_status(seed_paths: &BTreeSet<PathBuf>) -> Result<Vec<P
         seed_paths,
         &owned_exact_paths,
         &committed_locked_skill_paths,
+        &committed_pi_package_paths,
         &owned_shared_paths,
         &owned_cursor_safety_rules,
         &owned_opencode_hook_instructions,
         &owned_pi_bin_paths,
     )?;
-    let pi_package_prefixes = pi_package_status_prefixes(seed_paths);
     let top_level_pathspecs: Vec<PathBuf> = status_pathspecs
         .iter()
         .map(|path| project_to_git_path(&git, path))
@@ -1032,9 +1043,9 @@ fn managed_paths_from_git_status(seed_paths: &BTreeSet<PathBuf>) -> Result<Vec<P
         if is_safe_relative_path(&path)
             && is_managed_status_path(
                 &path,
-                &pi_package_prefixes,
                 &owned_exact_paths,
                 &committed_locked_skill_paths,
+                &committed_pi_package_paths,
                 &owned_shared_paths,
                 &owned_deleted_native_hooks,
                 &owned_cursor_safety_rules,
@@ -1144,6 +1155,25 @@ fn committed_locked_skill_stage_paths_from_lock(
             if let Ok(relative) = dir.strip_prefix(&project_root) {
                 dirs.insert(relative.to_path_buf());
             }
+        }
+    }
+    git_tracked_project_paths_under(git, &dirs)
+}
+
+fn committed_pi_package_stage_paths(git: &GitProject) -> Result<BTreeSet<PathBuf>> {
+    let Some(lock) = committed_project_lock(git)? else {
+        return Ok(BTreeSet::new());
+    };
+    let project_root = config::project_root();
+    let mut dirs = BTreeSet::new();
+    for entry in lock
+        .entries
+        .values()
+        .filter(|entry| entry.kind == ItemKind::PiExtension)
+    {
+        let package_dir = crate::pi_extension::checked_pi_package_path(&entry.name, false)?;
+        if let Ok(relative) = package_dir.strip_prefix(&project_root) {
+            dirs.insert(relative.to_path_buf());
         }
     }
     git_tracked_project_paths_under(git, &dirs)
@@ -1319,30 +1349,6 @@ fn is_pi_bin_path(path: &Path) -> bool {
     components.next().is_some() && components.next().is_none()
 }
 
-fn pi_package_status_prefixes(seed_paths: &BTreeSet<PathBuf>) -> BTreeSet<PathBuf> {
-    seed_paths
-        .iter()
-        .filter_map(|path| pi_package_prefix_from_path(path))
-        .collect()
-}
-
-fn pi_package_prefix_from_path(path: &Path) -> Option<PathBuf> {
-    let mut components = path.components();
-    if components.next()?.as_os_str() != ".pi" {
-        return None;
-    }
-    if components.next()?.as_os_str() != "packages" {
-        return None;
-    }
-    let first = components.next()?.as_os_str();
-    if first.to_string_lossy().starts_with('@') {
-        let second = components.next()?.as_os_str();
-        Some(Path::new(".pi").join("packages").join(first).join(second))
-    } else {
-        Some(Path::new(".pi").join("packages").join(first))
-    }
-}
-
 fn owned_shared_status_paths(
     seed_paths: &BTreeSet<PathBuf>,
     committed_paths: &BTreeSet<PathBuf>,
@@ -1374,17 +1380,16 @@ fn managed_status_pathspecs(
     seed_paths: &BTreeSet<PathBuf>,
     owned_exact_paths: &BTreeSet<PathBuf>,
     owned_deleted_locked_skill_paths: &BTreeSet<PathBuf>,
+    owned_deleted_pi_package_paths: &BTreeSet<PathBuf>,
     owned_shared_paths: &BTreeSet<PathBuf>,
     owned_cursor_safety_rules: &BTreeSet<PathBuf>,
     owned_opencode_hook_instructions: &BTreeSet<PathBuf>,
     owned_pi_bin_paths: &BTreeSet<PathBuf>,
 ) -> Result<Vec<PathBuf>> {
     let mut paths = seed_paths.clone();
-    for prefix in pi_package_status_prefixes(seed_paths) {
-        paths.insert(prefix);
-    }
     paths.extend(owned_exact_paths.iter().cloned());
     paths.extend(owned_deleted_locked_skill_paths.iter().cloned());
+    paths.extend(owned_deleted_pi_package_paths.iter().cloned());
     paths.extend(owned_shared_paths.iter().cloned());
     paths.extend(owned_cursor_safety_rules.iter().cloned());
     paths.extend(owned_opencode_hook_instructions.iter().cloned());
@@ -1442,9 +1447,9 @@ fn is_safe_relative_path(path: &Path) -> bool {
 
 fn is_managed_status_path(
     path: &Path,
-    pi_package_prefixes: &BTreeSet<PathBuf>,
     owned_exact_paths: &BTreeSet<PathBuf>,
     owned_deleted_locked_skill_paths: &BTreeSet<PathBuf>,
+    owned_deleted_pi_package_paths: &BTreeSet<PathBuf>,
     owned_shared_paths: &BTreeSet<PathBuf>,
     owned_deleted_native_hooks: &BTreeSet<PathBuf>,
     owned_cursor_safety_rules: &BTreeSet<PathBuf>,
@@ -1468,17 +1473,13 @@ fn is_managed_status_path(
     if status.contains(&b'D') && owned_deleted_locked_skill_paths.contains(&path) {
         return true;
     }
+    if status.contains(&b'D') && owned_deleted_pi_package_paths.contains(&path) {
+        return true;
+    }
     if path.to_str().is_none() {
         return false;
     }
-    let is_pi_package_path = pi_package_prefixes
-        .iter()
-        .any(|prefix| path.starts_with(prefix));
-    let is_node_modules_path = path
-        .components()
-        .any(|component| component.as_os_str() == OsStr::new("node_modules"));
-    (is_pi_package_path && (!is_node_modules_path || status.contains(&b'D')))
-        || owned_pi_bin_paths.contains(&path)
+    owned_pi_bin_paths.contains(&path)
         || (is_cursor_safety_rule_path(&path) && owned_cursor_safety_rules.contains(&path))
         || (is_opencode_hook_instruction_path(&path)
             && owned_opencode_hook_instructions.contains(&path))

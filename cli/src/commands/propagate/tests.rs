@@ -376,14 +376,31 @@ fn run_fails_closed_when_a_locked_source_is_unavailable() {
 #[test]
 fn stage_paths_are_scoped_to_lock_outputs_and_opencode_config() {
     let project = tmpdir("stage-project");
+    let source = tmpdir("stage-source");
     std::fs::create_dir_all(&project).unwrap();
     init_git_project(&project);
+    write_file(
+        &source.join("vstack.toml"),
+        "[catalog]\npi_extensions = [\"pi-extensions/@scope/pkg\"]\n",
+    );
+    write_file(
+        &source.join("pi-extensions/@scope/pkg/package.json"),
+        r#"{"name":"@scope/pkg","pi":{"extensions":[],"appendSystem":"instructions.md"},"bin":{"pi-tool":"bin/tool.js"}}"#,
+    );
+    write_file(
+        &source.join("pi-extensions/@scope/pkg/instructions.md"),
+        "pi rules\n",
+    );
+    write_file(
+        &source.join("pi-extensions/@scope/pkg/bin/tool.js"),
+        "tool\n",
+    );
 
     crate::test_util::with_project_root(&project, || {
         let mut lock = LockFile::default();
         lock.add(lock_entry("worker", ItemKind::Agent, &["opencode"]));
         lock.add(lock_entry("protect", ItemKind::Hook, &["opencode"]));
-        lock.add(lock_entry("@scope/pkg", ItemKind::PiExtension, &["pi"]));
+        lock.add(pi_entry("@scope/pkg", &source));
         lock.save(&config::lock_file_path(false)).unwrap();
 
         write_file(
@@ -778,12 +795,17 @@ fn retry_staging_does_not_stage_consumer_owned_deleted_native_hooks() {
 #[test]
 fn staging_skips_ignored_managed_paths_and_stages_remaining_paths() {
     let project = tmpdir("stage-ignored-project");
+    let source = tmpdir("stage-ignored-source");
     std::fs::create_dir_all(&project).unwrap();
     init_git_project(&project);
+    write_file(
+        &source.join("pi-extensions/ignored-pkg/package.json"),
+        r#"{"name":"ignored-pkg","pi":{"extensions":[]}}"#,
+    );
 
     crate::test_util::with_project_root(&project, || {
         let mut lock = LockFile::default();
-        lock.add(lock_entry("ignored-pkg", ItemKind::PiExtension, &["pi"]));
+        lock.add(pi_entry("ignored-pkg", &source));
         lock.save(&config::lock_file_path(false)).unwrap();
         write_file(&project.join(".gitignore"), ".pi/packages/ignored-pkg/\n");
         write_file(
@@ -843,14 +865,88 @@ fn staging_records_tracked_pi_node_modules_deletions_without_untracked_dependenc
 }
 
 #[test]
-fn retry_staging_records_deleted_pi_bin_from_committed_manifest_only() {
-    let project = tmpdir("stage-deleted-pi-bin");
+fn staging_scopes_pi_package_to_source_owned_files() {
+    let project = tmpdir("stage-pi-source-owned-files");
+    let source = tmpdir("stage-pi-source-owned-source");
     std::fs::create_dir_all(&project).unwrap();
     init_git_project(&project);
+    write_file(
+        &source.join("pi-extensions/demo-pkg/package.json"),
+        r#"{"name":"demo-pkg","pi":{"extensions":["extensions/owned.ts"]}}"#,
+    );
+    write_file(
+        &source.join("pi-extensions/demo-pkg/extensions/owned.ts"),
+        "owned\n",
+    );
+    write_file(
+        &source.join("pi-extensions/demo-pkg/extensions/new-upstream.ts"),
+        "new upstream\n",
+    );
+
+    crate::test_util::with_project_root(&project, || {
+        let mut entry = pi_entry("demo-pkg", &source);
+        entry.source_hash = config::compute_source_hash(&entry);
+        let mut lock = LockFile::default();
+        lock.add(entry);
+        lock.save(&config::lock_file_path(false)).unwrap();
+        write_file(
+            &project.join(".pi/packages/demo-pkg/package.json"),
+            r#"{"name":"demo-pkg","pi":{"extensions":["extensions/owned.ts"]}}"#,
+        );
+        write_file(
+            &project.join(".pi/packages/demo-pkg/extensions/owned.ts"),
+            "owned\n",
+        );
+        git(&project, &["add", "-A"]);
+        git(&project, &["commit", "-m", "baseline"]);
+
+        write_file(
+            &project.join(".pi/packages/demo-pkg/package.json"),
+            r#"{"name":"demo-pkg","pi":{"extensions":["extensions/owned.ts","extensions/new-upstream.ts"]}}"#,
+        );
+        write_file(
+            &project.join(".pi/packages/demo-pkg/extensions/new-upstream.ts"),
+            "new upstream\n",
+        );
+        std::fs::remove_file(project.join(".pi/packages/demo-pkg/extensions/owned.ts")).unwrap();
+        write_file(
+            &project.join(".pi/packages/demo-pkg/consumer-secret.txt"),
+            "consumer secret\n",
+        );
+
+        stage_project_paths(&[]).unwrap();
+
+        let staged = git_output(&project, &["diff", "--cached", "--name-status"]);
+        assert!(
+            staged.contains("M\t.pi/packages/demo-pkg/package.json"),
+            "{staged}"
+        );
+        assert!(
+            staged.contains("A\t.pi/packages/demo-pkg/extensions/new-upstream.ts"),
+            "{staged}"
+        );
+        assert!(
+            staged.contains("D\t.pi/packages/demo-pkg/extensions/owned.ts"),
+            "{staged}"
+        );
+        assert!(!staged.contains(".pi/packages/demo-pkg/consumer-secret.txt"));
+    });
+}
+
+#[test]
+fn retry_staging_records_deleted_pi_bin_from_committed_manifest_only() {
+    let project = tmpdir("stage-deleted-pi-bin");
+    let source = tmpdir("stage-deleted-pi-bin-source");
+    std::fs::create_dir_all(&project).unwrap();
+    init_git_project(&project);
+    write_file(
+        &source.join("pi-extensions/demo-pkg/package.json"),
+        r#"{"name":"demo-pkg","pi":{"extensions":[]},"bin":{}}"#,
+    );
 
     crate::test_util::with_project_root(&project, || {
         let mut lock = LockFile::default();
-        lock.add(lock_entry("demo-pkg", ItemKind::PiExtension, &["pi"]));
+        lock.add(pi_entry("demo-pkg", &source));
         lock.save(&config::lock_file_path(false)).unwrap();
         write_file(
             &project.join(".pi/packages/demo-pkg/package.json"),
@@ -1351,6 +1447,31 @@ fn stage_mode_fails_before_staging_when_no_drift_verify_fails() {
         let staged = git_output(&project, &["diff", "--cached", "--name-only"]);
         assert!(staged.is_empty(), "{staged}");
     });
+}
+
+#[test]
+fn hook_script_wire_path_matches_json_registration_slashes() {
+    let registration = serde_json::json!({
+        "hooks": {
+            "PreToolUse": [{
+                "matcher": "Bash",
+                "hooks": [{
+                    "type": "command",
+                    "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/guard.sh\""
+                }]
+            }]
+        }
+    });
+    let windows_spelling = Path::new(r".claude\hooks\guard.sh");
+    let raw_fragment = windows_spelling.to_string_lossy();
+    assert!(
+        !json_contains_string_fragment(&registration, &raw_fragment),
+        "negative control: backslash spelling must not match slash JSON"
+    );
+    assert!(
+        json_contains_string_fragment(&registration, &hook_script_wire_path(windows_spelling)),
+        "wire-normalized hook path should match harness registration JSON"
+    );
 }
 
 #[test]
