@@ -342,6 +342,14 @@ fn remote_helpers_redact_urls_and_use_collision_resistant_safe_keys() {
         remote_git_url("ssh://git@github.com/Owner/Repo.git").unwrap(),
         "ssh://git@github.com/Owner/Repo.git"
     );
+    assert_eq!(
+        remote_git_url("git+ssh://git@github.com/Owner/Repo.git").unwrap(),
+        "git+ssh://git@github.com/Owner/Repo.git"
+    );
+    assert!(remote_git_url("http://token@example.com/Owner/Repo.git").is_none());
+    assert!(looks_like_remote_source(
+        "http://token@example.com/Owner/Repo.git"
+    ));
     assert!(remote_git_url("../local-source").is_none());
 
     assert_eq!(
@@ -369,6 +377,12 @@ fn remote_helpers_redact_urls_and_use_collision_resistant_safe_keys() {
         remote_cache_key("ssh://git@github.com/Owner/Repo.git"),
         "explicit SSH transport keeps a distinct cache identity"
     );
+
+    let err = clone_or_update_remote_source("http://token@example.com/Owner/Repo.git")
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("plaintext HTTP"), "{err}");
+    assert!(!err.contains("token"), "{err}");
 }
 
 #[test]
@@ -392,21 +406,39 @@ fn clone_or_update_remote_source_at_clones_updates_and_fails_closed() {
     git(&remote, &["symbolic-ref", "HEAD", "refs/heads/main"]);
 
     let remote_url = remote.to_string_lossy().to_string();
-    let cloned = clone_or_update_remote_source_at("owner/repo", &remote_url, &cache).unwrap();
+    let cloned =
+        clone_or_update_remote_source_at("owner/repo", "owner/repo", &remote_url, &cache).unwrap();
     assert_eq!(cloned, cache);
     assert!(cache.join(".git").is_dir());
-    assert!(std::fs::read_to_string(cache.join("skills/demo/SKILL.md"))
-        .unwrap()
-        .contains("v1"));
+    assert!(
+        std::fs::read_to_string(cache.join("skills/demo/SKILL.md"))
+            .unwrap()
+            .contains("v1")
+    );
 
     write_skill(&source, "v2\n");
     git(&source, &["add", "."]);
     git(&source, &["commit", "-m", "update"]);
     git(&source, &["push", "origin", "main"]);
-    clone_or_update_remote_source_at("owner/repo", &remote_url, &cache).unwrap();
-    assert!(std::fs::read_to_string(cache.join("skills/demo/SKILL.md"))
-        .unwrap()
-        .contains("v2"));
+    clone_or_update_remote_source_at("owner/repo", "owner/repo", &remote_url, &cache).unwrap();
+    assert!(
+        std::fs::read_to_string(cache.join("skills/demo/SKILL.md"))
+            .unwrap()
+            .contains("v2")
+    );
+
+    git(&source, &["checkout", "-B", "next"]);
+    write_skill(&source, "v3\n");
+    git(&source, &["add", "."]);
+    git(&source, &["commit", "-m", "default branch update"]);
+    git(&source, &["push", "origin", "next"]);
+    git(&remote, &["symbolic-ref", "HEAD", "refs/heads/next"]);
+    clone_or_update_remote_source_at("owner/repo", "owner/repo", &remote_url, &cache).unwrap();
+    assert!(
+        std::fs::read_to_string(cache.join("skills/demo/SKILL.md"))
+            .unwrap()
+            .contains("v3")
+    );
 
     let other_remote = root.path().join("other.git");
     git(
@@ -422,13 +454,55 @@ fn clone_or_update_remote_source_at_clones_updates_and_fails_closed() {
             other_remote.to_str().unwrap(),
         ],
     );
-    let err = clone_or_update_remote_source_at("owner/repo", &remote_url, &cache)
+    let err = clone_or_update_remote_source_at("owner/repo", "owner/repo", &remote_url, &cache)
         .unwrap_err()
         .to_string();
     assert!(err.contains("has origin"), "{err}");
 
     let log = git_output(&cache, &["log", "--oneline", "-1"]);
     assert!(log.contains("update"));
+}
+
+#[test]
+fn legacy_remote_cache_migrates_after_origin_validation() {
+    let root = TempDir::new("remote-cache-migration");
+    let remote = root.path().join("remote.git");
+    let source = root.path().join("source");
+    let cache_root = root.path().join("cache");
+    let legacy_cache = cache_root.join("owner_repo");
+    let canonical_cache = cache_root.join(remote_cache_key("owner/repo"));
+    std::fs::create_dir_all(root.path()).unwrap();
+    git(root.path(), &["init", "--bare", remote.to_str().unwrap()]);
+
+    init_git_repo(&source);
+    write_skill(&source, "v1\n");
+    git(&source, &["add", "."]);
+    git(&source, &["commit", "-m", "initial"]);
+    git(
+        &source,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    git(&source, &["push", "origin", "main"]);
+    git(&remote, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+    git(
+        root.path(),
+        &[
+            "clone",
+            "--depth",
+            "1",
+            remote.to_str().unwrap(),
+            legacy_cache.to_str().unwrap(),
+        ],
+    );
+
+    let remote_url = remote.to_string_lossy().to_string();
+    let migrated =
+        clone_or_update_remote_source_at("owner/repo", "owner/repo", &remote_url, &canonical_cache)
+            .unwrap();
+
+    assert_eq!(migrated, canonical_cache);
+    assert!(canonical_cache.join(".git").is_dir());
+    assert!(!legacy_cache.exists());
 }
 
 #[test]
@@ -452,10 +526,10 @@ fn cached_repo_fetch_failure_reports_git_cause_without_reusing_stale_cache() {
     git(&remote, &["symbolic-ref", "HEAD", "refs/heads/main"]);
 
     let remote_url = remote.to_string_lossy().to_string();
-    clone_or_update_remote_source_at("local remote", &remote_url, &cache).unwrap();
+    clone_or_update_remote_source_at("local remote", "local remote", &remote_url, &cache).unwrap();
     std::fs::remove_dir_all(&remote).unwrap();
 
-    let err = clone_or_update_remote_source_at("local remote", &remote_url, &cache)
+    let err = clone_or_update_remote_source_at("local remote", "local remote", &remote_url, &cache)
         .unwrap_err()
         .to_string();
     assert!(err.contains("git fetch failed"), "{err}");

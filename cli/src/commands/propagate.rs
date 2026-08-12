@@ -1,10 +1,14 @@
 use crate::config::{self, ItemKind, LockFile};
 use crate::harness::Harness;
 use crate::scope::ScopeFilter;
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use std::collections::BTreeSet;
+use std::ffi::OsString;
+use std::io::Write;
+#[cfg(unix)]
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DriftStatus {
@@ -238,7 +242,8 @@ fn stage_project_paths(pre_refresh_paths: &[PathBuf]) -> Result<()> {
     let mut paths = BTreeSet::new();
     paths.extend(pre_refresh_paths.iter().cloned());
     paths.extend(project_stage_paths(&lock, false)?);
-    paths.extend(managed_paths_from_git_status()?);
+    let status_paths = managed_paths_from_git_status(&paths)?;
+    paths.extend(status_paths);
     let paths: Vec<PathBuf> = paths.into_iter().collect();
     stage_paths(&paths)
 }
@@ -261,7 +266,7 @@ fn stage_paths(paths: &[PathBuf]) -> Result<()> {
         return Ok(());
     }
 
-    let status = Command::new("git")
+    let status = git_literal_command()
         .arg("-C")
         .arg(&project_root)
         .args(["add", "-A", "--"])
@@ -584,12 +589,68 @@ fn safe_project_relative_path(relative: &str) -> Result<PathBuf> {
     Ok(path.to_path_buf())
 }
 
-fn managed_paths_from_git_status() -> Result<Vec<PathBuf>> {
+#[derive(Debug)]
+struct GitProject {
+    root: PathBuf,
+    prefix: PathBuf,
+}
+
+fn git_project() -> Result<GitProject> {
     let project_root = config::project_root();
+    let root = git_stdout(
+        &project_root,
+        &["rev-parse", "--show-toplevel"],
+        "resolving git top level for vstack-managed paths",
+    )?;
+    let prefix = git_stdout(
+        &project_root,
+        &["rev-parse", "--show-prefix"],
+        "resolving git project prefix for vstack-managed paths",
+    )?;
+    Ok(GitProject {
+        root: PathBuf::from(root.trim_end()),
+        prefix: PathBuf::from(prefix.trim_end_matches(['\n', '\r'])),
+    })
+}
+
+fn git_stdout(project_root: &Path, args: &[&str], context: &str) -> Result<String> {
     let output = Command::new("git")
         .arg("-C")
-        .arg(&project_root)
-        .args(["status", "--porcelain=v1", "-z", "--untracked-files=all"])
+        .arg(project_root)
+        .args(args)
+        .output()
+        .context(context.to_string())?;
+    if !output.status.success() {
+        bail!("{context}");
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+fn git_literal_command() -> Command {
+    let mut command = Command::new("git");
+    command.env("GIT_LITERAL_PATHSPECS", "1");
+    command
+}
+
+fn managed_paths_from_git_status(seed_paths: &BTreeSet<PathBuf>) -> Result<Vec<PathBuf>> {
+    let project_root = config::project_root();
+    let git = git_project()?;
+    let status_pathspecs = managed_status_pathspecs(seed_paths)?;
+    let top_level_pathspecs: Vec<PathBuf> = status_pathspecs
+        .iter()
+        .map(|path| project_to_git_path(&git, path))
+        .collect();
+    let output = git_literal_command()
+        .arg("-C")
+        .arg(&git.root)
+        .args([
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all",
+            "--",
+        ])
+        .args(&top_level_pathspecs)
         .output()
         .context("running git status for vstack-managed paths")?;
     if !output.status.success() {
@@ -611,15 +672,67 @@ fn managed_paths_from_git_status() -> Result<Vec<PathBuf>> {
             continue;
         }
         let status = &record[..2];
-        let path = path_from_git_status_bytes(&record[3..])?;
+        let top_level_path = path_from_git_status_bytes(&record[3..]);
         if status[0] == b'R' || status[0] == b'C' {
             skip_next = true;
         }
-        if is_safe_relative_path(&path) && is_managed_status_path(&path, &project_skill_prefixes) {
+        let Some(path) = git_to_project_path(&git, &top_level_path) else {
+            continue;
+        };
+        if is_safe_relative_path(&path)
+            && is_managed_status_path(&path, &project_skill_prefixes, status)
+        {
             paths.insert(path);
         }
     }
     Ok(paths.into_iter().collect())
+}
+
+fn managed_status_pathspecs(seed_paths: &BTreeSet<PathBuf>) -> Result<Vec<PathBuf>> {
+    let project_root = config::project_root();
+    let mut paths = seed_paths.clone();
+    for path in [
+        ".vstack-lock.json",
+        "vstack.toml",
+        "vstack.settings.toml",
+        ".agents/skill-failure-reporting.md",
+        ".claude/settings.json",
+        ".claude/hooks",
+        ".codex/hooks.json",
+        ".codex/config.toml",
+        ".codex/hooks",
+        ".cursor/rules",
+        ".opencode/instructions",
+        "opencode.json",
+        "opencode.jsonc",
+        ".pi/settings.json",
+        ".pi/.vstack-source.json",
+        ".pi/APPEND_SYSTEM.md",
+    ] {
+        paths.insert(PathBuf::from(path));
+    }
+    for prefix in project_skill_status_prefixes(&project_root)? {
+        paths.insert(prefix);
+    }
+    Ok(paths
+        .into_iter()
+        .filter(|path| is_safe_relative_path(path))
+        .collect())
+}
+
+fn project_to_git_path(git: &GitProject, path: &Path) -> PathBuf {
+    if git.prefix.as_os_str().is_empty() {
+        path.to_path_buf()
+    } else {
+        git.prefix.join(path)
+    }
+}
+
+fn git_to_project_path(git: &GitProject, path: &Path) -> Option<PathBuf> {
+    if git.prefix.as_os_str().is_empty() {
+        return Some(path.to_path_buf());
+    }
+    path.strip_prefix(&git.prefix).ok().map(Path::to_path_buf)
 }
 
 fn project_skill_status_prefixes(project_root: &Path) -> Result<Vec<PathBuf>> {
@@ -637,9 +750,15 @@ fn project_skill_status_prefixes(project_root: &Path) -> Result<Vec<PathBuf>> {
     Ok(prefixes)
 }
 
-fn path_from_git_status_bytes(bytes: &[u8]) -> Result<PathBuf> {
-    let value = String::from_utf8(bytes.to_vec()).context("git status path was not UTF-8")?;
-    Ok(PathBuf::from(value))
+fn path_from_git_status_bytes(bytes: &[u8]) -> PathBuf {
+    #[cfg(unix)]
+    {
+        PathBuf::from(OsString::from_vec(bytes.to_vec()))
+    }
+    #[cfg(not(unix))]
+    {
+        PathBuf::from(String::from_utf8_lossy(bytes).into_owned())
+    }
 }
 
 fn is_safe_relative_path(path: &Path) -> bool {
@@ -652,7 +771,7 @@ fn is_safe_relative_path(path: &Path) -> bool {
         })
 }
 
-fn is_managed_status_path(path: &Path, project_skill_prefixes: &[PathBuf]) -> bool {
+fn is_managed_status_path(path: &Path, project_skill_prefixes: &[PathBuf], status: &[u8]) -> bool {
     let path = path.components().collect::<PathBuf>();
     if matches!(
         path.to_str(),
@@ -679,6 +798,9 @@ fn is_managed_status_path(path: &Path, project_skill_prefixes: &[PathBuf]) -> bo
         .any(|prefix| path == *prefix || path.starts_with(prefix))
         || path_str.starts_with(".cursor/rules/safety-")
         || path_str.starts_with(".opencode/instructions/vstack-hook-")
+        || (status.contains(&b'D')
+            && path.extension().is_some_and(|extension| extension == "sh")
+            && (path_str.starts_with(".claude/hooks/") || path_str.starts_with(".codex/hooks/")))
 }
 
 fn filter_stageable_paths(paths: &[PathBuf]) -> Result<(Vec<PathBuf>, Vec<PathBuf>)> {
@@ -710,7 +832,7 @@ fn filter_stageable_paths(paths: &[PathBuf]) -> Result<(Vec<PathBuf>, Vec<PathBu
 }
 
 fn git_has_tracked_entries(project_root: &Path, path: &Path) -> Result<bool> {
-    let output = Command::new("git")
+    let output = git_literal_command()
         .arg("-C")
         .arg(project_root)
         .args(["ls-files", "--"])
@@ -724,12 +846,27 @@ fn git_has_tracked_entries(project_root: &Path, path: &Path) -> Result<bool> {
 }
 
 fn git_check_ignore(project_root: &Path, path: &Path) -> Result<bool> {
-    let status = Command::new("git")
+    let mut child = Command::new("git")
         .arg("-C")
         .arg(project_root)
-        .args(["check-ignore", "-q", "--"])
-        .arg(path)
-        .status()
+        .args(["check-ignore", "-q", "-z", "--stdin"])
+        .stdin(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("checking ignore status for {}", path.display()))?;
+    {
+        let stdin = child
+            .stdin
+            .as_mut()
+            .context("opening git check-ignore stdin")?;
+        stdin
+            .write_all(&path_bytes(path))
+            .with_context(|| format!("writing ignore path {}", path.display()))?;
+        stdin
+            .write_all(&[0])
+            .with_context(|| format!("terminating ignore path {}", path.display()))?;
+    }
+    let status = child
+        .wait()
         .with_context(|| format!("checking ignore status for {}", path.display()))?;
     match status.code() {
         Some(0) => Ok(true),
@@ -738,417 +875,16 @@ fn git_check_ignore(project_root: &Path, path: &Path) -> Result<bool> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::config::{InstallMethod, ItemKind, LockEntry};
-    use std::path::Path;
-    use std::process::Command;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    fn tmpdir(label: &str) -> PathBuf {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system clock before UNIX epoch")
-            .as_nanos();
-        std::env::temp_dir().join(format!(
-            "vstack-propagate-{label}-{}-{nanos}",
-            std::process::id()
-        ))
+fn path_bytes(path: &Path) -> Vec<u8> {
+    #[cfg(unix)]
+    {
+        path.as_os_str().as_bytes().to_vec()
     }
-
-    fn write_skill_source(root: &Path, body: &str) {
-        let skill_dir = root.join("skills").join("demo");
-        std::fs::create_dir_all(&skill_dir).unwrap();
-        std::fs::write(
-            skill_dir.join("SKILL.md"),
-            format!("---\nname: demo\ndescription: Demo skill\nlicense: MIT\n---\n\n{body}"),
-        )
-        .unwrap();
-    }
-
-    fn demo_entry(source: &Path) -> LockEntry {
-        LockEntry {
-            name: "demo".to_string(),
-            kind: ItemKind::Skill,
-            source: source.display().to_string(),
-            source_repo: None,
-            harnesses: vec!["claude-code".to_string()],
-            method: InstallMethod::Symlink,
-            installed_at: "2026-08-11T00:00:00Z".to_string(),
-            source_hash: String::new(),
-        }
-    }
-
-    fn git(project: &Path, args: &[&str]) {
-        let status = Command::new("git")
-            .args(args)
-            .current_dir(project)
-            .status()
-            .unwrap();
-        assert!(
-            status.success(),
-            "git {:?} failed in {}",
-            args,
-            project.display()
-        );
-    }
-
-    fn init_git_project(project: &Path) {
-        git(project, &["init"]);
-        git(project, &["config", "user.email", "test@example.com"]);
-        git(project, &["config", "user.name", "VStack Test"]);
-        git(project, &["config", "commit.gpgsign", "false"]);
-        git(project, &["config", "core.hooksPath", "/dev/null"]);
-    }
-
-    fn git_output(project: &Path, args: &[&str]) -> String {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(project)
-            .output()
-            .unwrap();
-        assert!(output.status.success(), "git {:?} failed", args);
-        String::from_utf8(output.stdout).unwrap()
-    }
-
-    fn write_file(path: &Path, content: &str) {
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, content).unwrap();
-    }
-
-    fn lock_entry(name: &str, kind: ItemKind, harnesses: &[&str]) -> LockEntry {
-        LockEntry {
-            name: name.to_string(),
-            kind,
-            source: "/unused/source".to_string(),
-            source_repo: None,
-            harnesses: harnesses
-                .iter()
-                .map(|harness| (*harness).to_string())
-                .collect(),
-            method: InstallMethod::Copy,
-            installed_at: "2026-08-11T00:00:00Z".to_string(),
-            source_hash: "stored-hash".to_string(),
-        }
-    }
-
-    #[test]
-    fn detect_drift_distinguishes_clean_and_changed_source() {
-        let project = tmpdir("project");
-        let source = tmpdir("source");
-        std::fs::create_dir_all(&project).unwrap();
-        write_skill_source(&source, "v1\n");
-
-        crate::test_util::with_project_root(&project, || {
-            let mut entry = demo_entry(&source);
-            entry.source_hash = config::compute_source_hash(&entry);
-            let mut lock = LockFile::default();
-            lock.add(entry);
-            lock.save(&config::lock_file_path(false)).unwrap();
-
-            let clean = detect_drift_for_scope(false).unwrap();
-            assert!(
-                clean.rows.is_empty(),
-                "unchanged source is the negative control"
-            );
-
-            write_skill_source(&source, "v2\n");
-            let changed = detect_drift_for_scope(false).unwrap();
-            assert_eq!(changed.rows.len(), 1);
-            assert_eq!(changed.rows[0].name, "demo");
-            assert_eq!(changed.rows[0].status, DriftStatus::Changed);
-        });
-    }
-
-    #[test]
-    fn detect_drift_reports_unavailable_sources() {
-        let project = tmpdir("project-missing");
-        std::fs::create_dir_all(&project).unwrap();
-
-        crate::test_util::with_project_root(&project, || {
-            let mut entry = demo_entry(&project.join("missing-source"));
-            entry.source_hash = "stored-hash".to_string();
-            let mut lock = LockFile::default();
-            lock.add(entry);
-            lock.save(&config::lock_file_path(false)).unwrap();
-
-            let drift = detect_drift_for_scope(false).unwrap();
-            assert_eq!(drift.rows.len(), 1);
-            assert_eq!(drift.rows[0].status, DriftStatus::SourceUnavailable);
-            assert!(drift.has_unavailable_sources());
-        });
-    }
-
-    #[test]
-    fn run_rejects_conflicting_stage_and_check_flags() {
-        let err = run(ScopeFilter::Project, true, false, true, true)
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("--stage cannot be combined with --check"));
-    }
-
-    #[test]
-    fn run_errors_for_explicit_empty_scope_but_allows_default_empty_scope() {
-        let project = tmpdir("empty-scope");
-        std::fs::create_dir_all(&project).unwrap();
-
-        crate::test_util::with_project_root(&project, || {
-            let default_empty = run(ScopeFilter::Project, false, false, false, false);
-            assert!(
-                default_empty.is_ok(),
-                "default empty project scope stays a no-op"
-            );
-
-            let explicit_empty = run(ScopeFilter::Project, false, false, false, true)
-                .unwrap_err()
-                .to_string();
-            assert!(explicit_empty.contains("no installed items found"));
-        });
-    }
-
-    #[test]
-    fn check_reports_drift_without_refreshing_lock() {
-        let project = tmpdir("check-project");
-        let source = tmpdir("check-source");
-        std::fs::create_dir_all(&project).unwrap();
-        write_skill_source(&source, "v1\n");
-
-        crate::test_util::with_project_root(&project, || {
-            let mut entry = demo_entry(&source);
-            entry.source_hash = config::compute_source_hash(&entry);
-            let stored_hash = entry.source_hash.clone();
-            let mut lock = LockFile::default();
-            lock.add(entry);
-            lock.save(&config::lock_file_path(false)).unwrap();
-
-            write_skill_source(&source, "v2\n");
-            let err = run(ScopeFilter::Project, true, false, false, true)
-                .unwrap_err()
-                .to_string();
-            assert!(err.contains("propagation needed"));
-
-            let lock = LockFile::load(&config::lock_file_path(false)).unwrap();
-            assert_eq!(
-                lock.entries["demo"].source_hash, stored_hash,
-                "--check must not normalize or refresh the lock"
-            );
-        });
-    }
-
-    #[test]
-    fn check_reports_legacy_hash_without_normalizing_lock() {
-        let project = tmpdir("legacy-project");
-        let source = tmpdir("legacy-source");
-        std::fs::create_dir_all(&project).unwrap();
-        write_skill_source(&source, "v1\n");
-
-        crate::test_util::with_project_root(&project, || {
-            let mut lock = LockFile::default();
-            lock.add(demo_entry(&source));
-            lock.save(&config::lock_file_path(false)).unwrap();
-
-            let err = run(ScopeFilter::Project, true, false, false, true)
-                .unwrap_err()
-                .to_string();
-            assert!(err.contains("propagation needed"));
-
-            let lock = LockFile::load(&config::lock_file_path(false)).unwrap();
-            assert!(
-                lock.entries["demo"].source_hash.is_empty(),
-                "--check must not normalize legacy lock hashes"
-            );
-        });
-    }
-
-    #[test]
-    fn run_fails_closed_when_a_locked_source_is_unavailable() {
-        let project = tmpdir("unavailable-project");
-        std::fs::create_dir_all(&project).unwrap();
-
-        crate::test_util::with_project_root(&project, || {
-            let mut lock = LockFile::default();
-            lock.add(lock_entry("demo", ItemKind::Skill, &["claude-code"]));
-            lock.save(&config::lock_file_path(false)).unwrap();
-
-            let err = run(ScopeFilter::Project, false, false, false, true)
-                .unwrap_err()
-                .to_string();
-            assert!(err.contains("locked sources are unavailable"));
-        });
-    }
-
-    #[test]
-    fn stage_paths_are_scoped_to_lock_outputs_and_opencode_config() {
-        let project = tmpdir("stage-project");
-        std::fs::create_dir_all(&project).unwrap();
-        init_git_project(&project);
-
-        crate::test_util::with_project_root(&project, || {
-            let mut lock = LockFile::default();
-            lock.add(lock_entry("worker", ItemKind::Agent, &["opencode"]));
-            lock.add(lock_entry("protect", ItemKind::Hook, &["opencode"]));
-            lock.add(lock_entry("@scope/pkg", ItemKind::PiExtension, &["pi"]));
-            lock.save(&config::lock_file_path(false)).unwrap();
-
-            write_file(
-                &project.join(".opencode/agents/worker.md"),
-                "managed agent\n",
-            );
-            write_file(
-                &project.join(".agents/skill-failure-reporting.md"),
-                "managed reference\n",
-            );
-            write_file(
-                &project.join(".opencode/instructions/vstack-hook-protect.md"),
-                "managed hook\n",
-            );
-            write_file(&project.join("opencode.json"), "{}\n");
-            write_file(
-                &project.join(".pi/packages/@scope/pkg/package.json"),
-                r#"{"name":"@scope/pkg","pi":{"extensions":[],"appendSystem":"instructions.md"},"bin":{"pi-tool":"bin/tool.js"}}"#,
-            );
-            write_file(
-                &project.join(".pi/packages/@scope/pkg/instructions.md"),
-                "pi rules\n",
-            );
-            write_file(
-                &project.join(".pi/packages/@scope/pkg/bin/tool.js"),
-                "tool\n",
-            );
-            write_file(&project.join(".pi/bin/pi-tool"), "tool link\n");
-            write_file(&project.join(".pi/settings.json"), "{}\n");
-            write_file(&project.join(".pi/.vstack-source.json"), "{}\n");
-            write_file(&project.join(".pi/APPEND_SYSTEM.md"), "append\n");
-            write_file(&project.join(".opencode/secret.txt"), "repo secret\n");
-            write_file(
-                &project.join(".opencode/agents/unrelated.md"),
-                "unrelated agent\n",
-            );
-
-            let paths = project_stage_paths(&lock, false).unwrap();
-            assert!(paths.contains(&PathBuf::from(".vstack-lock.json")));
-            assert!(paths.contains(&PathBuf::from(".opencode/agents/worker.md")));
-            assert!(paths.contains(&PathBuf::from(".agents/skill-failure-reporting.md")));
-            assert!(paths.contains(&PathBuf::from("opencode.json")));
-            assert!(paths.contains(&PathBuf::from(
-                ".opencode/instructions/vstack-hook-protect.md"
-            )));
-            assert!(paths.contains(&PathBuf::from(".pi/packages/@scope/pkg")));
-            assert!(paths.contains(&PathBuf::from(".pi/bin/pi-tool")));
-            assert!(paths.contains(&PathBuf::from(".pi/settings.json")));
-            assert!(paths.contains(&PathBuf::from(".pi/.vstack-source.json")));
-            assert!(paths.contains(&PathBuf::from(".pi/APPEND_SYSTEM.md")));
-            assert!(!paths.contains(&PathBuf::from(".opencode/secret.txt")));
-            assert!(!paths.contains(&PathBuf::from(".opencode/agents/unrelated.md")));
-
-            stage_paths(&paths).unwrap();
-            let staged = git_output(&project, &["diff", "--cached", "--name-only"]);
-            assert!(staged.contains(".vstack-lock.json\n"));
-            assert!(staged.contains(".opencode/agents/worker.md\n"));
-            assert!(staged.contains(".agents/skill-failure-reporting.md\n"));
-            assert!(staged.contains("opencode.json\n"));
-            assert!(staged.contains(".opencode/instructions/vstack-hook-protect.md\n"));
-            assert!(staged.contains(".pi/packages/@scope/pkg/package.json\n"));
-            assert!(staged.contains(".pi/bin/pi-tool\n"));
-            assert!(staged.contains(".pi/APPEND_SYSTEM.md\n"));
-            assert!(!staged.contains(".opencode/secret.txt"));
-            assert!(!staged.contains(".opencode/agents/unrelated.md"));
-        });
-    }
-
-    #[test]
-    fn staging_pre_refresh_paths_records_refresh_deletions() {
-        let project = tmpdir("stage-delete-project");
-        std::fs::create_dir_all(&project).unwrap();
-        init_git_project(&project);
-
-        crate::test_util::with_project_root(&project, || {
-            let mut pre_lock = LockFile::default();
-            pre_lock.add(lock_entry("protect", ItemKind::Hook, &["opencode"]));
-            pre_lock.save(&config::lock_file_path(false)).unwrap();
-            write_file(
-                &project.join(".opencode/instructions/vstack-hook-protect.md"),
-                "managed hook\n",
-            );
-            git(&project, &["add", "-A"]);
-            git(&project, &["commit", "-m", "baseline"]);
-
-            let pre_paths = project_stage_paths(&pre_lock, true).unwrap();
-            LockFile::default()
-                .save(&config::lock_file_path(false))
-                .unwrap();
-            std::fs::remove_file(project.join(".opencode/instructions/vstack-hook-protect.md"))
-                .unwrap();
-
-            stage_project_paths(&pre_paths).unwrap();
-            let staged = git_output(&project, &["diff", "--cached", "--name-status"]);
-            assert!(staged.contains("M\t.vstack-lock.json"), "{staged}");
-            assert!(
-                staged.contains("D\t.opencode/instructions/vstack-hook-protect.md"),
-                "{staged}"
-            );
-        });
-    }
-
-    #[test]
-    fn staging_skips_ignored_managed_paths_and_stages_remaining_paths() {
-        let project = tmpdir("stage-ignored-project");
-        std::fs::create_dir_all(&project).unwrap();
-        init_git_project(&project);
-
-        crate::test_util::with_project_root(&project, || {
-            let mut lock = LockFile::default();
-            lock.add(lock_entry("ignored-pkg", ItemKind::PiExtension, &["pi"]));
-            lock.save(&config::lock_file_path(false)).unwrap();
-            write_file(&project.join(".gitignore"), ".pi/packages/ignored-pkg/\n");
-            write_file(
-                &project.join(".pi/packages/ignored-pkg/package.json"),
-                r#"{"name":"ignored-pkg","pi":{"extensions":[]}}"#,
-            );
-
-            let paths = project_stage_paths(&lock, false).unwrap();
-            assert!(paths.contains(&PathBuf::from(".pi/packages/ignored-pkg")));
-            stage_paths(&paths).unwrap();
-
-            let staged = git_output(&project, &["diff", "--cached", "--name-only"]);
-            assert!(staged.contains(".vstack-lock.json\n"), "{staged}");
-            assert!(!staged.contains(".pi/packages/ignored-pkg"), "{staged}");
-        });
-    }
-
-    #[test]
-    fn stage_mode_verifies_and_stages_when_hashes_are_current() {
-        let project = tmpdir("stage-no-drift-project");
-        let source = tmpdir("stage-no-drift-source");
-        std::fs::create_dir_all(&project).unwrap();
-        init_git_project(&project);
-        write_skill_source(&source, "v1\n");
-
-        crate::test_util::with_project_root(&project, || {
-            let mut entry = demo_entry(&source);
-            entry.source_hash = config::compute_source_hash(&entry);
-            let mut lock = LockFile::default();
-            lock.add(entry);
-            lock.save(&config::lock_file_path(false)).unwrap();
-            write_file(
-                &project.join(".agents/skills/demo/SKILL.md"),
-                "---\nname: demo\ndescription: Demo skill\nlicense: MIT\n---\n\nv1\n",
-            );
-            write_file(&project.join("vstack.toml"), "[agent-skills]\n");
-            write_file(
-                &project.join(".pi/packages/manual/package.json"),
-                r#"{"name":"manual","pi":{"extensions":[]}}"#,
-            );
-
-            run(ScopeFilter::Project, false, false, true, true).unwrap();
-
-            let staged = git_output(&project, &["diff", "--cached", "--name-only"]);
-            assert!(staged.contains("vstack.toml\n"), "{staged}");
-            assert!(
-                !staged.contains(".pi/packages/manual/package.json"),
-                "{staged}"
-            );
-        });
+    #[cfg(not(unix))]
+    {
+        path.to_string_lossy().as_bytes().to_vec()
     }
 }
+
+#[cfg(test)]
+mod tests;

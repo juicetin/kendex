@@ -23,7 +23,7 @@
 
 use crate::config::{self, ItemKind, LockEntry};
 use crate::scope::ScopeFilter;
-use anyhow::Result;
+use anyhow::{Result, bail};
 use std::path::{Path, PathBuf};
 
 /// Per-item verification result.
@@ -106,7 +106,7 @@ pub fn run(scope: ScopeFilter, names: &[String]) -> Result<()> {
         total_failed
     );
     if total_failed > 0 {
-        std::process::exit(1);
+        bail!("verification failed for {total_failed} item(s)");
     }
     Ok(())
 }

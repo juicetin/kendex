@@ -820,33 +820,10 @@ pub fn refresh_remote_caches(lock: &LockFile) {
     let mut seen = std::collections::HashSet::new();
     for entry in lock.entries.values() {
         let src = &entry.source;
-        // Only remote sources (owner/repo format)
-        if src.contains('/') && !src.starts_with('.') && !src.starts_with('/') {
-            if !seen.insert(src.clone()) {
-                continue;
-            }
-            let cache_key = src.replace('/', "_");
-            let cache_dir = global_base_dir()
-                .join(".vstack")
-                .join("cache")
-                .join(&cache_key);
-            if cache_dir.join(".git").exists() {
-                let fetch = std::process::Command::new("git")
-                    .args(["fetch", "origin", "--quiet"])
-                    .current_dir(&cache_dir)
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .status();
-                if fetch.is_ok_and(|s| s.success()) {
-                    let _ = std::process::Command::new("git")
-                        .args(["reset", "--hard", "origin/HEAD"])
-                        .current_dir(&cache_dir)
-                        .stdout(std::process::Stdio::null())
-                        .stderr(std::process::Stdio::null())
-                        .status();
-                }
-            }
+        if !seen.insert(src.clone()) {
+            continue;
         }
+        crate::refresh_sources::refresh_remote_cache_best_effort(src);
     }
 }
 
