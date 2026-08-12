@@ -44,6 +44,13 @@ pub struct RefreshStats {
     /// report can never fall through to "unchanged" with the stored hash —
     /// that silently masked an entry whose source had stopped providing it.
     pub missing: BTreeMap<String, String>,
+    /// Items installed as far as they could be, but whose declared
+    /// requirements are unsatisfied. Distinct from `missing` (the item's own
+    /// source is gone) and from `failures` (an install attempt errored): the
+    /// artifact was regenerated, so refreshing is not an error, but it is not
+    /// complete either — which is why these items are also kept out of
+    /// `successful_items` so their lock hash is not recorded as satisfied.
+    pub incomplete: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -85,6 +92,14 @@ impl RefreshStats {
 
     /// Record that `item` has no asset to refresh from. `source` is the source
     /// root it resolved to, or `None` when no source resolved at all.
+    fn mark_incomplete(&mut self, item: &str, reason: String) {
+        self.incomplete.insert(item.to_string(), reason);
+    }
+
+    pub fn has_incomplete(&self) -> bool {
+        !self.incomplete.is_empty()
+    }
+
     fn mark_missing(&mut self, item: &str, source: Option<&Path>) {
         let reason = match source {
             Some(root) => format!("not found in source {}", root.display()),
@@ -303,10 +318,16 @@ pub fn refresh_items_in_scope(
             })
             .collect();
         if !missing.is_empty() {
-            eprintln!(
-                "  Warning: agent {name} requires skill(s) not installed: {}; run `vstack add {}`",
-                missing.join(", "),
-                missing.join(" ")
+            // Recorded, not merely printed: callers gate on `has_missing()`, so
+            // a warning alone would let a summary report success while the
+            // agent was regenerated without a dependency it declares.
+            stats.mark_incomplete(
+                name,
+                format!(
+                    "requires skill(s) not installed: {}; run `vstack add {}`",
+                    missing.join(", "),
+                    missing.join(" ")
+                ),
             );
         }
 
@@ -1491,6 +1512,9 @@ fn run_one_with_source_records(
     );
     for (item, reason) in &stats.missing {
         eprintln!("  ? {item} — {reason}; not refreshed");
+    }
+    for (item, reason) in &stats.incomplete {
+        eprintln!("  ? {item} — {reason}; refreshed but incomplete");
     }
     if stats.has_failures() {
         for failure in &stats.failures {

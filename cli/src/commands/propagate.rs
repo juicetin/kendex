@@ -178,6 +178,12 @@ fn verify_project_auxiliary_installs_before_stage() -> Result<()> {
     for entry in lock.entries.values() {
         match entry.kind {
             ItemKind::Hook => {
+                if entry.harnesses.is_empty() {
+                    failures.push(format!(
+                        "locked hook {} records no harnesses, so no safety mechanism was checked",
+                        entry.name
+                    ));
+                }
                 let registration = locked_hook_registration(entry);
                 for harness in entry.harnesses.iter().filter_map(|id| Harness::from_id(id)) {
                     verify_hook_auxiliary_install(
@@ -228,7 +234,7 @@ fn verify_hook_auxiliary_install(
                 require_hook_command_registration(
                     Path::new(".claude").join("settings.json").as_path(),
                     &crate::installer::claude_project_hook_command(name),
-                    registration.map(|r| (r.event.as_str(), r.matcher.as_deref())),
+                    registration.map(|r| (r.event(), r.matcher())),
                     &format!("Claude hook {name}"),
                     failures,
                 );
@@ -247,8 +253,8 @@ fn verify_hook_auxiliary_install(
                     Path::new(".codex").join("hooks.json").as_path(),
                     &crate::installer::codex_project_hook_command(name),
                     registration.and_then(|r| {
-                        crate::installer::codex_event_for(&r.event)
-                            .map(|event| (event, r.matcher.as_deref()))
+                        crate::installer::codex_event_for(r.event())
+                            .map(|event| (event, r.matcher()))
                     }),
                     &format!("Codex hook {name}"),
                     failures,
@@ -270,7 +276,25 @@ fn verify_hook_auxiliary_install(
         Harness::OpenCode => {
             let instruction = crate::installer::opencode_hook_instruction_path(false, name);
             if instruction.exists() {
+                require_translated_hook_artifact_matches_source(
+                    &instruction,
+                    registration
+                        .map(|r| crate::installer::opencode_hook_instruction_contents(&r.hook)),
+                    &format!("OpenCode hook {name}"),
+                    failures,
+                );
                 require_opencode_instruction_registration(name, failures);
+            }
+        }
+        Harness::Cursor => {
+            let rule = crate::installer::cursor_hook_rule_path(false, name);
+            if rule.exists() {
+                require_translated_hook_artifact_matches_source(
+                    &rule,
+                    registration.map(|r| crate::installer::cursor_hook_rule_contents(&r.hook)),
+                    &format!("Cursor hook {name}"),
+                    failures,
+                );
             }
         }
         _ => {}
@@ -316,11 +340,23 @@ fn opencode_config_lists_instruction(json: &serde_json::Value, expected: &str) -
 /// dependency failure, not a pass: callers refuse to stage rather than accept a
 /// registration they cannot check.
 struct LockedHookRegistration {
-    event: String,
-    matcher: Option<String>,
-    /// The script body the installer writes verbatim to
-    /// `.claude/hooks/<name>.sh` and `.codex/hooks/<name>.sh`.
-    script: String,
+    hook: crate::hook::Hook,
+}
+
+impl LockedHookRegistration {
+    fn event(&self) -> &str {
+        &self.hook.event
+    }
+
+    fn matcher(&self) -> Option<&str> {
+        self.hook.matcher.as_deref()
+    }
+
+    /// The bytes the installer writes verbatim to `.claude/hooks/<name>.sh`
+    /// and `.codex/hooks/<name>.sh`.
+    fn script(&self) -> &str {
+        &self.hook.script
+    }
 }
 
 fn locked_hook_registration(entry: &config::LockEntry) -> Option<LockedHookRegistration> {
@@ -329,11 +365,7 @@ fn locked_hook_registration(entry: &config::LockEntry) -> Option<LockedHookRegis
         .ok()?
         .into_iter()
         .find(|hook| hook.name == entry.name)
-        .map(|hook| LockedHookRegistration {
-            event: hook.event,
-            matcher: hook.matcher,
-            script: hook.script,
-        })
+        .map(|hook| LockedHookRegistration { hook })
 }
 
 fn verify_pi_auxiliary_install(name: &str, failures: &mut Vec<String>) -> Result<()> {
@@ -514,12 +546,41 @@ fn require_installed_hook_script_matches_source(
     };
     let path = config::project_root().join(relative);
     match std::fs::read_to_string(&path) {
-        Ok(installed) if installed == registration.script => {}
+        Ok(installed) if installed == registration.script() => {}
         Ok(_) => failures.push(format!(
             "{} does not match the locked script for {label}",
             relative.display()
         )),
         Err(err) => failures.push(format!("{} is unreadable: {err}", relative.display())),
+    }
+}
+
+/// A translated safety artifact — an OpenCode instruction file, a Cursor rule —
+/// is rendered from the hook, not copied, so its body is still fully
+/// installer-owned. Existence and registration say nothing about the prose
+/// actually in it, and a locally replaced body would otherwise be staged as
+/// though propagation produced it. `expected` is `None` only when the source
+/// definition could not be read, which fails closed like the other checks.
+fn require_translated_hook_artifact_matches_source(
+    path: &Path,
+    expected: Option<String>,
+    label: &str,
+    failures: &mut Vec<String>,
+) {
+    let project_root = config::project_root();
+    let display = path.strip_prefix(&project_root).unwrap_or(path).display();
+    let Some(expected) = expected else {
+        failures.push(format!(
+            "cannot read the locked definition for {label} from its source; refusing to verify {display}"
+        ));
+        return;
+    };
+    match std::fs::read_to_string(path) {
+        Ok(installed) if installed == expected => {}
+        Ok(_) => failures.push(format!(
+            "{display} does not match the locked {label} content"
+        )),
+        Err(err) => failures.push(format!("{display} is unreadable: {err}")),
     }
 }
 

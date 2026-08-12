@@ -289,9 +289,18 @@ fn accepted_canonical_skill_targets(entry: &LockEntry, global: bool) -> Vec<Path
         }
     } else {
         roots.push(config::project_root().join(".agents").join("skills"));
+        // An anchor proves sharing for the names it evidences. A root anchored
+        // only by specific linked children is not canonical for a skill that
+        // was never among them, so accepting it wholesale would trust a link
+        // into a foreign checkout for an unanchored name.
         roots.extend(
             crate::installer::anchored_canonical_skill_roots(&harnesses)
                 .into_iter()
+                .filter(|(_, sharing)| {
+                    sharing
+                        .iter()
+                        .any(|(_, evidence)| evidence.covers(name.as_str()))
+                })
                 .map(|(root, _)| root),
         );
     }
@@ -413,6 +422,9 @@ fn verify_hook_install(
                 // check here.
             }
         }
+    }
+    if harnesses.is_empty() {
+        return (Some(false), Some("no harnesses recorded".into()));
     }
     if !unknown.is_empty() {
         missing.push(format!("unknown harness id(s): {}", unknown.join(", ")));

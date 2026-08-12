@@ -2724,11 +2724,18 @@ fn stage_mode_verifies_the_pi_append_system_block_and_source_index() {
 #[test]
 fn stage_mode_requires_the_opencode_instruction_to_be_registered() {
     let project = tmpdir("stage-opencode-instruction-registration");
+    let source = tmpdir("stage-opencode-instruction-registration-source");
     std::fs::create_dir_all(&project).unwrap();
+    write_hook_source(&source, "guard");
 
     crate::test_util::with_project_root(&project, || {
+        let entry = hook_entry("guard", &source, &["opencode"]);
+        let registration = locked_hook_registration(&entry).unwrap();
         let instruction = crate::installer::opencode_hook_instruction_path(false, "guard");
-        write_file(&instruction, "# Safety: guard\n");
+        write_file(
+            &instruction,
+            &crate::installer::opencode_hook_instruction_contents(&registration.hook),
+        );
         let expected = crate::installer::opencode_hook_instruction_ref(false, "guard");
 
         // Registered: passes.
@@ -2737,13 +2744,23 @@ fn stage_mode_requires_the_opencode_instruction_to_be_registered() {
             &format!(r#"{{"instructions":["{expected}"]}}"#),
         );
         let mut failures = Vec::new();
-        verify_hook_auxiliary_install("guard", Harness::OpenCode, None, &mut failures);
+        verify_hook_auxiliary_install(
+            "guard",
+            Harness::OpenCode,
+            Some(&registration),
+            &mut failures,
+        );
         assert!(failures.is_empty(), "{failures:?}");
 
         // Present but no longer referenced: OpenCode never loads it.
         write_file(&project.join("opencode.json"), r#"{"instructions":[]}"#);
         let mut failures = Vec::new();
-        verify_hook_auxiliary_install("guard", Harness::OpenCode, None, &mut failures);
+        verify_hook_auxiliary_install(
+            "guard",
+            Harness::OpenCode,
+            Some(&registration),
+            &mut failures,
+        );
         assert!(
             failures
                 .iter()
@@ -2758,7 +2775,12 @@ fn stage_mode_requires_the_opencode_instruction_to_be_registered() {
             &format!(r#"{{"instructions":["{expected}"]}}"#),
         );
         let mut failures = Vec::new();
-        verify_hook_auxiliary_install("guard", Harness::OpenCode, None, &mut failures);
+        verify_hook_auxiliary_install(
+            "guard",
+            Harness::OpenCode,
+            Some(&registration),
+            &mut failures,
+        );
         assert!(
             failures
                 .iter()
@@ -2769,15 +2791,80 @@ fn stage_mode_requires_the_opencode_instruction_to_be_registered() {
         // With only the .jsonc spelling present it becomes the active config.
         std::fs::remove_file(project.join("opencode.json")).unwrap();
         let mut failures = Vec::new();
-        verify_hook_auxiliary_install("guard", Harness::OpenCode, None, &mut failures);
+        verify_hook_auxiliary_install(
+            "guard",
+            Harness::OpenCode,
+            Some(&registration),
+            &mut failures,
+        );
         assert!(failures.is_empty(), "{failures:?}");
 
+        // A locally replaced instruction body is not stageable, registered or not.
+        write_file(&instruction, "# Safety: guard\n\ndisabled\n");
+        let mut failures = Vec::new();
+        verify_hook_auxiliary_install(
+            "guard",
+            Harness::OpenCode,
+            Some(&registration),
+            &mut failures,
+        );
+        assert!(
+            failures
+                .iter()
+                .any(|f| f.contains("does not match the locked OpenCode hook guard content")),
+            "{failures:?}"
+        );
+
         // No config at all.
+        write_file(
+            &instruction,
+            &crate::installer::opencode_hook_instruction_contents(&registration.hook),
+        );
         std::fs::remove_file(project.join("opencode.jsonc")).unwrap();
         let mut failures = Vec::new();
-        verify_hook_auxiliary_install("guard", Harness::OpenCode, None, &mut failures);
+        verify_hook_auxiliary_install(
+            "guard",
+            Harness::OpenCode,
+            Some(&registration),
+            &mut failures,
+        );
         assert!(
             failures.iter().any(|f| f.contains("missing registration")),
+            "{failures:?}"
+        );
+    });
+}
+
+#[test]
+fn stage_mode_rejects_a_locally_replaced_cursor_safety_rule() {
+    let project = tmpdir("stage-cursor-rule-replaced");
+    let source = tmpdir("stage-cursor-rule-replaced-source");
+    std::fs::create_dir_all(&project).unwrap();
+    write_hook_source(&source, "guard");
+
+    crate::test_util::with_project_root(&project, || {
+        let entry = hook_entry("guard", &source, &["cursor"]);
+        let registration = locked_hook_registration(&entry).unwrap();
+        let rule = crate::installer::cursor_hook_rule_path(false, "guard");
+        write_file(
+            &rule,
+            &crate::installer::cursor_hook_rule_contents(&registration.hook),
+        );
+
+        let mut failures = Vec::new();
+        verify_hook_auxiliary_install("guard", Harness::Cursor, Some(&registration), &mut failures);
+        assert!(failures.is_empty(), "{failures:?}");
+
+        write_file(
+            &rule,
+            "---\ndescription: \"Safety: guard\"\n---\n\ndisabled\n",
+        );
+        let mut failures = Vec::new();
+        verify_hook_auxiliary_install("guard", Harness::Cursor, Some(&registration), &mut failures);
+        assert!(
+            failures
+                .iter()
+                .any(|f| f.contains("does not match the locked Cursor hook guard content")),
             "{failures:?}"
         );
     });
@@ -2958,5 +3045,30 @@ fn stage_mode_rejects_a_locally_edited_managed_hook_script() {
             git_output(&project, &["diff", "--cached", "--name-only"]).is_empty(),
             "nothing may be staged"
         );
+    });
+}
+
+#[test]
+fn stage_mode_rejects_a_hook_entry_with_no_harnesses() {
+    let project = tmpdir("stage-hook-no-harnesses");
+    let source = tmpdir("stage-hook-no-harnesses-source");
+    std::fs::create_dir_all(&project).unwrap();
+    init_git_project(&project);
+    write_hook_source(&source, "guard");
+
+    crate::test_util::with_project_root(&project, || {
+        let mut entry = hook_entry("guard", &source, &[]);
+        entry.source_hash = config::compute_source_hash(&entry);
+        let mut lock = LockFile::default();
+        lock.add(entry);
+        lock.save(&config::lock_file_path(false)).unwrap();
+        git(&project, &["add", "-A"]);
+        git(&project, &["commit", "-m", "baseline"]);
+
+        // Nothing was checked, because there is nothing recorded to check.
+        let err = verify_project_auxiliary_installs_before_stage()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("records no harnesses"), "{err}");
     });
 }
