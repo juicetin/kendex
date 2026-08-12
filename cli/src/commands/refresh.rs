@@ -1537,6 +1537,16 @@ fn run_one_with_source_records(
             stats.missing.len()
         );
     }
+    // Returning Ok here would let propagation verify and stage artifacts known
+    // to be short of a declared dependency, and it could never converge: the
+    // lock hash is deliberately withheld, so every later run sees the same
+    // drift. Stop with the remedy already printed above.
+    if stats.has_incomplete() {
+        anyhow::bail!(
+            "{} refreshed item(s) are missing a declared dependency; install the skill(s) named above and re-run",
+            stats.incomplete.len()
+        );
+    }
     Ok(())
 }
 

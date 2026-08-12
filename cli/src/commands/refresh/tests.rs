@@ -1488,3 +1488,34 @@ fn refresh_withholds_agent_success_when_a_declared_skill_is_not_installed() {
 
     let _ = std::fs::remove_dir_all(root);
 }
+
+/// An incomplete refresh must stop the run: the lock hash is deliberately
+/// withheld, so returning success would let propagation stage the incomplete
+/// artifact and would never converge — every later run sees the same drift.
+#[test]
+fn refresh_run_fails_when_an_agent_is_missing_a_declared_skill() {
+    let root = tmpdir("declared-skill-run-gate");
+    let project = root.join("project");
+    let source = make_source(&root, "source");
+    std::fs::create_dir_all(&project).unwrap();
+    write_colliding_source(&source, "1", "PreToolUse", "source-model");
+
+    let mut lock = LockFile::default();
+    lock.add(lock_entry(
+        "rust",
+        ItemKind::Agent,
+        &source,
+        vec!["claude-code"],
+    ));
+    lock.save(&project.join(".vstack-lock.json")).unwrap();
+
+    let err = crate::test_util::with_project_root(&project, || {
+        run(crate::scope::ScopeFilter::Project, false).unwrap_err()
+    });
+    assert!(
+        err.to_string().contains("missing a declared dependency"),
+        "{err:#}"
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}

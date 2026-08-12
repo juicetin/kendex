@@ -851,6 +851,7 @@ fn refresh_prunes_hook_artifacts_when_harness_allowlist_drops_claude() {
 #[test]
 fn refresh_prune_uses_hook_lock_source_when_duplicate_hook_names_exist() {
     let sandbox = Sandbox::new("refresh-multisource-hook");
+    install_dev_skill(&sandbox.project);
     let source_a = &sandbox.source;
     let source_b = sandbox.root.join("source-b");
     write_hook(source_a, Some("[codex]"));
@@ -919,9 +920,25 @@ fn refresh_prune_uses_hook_lock_source_when_duplicate_hook_names_exist() {
     );
 }
 
+/// Materialize the `dev` skill the sandbox source declares for the `rust`
+/// agent. Without it on disk the lock entry is pruned as stale and the agent
+/// is left short of a declared dependency, which refresh refuses.
+fn install_dev_skill(project: &Path) {
+    for dir in [".agents/skills/dev", ".claude/skills/dev"] {
+        let path = project.join(dir);
+        fs::create_dir_all(&path).unwrap();
+        fs::write(
+            path.join("SKILL.md"),
+            "---\nname: dev\ndescription: Dev skill\nlicense: MIT\n---\n# Dev\n",
+        )
+        .unwrap();
+    }
+}
+
 #[test]
 fn refresh_agent_hook_frontmatter_uses_hook_harness_from_lock() {
     let sandbox = Sandbox::new("refresh-hook-harness-scope");
+    install_dev_skill(&sandbox.project);
     let source = sandbox.source.to_string_lossy();
     fs::write(
         sandbox.project.join(".vstack-lock.json"),
