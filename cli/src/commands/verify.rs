@@ -170,9 +170,10 @@ fn verify_pi_install(name: &str, global: bool) -> (Option<bool>, Option<String>)
 
 fn verify_skill_install(
     name: &str,
-    _harnesses: &[String],
+    harnesses: &[String],
     global: bool,
 ) -> (Option<bool>, Option<String>) {
+    let mut missing = Vec::new();
     let canonical = if global {
         config::global_state_dir().join("skills").join(name)
     } else {
@@ -181,10 +182,25 @@ fn verify_skill_install(
             .join("skills")
             .join(name)
     };
-    if canonical.exists() {
+    if !canonical.join("SKILL.md").is_file() {
+        missing.push("canonical".to_string());
+    }
+    for h in harnesses {
+        let Some(harness) = crate::harness::Harness::from_id(h) else {
+            continue;
+        };
+        let path = harness.skills_dir(global).join(name);
+        if !path.join("SKILL.md").is_file() {
+            missing.push(h.clone());
+        }
+    }
+    if missing.is_empty() {
         (Some(true), None)
     } else {
-        (Some(false), Some("install path missing".into()))
+        (
+            Some(false),
+            Some(format!("install path missing for {}", missing.join(", "))),
+        )
     }
 }
 

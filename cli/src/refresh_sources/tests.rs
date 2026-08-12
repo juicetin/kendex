@@ -493,6 +493,45 @@ fn remote_helpers_redact_urls_and_use_collision_resistant_safe_keys() {
 }
 
 #[test]
+fn cached_repo_origin_mismatch_does_not_leak_legacy_path_userinfo() {
+    let root = TempDir::new("legacy-cache-redaction");
+    let cache = root
+        .path()
+        .join("cache")
+        .join("https:__token@example.com_owner_repo");
+    init_git_repo(&cache);
+    git(
+        &cache,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://other-secret@example.com/Other/Repo.git",
+        ],
+    );
+
+    let err = validate_cached_repo_origin(
+        &remote_source_display("https://token@example.com/Owner/Repo.git"),
+        "https://expected-secret@example.com/Owner/Repo.git",
+        &cache,
+    )
+    .unwrap_err()
+    .to_string();
+
+    assert!(!err.contains("token"), "{err}");
+    assert!(!err.contains("expected-secret"), "{err}");
+    assert!(!err.contains("other-secret"), "{err}");
+    assert!(
+        err.contains("https://<redacted>@example.com/Owner/Repo.git"),
+        "{err}"
+    );
+    assert!(
+        err.contains("https://<redacted>@example.com/Other/Repo.git"),
+        "{err}"
+    );
+}
+
+#[test]
 fn clone_or_update_remote_source_at_clones_updates_and_fails_closed() {
     let root = TempDir::new("remote-clone");
     let remote = root.path().join("remote.git");

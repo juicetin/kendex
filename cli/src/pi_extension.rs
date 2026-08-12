@@ -335,6 +335,10 @@ fn validate_safe_component(kind: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn validate_pi_bin_name(name: &str) -> Result<()> {
+    validate_safe_component("Pi bin name", name)
+}
+
 fn validate_pi_package_name(name: &str) -> Result<()> {
     if name.is_empty() || name.contains('\\') || name.starts_with('/') || name.contains("//") {
         anyhow::bail!("invalid Pi package name `{name}`");
@@ -663,7 +667,7 @@ pub fn remove_pi_extension(name: &str, global: bool) -> Result<Vec<PathBuf>> {
         && let Ok(ext) = PiExtension::from_dir(&dest)
     {
         for cli_name in ext.bin.keys() {
-            validate_safe_component("Pi bin name", cli_name)?;
+            validate_pi_bin_name(cli_name)?;
             let link = crate::config::pi_bin_dir(global).join(cli_name);
             match std::fs::remove_file(&link) {
                 Ok(()) => removed.push(link),
@@ -706,7 +710,7 @@ fn install_bin_links(ext: &PiExtension, package_dest: &Path, global: bool) -> Re
     let bin_dir = crate::config::pi_bin_dir(global);
     std::fs::create_dir_all(&bin_dir)?;
     for (cli_name, rel_target) in &ext.bin {
-        validate_safe_component("Pi bin name", cli_name)?;
+        validate_pi_bin_name(cli_name)?;
         let target = checked_package_child_path(package_dest, rel_target, "Pi bin target")?;
         if !target.exists() {
             eprintln!(
@@ -740,7 +744,7 @@ fn remove_stale_bin_links(
     global: bool,
 ) -> Result<()> {
     for cli_name in previous_bin_names.difference(current_bin_names) {
-        validate_safe_component("Pi bin name", cli_name)?;
+        validate_pi_bin_name(cli_name)?;
         let link = crate::config::pi_bin_dir(global).join(cli_name);
         if !is_package_bin_symlink(&link, package_dest)? {
             continue;

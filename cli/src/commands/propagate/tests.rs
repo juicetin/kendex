@@ -864,6 +864,41 @@ fn retry_staging_records_deleted_pi_bin_from_committed_manifest_only() {
 }
 
 #[test]
+fn retry_staging_accepts_pi_bin_names_valid_for_installer() {
+    let project = tmpdir("stage-deleted-pi-bin-tilde");
+    std::fs::create_dir_all(&project).unwrap();
+    init_git_project(&project);
+
+    crate::test_util::with_project_root(&project, || {
+        let mut lock = LockFile::default();
+        lock.add(lock_entry("demo-pkg", ItemKind::PiExtension, &["pi"]));
+        lock.save(&config::lock_file_path(false)).unwrap();
+        write_file(
+            &project.join(".pi/packages/demo-pkg/package.json"),
+            r#"{"name":"demo-pkg","pi":{"extensions":[]},"bin":{"old~cmd":"bin/old.js"}}"#,
+        );
+        write_file(
+            &project.join(".pi/packages/demo-pkg/bin/old.js"),
+            "old bin\n",
+        );
+        write_file(&project.join(".pi/bin/old~cmd"), "managed old link\n");
+        git(&project, &["add", "-A"]);
+        git(&project, &["commit", "-m", "baseline"]);
+
+        write_file(
+            &project.join(".pi/packages/demo-pkg/package.json"),
+            r#"{"name":"demo-pkg","pi":{"extensions":[]},"bin":{}}"#,
+        );
+        std::fs::remove_file(project.join(".pi/packages/demo-pkg/bin/old.js")).unwrap();
+        std::fs::remove_file(project.join(".pi/bin/old~cmd")).unwrap();
+
+        stage_project_paths(&[]).unwrap();
+        let staged = git_output(&project, &["diff", "--cached", "--name-status"]);
+        assert!(staged.contains("D\t.pi/bin/old~cmd"), "{staged}");
+    });
+}
+
+#[test]
 fn staging_project_owned_skills_keeps_unmanaged_descendants_unstaged() {
     let project = tmpdir("stage-project-owned-skill");
     std::fs::create_dir_all(&project).unwrap();
@@ -1049,6 +1084,10 @@ fn stage_mode_verifies_and_stages_when_hashes_are_current() {
             &project.join(".agents/skills/demo/SKILL.md"),
             "---\nname: demo\ndescription: Demo skill\nlicense: MIT\n---\n\nv1\n",
         );
+        write_file(
+            &project.join(".claude/skills/demo/SKILL.md"),
+            "---\nname: demo\ndescription: Demo skill\nlicense: MIT\n---\n\nv1\n",
+        );
         write_file(&project.join("vstack.toml"), "[agent-skills]\n");
         write_file(
             &project.join(".pi/packages/manual/package.json"),
@@ -1094,6 +1133,42 @@ fn stage_mode_fails_before_staging_when_no_drift_verify_fails() {
             &project.join(".pi/packages/demo-pkg/package.json"),
             r#"{"name":"demo-pkg","pi":{"extensions":["corrupt"]}}"#,
         );
+
+        let err = run(ScopeFilter::Project, false, false, true, true)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("verification failed"), "{err}");
+        let staged = git_output(&project, &["diff", "--cached", "--name-only"]);
+        assert!(staged.is_empty(), "{staged}");
+    });
+}
+
+#[test]
+fn stage_mode_fails_before_staging_when_locked_skill_harness_path_is_missing() {
+    let project = tmpdir("stage-no-drift-skill-harness-verify-fails");
+    let source = tmpdir("stage-no-drift-skill-harness-source");
+    std::fs::create_dir_all(&project).unwrap();
+    init_git_project(&project);
+    write_skill_source(&source, "v1\n");
+
+    crate::test_util::with_project_root(&project, || {
+        let mut entry = demo_entry(&source);
+        entry.source_hash = config::compute_source_hash(&entry);
+        let mut lock = LockFile::default();
+        lock.add(entry);
+        lock.save(&config::lock_file_path(false)).unwrap();
+        write_file(
+            &project.join(".agents/skills/demo/SKILL.md"),
+            "---\nname: demo\ndescription: Demo skill\nlicense: MIT\n---\n\nv1\n",
+        );
+        write_file(
+            &project.join(".claude/skills/demo/SKILL.md"),
+            "---\nname: demo\ndescription: Demo skill\nlicense: MIT\n---\n\nv1\n",
+        );
+        git(&project, &["add", "-A"]);
+        git(&project, &["commit", "-m", "baseline"]);
+
+        std::fs::remove_file(project.join(".claude/skills/demo/SKILL.md")).unwrap();
 
         let err = run(ScopeFilter::Project, false, false, true, true)
             .unwrap_err()

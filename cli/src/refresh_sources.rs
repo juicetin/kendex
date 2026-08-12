@@ -730,8 +730,7 @@ fn validate_cached_repo_origin(display: &str, expected_url: &str, repo_dir: &Pat
     let actual = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if remote_cache_identity(&actual) != remote_cache_identity(expected_url) {
         bail!(
-            "cached source {display} at {} has origin {}, expected {}; remove the cache directory and retry",
-            repo_dir.display(),
+            "cached source {display} has origin {}, expected {}; remove the cache directory and retry",
             remote_source_display(&actual),
             remote_source_display(expected_url)
         );

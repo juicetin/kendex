@@ -895,7 +895,7 @@ fn committed_pi_bin_paths(git: &GitProject) -> Result<BTreeSet<PathBuf>> {
             continue;
         }
         for bin_name in pi_bin_names_from_package_manifest(&output.stdout)? {
-            crate::path_safety::validate_item_name(&bin_name)
+            crate::pi_extension::validate_pi_bin_name(&bin_name)
                 .with_context(|| format!("unsafe committed Pi bin name {bin_name}"))?;
             let bin_path = config::pi_bin_dir(false).join(bin_name);
             if let Ok(relative) = bin_path.strip_prefix(&project_root) {
