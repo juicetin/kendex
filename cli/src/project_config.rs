@@ -159,8 +159,50 @@ fn is_agent_frontmatter_override(value: &toml::Value) -> bool {
 /// Parse `[agent-frontmatter]` and `[agent-frontmatter.<harness>]` tables out
 /// of arbitrary `vstack.toml` content. Used by both `ProjectConfig` and
 /// `MappingConfig` so the source repo and the project share parsing logic.
+///
+/// Entries that do not fit the schema are dropped. Callers that must not
+/// silently lose an override — the refresh preflight — run
+/// [`validate_agent_frontmatter_tables`] first; it walks the same code and so
+/// cannot drift from what this accepts.
 pub fn parse_agent_frontmatter_tables(
     content: &str,
+) -> (
+    HashMap<String, crate::agent::AgentFrontmatterOverrides>,
+    HashMap<String, HashMap<String, crate::agent::AgentFrontmatterOverrides>>,
+) {
+    walk_agent_frontmatter_tables(content, &mut |_| {})
+}
+
+/// Report the first `[agent-frontmatter]` entry [`parse_agent_frontmatter_tables`]
+/// would drop, as a human-readable reason.
+///
+/// `MappingConfig` marks both frontmatter fields `#[serde(skip)]` — the
+/// harness/agent nesting is disambiguated by field sniffing, which serde cannot
+/// express — so deserializing a source `vstack.toml` as a `MappingConfig` says
+/// nothing about whether its overrides survived. Without this, a malformed
+/// override was dropped, the agent was regenerated without it, and the changed
+/// source hash was recorded as satisfied.
+///
+/// Unknown fields inside an otherwise well-formed override are accepted, as
+/// everywhere else in the config: only malformed shapes and wrongly typed
+/// values fail.
+pub fn validate_agent_frontmatter_tables(content: &str) -> Result<(), String> {
+    let mut first: Option<String> = None;
+    walk_agent_frontmatter_tables(content, &mut |reason| {
+        first.get_or_insert(reason);
+    });
+    match first {
+        Some(reason) => Err(reason),
+        None => Ok(()),
+    }
+}
+
+/// Shared walk behind [`parse_agent_frontmatter_tables`] and
+/// [`validate_agent_frontmatter_tables`]: every entry the parse drops is
+/// reported to `on_dropped` with the reason it was dropped.
+fn walk_agent_frontmatter_tables(
+    content: &str,
+    on_dropped: &mut dyn FnMut(String),
 ) -> (
     HashMap<String, crate::agent::AgentFrontmatterOverrides>,
     HashMap<String, HashMap<String, crate::agent::AgentFrontmatterOverrides>>,
@@ -169,22 +211,35 @@ pub fn parse_agent_frontmatter_tables(
     let mut by_harness: HashMap<String, HashMap<String, crate::agent::AgentFrontmatterOverrides>> =
         HashMap::new();
     let Ok(value) = toml::from_str::<toml::Value>(content) else {
+        // Not this walk's failure to report: the caller's own TOML parse
+        // surfaces the syntax error with its position.
         return (legacy, by_harness);
     };
-    let Some(table) = value
-        .get("agent-frontmatter")
-        .and_then(|value| value.as_table())
-    else {
+    let Some(raw) = value.get("agent-frontmatter") else {
+        return (legacy, by_harness);
+    };
+    let Some(table) = raw.as_table() else {
+        on_dropped(format!(
+            "`agent-frontmatter` must be a table, found {}",
+            raw.type_str()
+        ));
         return (legacy, by_harness);
     };
     for (key, value) in table {
         if is_agent_frontmatter_override(value) {
-            if let Ok(overrides) = value.clone().try_into() {
-                legacy.insert(key.clone(), overrides);
+            match value.clone().try_into() {
+                Ok(overrides) => {
+                    legacy.insert(key.clone(), overrides);
+                }
+                Err(err) => on_dropped(format!("`agent-frontmatter.{key}` is invalid: {err}")),
             }
             continue;
         }
         let Some(agent_table) = value.as_table() else {
+            on_dropped(format!(
+                "`agent-frontmatter.{key}` must be an override table or a table of per-agent overrides, found {}",
+                value.type_str()
+            ));
             continue;
         };
         let harness_key = crate::harness::Harness::from_id(key)
@@ -192,13 +247,27 @@ pub fn parse_agent_frontmatter_tables(
             .unwrap_or_else(|| key.clone());
         for (agent_name, override_value) in agent_table {
             if !is_agent_frontmatter_override(override_value) {
+                on_dropped(match override_value.as_table() {
+                    Some(_) => format!(
+                        "`agent-frontmatter.{key}.{agent_name}` carries no recognized frontmatter field"
+                    ),
+                    None => format!(
+                        "`agent-frontmatter.{key}.{agent_name}` must be an override table, found {}",
+                        override_value.type_str()
+                    ),
+                });
                 continue;
             }
-            if let Ok(overrides) = override_value.clone().try_into() {
-                by_harness
-                    .entry(harness_key.clone())
-                    .or_default()
-                    .insert(agent_name.clone(), overrides);
+            match override_value.clone().try_into() {
+                Ok(overrides) => {
+                    by_harness
+                        .entry(harness_key.clone())
+                        .or_default()
+                        .insert(agent_name.clone(), overrides);
+                }
+                Err(err) => on_dropped(format!(
+                    "`agent-frontmatter.{key}.{agent_name}` is invalid: {err}"
+                )),
             }
         }
     }

@@ -220,6 +220,13 @@ fn merge_upstream<T: Clone>(
 /// then silently default. A source with no `vstack.toml` is not a failure: the
 /// default mapping is the correct answer there.
 ///
+/// `MappingConfig` deserialization alone is not enough: both `agent_frontmatter`
+/// fields are `#[serde(skip)]` (their harness/agent nesting is disambiguated by
+/// field sniffing, not by serde), so `[agent-frontmatter]` is never validated by
+/// that parse and every malformed entry is silently dropped by
+/// `parse_agent_frontmatter_tables` instead. `validate_agent_frontmatter_tables`
+/// closes that hole over the same walk the parse uses.
+///
 /// Callers must run this before any project-config, settings, or lock write:
 /// the fallback mapping's frontmatter defaults, once persisted into the
 /// consumer's `vstack.toml`, outrank source defaults forever after, so
@@ -244,6 +251,14 @@ fn invalid_source_mapping(sources: &[RefreshSource]) -> Option<(PathBuf, anyhow:
                 config_path,
                 anyhow::anyhow!(
                     "source mapping will not parse ({err}); refusing to regenerate items without their [agent-skills]/[role-skills]/[hook-events] assignments"
+                ),
+            ));
+        }
+        if let Err(err) = crate::project_config::validate_agent_frontmatter_tables(&content) {
+            return Some((
+                config_path,
+                anyhow::anyhow!(
+                    "source mapping will not parse ({err}); refusing to regenerate agents without their [agent-frontmatter] overrides"
                 ),
             ));
         }

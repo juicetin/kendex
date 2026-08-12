@@ -1842,6 +1842,117 @@ fn refresh_stops_when_a_source_mapping_violates_the_schema_or_cannot_be_read() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+/// `MappingConfig` marks both `agent_frontmatter` fields `#[serde(skip)]`, so
+/// `toml::from_str::<MappingConfig>` never looks at `[agent-frontmatter]` — and
+/// `parse_agent_frontmatter_tables`, which does, drops every entry it cannot
+/// interpret. A source table whose value is not an override, or whose override
+/// carries a wrongly typed field, therefore passed the preflight, refreshed the
+/// agent without that override, and recorded the changed source hash as
+/// satisfied. The preflight must reject the malformed shapes while still
+/// accepting the shapes real consumer configs carry.
+#[test]
+fn refresh_stops_when_a_source_mapping_carries_invalid_agent_frontmatter() {
+    let root = tmpdir("invalid-agent-frontmatter");
+    let project = root.join("project");
+    let source = make_source(&root, "source");
+    std::fs::create_dir_all(&project).unwrap();
+    write_colliding_source(&source, "1", "PreToolUse", "source-model");
+
+    let mut lock = LockFile::default();
+    lock.add(lock_entry(
+        "rust",
+        ItemKind::Agent,
+        &source,
+        vec!["claude-code"],
+    ));
+    lock.add(lock_entry(
+        "shared",
+        ItemKind::Skill,
+        &source,
+        vec!["claude-code"],
+    ));
+    let run = || {
+        let sources = vec![RefreshSource::from_root(&source)];
+        crate::test_util::with_project_root(&project, || {
+            let mut project_config = ProjectConfig::default();
+            refresh_items_in_scope(false, &lock, &sources, &mut project_config, &project, None)
+        })
+    };
+
+    // Control: the harness table `write_colliding_source` writes is the shape
+    // every real consumer `vstack.toml` carries, and it must keep refreshing.
+    let stats = run();
+    assert!(!stats.has_failures(), "{:?}", stats.failures);
+    assert!(stats.successful_items.contains("rust"));
+
+    for (label, mapping) in [
+        // Harness table whose agent entry is not a table at all: silently
+        // skipped by `parse_agent_frontmatter_tables`.
+        (
+            "non-table agent entry under a harness",
+            "[agent-frontmatter.claude]\nrust = \"invalid\"\n",
+        ),
+        // Same shape one level up, where the key is read as an agent name.
+        (
+            "non-table entry at the top level",
+            "[agent-frontmatter]\nrust = \"invalid\"\n",
+        ),
+        // Recognised as an override table, but `pane` is a bool: the
+        // `try_into` that rejects it is the one whose error was dropped.
+        (
+            "wrongly typed field in a top-level override",
+            "[agent-frontmatter]\nrust = { pane = \"yes\" }\n",
+        ),
+        (
+            "wrongly typed field in a harness override",
+            "[agent-frontmatter.claude]\nrust = { pane = \"yes\" }\n",
+        ),
+    ] {
+        std::fs::write(source.join("vstack.toml"), mapping).unwrap();
+        let stats = run();
+        assert!(
+            stats.has_failures(),
+            "{label}: schema-invalid agent frontmatter must fail refresh"
+        );
+        assert!(
+            stats.failures[0].error.contains("will not parse"),
+            "{label}: {:?}",
+            stats.failures
+        );
+        assert!(
+            stats.successful_items.is_empty(),
+            "{label}: nothing may be recorded as refreshed"
+        );
+    }
+
+    // No false positives: both override spellings real consumers use, and an
+    // unknown key, still refresh.
+    for (label, mapping) in [
+        (
+            "harness override",
+            "[agent-frontmatter.claude]\nrust = { model = \"opus\", effort = \"max\" }\n",
+        ),
+        (
+            "top-level override",
+            "[agent-frontmatter]\nrust = { model = \"opus\", deny-tools = [\"web\"] }\n",
+        ),
+        (
+            "unknown field in an override",
+            "[agent-frontmatter.claude]\nrust = { model = \"opus\", future-key = 3 }\n",
+        ),
+    ] {
+        std::fs::write(source.join("vstack.toml"), mapping).unwrap();
+        let stats = run();
+        assert!(!stats.has_failures(), "{label}: {:?}", stats.failures);
+        assert!(
+            stats.successful_items.contains("rust"),
+            "{label}: a valid override must still refresh"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
 /// A project-owned skill assigned to a Codex or Pi agent lives in the shared
 /// `.agents/skills/<name>` directory and intentionally has no lock entry, so a
 /// lock-only lookup always classified it missing and aborted every refresh as
