@@ -286,6 +286,30 @@ pub fn refresh_items_in_scope(
             continue;
         };
 
+        // A declared dependency that is not installed must not be silently
+        // filtered out: `skills_for_agent` intersects with the installed set,
+        // so an upstream `[role-skills]`/`[agent-skills]` addition would drop
+        // out here while the mapping hash that forced this refresh got recorded
+        // as satisfied. Fail the agent instead — its hash is only written for
+        // successful items, so the next run still reports the work as pending.
+        let declared = source
+            .mapping
+            .declared_skills_for_agent(&agent.name, &agent.role);
+        let missing: Vec<String> = declared
+            .into_iter()
+            .filter(|skill| {
+                !installed_skills.iter().any(|installed| installed == skill)
+                    && source.skills.iter().any(|s| &s.name == skill)
+            })
+            .collect();
+        if !missing.is_empty() {
+            eprintln!(
+                "  Warning: agent {name} requires skill(s) not installed: {}; run `vstack add {}`",
+                missing.join(", "),
+                missing.join(" ")
+            );
+        }
+
         // Required skills: project list (if present) merged with source additions.
         let source_skills =
             source
@@ -366,7 +390,12 @@ pub fn refresh_items_in_scope(
                 }
             }
         }
-        if succeeded > 0 && !failed {
+        // A refresh that could not give the agent a declared dependency has not
+        // satisfied the mapping, so it must not be marked successful: the hash
+        // is only recorded for successful items, which is what keeps the next
+        // `propagate --check` reporting the work as still pending instead of
+        // clean. The agent is still regenerated with what it does have.
+        if succeeded > 0 && !failed && missing.is_empty() {
             stats.agents_refreshed += 1;
             stats.mark_success(name);
             if content_changed {

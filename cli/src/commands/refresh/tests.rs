@@ -920,6 +920,14 @@ fn refresh_items_reports_agent_write_failure_without_success() {
 
     let mut lock = LockFile::default();
     lock.add(lock_entry("rust", ItemKind::Agent, &source, vec!["codex"]));
+    // The source declares `[agent-skills] rust = ["shared"]`; the declared
+    // dependency must be installed or the agent fails on that instead.
+    lock.add(lock_entry(
+        "shared",
+        ItemKind::Skill,
+        &source,
+        vec!["codex"],
+    ));
     let sources = vec![RefreshSource::from_root(&source)];
 
     let stats = crate::test_util::with_project_root(&project, || {
@@ -1392,6 +1400,68 @@ fn refresh_rejects_project_skills_dir_inside_agents() {
             .any(|f| f.error.contains("must live outside .agents")),
         "expected rejection, got: {:?}",
         stats.failures
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// An upstream `[agent-skills]`/`[role-skills]` addition names a dependency the
+/// project has not installed. The mapping hash change forces this refresh, so
+/// the agent must not be recorded as satisfied — otherwise the next
+/// `propagate --check` reports clean while the agent never got its skill.
+#[test]
+fn refresh_withholds_agent_success_when_a_declared_skill_is_not_installed() {
+    let root = tmpdir("declared-skill-not-installed");
+    let project = root.join("project");
+    let source = make_source(&root, "source");
+    std::fs::create_dir_all(&project).unwrap();
+    write_colliding_source(&source, "1", "PreToolUse", "source-model");
+
+    let mut lock = LockFile::default();
+    lock.add(lock_entry(
+        "rust",
+        ItemKind::Agent,
+        &source,
+        vec!["claude-code"],
+    ));
+    let sources = vec![RefreshSource::from_root(&source)];
+
+    let stats = crate::test_util::with_project_root(&project, || {
+        let mut project_config = ProjectConfig::default();
+        refresh_items_in_scope(false, &lock, &sources, &mut project_config, &project, None)
+    });
+
+    assert!(
+        !stats.successful_items.contains("rust"),
+        "a declared dependency that was never installed must not count as refreshed"
+    );
+
+    // With the declared skill installed, the same refresh succeeds.
+    let mut lock = LockFile::default();
+    lock.add(lock_entry(
+        "rust",
+        ItemKind::Agent,
+        &source,
+        vec!["claude-code"],
+    ));
+    lock.add(lock_entry(
+        "shared",
+        ItemKind::Skill,
+        &source,
+        vec!["claude-code"],
+    ));
+    let stats = crate::test_util::with_project_root(&project, || {
+        let mut project_config = ProjectConfig::default();
+        refresh_items_in_scope(false, &lock, &sources, &mut project_config, &project, None)
+    });
+    assert!(
+        stats.successful_items.contains("rust"),
+        "failures: {:?}",
+        stats
+            .failures
+            .iter()
+            .map(|f| f.item.clone())
+            .collect::<Vec<_>>()
     );
 
     let _ = std::fs::remove_dir_all(root);

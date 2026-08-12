@@ -191,7 +191,10 @@ fn verify_project_auxiliary_installs_before_stage() -> Result<()> {
             ItemKind::PiExtension => {
                 verify_pi_auxiliary_install(&entry.name, &mut failures)?;
             }
-            _ => {}
+            // Skills, agents, and extras have no auxiliary registration to
+            // check: they are files, verified by `verify::run`. Listed rather
+            // than wildcarded so a new kind has to be considered here.
+            ItemKind::Skill | ItemKind::Agent | ItemKind::Extra => {}
         }
     }
     if failures.is_empty() {
@@ -1942,6 +1945,21 @@ const SHARED_CONFIG_PATHS: &[&str] = &[
     ".pi/APPEND_SYSTEM.md",
 ];
 
+/// Project-owned skill files, relative to the project root. Same discovery
+/// `project_stage_paths` uses, so the guard covers exactly the paths staging
+/// would otherwise pass to `git add -A`.
+fn project_owned_skill_paths() -> Result<Vec<PathBuf>> {
+    let lock_path = config::lock_file_path(false);
+    if !lock_path.exists() {
+        return Ok(Vec::new());
+    }
+    let lock = LockFile::load(&lock_path)?;
+    let project_root = config::project_root();
+    let mut paths = BTreeSet::new();
+    push_project_owned_skill_paths(&mut paths, &project_root, &lock, false)?;
+    Ok(paths.into_iter().collect())
+}
+
 fn is_shared_status_path(path: &Path) -> bool {
     path.to_str()
         .is_some_and(|path| SHARED_CONFIG_PATHS.contains(&path))
@@ -1954,9 +1972,16 @@ fn is_shared_status_path(path: &Path) -> bool {
 /// yet has nothing of the consumer's to lose.
 fn dirty_shared_config_paths() -> Result<Vec<PathBuf>> {
     let git = git_project()?;
+    // Project-owned skills are shared in the same way: refresh maintains a
+    // marker-delimited instruction block inside a file whose other content is
+    // the consumer's. They are discovered rather than fixed, so they are
+    // collected here instead of listed in SHARED_CONFIG_PATHS.
+    let project_owned = project_owned_skill_paths()?;
     let pathspecs: Vec<PathBuf> = SHARED_CONFIG_PATHS
         .iter()
-        .map(|path| project_to_git_path(&git, Path::new(path)))
+        .map(Path::new)
+        .chain(project_owned.iter().map(PathBuf::as_path))
+        .map(|path| project_to_git_path(&git, path))
         .collect();
     let output = git_literal_command()
         .arg("-C")
@@ -1995,7 +2020,8 @@ fn dirty_shared_config_paths() -> Result<Vec<PathBuf>> {
         let Some(path) = git_to_project_path(&git, &top_level_path) else {
             continue;
         };
-        if is_shared_status_path(&path) && !dirty.contains(&path) {
+        if (is_shared_status_path(&path) || project_owned.contains(&path)) && !dirty.contains(&path)
+        {
             dirty.push(path);
         }
     }

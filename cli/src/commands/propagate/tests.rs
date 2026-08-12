@@ -2863,3 +2863,37 @@ fn no_drift_stage_path_refuses_pre_existing_shared_config_edits() {
         );
     });
 }
+
+#[test]
+fn stage_mode_refuses_pre_existing_edits_to_project_owned_skills() {
+    let project = tmpdir("stage-project-owned-skill-dirty");
+    std::fs::create_dir_all(&project).unwrap();
+    init_git_project(&project);
+
+    crate::test_util::with_project_root(&project, || {
+        LockFile::default()
+            .save(&config::lock_file_path(false))
+            .unwrap();
+        // Not in the lock: a project-owned skill, whose file vstack only owns a
+        // marker-delimited block inside.
+        write_file(
+            &project.join(".agents/skills/house-rules/SKILL.md"),
+            "---\nname: house-rules\ndescription: House rules\n---\n\nconsumer prose\n",
+        );
+        git(&project, &["add", "-A"]);
+        git(&project, &["commit", "-m", "baseline"]);
+
+        assert!(dirty_shared_config_paths().unwrap().is_empty());
+
+        write_file(
+            &project.join(".agents/skills/house-rules/SKILL.md"),
+            "---\nname: house-rules\ndescription: House rules\n---\n\nconsumer prose, revised\n",
+        );
+        let dirty = dirty_shared_config_paths().unwrap();
+        assert_eq!(
+            dirty,
+            vec![PathBuf::from(".agents/skills/house-rules/SKILL.md")]
+        );
+        assert!(refuse_pre_existing_shared_config_edits(&dirty).is_err());
+    });
+}

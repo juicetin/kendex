@@ -132,6 +132,43 @@ impl MappingConfig {
         matched
     }
 
+    /// Skills this mapping *declares* for the agent — explicit `[agent-skills]`
+    /// and `[role-skills]` entries only, with no availability filtering and no
+    /// prefix-matching heuristic. A declaration names a required dependency, so
+    /// callers must not silently drop one that is not installed yet; the
+    /// prefix heuristic is deliberately excluded because matching a catalog
+    /// skill a project never chose to install is not a requirement.
+    pub fn declared_skills_for_agent(
+        &self,
+        agent_name: &str,
+        agent_role: &crate::agent::AgentRole,
+    ) -> Vec<String> {
+        let name = agent_name.to_lowercase();
+        let mut declared: Vec<String> = Vec::new();
+        let mut push_unique = |skill: &str| {
+            if !declared.iter().any(|existing| existing == skill) {
+                declared.push(skill.to_string());
+            }
+        };
+        for key in [Some(name.as_str()), name.strip_prefix("reviewer-")]
+            .into_iter()
+            .flatten()
+        {
+            if let Some(extras) = self.agent_skills.get(key) {
+                for skill in extras {
+                    push_unique(skill);
+                }
+            }
+        }
+        if let Some(role_skills) = self.role_skills.get(agent_role.as_str()) {
+            for skill in role_skills {
+                push_unique(skill);
+            }
+        }
+        declared.sort();
+        declared
+    }
+
     pub fn hooks_for_agent<'a>(
         &self,
         agent_role: &crate::agent::AgentRole,

@@ -269,8 +269,18 @@ fn accepted_canonical_skill_targets(entry: &LockEntry, global: bool) -> Vec<Path
         .collect();
     let mut targets = Vec::new();
     if global {
-        targets.push(config::codex_home_dir().join("skills").join(name));
-        targets.push(config::global_state_dir().join("skills").join(name));
+        // Codex keeps its global canonical under its own home; every other
+        // harness shares `global_state_dir()`. Only offer a tree this entry's
+        // harnesses actually install into.
+        if harnesses.contains(&crate::harness::Harness::Codex) {
+            targets.push(config::codex_home_dir().join("skills").join(name));
+        }
+        if harnesses
+            .iter()
+            .any(|harness| *harness != crate::harness::Harness::Codex)
+        {
+            targets.push(config::global_state_dir().join("skills").join(name));
+        }
     } else {
         targets.push(
             config::project_root()
@@ -660,6 +670,51 @@ mod tests {
                 note.unwrap().contains("outside the canonical skill tree"),
                 "a path merely spelled .agents/skills/<name> is not this entry's canonical"
             );
+        });
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn verify_skill_rejects_the_codex_canonical_for_a_non_codex_global_entry() {
+        let root = tmpdir("codex-canonical-scoping");
+        let home = root.join("home");
+        let config_home = root.join("config");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&config_home).unwrap();
+
+        crate::test_util::with_home_and_config(&home, &config_home, || {
+            let codex_canonical = config::codex_home_dir().join("skills").join("demo");
+            write_file(&codex_canonical.join("SKILL.md"), "---\nname: demo\n---\n");
+
+            let mut entry = LockEntry {
+                name: "demo".to_string(),
+                kind: ItemKind::Skill,
+                source: "/unused/source".to_string(),
+                source_repo: None,
+                harnesses: vec!["claude-code".to_string()],
+                method: InstallMethod::Symlink,
+                installed_at: "2026-08-11T00:00:00Z".to_string(),
+                source_hash: "stored-hash".to_string(),
+            };
+
+            let link = crate::harness::Harness::ClaudeCode
+                .skills_dir(true)
+                .join("demo");
+            std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+            std::os::unix::fs::symlink(&codex_canonical, &link).unwrap();
+
+            let (ok, note) = verify_skill_install(&entry, true);
+            assert_eq!(
+                ok,
+                Some(false),
+                "Codex's tree is not this entry's canonical"
+            );
+            assert!(note.unwrap().contains("outside the canonical skill tree"));
+
+            // The same link is legitimate once Codex is one of its harnesses.
+            entry.harnesses.push("codex".to_string());
+            let (ok, note) = verify_skill_install(&entry, true);
+            assert_eq!(ok, Some(true), "{note:?}");
         });
     }
 
