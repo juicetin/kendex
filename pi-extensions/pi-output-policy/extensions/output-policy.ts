@@ -8,6 +8,11 @@ const INSTALL_SYMBOL = Symbol.for("vstack.pi-output-policy.installed");
 const CONFIG_ID = "@vanillagreen/pi-output-policy";
 const DEFAULT_MINIMIZER_MAX_CAPTURE_BYTES = 1024 * 1024;
 const DEFAULT_SHELL_MINIMIZER_ENABLED = true;
+const DEFAULT_MODEL_OUTPUT_MAX_CHARS = 96_000;
+const DEFAULT_MODEL_OUTPUT_MAX_CONSECUTIVE_REPEATS = 24;
+const DEFAULT_MODEL_OUTPUT_MIN_REPEAT_BLOCK_CHARS = 32;
+const DEFAULT_MODEL_OUTPUT_MIN_REPEATED_CHARS = 1_536;
+const MAX_PENDING_MODEL_OUTPUT_CHARS = 16_384;
 
 // Tools whose `details` carry state-bearing data (task lists, background-task
 // snapshots, subagent run records). Sanitization would corrupt restore
@@ -98,6 +103,35 @@ interface TruncationMeta {
 interface SessionCounters {
 	turnSavedBytes: number;
 	sessionSavedBytes: number;
+}
+
+export interface ModelOutputGuardState {
+	aborted: boolean;
+	consecutiveRepeats: number;
+	lastBlock?: string;
+	pending: string;
+	repeatedChars: number;
+	totalChars: number;
+}
+
+export interface ModelOutputGuardOptions {
+	maxChars: number;
+	maxConsecutiveRepeats: number;
+	minRepeatBlockChars: number;
+	minRepeatedChars: number;
+	repetitionEnabled?: boolean;
+}
+
+export interface ModelOutputGuardDetection {
+	block?: string;
+	consecutiveRepeats?: number;
+	reason: "max-chars" | "repetition";
+	totalChars: number;
+}
+
+interface ModelOutputGuardConfigSnapshot {
+	enabled: boolean;
+	options: ModelOutputGuardOptions;
 }
 
 const SESSION_COUNTERS = new Map<string, SessionCounters>();
@@ -277,6 +311,17 @@ function settingString(key: string, fallback: string, cwd?: string): string {
 	return typeof value === "string" ? value : fallback;
 }
 
+function configNumber(config: VstackConfig, key: string, fallback: number): number {
+	const value = config[key];
+	const parsed = typeof value === "number" ? value : typeof value === "string" ? Number(value) : Number.NaN;
+	return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function configBoolean(config: VstackConfig, key: string, fallback: boolean): boolean {
+	const value = config[key];
+	return typeof value === "boolean" ? value : fallback;
+}
+
 export function resolvePolicyMode(cwd?: string): PolicyMode {
 	const raw = settingString("policyMode", DEFAULT_POLICY_MODE, cwd).toLowerCase().trim();
 	if (raw === "compat" || raw === "balanced" || raw === "compact") return raw;
@@ -300,6 +345,118 @@ export function isSanitizeExceptTool(toolName: string, cwd?: string): boolean {
 
 export function __resetSessionCountersForTests(): void {
 	SESSION_COUNTERS.clear();
+}
+
+export function createModelOutputGuardState(): ModelOutputGuardState {
+	return {
+		aborted: false,
+		consecutiveRepeats: 0,
+		pending: "",
+		repeatedChars: 0,
+		totalChars: 0,
+	};
+}
+
+function normalizedRepeatBlock(line: string): string {
+	return line.trim().replace(/\s+/g, " ");
+}
+
+function isCommonMarkFenceLine(line: string): boolean {
+	// CommonMark permits up to three leading spaces and an optional info string.
+	// Backtick-fence info strings cannot contain backticks; tilde-fence info
+	// strings have no equivalent character restriction.
+	const match = /^(?: {0,3})(`{3,}|~{3,})(.*)$/.exec(line);
+	if (!match) return false;
+	return match[1].startsWith("~") || !match[2].includes("`");
+}
+
+function isIgnorableRepeatSyntaxBlock(line: string): boolean {
+	// Preserve a substantial repetition streak only across syntax-only lines
+	// produced by common model/tool protocols. Short prose, labels, values, and
+	// headings are semantic content and must break the streak.
+	const block = normalizedRepeatBlock(line);
+	return /^<\/?[A-Za-z][A-Za-z0-9:._-]*(?:\s+[^<>]*)?\/?>$/.test(block)
+		|| isCommonMarkFenceLine(line)
+		|| /^(?:(?:-\s*){3,}|(?:\*\s*){3,}|(?:_\s*){3,})$/.test(block);
+}
+
+function resetModelOutputRepeatStreak(state: ModelOutputGuardState): void {
+	state.lastBlock = undefined;
+	state.consecutiveRepeats = 0;
+	state.repeatedChars = 0;
+}
+
+export function inspectModelOutputDelta(
+	state: ModelOutputGuardState,
+	delta: string,
+	options: ModelOutputGuardOptions,
+): ModelOutputGuardDetection | undefined {
+	if (state.aborted || delta.length === 0) return undefined;
+	state.totalChars += delta.length;
+	if (options.maxChars > 0 && state.totalChars >= options.maxChars) {
+		return { reason: "max-chars", totalChars: state.totalChars };
+	}
+
+	if (options.repetitionEnabled === false) return undefined;
+	state.pending = `${state.pending}${delta.replace(/\r\n?/g, "\n")}`;
+	let newline = state.pending.indexOf("\n");
+	while (newline >= 0) {
+		const line = state.pending.slice(0, newline);
+		const block = normalizedRepeatBlock(line);
+		state.pending = state.pending.slice(newline + 1);
+		newline = state.pending.indexOf("\n");
+		if (!block) continue;
+		if (isIgnorableRepeatSyntaxBlock(line)) continue;
+		if (block.length < options.minRepeatBlockChars) {
+			resetModelOutputRepeatStreak(state);
+			continue;
+		}
+		if (block === state.lastBlock) {
+			state.consecutiveRepeats += 1;
+			state.repeatedChars += block.length;
+		} else {
+			state.lastBlock = block;
+			state.consecutiveRepeats = 1;
+			state.repeatedChars = block.length;
+		}
+		if (
+			state.consecutiveRepeats >= options.maxConsecutiveRepeats
+			&& state.repeatedChars >= options.minRepeatedChars
+		) {
+			return {
+				block,
+				consecutiveRepeats: state.consecutiveRepeats,
+				reason: "repetition",
+				totalChars: state.totalChars,
+			};
+		}
+	}
+
+	if (state.pending.length > MAX_PENDING_MODEL_OUTPUT_CHARS) {
+		state.pending = state.pending.slice(-MAX_PENDING_MODEL_OUTPUT_CHARS);
+	}
+	return undefined;
+}
+
+function modelOutputGuardConfigSnapshot(cwd?: string): ModelOutputGuardConfigSnapshot {
+	const config = readVstackConfig(cwd);
+	return {
+		enabled: configBoolean(config, "enabled", true) && configBoolean(config, "modelOutputGuard.enabled", true),
+		options: {
+			maxChars: Math.max(0, Math.floor(configNumber(config, "modelOutputGuard.maxChars", DEFAULT_MODEL_OUTPUT_MAX_CHARS))),
+			maxConsecutiveRepeats: Math.max(2, Math.floor(configNumber(config, "modelOutputGuard.maxConsecutiveRepeats", DEFAULT_MODEL_OUTPUT_MAX_CONSECUTIVE_REPEATS))),
+			repetitionEnabled: configBoolean(config, "modelOutputGuard.repetition.enabled", true),
+			minRepeatBlockChars: Math.max(8, Math.floor(configNumber(config, "modelOutputGuard.minRepeatBlockChars", DEFAULT_MODEL_OUTPUT_MIN_REPEAT_BLOCK_CHARS))),
+			minRepeatedChars: Math.max(64, Math.floor(configNumber(config, "modelOutputGuard.minRepeatedChars", DEFAULT_MODEL_OUTPUT_MIN_REPEATED_CHARS))),
+		},
+	};
+}
+
+function assistantStreamDelta(event: any): string | undefined {
+	const update = event?.assistantMessageEvent ?? event;
+	if (!update || typeof update.delta !== "string") return undefined;
+	if (!["text", "text_delta", "thinking", "thinking_delta", "toolcall_delta"].includes(String(update.type ?? ""))) return undefined;
+	return update.delta;
 }
 
 function byteLength(text: string): number {
@@ -581,8 +738,25 @@ export default function outputPolicy(pi: ExtensionAPI): void {
 	const guard = pi as unknown as Record<PropertyKey, unknown>;
 	if (guard[INSTALL_SYMBOL]) return;
 	guard[INSTALL_SYMBOL] = true;
+	// Pi 0.84.1 invokes the extension factory once per loaded session runtime.
+	// Session replacement emits shutdown, invalidates the old runner, and loads a
+	// new ExtensionAPI/factory closure, so this state cannot cross session runtimes.
+	let modelOutputState = createModelOutputGuardState();
+	let modelOutputConfig: ModelOutputGuardConfigSnapshot | undefined;
+
+	const resetModelOutputState = () => {
+		modelOutputState = createModelOutputGuardState();
+		modelOutputConfig = undefined;
+	};
+
+	const snapshotModelOutputConfig = (ctx: ExtensionContext) => {
+		recordProjectTrust(ctx);
+		modelOutputConfig = modelOutputGuardConfigSnapshot(ctx.cwd);
+		return modelOutputConfig;
+	};
 
 	pi.on("session_start", async (_event, ctx: ExtensionContext) => {
+		resetModelOutputState();
 		recordProjectTrust(ctx);
 		SESSION_COUNTERS.delete(sessionIdForContext(ctx));
 		if (settingBoolean("enabled", true, ctx.cwd)) {
@@ -592,11 +766,42 @@ export default function outputPolicy(pi: ExtensionAPI): void {
 	});
 
 	pi.on("turn_start", async (_event, ctx: ExtensionContext) => {
+		resetModelOutputState();
 		counters(sessionIdForContext(ctx)).turnSavedBytes = 0;
 	});
 
 	pi.on("session_shutdown", async (_event, ctx: ExtensionContext) => {
+		resetModelOutputState();
 		SESSION_COUNTERS.delete(sessionIdForContext(ctx));
+	});
+
+	pi.on("message_start", (event: any, ctx: ExtensionContext) => {
+		if (event?.message?.role !== "assistant") return;
+		resetModelOutputState();
+		snapshotModelOutputConfig(ctx);
+	});
+
+	pi.on("message_update", (event: any, ctx: ExtensionContext) => {
+		const delta = assistantStreamDelta(event);
+		if (delta === undefined) return;
+		// Pi 0.84.1 agent-core guarantees one assistant message_start before any
+		// message_update. This lazy snapshot only supports isolated direct/mock
+		// event injection; delta events expose no safe boundary to infer if start is
+		// absent, so do not reset via timing, contentIndex, or delta-shape heuristics.
+		const config = modelOutputConfig ?? snapshotModelOutputConfig(ctx);
+		if (!config.enabled) return;
+		const detection = inspectModelOutputDelta(modelOutputState, delta, config.options);
+		if (!detection || modelOutputState.aborted) return;
+		modelOutputState.aborted = true;
+		const detail = detection.reason === "repetition"
+			? `${detection.consecutiveRepeats} consecutive repeated blocks`
+			: `${detection.totalChars.toLocaleString()} streamed characters`;
+		ctx.abort();
+		try {
+			ctx.ui.notify(`Model output stopped: ${detail}. Retry or switch model.`, "warning");
+		} catch (error) {
+			console.warn(`pi-output-policy: model-output warning failed (${stringifyError(error)})`);
+		}
 	});
 
 	pi.on("tool_result", async (event: any, ctx: ExtensionContext) => {
