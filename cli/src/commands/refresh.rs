@@ -3,6 +3,7 @@ use crate::config::{self, ItemKind};
 use crate::harness::Harness;
 use crate::hook::Hook;
 use crate::installer;
+use crate::mapping::MappingConfig;
 use crate::path_safety::is_same_repository_worktree;
 use crate::project_config::ProjectConfig;
 use crate::refresh_sources::{
@@ -222,22 +223,40 @@ pub fn refresh_items_in_scope(
     name_filter: Option<&[String]>,
 ) -> RefreshStats {
     let mut stats = RefreshStats::default();
-    // `MappingConfig::load` falls back to the default mapping when a source's
-    // `vstack.toml` will not parse, so agents would be regenerated without their
-    // authoritative `[agent-skills]`, `[role-skills]`, and `[hook-events]`
-    // assignments — and, with the parse sentinel in the hash, that state would
-    // then be recorded as successfully refreshed. Stop instead.
+    // `MappingConfig::load` falls back to the default mapping whenever a
+    // source's `vstack.toml` does not become a `MappingConfig`, so agents would
+    // be regenerated without their authoritative `[agent-skills]`,
+    // `[role-skills]`, and `[hook-events]` assignments — and, with the parse
+    // sentinel in the hash, that state would then be recorded as successfully
+    // refreshed. Both ways in fail closed here: a config that cannot be read at
+    // all, and one that reads but does not deserialize. Deserializing as
+    // `MappingConfig` rather than a generic `toml::Value` is the point — a
+    // schema violation such as `[agent-skills] rust = "github"` is valid TOML
+    // and would otherwise pass the preflight and then silently default.
+    // A source with no `vstack.toml` is not a failure: the default mapping is
+    // the correct answer there.
     for source in sources {
         let config_path = source.root.join("vstack.toml");
-        let Ok(content) = std::fs::read_to_string(&config_path) else {
-            continue;
+        let content = match std::fs::read_to_string(&config_path) {
+            Ok(content) => content,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) => {
+                stats.fail(
+                    &config_path.display().to_string(),
+                    None,
+                    anyhow::anyhow!(
+                        "source mapping is unreadable ({err}); refusing to regenerate items without their [agent-skills]/[role-skills]/[hook-events] assignments"
+                    ),
+                );
+                return stats;
+            }
         };
-        if content.parse::<toml::Value>().is_err() {
+        if let Err(err) = toml::from_str::<MappingConfig>(&content) {
             stats.fail(
                 &config_path.display().to_string(),
                 None,
                 anyhow::anyhow!(
-                    "source mapping will not parse; refusing to regenerate items without their [agent-skills]/[role-skills]/[hook-events] assignments"
+                    "source mapping will not parse ({err}); refusing to regenerate items without their [agent-skills]/[role-skills]/[hook-events] assignments"
                 ),
             );
             return stats;
@@ -378,7 +397,15 @@ pub fn refresh_items_in_scope(
             .into_iter()
             .filter(|skill| match installed_skill_dirs.get(skill) {
                 Some(dirs) => !agent_skill_dirs.iter().all(|dir| dirs.contains(dir)),
-                None => true,
+                // A project-owned skill assigned to a Codex or Pi agent lives in
+                // the shared `.agents/skills/<name>` directory and intentionally
+                // has no lock entry, so the lock cannot answer for it and a
+                // lock-only lookup called every one of them absent. Ask the
+                // agent's own skills directory instead: a skill directory there
+                // is one the agent loads, including when the entry is a link
+                // into `project-skills-dir` — refresh creates those links above,
+                // before this pass runs.
+                None => !agent_skill_dirs.iter().all(|dir| dir.join(skill).is_dir()),
             })
             .collect();
         if !missing.is_empty() {

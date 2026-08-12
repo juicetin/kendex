@@ -2529,7 +2529,7 @@ fn stage_mode_refuses_when_a_shared_config_file_already_carried_consumer_edits()
             r#"{"consumerSecret":"do-not-publish","hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/guard.sh\""}]}]}}"#,
         );
 
-        let dirty = dirty_shared_config_paths().unwrap();
+        let dirty = dirty_shared_config_paths(&pre_refresh_project_stage_paths().unwrap()).unwrap();
         assert_eq!(dirty, vec![PathBuf::from(".claude/settings.json")]);
         let err = refuse_pre_existing_shared_config_edits(&dirty)
             .unwrap_err()
@@ -2539,7 +2539,11 @@ fn stage_mode_refuses_when_a_shared_config_file_already_carried_consumer_edits()
 
         // A clean tree is not refused.
         git(&project, &["checkout", "--", ".claude/settings.json"]);
-        assert!(dirty_shared_config_paths().unwrap().is_empty());
+        assert!(
+            dirty_shared_config_paths(&pre_refresh_project_stage_paths().unwrap())
+                .unwrap()
+                .is_empty()
+        );
     });
 }
 
@@ -2752,6 +2756,7 @@ fn stage_mode_requires_the_opencode_instruction_to_be_registered() {
             "guard",
             Harness::OpenCode,
             Some(&registration),
+            &[],
             &mut failures,
         );
         assert!(failures.is_empty(), "{failures:?}");
@@ -2763,6 +2768,7 @@ fn stage_mode_requires_the_opencode_instruction_to_be_registered() {
             "guard",
             Harness::OpenCode,
             Some(&registration),
+            &[],
             &mut failures,
         );
         assert!(
@@ -2783,6 +2789,7 @@ fn stage_mode_requires_the_opencode_instruction_to_be_registered() {
             "guard",
             Harness::OpenCode,
             Some(&registration),
+            &[],
             &mut failures,
         );
         assert!(
@@ -2799,6 +2806,7 @@ fn stage_mode_requires_the_opencode_instruction_to_be_registered() {
             "guard",
             Harness::OpenCode,
             Some(&registration),
+            &[],
             &mut failures,
         );
         assert!(failures.is_empty(), "{failures:?}");
@@ -2810,6 +2818,7 @@ fn stage_mode_requires_the_opencode_instruction_to_be_registered() {
             "guard",
             Harness::OpenCode,
             Some(&registration),
+            &[],
             &mut failures,
         );
         assert!(
@@ -2830,6 +2839,7 @@ fn stage_mode_requires_the_opencode_instruction_to_be_registered() {
             "guard",
             Harness::OpenCode,
             Some(&registration),
+            &[],
             &mut failures,
         );
         assert!(
@@ -2856,7 +2866,13 @@ fn stage_mode_rejects_a_locally_replaced_cursor_safety_rule() {
         );
 
         let mut failures = Vec::new();
-        verify_hook_auxiliary_install("guard", Harness::Cursor, Some(&registration), &mut failures);
+        verify_hook_auxiliary_install(
+            "guard",
+            Harness::Cursor,
+            Some(&registration),
+            &[],
+            &mut failures,
+        );
         assert!(failures.is_empty(), "{failures:?}");
 
         write_file(
@@ -2864,7 +2880,13 @@ fn stage_mode_rejects_a_locally_replaced_cursor_safety_rule() {
             "---\ndescription: \"Safety: guard\"\n---\n\ndisabled\n",
         );
         let mut failures = Vec::new();
-        verify_hook_auxiliary_install("guard", Harness::Cursor, Some(&registration), &mut failures);
+        verify_hook_auxiliary_install(
+            "guard",
+            Harness::Cursor,
+            Some(&registration),
+            &[],
+            &mut failures,
+        );
         assert!(
             failures
                 .iter()
@@ -2878,22 +2900,37 @@ fn stage_mode_rejects_a_locally_replaced_cursor_safety_rule() {
 #[cfg(unix)]
 fn stage_mode_refuses_an_untracked_shared_config_and_guards_the_no_drift_path() {
     let project = tmpdir("stage-untracked-shared-config");
+    let source = tmpdir("stage-untracked-shared-config-source");
     std::fs::create_dir_all(&project).unwrap();
+    write_file(
+        &source.join("pi-extensions/demo-pkg/package.json"),
+        r#"{"name":"demo-pkg","pi":{"extensions":[]}}"#,
+    );
     init_git_project(&project);
 
     crate::test_util::with_project_root(&project, || {
+        // A locked Pi package is what makes `.pi/settings.json` a file staging
+        // would touch; without one it is purely the consumer's and staging
+        // never reaches it.
+        let mut lock = LockFile::default();
+        lock.add(pi_entry("demo-pkg", &source));
+        lock.save(&config::lock_file_path(false)).unwrap();
         write_file(&project.join("README.md"), "hi\n");
         git(&project, &["add", "-A"]);
         git(&project, &["commit", "-m", "baseline"]);
 
-        assert!(dirty_shared_config_paths().unwrap().is_empty());
+        assert!(
+            dirty_shared_config_paths(&pre_refresh_project_stage_paths().unwrap())
+                .unwrap()
+                .is_empty()
+        );
 
         // A shared config the consumer wrote but never committed is still theirs.
         write_file(
             &project.join(".pi/settings.json"),
             r#"{"consumerSecret":"do-not-publish"}"#,
         );
-        let dirty = dirty_shared_config_paths().unwrap();
+        let dirty = dirty_shared_config_paths(&pre_refresh_project_stage_paths().unwrap()).unwrap();
         assert_eq!(dirty, vec![PathBuf::from(".pi/settings.json")]);
         assert!(refuse_pre_existing_shared_config_edits(&dirty).is_err());
     });
@@ -2977,13 +3014,17 @@ fn stage_mode_refuses_pre_existing_edits_to_project_owned_skills() {
         git(&project, &["add", "-A"]);
         git(&project, &["commit", "-m", "baseline"]);
 
-        assert!(dirty_shared_config_paths().unwrap().is_empty());
+        assert!(
+            dirty_shared_config_paths(&pre_refresh_project_stage_paths().unwrap())
+                .unwrap()
+                .is_empty()
+        );
 
         write_file(
             &project.join(".agents/skills/house-rules/SKILL.md"),
             "---\nname: house-rules\ndescription: House rules\n---\n\nconsumer prose, revised\n",
         );
-        let dirty = dirty_shared_config_paths().unwrap();
+        let dirty = dirty_shared_config_paths(&pre_refresh_project_stage_paths().unwrap()).unwrap();
         assert_eq!(
             dirty,
             vec![PathBuf::from(".agents/skills/house-rules/SKILL.md")]
@@ -3144,11 +3185,21 @@ fn stage_mode_rejects_a_replaced_codex_prose_safety_block() {
         let registration = locked_hook_registration(&entry).unwrap();
         let block = crate::installer::codex_hook_safety_block(&registration.hook);
         let agent = project.join(".codex/agents/rust.toml");
+        let mut lock = LockFile::default();
+        lock.add(lock_entry("rust", ItemKind::Agent, &["codex"]));
+        lock.add(lock_entry("analyst", ItemKind::Agent, &["codex"]));
+        let carriers = codex_prose_carrier_paths(&lock);
         write_file(&agent, &format!("instructions = '''\n{block}\n'''\n"));
 
         // No `.codex/hooks/guard.sh`: this is the prose-fallback path.
         let mut failures = Vec::new();
-        verify_hook_auxiliary_install("guard", Harness::Codex, Some(&registration), &mut failures);
+        verify_hook_auxiliary_install(
+            "guard",
+            Harness::Codex,
+            Some(&registration),
+            &carriers,
+            &mut failures,
+        );
         assert!(failures.is_empty(), "{failures:?}");
 
         // The marker survives while the advisory it carries is gone.
@@ -3157,7 +3208,13 @@ fn stage_mode_rejects_a_replaced_codex_prose_safety_block() {
             "instructions = '''\n## Safety: guard\n\ndisabled\n'''\n",
         );
         let mut failures = Vec::new();
-        verify_hook_auxiliary_install("guard", Harness::Codex, Some(&registration), &mut failures);
+        verify_hook_auxiliary_install(
+            "guard",
+            Harness::Codex,
+            Some(&registration),
+            &carriers,
+            &mut failures,
+        );
         assert!(
             failures
                 .iter()
@@ -3169,7 +3226,13 @@ fn stage_mode_rejects_a_replaced_codex_prose_safety_block() {
         // "no prose fallback here" and passed.
         write_file(&agent, "instructions = '''\nnothing here\n'''\n");
         let mut failures = Vec::new();
-        verify_hook_auxiliary_install("guard", Harness::Codex, Some(&registration), &mut failures);
+        verify_hook_auxiliary_install(
+            "guard",
+            Harness::Codex,
+            Some(&registration),
+            &carriers,
+            &mut failures,
+        );
         assert!(
             failures
                 .iter()
@@ -3184,7 +3247,13 @@ fn stage_mode_rejects_a_replaced_codex_prose_safety_block() {
             &format!("# {block}\\ninstructions = '''\\nnothing here\\n'''\\n"),
         );
         let mut failures = Vec::new();
-        verify_hook_auxiliary_install("guard", Harness::Codex, Some(&registration), &mut failures);
+        verify_hook_auxiliary_install(
+            "guard",
+            Harness::Codex,
+            Some(&registration),
+            &carriers,
+            &mut failures,
+        );
         assert!(
             failures
                 .iter()
@@ -3197,7 +3266,13 @@ fn stage_mode_rejects_a_replaced_codex_prose_safety_block() {
         let sibling = project.join(".codex/agents/analyst.toml");
         write_file(&sibling, "instructions = '''\nno safety here\n'''\n");
         let mut failures = Vec::new();
-        verify_hook_auxiliary_install("guard", Harness::Codex, Some(&registration), &mut failures);
+        verify_hook_auxiliary_install(
+            "guard",
+            Harness::Codex,
+            Some(&registration),
+            &carriers,
+            &mut failures,
+        );
         assert!(
             failures
                 .iter()
@@ -3226,9 +3301,135 @@ fn stage_mode_rejects_a_native_codex_hook_downgraded_to_prose() {
 
         // Script and registration removed, advisory prose left in their place.
         let mut failures = Vec::new();
-        verify_hook_auxiliary_install("guard", Harness::Codex, Some(&registration), &mut failures);
+        verify_hook_auxiliary_install(
+            "guard",
+            Harness::Codex,
+            Some(&registration),
+            &[],
+            &mut failures,
+        );
         assert!(
             failures.iter().any(|f| f.contains("installs natively")),
+            "{failures:?}"
+        );
+    });
+}
+
+/// The guard queried every `SHARED_CONFIG_PATHS` entry regardless of what the
+/// lock holds, so a dirty harness config propagation never touches — a
+/// consumer's own `.pi/settings.json` when the lock holds only Claude assets —
+/// refused `--stage`. Ownership is lock-dependent, exactly as
+/// `project_stage_paths` derives it.
+#[test]
+fn stage_guard_ignores_a_dirty_shared_config_no_locked_asset_owns() {
+    let project = tmpdir("stage-shared-config-unowned");
+    let source = tmpdir("stage-shared-config-unowned-source");
+    std::fs::create_dir_all(&project).unwrap();
+    init_git_project(&project);
+    write_hook_source(&source, "guard");
+
+    crate::test_util::with_project_root(&project, || {
+        let mut entry = hook_entry("guard", &source, &["claude-code"]);
+        entry.source_hash = config::compute_source_hash(&entry);
+        let mut lock = LockFile::default();
+        lock.add(entry);
+        lock.save(&config::lock_file_path(false)).unwrap();
+        write_installed_hook_script(&project.join(".claude/hooks/guard.sh"), "guard");
+        write_file(
+            &project.join(".claude/settings.json"),
+            r#"{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/guard.sh\""}]}]}}"#,
+        );
+        // A consumer's own Pi config. No locked entry is a Pi package, so
+        // propagation never writes it and staging never adds it.
+        write_file(&project.join(".pi/settings.json"), r#"{"packages":[]}"#);
+        git(&project, &["add", "-A"]);
+        git(&project, &["commit", "-m", "baseline"]);
+
+        write_file(
+            &project.join(".pi/settings.json"),
+            r#"{"packages":["../their-own-thing"]}"#,
+        );
+
+        let stage_paths = pre_refresh_project_stage_paths().unwrap();
+        assert!(
+            !stage_paths.contains(&PathBuf::from(".pi/settings.json")),
+            "staging does not own this file: {stage_paths:?}"
+        );
+        assert!(
+            dirty_shared_config_paths(&stage_paths).unwrap().is_empty(),
+            "an unowned dirty config must not block staging"
+        );
+
+        // Control: the shared file a locked asset does own still blocks.
+        write_file(
+            &project.join(".claude/settings.json"),
+            r#"{"consumerSecret":"do-not-publish","hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/guard.sh\""}]}]}}"#,
+        );
+        let stage_paths = pre_refresh_project_stage_paths().unwrap();
+        assert_eq!(
+            dirty_shared_config_paths(&stage_paths).unwrap(),
+            vec![PathBuf::from(".claude/settings.json")]
+        );
+    });
+}
+
+/// The prose check swept every `.codex/agents/*.toml`, but
+/// `install_hook_codex_prose` only ever writes to the agents it is handed and
+/// staging owns only lock-listed agent paths. A consumer's own Codex agent
+/// therefore failed `--stage` for not carrying a safety block nothing installed
+/// there.
+#[test]
+fn stage_mode_ignores_a_codex_agent_no_lock_entry_claims() {
+    let project = tmpdir("stage-codex-prose-unmanaged");
+    let source = tmpdir("stage-codex-prose-unmanaged-source");
+    std::fs::create_dir_all(&project).unwrap();
+    write_prose_fallback_hook_source(&source, "guard");
+
+    crate::test_util::with_project_root(&project, || {
+        let entry = hook_entry("guard", &source, &["codex"]);
+        let registration = locked_hook_registration(&entry).unwrap();
+        let block = crate::installer::codex_hook_safety_block(&registration.hook);
+        write_file(
+            &project.join(".codex/agents/rust.toml"),
+            &format!("instructions = '''\n{block}\n'''\n"),
+        );
+        // A Codex agent the consumer wrote themselves. No lock entry names it,
+        // so no vstack install ever spliced the block into it.
+        write_file(
+            &project.join(".codex/agents/their-own.toml"),
+            "instructions = '''\ntheir own agent\n'''\n",
+        );
+
+        let mut lock = LockFile::default();
+        lock.add(lock_entry("rust", ItemKind::Agent, &["codex"]));
+        let carriers = codex_prose_carrier_paths(&lock);
+
+        let mut failures = Vec::new();
+        verify_hook_auxiliary_install(
+            "guard",
+            Harness::Codex,
+            Some(&registration),
+            &carriers,
+            &mut failures,
+        );
+        assert!(failures.is_empty(), "{failures:?}");
+
+        // Control: the same file, once the lock records it as a Codex agent,
+        // must carry the block.
+        lock.add(lock_entry("their-own", ItemKind::Agent, &["codex"]));
+        let carriers = codex_prose_carrier_paths(&lock);
+        let mut failures = Vec::new();
+        verify_hook_auxiliary_install(
+            "guard",
+            Harness::Codex,
+            Some(&registration),
+            &carriers,
+            &mut failures,
+        );
+        assert!(
+            failures
+                .iter()
+                .any(|f| f.contains("their-own.toml") && f.contains("locked safety prose")),
             "{failures:?}"
         );
     });

@@ -550,8 +550,20 @@ fn install_pi_extension_inner(
     #[cfg(unix)]
     {
         let bin_dir = crate::config::pi_bin_dir(global);
-        for cli_name in ext.bin.keys() {
+        for (cli_name, rel_target) in &ext.bin {
             validate_pi_bin_name(cli_name)?;
+            // `install_bin_links` skips a bin whose manifest target does not
+            // exist, so the preflight must skip it too: refusing here would
+            // fail a reinstall over a name the install was never going to
+            // claim, leaving a partially available extension uninstallable
+            // whenever a consumer owns that name. The copy has not happened
+            // yet, so the source directory is where the target either ships or
+            // does not — `copy_dir` reproduces it verbatim into `dest`.
+            let source_target =
+                checked_package_child_path(&ext.source_dir, rel_target, "Pi bin target")?;
+            if !source_target.exists() {
+                continue;
+            }
             reject_foreign_bin_link(&bin_dir.join(cli_name), cli_name, &dest, &ext.name)?;
         }
     }
@@ -1846,6 +1858,75 @@ printf 'module.exports = 1;\n' > node_modules/left-pad/index.js
                 "expected packages key gone after sole package removed, got {after}"
             );
         });
+
+        let _ = std::fs::remove_dir_all(&sandbox);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    /// `install_bin_links` deliberately skips a bin whose manifest target does
+    /// not exist. The preflight rejected an occupied bin name before looking at
+    /// the target, so a partially available extension turned a non-destructive
+    /// reinstall into a hard failure merely because a consumer owned that name.
+    /// A missing target must skip, leaving the consumer's file in place, while
+    /// a bin whose target does exist still collides.
+    fn install_skips_an_occupied_bin_name_whose_manifest_target_is_missing() {
+        let sandbox = std::env::temp_dir().join(format!(
+            "vstack_pi_bin_missing_target_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&sandbox);
+        let source = sandbox.join("src").join("pi-tooly");
+        std::fs::create_dir_all(source.join("bin")).unwrap();
+        std::fs::create_dir_all(source.join("extensions")).unwrap();
+        std::fs::write(source.join("extensions").join("ext.ts"), "// noop\n").unwrap();
+        std::fs::write(
+            source.join("bin").join("present.js"),
+            "#!/usr/bin/env node\n",
+        )
+        .unwrap();
+        // `pi-gone` is declared but its file was never shipped.
+        std::fs::write(
+            source.join("package.json"),
+            r#"{
+                "name": "pi-tooly",
+                "pi": { "extensions": ["./extensions/ext.ts"] },
+                "bin": { "pi-gone": "./bin/gone.js", "pi-present": "./bin/present.js" }
+            }"#,
+        )
+        .unwrap();
+
+        let project = sandbox.join("project");
+        std::fs::create_dir_all(project.join(".pi").join("bin")).unwrap();
+        let occupied = project.join(".pi").join("bin").join("pi-gone");
+        std::fs::write(&occupied, "#!/bin/sh\necho mine\n").unwrap();
+
+        with_project_root(&project, || {
+            let ext = PiExtension::from_dir(&source).unwrap();
+            install_pi_extension(&ext, false).unwrap().unwrap();
+        });
+        assert_eq!(
+            std::fs::read_to_string(&occupied).unwrap(),
+            "#!/bin/sh\necho mine\n",
+            "the consumer's file must be preserved, not replaced"
+        );
+        assert!(
+            project.join(".pi").join("bin").join("pi-present").exists(),
+            "the shipped bin must still be linked"
+        );
+
+        // Control: once the target ships, the same occupied name collides.
+        std::fs::write(source.join("bin").join("gone.js"), "#!/usr/bin/env node\n").unwrap();
+        with_project_root(&project, || {
+            let ext = PiExtension::from_dir(&source).unwrap();
+            let err = install_pi_extension(&ext, false).unwrap_err().to_string();
+            assert!(err.contains("already taken"), "{err}");
+        });
+        assert_eq!(
+            std::fs::read_to_string(&occupied).unwrap(),
+            "#!/bin/sh\necho mine\n",
+            "the consumer's file must survive the refusal"
+        );
 
         let _ = std::fs::remove_dir_all(&sandbox);
     }

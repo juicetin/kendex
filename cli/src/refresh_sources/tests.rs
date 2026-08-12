@@ -1137,3 +1137,84 @@ fn cached_repo_update_refuses_a_cache_whose_git_metadata_is_redirected() {
         .to_string();
     assert!(err.contains("does not own its git metadata"), "{err}");
 }
+
+#[test]
+#[cfg(unix)]
+fn cached_repo_update_refuses_a_cache_whose_worktree_points_outside_it() {
+    let root = TempDir::new("cache-redirected-worktree");
+    let origin = root.path().join("origin");
+    init_git_repo(&origin);
+    std::fs::write(origin.join("README.md"), "upstream\n").unwrap();
+    git(&origin, &["add", "README.md"]);
+    git(&origin, &["commit", "-m", "add"]);
+
+    // The user's own directory, holding both a file the upstream repo also
+    // tracks and an untracked one. `reset --hard` overwrites the first and
+    // `clean -ffdx` deletes the second.
+    let victim = root.path().join("victim");
+    std::fs::create_dir_all(&victim).unwrap();
+    std::fs::write(victim.join("README.md"), "precious\n").unwrap();
+    std::fs::write(victim.join("notes.txt"), "precious\n").unwrap();
+
+    // A real directory owning a real `.git` directory, so every existing entry
+    // check passes — only the repository's own `core.worktree` redirects the
+    // destructive commands out of the cache.
+    let cache = root.path().join("cache").join("owner_repo");
+    std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
+    git(
+        root.path(),
+        &["clone", origin.to_str().unwrap(), cache.to_str().unwrap()],
+    );
+    git(
+        &cache,
+        &["config", "core.worktree", victim.to_str().unwrap()],
+    );
+
+    let err = update_cached_repo_strict("owner/repo", &cache)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("refusing to update"), "{err}");
+    assert!(err.contains("does not resolve to its cache entry"), "{err}");
+    assert!(
+        !err.contains(&cache.display().to_string()),
+        "a legacy cache path can embed URL userinfo and must not be printed: {err}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(victim.join("README.md")).unwrap(),
+        "precious\n",
+        "the redirected worktree must be untouched"
+    );
+    assert!(
+        victim.join("notes.txt").exists(),
+        "the redirected worktree must be untouched"
+    );
+}
+
+#[test]
+fn cache_git_commands_drop_inherited_repository_and_worktree_variables() {
+    let command = cache_git_command(Path::new("/vstack/cache/owner_repo"));
+    let removed: Vec<String> = command
+        .get_envs()
+        .filter(|(_, value)| value.is_none())
+        .map(|(key, _)| key.to_string_lossy().into_owned())
+        .collect();
+    // An inherited `GIT_DIR`/`GIT_WORK_TREE` redirects `reset --hard` and
+    // `clean -ffdx` at whatever the caller's environment names, so every
+    // repository- and worktree-locating variable must be cleared.
+    for key in [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_COMMON_DIR",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_NAMESPACE",
+        "GIT_CEILING_DIRECTORIES",
+        "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+    ] {
+        assert!(
+            removed.iter().any(|name| name == key),
+            "{key} is not cleared: {removed:?}"
+        );
+    }
+}

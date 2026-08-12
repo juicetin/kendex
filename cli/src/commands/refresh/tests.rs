@@ -1700,3 +1700,186 @@ fn refresh_stops_when_a_source_mapping_will_not_parse() {
 
     let _ = std::fs::remove_dir_all(root);
 }
+
+/// The generic `toml::Value` preflight accepts a `vstack.toml` that is
+/// syntactically valid but violates `MappingConfig`'s schema, while
+/// `MappingConfig::load` fails deserialization and silently returns the default
+/// mapping — so refresh regenerated agents without their authoritative
+/// assignments and recorded the schema-invalid config as satisfied. A source
+/// config that exists but cannot be read is the same fail-open.
+#[test]
+fn refresh_stops_when_a_source_mapping_violates_the_schema_or_cannot_be_read() {
+    let root = tmpdir("schema-invalid-source-mapping");
+    let project = root.join("project");
+    let source = make_source(&root, "source");
+    std::fs::create_dir_all(&project).unwrap();
+    write_colliding_source(&source, "1", "PreToolUse", "source-model");
+
+    let mut lock = LockFile::default();
+    lock.add(lock_entry(
+        "rust",
+        ItemKind::Agent,
+        &source,
+        vec!["claude-code"],
+    ));
+    lock.add(lock_entry(
+        "shared",
+        ItemKind::Skill,
+        &source,
+        vec!["claude-code"],
+    ));
+
+    // Control: with a schema-valid mapping the agent refreshes.
+    let sources = vec![RefreshSource::from_root(&source)];
+    let stats = crate::test_util::with_project_root(&project, || {
+        let mut project_config = ProjectConfig::default();
+        refresh_items_in_scope(false, &lock, &sources, &mut project_config, &project, None)
+    });
+    assert!(stats.successful_items.contains("rust"));
+
+    // Valid TOML, wrong shape: `[agent-skills]` values are skill lists.
+    std::fs::write(
+        source.join("vstack.toml"),
+        "[agent-skills]\nrust = \"github\"\n",
+    )
+    .unwrap();
+    let sources = vec![RefreshSource::from_root(&source)];
+    let stats = crate::test_util::with_project_root(&project, || {
+        let mut project_config = ProjectConfig::default();
+        refresh_items_in_scope(false, &lock, &sources, &mut project_config, &project, None)
+    });
+    assert!(
+        stats.has_failures(),
+        "a schema-invalid mapping must fail refresh"
+    );
+    assert!(
+        stats.failures[0].error.contains("will not parse"),
+        "{:?}",
+        stats.failures
+    );
+    assert!(
+        stats.successful_items.is_empty(),
+        "nothing may be recorded as refreshed"
+    );
+
+    // Present but unreadable: a directory in the config's place fails
+    // `read_to_string` the same way a permission or I/O error does.
+    std::fs::remove_file(source.join("vstack.toml")).unwrap();
+    std::fs::create_dir_all(source.join("vstack.toml")).unwrap();
+    let sources = vec![RefreshSource::from_root(&source)];
+    let stats = crate::test_util::with_project_root(&project, || {
+        let mut project_config = ProjectConfig::default();
+        refresh_items_in_scope(false, &lock, &sources, &mut project_config, &project, None)
+    });
+    assert!(
+        stats.has_failures(),
+        "an unreadable mapping must fail refresh"
+    );
+    assert!(
+        stats.failures[0].error.contains("unreadable"),
+        "{:?}",
+        stats.failures
+    );
+    assert!(
+        stats.successful_items.is_empty(),
+        "nothing may be recorded as refreshed"
+    );
+
+    // A source with no `vstack.toml` at all is not a failure: the default
+    // mapping is the correct answer there.
+    std::fs::remove_dir_all(source.join("vstack.toml")).unwrap();
+    let sources = vec![RefreshSource::from_root(&source)];
+    let stats = crate::test_util::with_project_root(&project, || {
+        let mut project_config = ProjectConfig::default();
+        refresh_items_in_scope(false, &lock, &sources, &mut project_config, &project, None)
+    });
+    assert!(!stats.has_failures(), "{:?}", stats.failures);
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// A project-owned skill assigned to a Codex or Pi agent lives in the shared
+/// `.agents/skills/<name>` directory and intentionally has no lock entry, so a
+/// lock-only lookup always classified it missing and aborted every refresh as
+/// incomplete even though the agent can load it. The agent's own skills
+/// directory is the authority, including when the entry there is a link into
+/// `project-skills-dir`.
+#[test]
+fn refresh_accepts_an_unlocked_project_owned_skill_in_the_agent_skills_dir() {
+    let root = tmpdir("unlocked-project-owned-skill");
+    let project = root.join("project");
+    let source = make_source(&root, "source");
+    std::fs::create_dir_all(&project).unwrap();
+    write_colliding_source(&source, "1", "PreToolUse", "source-model");
+    // The mapping assigns a skill the lock never records: it is the project's
+    // own, not the catalog's.
+    std::fs::write(
+        source.join("vstack.toml"),
+        "[agent-skills]\nrust = [\"house-style\"]\n",
+    )
+    .unwrap();
+
+    let mut lock = LockFile::default();
+    lock.add(lock_entry("rust", ItemKind::Agent, &source, vec!["codex"]));
+
+    // Control: with nothing on disk the declared dependency is genuinely unmet.
+    let sources = vec![RefreshSource::from_root(&source)];
+    let stats = crate::test_util::with_project_root(&project, || {
+        let mut project_config = ProjectConfig::default();
+        refresh_items_in_scope(false, &lock, &sources, &mut project_config, &project, None)
+    });
+    assert!(
+        stats.has_incomplete(),
+        "a declaration with no skill anywhere must still be incomplete"
+    );
+    assert!(
+        !stats.successful_items.contains("rust"),
+        "an incomplete agent must not record its hash as satisfied"
+    );
+
+    // The project's own skill, in the directory Codex and Pi both read.
+    let house_style = project.join(".agents").join("skills").join("house-style");
+    std::fs::create_dir_all(&house_style).unwrap();
+    std::fs::write(
+        house_style.join("SKILL.md"),
+        "---\nname: house-style\ndescription: House style\n---\n# House style\n",
+    )
+    .unwrap();
+
+    let sources = vec![RefreshSource::from_root(&source)];
+    let stats = crate::test_util::with_project_root(&project, || {
+        let mut project_config = ProjectConfig::default();
+        refresh_items_in_scope(false, &lock, &sources, &mut project_config, &project, None)
+    });
+    assert!(!stats.has_failures(), "{:?}", stats.failures);
+    assert!(!stats.has_missing(), "{:?}", stats.missing);
+    assert!(!stats.has_incomplete(), "{:?}", stats.incomplete);
+    assert!(stats.successful_items.contains("rust"));
+
+    // The same skill reached through the relocate-and-link convention: the
+    // real directory is `project-skills-dir`, and refresh links it into
+    // `.agents/skills` before the agents pass runs.
+    std::fs::remove_dir_all(&house_style).unwrap();
+    let relocated = project.join("docs").join("skills").join("house-style");
+    std::fs::create_dir_all(&relocated).unwrap();
+    std::fs::write(
+        relocated.join("SKILL.md"),
+        "---\nname: house-style\ndescription: House style\n---\n# House style\n",
+    )
+    .unwrap();
+
+    let sources = vec![RefreshSource::from_root(&source)];
+    let stats = crate::test_util::with_project_root(&project, || {
+        let mut project_config = ProjectConfig {
+            project_skills_dir: Some("docs/skills".into()),
+            ..ProjectConfig::default()
+        };
+        refresh_items_in_scope(false, &lock, &sources, &mut project_config, &project, None)
+    });
+    assert!(!stats.has_failures(), "{:?}", stats.failures);
+    assert!(!stats.has_missing(), "{:?}", stats.missing);
+    assert!(!stats.has_incomplete(), "{:?}", stats.incomplete);
+    assert!(stats.successful_items.contains("rust"));
+
+    let _ = std::fs::remove_dir_all(root);
+}

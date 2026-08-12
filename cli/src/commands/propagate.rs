@@ -67,10 +67,9 @@ pub fn run(
     }
 
     let (pre_refresh_stage_paths, pre_refresh_dirty_shared) = if stage {
-        (
-            pre_refresh_project_stage_paths()?,
-            dirty_shared_config_paths()?,
-        )
+        let stage_paths = pre_refresh_project_stage_paths()?;
+        let dirty = dirty_shared_config_paths(&stage_paths)?;
+        (stage_paths, dirty)
     } else {
         (Vec::new(), Vec::new())
     };
@@ -180,8 +179,23 @@ fn refuse_pre_existing_shared_config_edits(dirty: &[PathBuf]) -> Result<()> {
     )
 }
 
+/// The agent TOMLs `install_hook_codex_prose` actually writes to: the Codex
+/// agents the lock records, resolved to their installed paths. Every other file
+/// under `.codex/agents` is a consumer's own agent that no vstack install ever
+/// spliced a safety block into, and staging never owns it either.
+fn codex_prose_carrier_paths(lock: &LockFile) -> Vec<PathBuf> {
+    let agents_dir = Harness::Codex.agents_dir(false);
+    lock.entries
+        .values()
+        .filter(|entry| entry.kind == ItemKind::Agent)
+        .filter(|entry| entry.harnesses.iter().any(|id| id == Harness::Codex.id()))
+        .map(|entry| agents_dir.join(Harness::Codex.agent_filename(&entry.name)))
+        .collect()
+}
+
 fn verify_project_auxiliary_installs_before_stage() -> Result<()> {
     let lock = LockFile::load(&config::lock_file_path(false))?;
+    let codex_prose_carriers = codex_prose_carrier_paths(&lock);
     let mut failures = Vec::new();
     for entry in lock.entries.values() {
         match entry.kind {
@@ -198,6 +212,7 @@ fn verify_project_auxiliary_installs_before_stage() -> Result<()> {
                         &entry.name,
                         harness,
                         registration.as_ref(),
+                        &codex_prose_carriers,
                         &mut failures,
                     );
                 }
@@ -225,6 +240,7 @@ fn verify_hook_auxiliary_install(
     name: &str,
     harness: Harness,
     registration: Option<&LockedHookRegistration>,
+    codex_prose_carriers: &[PathBuf],
     failures: &mut Vec<String>,
 ) {
     match harness {
@@ -301,7 +317,12 @@ fn verify_hook_auxiliary_install(
                 // Prose fallback: the block must be present and byte-equal in
                 // every installed Codex agent. The marker alone proves nothing —
                 // a replaced body keeps it while the advisory it carries is gone.
-                None => require_codex_prose_block_matches_source(name, registration, failures),
+                None => require_codex_prose_block_matches_source(
+                    name,
+                    registration,
+                    codex_prose_carriers,
+                    failures,
+                ),
             }
         }
         Harness::OpenCode => {
@@ -598,35 +619,21 @@ fn require_installed_hook_script_matches_source(
     }
 }
 
-/// The Codex prose fallback lives inside every agent TOML under
-/// `.codex/agents`, so every one of them must carry the installer's exact
-/// block. Reading it off marker presence would miss a block deleted outright,
-/// and an unreadable agents directory is a dependency failure rather than
-/// evidence of a clean install — only its genuine absence (no Codex agents
-/// installed at all) leaves nothing to check.
+/// The Codex prose fallback lives inside the agent TOMLs vstack installs, so
+/// every one of those must carry the installer's exact block. Reading it off
+/// marker presence would miss a block deleted outright. The carrier set comes
+/// from the Codex agent lock entries rather than a scan of `.codex/agents`:
+/// `install_hook_codex_prose` writes only to the agents it is handed and
+/// staging owns only lock-listed agent paths, so a consumer's own Codex agent
+/// is not a file this can hold to vstack's block. An installed agent that is
+/// absent is `verify::run`'s finding, and the installer skips it here too.
 fn require_codex_prose_block_matches_source(
     name: &str,
     registration: &LockedHookRegistration,
+    carriers: &[PathBuf],
     failures: &mut Vec<String>,
 ) {
-    let agents_dir = config::project_root().join(".codex").join("agents");
-    let entries = match std::fs::read_dir(&agents_dir) {
-        Ok(entries) => entries,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return,
-        Err(err) => {
-            failures.push(format!(
-                ".codex/agents is unreadable ({err}); refusing to verify the safety prose for Codex hook {name}"
-            ));
-            return;
-        }
-    };
-    let mut agents = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().is_some_and(|ext| ext == "toml") {
-            agents.push(path);
-        }
-    }
+    let agents: Vec<&PathBuf> = carriers.iter().filter(|path| path.exists()).collect();
     if agents.is_empty() {
         return;
     }
@@ -636,7 +643,7 @@ fn require_codex_prose_block_matches_source(
             .strip_prefix(config::project_root())
             .unwrap_or(path.as_path())
             .display();
-        match std::fs::read_to_string(&path) {
+        match std::fs::read_to_string(path) {
             Ok(body) if codex_instructions_body(&body).is_some_and(|b| b.contains(&expected)) => {}
             Ok(_) => failures.push(format!(
                 "{display} does not carry the locked safety prose for Codex hook {name}"
@@ -2179,19 +2186,33 @@ fn is_shared_status_path(path: &Path) -> bool {
 /// did not produce — staging the file would sweep it into the automated PR.
 /// Untracked files are not included: a shared file that does not exist in HEAD
 /// yet has nothing of the consumer's to lose.
-fn dirty_shared_config_paths() -> Result<Vec<PathBuf>> {
+///
+/// `stage_paths` is the lock-dependent set staging would pass to `git add`, and
+/// the guard covers only the shared files inside it. Querying every
+/// `SHARED_CONFIG_PATHS` entry unconditionally refused `--stage` over a harness
+/// config no locked asset owns — a consumer's own `.pi/settings.json` when the
+/// lock holds only Claude assets — which propagation would never have written.
+fn dirty_shared_config_paths(stage_paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
     let git = git_project()?;
+    let owned_shared: BTreeSet<PathBuf> = stage_paths
+        .iter()
+        .filter(|path| is_shared_status_path(path))
+        .cloned()
+        .collect();
     // Project-owned skills are shared in the same way: refresh maintains a
     // marker-delimited instruction block inside a file whose other content is
     // the consumer's. They are discovered rather than fixed, so they are
     // collected here instead of listed in SHARED_CONFIG_PATHS.
     let project_owned = project_owned_skill_paths()?;
-    let pathspecs: Vec<PathBuf> = SHARED_CONFIG_PATHS
+    let pathspecs: Vec<PathBuf> = owned_shared
         .iter()
-        .map(Path::new)
+        .map(PathBuf::as_path)
         .chain(project_owned.iter().map(PathBuf::as_path))
         .map(|path| project_to_git_path(&git, path))
         .collect();
+    if pathspecs.is_empty() {
+        return Ok(Vec::new());
+    }
     let output = git_literal_command()
         .arg("-C")
         .arg(&git.root)
@@ -2229,7 +2250,7 @@ fn dirty_shared_config_paths() -> Result<Vec<PathBuf>> {
         let Some(path) = git_to_project_path(&git, &top_level_path) else {
             continue;
         };
-        if (is_shared_status_path(&path) || project_owned.contains(&path)) && !dirty.contains(&path)
+        if (owned_shared.contains(&path) || project_owned.contains(&path)) && !dirty.contains(&path)
         {
             dirty.push(path);
         }

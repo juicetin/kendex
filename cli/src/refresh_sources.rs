@@ -877,10 +877,78 @@ fn update_existing_remote_cache(source: &str, repo_dir: &Path) -> Result<()> {
     update_cached_repo_strict(&display, repo_dir)
 }
 
+/// Git's repository- and worktree-locating environment variables. Every one of
+/// them overrides the working directory, so an inherited value — vstack invoked
+/// from a hook, or from a shell that exported one — would point `reset --hard`
+/// and `clean -ffdx` at a repository that is not the cache.
+const GIT_LOCATION_ENV_VARS: &[&str] = &[
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_COMMON_DIR",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_NAMESPACE",
+    "GIT_CEILING_DIRECTORIES",
+    "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+];
+
+/// A `git` invocation pinned to the cache entry: the working directory decides
+/// the repository, with every inherited override cleared.
+fn cache_git_command(repo_dir: &Path) -> std::process::Command {
+    let mut command = std::process::Command::new("git");
+    command.current_dir(repo_dir);
+    for key in GIT_LOCATION_ENV_VARS {
+        command.env_remove(key);
+    }
+    command
+}
+
+/// Require the repository reachable from the cache entry to have that entry as
+/// its work tree. The environment is sanitized above, but the cache's own
+/// `config` can still carry a `core.worktree` pointing at a user checkout, and
+/// no check on the entry or its `.git` sees that — `reset --hard` would then
+/// overwrite the user's copies of the tracked files and `clean -ffdx` would
+/// delete their untracked ones. Ask git where it would act, and refuse unless
+/// the answer is the cache.
+fn require_cache_is_git_toplevel(display: &str, repo_dir: &Path) -> Result<()> {
+    let output = cache_git_command(repo_dir)
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .with_context(|| format!("resolving the work tree of cached source {display}"))?;
+    if !output.status.success() {
+        bail!(
+            "refusing to update cached source {display}: its work tree could not be resolved: {}",
+            git_output_summary(&output)
+        );
+    }
+    let toplevel = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim().to_string());
+    // Canonicalized on both sides: the cache root is routinely reached through
+    // a symlinked home or a symlinked temp directory, and git reports the
+    // resolved path. A path that will not canonicalize fails closed.
+    let resolved = std::fs::canonicalize(&toplevel).map_err(|err| {
+        anyhow::anyhow!(
+            "refusing to update cached source {display}: its work tree could not be resolved: {err}"
+        )
+    })?;
+    let expected = std::fs::canonicalize(repo_dir)
+        .map_err(|err| anyhow::anyhow!("refusing to update cached source {display}: {err}"))?;
+    if resolved != expected {
+        // Neither path is printed: a legacy cache key is reconstructed from the
+        // recorded source and can embed URL userinfo, and the work tree is the
+        // user location this refuses to touch.
+        bail!(
+            "refusing to update cached source {display}: its git work tree does not resolve to its cache entry, and updating it would run destructive git commands outside the cache"
+        );
+    }
+    Ok(())
+}
+
 fn update_cached_repo_strict(display: &str, repo_dir: &Path) -> Result<()> {
     reject_unsafe_cache_dir(display, repo_dir)?;
+    require_cache_is_git_toplevel(display, repo_dir)?;
     eprintln!("Updating cached repo {display}...");
-    let fetch = std::process::Command::new("git")
+    let fetch = cache_git_command(repo_dir)
         .args([
             "fetch",
             "origin",
@@ -890,7 +958,6 @@ fn update_cached_repo_strict(display: &str, repo_dir: &Path) -> Result<()> {
             "1",
             "+refs/heads/*:refs/remotes/origin/*",
         ])
-        .current_dir(repo_dir)
         .stdout(std::process::Stdio::null())
         .output()
         .with_context(|| format!("running git fetch for cached source {display}"))?;
@@ -900,9 +967,8 @@ fn update_cached_repo_strict(display: &str, repo_dir: &Path) -> Result<()> {
             git_output_summary(&fetch)
         );
     }
-    let head = std::process::Command::new("git")
+    let head = cache_git_command(repo_dir)
         .args(["remote", "set-head", "origin", "--auto"])
-        .current_dir(repo_dir)
         .stdout(std::process::Stdio::null())
         .output()
         .with_context(|| format!("refreshing origin/HEAD for cached source {display}"))?;
@@ -912,9 +978,8 @@ fn update_cached_repo_strict(display: &str, repo_dir: &Path) -> Result<()> {
             git_output_summary(&head)
         );
     }
-    let reset = std::process::Command::new("git")
+    let reset = cache_git_command(repo_dir)
         .args(["reset", "--hard", "origin/HEAD"])
-        .current_dir(repo_dir)
         .stdout(std::process::Stdio::null())
         .output()
         .with_context(|| format!("running git reset for cached source {display}"))?;
@@ -924,9 +989,8 @@ fn update_cached_repo_strict(display: &str, repo_dir: &Path) -> Result<()> {
             git_output_summary(&reset)
         );
     }
-    let clean = std::process::Command::new("git")
+    let clean = cache_git_command(repo_dir)
         .args(["clean", "-ffdx", "--", "."])
-        .current_dir(repo_dir)
         .stdout(std::process::Stdio::null())
         .output()
         .with_context(|| format!("running git clean for cached source {display}"))?;
