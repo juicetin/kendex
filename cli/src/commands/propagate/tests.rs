@@ -100,6 +100,15 @@ fn demo_entry(source: &Path) -> LockEntry {
     }
 }
 
+/// The same `demo` skill installed by copy: its harness path is a real
+/// directory rather than a link into `.agents/skills`.
+fn demo_copy_entry(source: &Path) -> LockEntry {
+    LockEntry {
+        method: InstallMethod::Copy,
+        ..demo_entry(source)
+    }
+}
+
 fn agent_entry(name: &str, source: &Path) -> LockEntry {
     LockEntry {
         name: name.to_string(),
@@ -1294,7 +1303,7 @@ fn stage_mode_verifies_and_stages_when_hashes_are_current() {
     write_skill_source(&source, "v1\n");
 
     crate::test_util::with_project_root(&project, || {
-        let mut entry = demo_entry(&source);
+        let mut entry = demo_copy_entry(&source);
         entry.source_hash = config::compute_source_hash(&entry);
         let mut lock = LockFile::default();
         lock.add(entry);
@@ -1354,7 +1363,7 @@ fn stage_mode_scopes_locked_skill_staging_to_source_owned_files() {
     );
 
     crate::test_util::with_project_root(&project, || {
-        let mut entry = demo_entry(&source);
+        let mut entry = demo_copy_entry(&source);
         entry.source_hash = config::compute_source_hash(&entry);
         let mut lock = LockFile::default();
         lock.add(entry);
@@ -1505,7 +1514,7 @@ fn retry_stage_records_locked_skill_deletions_from_committed_install() {
     write_file(&source.join("skills/demo/removed-upstream.md"), "removed\n");
 
     crate::test_util::with_project_root(&project, || {
-        let mut entry = demo_entry(&source);
+        let mut entry = demo_copy_entry(&source);
         entry.source_hash = config::compute_source_hash(&entry);
         let mut lock = LockFile::default();
         lock.add(entry);

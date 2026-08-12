@@ -205,6 +205,52 @@ fn merge_upstream<T: Clone>(
     (merged, added)
 }
 
+/// Report the first source whose `vstack.toml` cannot be read or does not
+/// deserialize as a [`MappingConfig`], as `(config path, reason)`.
+///
+/// `MappingConfig::load` falls back to the default mapping whenever a source's
+/// `vstack.toml` does not become a `MappingConfig`, so agents would be
+/// regenerated without their authoritative `[agent-skills]`, `[role-skills]`,
+/// and `[hook-events]` assignments — and, with the parse sentinel in the hash,
+/// that state would then be recorded as successfully refreshed. Both ways in
+/// fail closed: a config that cannot be read at all, and one that reads but
+/// does not deserialize. Deserializing as `MappingConfig` rather than a generic
+/// `toml::Value` is the point — a schema violation such as
+/// `[agent-skills] rust = "github"` is valid TOML and would otherwise pass and
+/// then silently default. A source with no `vstack.toml` is not a failure: the
+/// default mapping is the correct answer there.
+///
+/// Callers must run this before any project-config, settings, or lock write:
+/// the fallback mapping's frontmatter defaults, once persisted into the
+/// consumer's `vstack.toml`, outrank source defaults forever after, so
+/// repairing the upstream mapping would not restore the intended values.
+fn invalid_source_mapping(sources: &[RefreshSource]) -> Option<(PathBuf, anyhow::Error)> {
+    for source in sources {
+        let config_path = source.root.join("vstack.toml");
+        let content = match std::fs::read_to_string(&config_path) {
+            Ok(content) => content,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) => {
+                return Some((
+                    config_path,
+                    anyhow::anyhow!(
+                        "source mapping is unreadable ({err}); refusing to regenerate items without their [agent-skills]/[role-skills]/[hook-events] assignments"
+                    ),
+                ));
+            }
+        };
+        if let Err(err) = toml::from_str::<MappingConfig>(&content) {
+            return Some((
+                config_path,
+                anyhow::anyhow!(
+                    "source mapping will not parse ({err}); refusing to regenerate items without their [agent-skills]/[role-skills]/[hook-events] assignments"
+                ),
+            ));
+        }
+    }
+    None
+}
+
 /// Re-install the items currently recorded in `lock` (or just those in
 /// `name_filter`) using the supplied source data.
 ///
@@ -223,44 +269,9 @@ pub fn refresh_items_in_scope(
     name_filter: Option<&[String]>,
 ) -> RefreshStats {
     let mut stats = RefreshStats::default();
-    // `MappingConfig::load` falls back to the default mapping whenever a
-    // source's `vstack.toml` does not become a `MappingConfig`, so agents would
-    // be regenerated without their authoritative `[agent-skills]`,
-    // `[role-skills]`, and `[hook-events]` assignments — and, with the parse
-    // sentinel in the hash, that state would then be recorded as successfully
-    // refreshed. Both ways in fail closed here: a config that cannot be read at
-    // all, and one that reads but does not deserialize. Deserializing as
-    // `MappingConfig` rather than a generic `toml::Value` is the point — a
-    // schema violation such as `[agent-skills] rust = "github"` is valid TOML
-    // and would otherwise pass the preflight and then silently default.
-    // A source with no `vstack.toml` is not a failure: the default mapping is
-    // the correct answer there.
-    for source in sources {
-        let config_path = source.root.join("vstack.toml");
-        let content = match std::fs::read_to_string(&config_path) {
-            Ok(content) => content,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(err) => {
-                stats.fail(
-                    &config_path.display().to_string(),
-                    None,
-                    anyhow::anyhow!(
-                        "source mapping is unreadable ({err}); refusing to regenerate items without their [agent-skills]/[role-skills]/[hook-events] assignments"
-                    ),
-                );
-                return stats;
-            }
-        };
-        if let Err(err) = toml::from_str::<MappingConfig>(&content) {
-            stats.fail(
-                &config_path.display().to_string(),
-                None,
-                anyhow::anyhow!(
-                    "source mapping will not parse ({err}); refusing to regenerate items without their [agent-skills]/[role-skills]/[hook-events] assignments"
-                ),
-            );
-            return stats;
-        }
+    if let Some((config_path, err)) = invalid_source_mapping(sources) {
+        stats.fail(&config_path.display().to_string(), None, err);
+        return stats;
     }
     let pass = |name: &str| name_filter.is_none_or(|f| f.iter().any(|n| n == name));
     let all_hooks = all_source_hooks(sources);
@@ -1320,6 +1331,9 @@ fn run_one_with_source_records(
         .map(|source| source.root.clone())
         .collect();
     let sources = load_refresh_sources(&source_records);
+    if let Some((config_path, err)) = invalid_source_mapping(&sources) {
+        anyhow::bail!("{}: {err}", config_path.display());
+    }
 
     // Self-heal hook lock entries: drop harness ids the hook no longer
     // applies to (the `harnesses:` allowlist in source may have changed

@@ -21,7 +21,7 @@
 //! Exit code is non-zero if any item fails verification, so this composes
 //! with shell pipelines (`vstack verify -g && pi`).
 
-use crate::config::{self, ItemKind, LockEntry};
+use crate::config::{self, InstallMethod, ItemKind, LockEntry};
 use crate::refresh_sources::{RefreshSource, ResolvedSource};
 use crate::scope::ScopeFilter;
 use anyhow::{Result, bail};
@@ -229,7 +229,8 @@ fn verify_skill_install(entry: &LockEntry, global: bool) -> (Option<bool>, Optio
     for (path, harnesses) in path_harnesses {
         if !path.join("SKILL.md").is_file() {
             missing.extend(harnesses);
-        } else if !skill_link_resolves_to_canonical_install(&path, &canonical_targets) {
+        } else if !skill_link_resolves_to_canonical_install(&path, entry.method, &canonical_targets)
+        {
             retargeted.extend(harnesses);
         }
     }
@@ -243,7 +244,7 @@ fn verify_skill_install(entry: &LockEntry, global: bool) -> (Option<bool>, Optio
         }
         if !retargeted.is_empty() {
             notes.push(format!(
-                "install path is a symlink outside the canonical skill tree for {}",
+                "install path is outside the canonical skill tree for {}",
                 retargeted.join(", ")
             ));
         }
@@ -320,18 +321,29 @@ fn accepted_canonical_skill_targets(entry: &LockEntry, global: bool) -> Vec<Path
         .collect()
 }
 
-/// A skill install that is a symlink must land on one of this entry's own
-/// canonical locations. Following the link and finding *a* `SKILL.md` is not
-/// enough, and neither is a path that merely ends in `.agents/skills/<name>`:
-/// an unrelated checkout spells its canonicals the same way. A redirected link
-/// would otherwise pass verification and let `propagate --stage` commit a
-/// pointer to unrelated instructions. A non-symlink install (copy method) is
-/// not constrained here.
-fn skill_link_resolves_to_canonical_install(path: &Path, canonical_targets: &[PathBuf]) -> bool {
+/// A skill install must land on one of this entry's own canonical locations
+/// whenever the lock records [`InstallMethod::Symlink`]. Following the link and
+/// finding *a* `SKILL.md` is not enough, and neither is a path that merely ends
+/// in `.agents/skills/<name>`: an unrelated checkout spells its canonicals the
+/// same way. Nor is being a plain directory enough — a managed link replaced by
+/// a consumer-owned directory would otherwise pass and let `propagate --stage`
+/// commit unrelated instructions. Resolution, not link-ness, is the test: a
+/// shared layout whose harness skills dir is itself the link leaves each child
+/// a real directory that still canonicalizes into an accepted target.
+///
+/// A `Copy` install is constrained only when it is a symlink. On non-unix
+/// `installer::install_skill` materializes a `Symlink` install as a copy, so it
+/// is not constrained there either.
+fn skill_link_resolves_to_canonical_install(
+    path: &Path,
+    method: InstallMethod,
+    canonical_targets: &[PathBuf],
+) -> bool {
     let Ok(meta) = std::fs::symlink_metadata(path) else {
         return false;
     };
-    if !meta.file_type().is_symlink() {
+    let linked_install = cfg!(unix) && method == InstallMethod::Symlink;
+    if !meta.file_type().is_symlink() && !linked_install {
         return true;
     }
     let Ok(resolved) = std::fs::canonicalize(path) else {
@@ -561,7 +573,7 @@ fn locate_pi_source(name: &str, global: bool) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{InstallMethod, LockEntry, LockFile};
+    use crate::config::{LockEntry, LockFile};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn tmpdir(label: &str) -> PathBuf {
@@ -649,6 +661,53 @@ mod tests {
             let err = run(ScopeFilter::Project, &[]).unwrap_err().to_string();
             assert!(err.contains("verification failed"), "{err}");
         });
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn verify_skill_rejects_consumer_directory_standing_in_for_a_symlink_install() {
+        let root = tmpdir("symlink-entry-replaced-by-directory");
+        let home = root.join("home");
+        let config_home = root.join("config");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&config_home).unwrap();
+
+        crate::test_util::with_home_and_config(&home, &config_home, || {
+            let canonical = config::global_state_dir().join("skills").join("demo");
+            write_file(&canonical.join("SKILL.md"), "---\nname: demo\n---\n");
+
+            let entry = LockEntry {
+                name: "demo".to_string(),
+                kind: ItemKind::Skill,
+                source: "/unused/source".to_string(),
+                source_repo: None,
+                harnesses: vec!["claude-code".to_string()],
+                method: InstallMethod::Symlink,
+                installed_at: "2026-08-11T00:00:00Z".to_string(),
+                source_hash: "stored-hash".to_string(),
+            };
+
+            // The managed link replaced by a consumer-owned directory that
+            // happens to carry a SKILL.md. Finding a readable skill there says
+            // nothing about whether it is the install the lock records.
+            let install = crate::harness::Harness::ClaudeCode
+                .skills_dir(true)
+                .join("demo");
+            write_file(&install.join("SKILL.md"), "---\nname: impostor\n---\n");
+
+            let (ok, note) = verify_skill_install(&entry, true);
+            assert_eq!(
+                ok,
+                Some(false),
+                "a symlink-method entry installed as a plain directory must fail"
+            );
+            assert!(
+                note.unwrap().contains("outside the canonical skill tree"),
+                "wrong failure reason"
+            );
+        });
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

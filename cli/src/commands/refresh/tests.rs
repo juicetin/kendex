@@ -1883,3 +1883,58 @@ fn refresh_accepts_an_unlocked_project_owned_skill_in_the_agent_skills_dir() {
 
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[test]
+fn refresh_run_leaves_project_config_untouched_when_source_mapping_is_schema_invalid() {
+    // A schema-invalid upstream mapping must stop the refresh BEFORE any
+    // project write. `MappingConfig::load` falls back to the default mapping,
+    // so a check that runs after `write_agent_frontmatter_defaults` persists
+    // fallback frontmatter into the consumer's `vstack.toml` — and because
+    // project overrides outrank source defaults, repairing upstream afterwards
+    // does not restore the intended values.
+    let root = tmpdir("invalid-mapping-preflight");
+    let project = root.join("project");
+    let source = make_source(&root, "source");
+    std::fs::create_dir_all(&project).unwrap();
+    write_colliding_source(&source, "1", "PreToolUse", "model-x");
+    // Valid TOML, wrong schema: `[agent-skills]` values must be lists.
+    std::fs::write(
+        source.join("vstack.toml"),
+        "[agent-skills]\nrust = \"shared\"\n",
+    )
+    .unwrap();
+
+    let mut lock = LockFile::default();
+    lock.add(lock_entry(
+        "rust",
+        ItemKind::Agent,
+        &source,
+        vec!["claude-code"],
+    ));
+    lock.save(&project.join(".vstack-lock.json")).unwrap();
+
+    let project_config_path = project.join("vstack.toml");
+    std::fs::write(&project_config_path, "# consumer config\n").unwrap();
+    let before = std::fs::read_to_string(&project_config_path).unwrap();
+
+    let records = vec![ResolvedSource {
+        root: source.clone(),
+        aliases: vec![source.to_string_lossy().into_owned()],
+        source_repo: None,
+    }];
+    let err = crate::test_util::with_project_root(&project, || {
+        run_one_with_source_records(false, false, Some(&records))
+    })
+    .expect_err("schema-invalid source mapping must fail the refresh");
+    assert_eq!(
+        std::fs::read_to_string(&project_config_path).unwrap(),
+        before,
+        "consumer vstack.toml was mutated before the source mapping was validated"
+    );
+    assert!(
+        err.to_string().contains("source mapping will not parse"),
+        "wrong failure: {err}"
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
