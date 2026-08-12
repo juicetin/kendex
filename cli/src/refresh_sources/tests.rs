@@ -1024,3 +1024,34 @@ fn cached_repo_update_refuses_a_symlinked_cache_entry() {
         "the linked checkout must be untouched"
     );
 }
+
+#[test]
+fn remote_urls_carrying_a_query_or_fragment_are_rejected_and_redacted() {
+    for source in [
+        "https://example.com/Owner/Repo.git?access_token=secret",
+        "https://example.com/Owner/Repo.git#secret",
+    ] {
+        let err = remote_git_url_for_subprocess(source)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("query or fragment"), "{err}");
+        assert!(!err.contains("secret"), "{err}");
+        assert!(err.contains("<redacted>"), "{err}");
+    }
+
+    // Diagnostics for such a source never echo it either.
+    let display = remote_source_display("https://example.com/Owner/Repo.git?access_token=secret");
+    assert!(!display.contains("secret"), "{display}");
+    assert_eq!(display, "https://example.com/Owner/Repo.git?<redacted>");
+
+    // A userinfo token and a query token are both hidden at once.
+    let display = remote_source_display("https://token@example.com/Owner/Repo.git?k=secret");
+    assert!(!display.contains("token"), "{display}");
+    assert!(!display.contains("secret"), "{display}");
+
+    // Ordinary remotes are untouched.
+    assert_eq!(
+        remote_source_display("https://example.com/Owner/Repo.git"),
+        "https://example.com/Owner/Repo.git"
+    );
+}

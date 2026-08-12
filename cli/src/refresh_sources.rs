@@ -560,7 +560,17 @@ pub(crate) fn remote_source_display(source: &str) -> String {
     {
         return slug;
     }
-    redact_remote_userinfo(source)
+    redact_remote_query(&redact_remote_userinfo(source))
+}
+
+/// Replace a URL query/fragment with a marker. Git clone URLs have no
+/// legitimate use for either, and both are places a token gets carried
+/// (`...?access_token=secret`), so diagnostics must never echo them.
+fn redact_remote_query(url: &str) -> String {
+    match url.find(['?', '#']) {
+        Some(index) => format!("{}<redacted>", &url[..=index]),
+        None => url.to_string(),
+    }
 }
 
 pub(crate) fn remote_cache_dir(source: &str) -> Option<PathBuf> {
@@ -699,6 +709,16 @@ fn reject_plaintext_http_remote(source: &str) -> Result<()> {
 }
 
 fn reject_credential_bearing_git_url(url: &str) -> Result<()> {
+    // A query or fragment is not part of any legitimate git clone URL, and it
+    // is where a token rides when it is not in the userinfo
+    // (`https://host/repo.git?access_token=...`). Reject the whole form rather
+    // than trying to classify which parameters are secret.
+    if url.contains('?') || url.contains('#') {
+        bail!(
+            "remote source URLs with a query or fragment are not supported for managed-code refresh: {}. Use SSH keys, gh auth login, or a Git credential helper instead.",
+            remote_source_display(url)
+        );
+    }
     let Some(parts) = split_url_userinfo(url) else {
         return Ok(());
     };
