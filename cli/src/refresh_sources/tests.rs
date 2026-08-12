@@ -1218,3 +1218,41 @@ fn cache_git_commands_drop_inherited_repository_and_worktree_variables() {
         );
     }
 }
+
+#[test]
+fn cache_git_commands_refuse_interactive_credential_prompts() {
+    let command = cache_git_command(Path::new("/vstack/cache/owner_repo"));
+    let env: HashMap<String, Option<String>> = command
+        .get_envs()
+        .map(|(key, value)| {
+            (
+                key.to_string_lossy().into_owned(),
+                value.map(|v| v.to_string_lossy().into_owned()),
+            )
+        })
+        .collect();
+    // A cache whose origin needs credentials would otherwise stop the refresh
+    // dead on a username prompt with no terminal to answer it.
+    assert_eq!(
+        env.get("GIT_TERMINAL_PROMPT").cloned().flatten().as_deref(),
+        Some("0"),
+        "terminal prompting is not disabled: {env:?}"
+    );
+    let ssh = env.get("GIT_SSH_COMMAND").cloned().flatten();
+    assert!(
+        ssh.as_deref().is_some_and(|v| v.contains("BatchMode=yes")),
+        "ssh prompting is not disabled: {ssh:?}"
+    );
+}
+
+#[test]
+fn batch_mode_ssh_command_extends_an_inherited_command() {
+    assert_eq!(batch_mode_ssh_command(None), "ssh -o BatchMode=yes");
+    assert_eq!(batch_mode_ssh_command(Some("   ")), "ssh -o BatchMode=yes");
+    // A caller's own ssh binary and options keep working; only prompting is
+    // taken away.
+    assert_eq!(
+        batch_mode_ssh_command(Some("ssh -i /keys/id_ed25519")),
+        "ssh -i /keys/id_ed25519 -o BatchMode=yes"
+    );
+}

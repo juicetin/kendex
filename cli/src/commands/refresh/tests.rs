@@ -1938,3 +1938,95 @@ fn refresh_run_leaves_project_config_untouched_when_source_mapping_is_schema_inv
 
     let _ = std::fs::remove_dir_all(root);
 }
+
+/// An agent whose recorded harnesses resolve to no skills directory at all has
+/// nowhere to load a declared dependency from, so the satisfaction check must
+/// not read as met — `all()` over an empty set is vacuously true.
+#[test]
+fn refresh_reports_declared_skills_unmet_when_no_harness_skills_dir_resolves() {
+    let root = tmpdir("declared-skill-no-harness-dir");
+    let project = root.join("project");
+    let source = make_source(&root, "source");
+    std::fs::create_dir_all(&project).unwrap();
+    write_colliding_source(&source, "1", "PreToolUse", "source-model");
+
+    let mut lock = LockFile::default();
+    // An id this binary does not recognize: nothing resolves, so the agent has
+    // no skills directory.
+    lock.add(lock_entry(
+        "rust",
+        ItemKind::Agent,
+        &source,
+        vec!["holodeck"],
+    ));
+    // The skill is installed for a harness that does resolve, so a check that
+    // consulted the lock alone would also call it satisfied.
+    lock.add(lock_entry(
+        "shared",
+        ItemKind::Skill,
+        &source,
+        vec!["claude-code"],
+    ));
+    let sources = vec![RefreshSource::from_root(&source)];
+
+    let stats = crate::test_util::with_project_root(&project, || {
+        let mut project_config = ProjectConfig::default();
+        refresh_items_in_scope(false, &lock, &sources, &mut project_config, &project, None)
+    });
+
+    assert!(
+        stats.has_incomplete(),
+        "an agent with no resolvable skills directory cannot have its declarations met: {:?}",
+        stats.incomplete
+    );
+    assert!(
+        !stats.successful_items.contains("rust"),
+        "and must not record its hash as satisfied"
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// The unlocked-project-skill fallback asks the agent's own skills directory,
+/// so it has to hold the entry there to the same bar the rest of vstack does:
+/// a directory without a `SKILL.md` is not a skill the agent can load.
+#[test]
+fn refresh_rejects_a_skill_shaped_directory_without_a_skill_manifest() {
+    let root = tmpdir("declared-skill-dir-without-manifest");
+    let project = root.join("project");
+    let source = make_source(&root, "source");
+    std::fs::create_dir_all(&project).unwrap();
+    write_colliding_source(&source, "1", "PreToolUse", "source-model");
+    std::fs::write(
+        source.join("vstack.toml"),
+        "[agent-skills]\nrust = [\"house-style\"]\n",
+    )
+    .unwrap();
+
+    let mut lock = LockFile::default();
+    lock.add(lock_entry("rust", ItemKind::Agent, &source, vec!["codex"]));
+
+    // A directory of the right name that is not a skill: no `SKILL.md`, just
+    // leftovers. The agent cannot load it.
+    let house_style = project.join(".agents").join("skills").join("house-style");
+    std::fs::create_dir_all(&house_style).unwrap();
+    std::fs::write(house_style.join("notes.md"), "not a skill\n").unwrap();
+
+    let sources = vec![RefreshSource::from_root(&source)];
+    let stats = crate::test_util::with_project_root(&project, || {
+        let mut project_config = ProjectConfig::default();
+        refresh_items_in_scope(false, &lock, &sources, &mut project_config, &project, None)
+    });
+
+    assert!(
+        stats.has_incomplete(),
+        "a directory with no SKILL.md must not satisfy a declared dependency: {:?}",
+        stats.incomplete
+    );
+    assert!(
+        !stats.successful_items.contains("rust"),
+        "and must not record its hash as satisfied"
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}

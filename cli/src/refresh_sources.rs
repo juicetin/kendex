@@ -893,6 +893,18 @@ const GIT_LOCATION_ENV_VARS: &[&str] = &[
     "GIT_DISCOVERY_ACROSS_FILESYSTEM",
 ];
 
+/// The ssh command for a cache git invocation, in batch mode. An inherited
+/// `GIT_SSH_COMMAND` is extended rather than replaced, so a caller's own ssh
+/// binary and options keep working; git appends the host and remote command
+/// after this string, so the added option still lands before them.
+fn batch_mode_ssh_command(inherited: Option<&str>) -> String {
+    let base = inherited
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("ssh");
+    format!("{base} -o BatchMode=yes")
+}
+
 /// A `git` invocation pinned to the cache entry: the working directory decides
 /// the repository, with every inherited override cleared.
 fn cache_git_command(repo_dir: &Path) -> std::process::Command {
@@ -901,6 +913,15 @@ fn cache_git_command(repo_dir: &Path) -> std::process::Command {
     for key in GIT_LOCATION_ENV_VARS {
         command.env_remove(key);
     }
+    // A cache whose origin needs credentials would otherwise block on git's
+    // username prompt — `update_cached_repo_strict` runs unattended, so that is
+    // a hang, not a question. Refuse the prompt in both transports and let the
+    // command fail with a message instead.
+    command.env("GIT_TERMINAL_PROMPT", "0");
+    command.env(
+        "GIT_SSH_COMMAND",
+        batch_mode_ssh_command(std::env::var("GIT_SSH_COMMAND").ok().as_deref()),
+    );
     command
 }
 

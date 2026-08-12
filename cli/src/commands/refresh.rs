@@ -404,21 +404,33 @@ pub fn refresh_items_in_scope(
             .filter_map(|id| Harness::from_id(id))
             .map(|harness| harness.skills_dir(global))
             .collect();
-        let missing: Vec<String> = declared
-            .into_iter()
-            .filter(|skill| match installed_skill_dirs.get(skill) {
-                Some(dirs) => !agent_skill_dirs.iter().all(|dir| dirs.contains(dir)),
-                // A project-owned skill assigned to a Codex or Pi agent lives in
-                // the shared `.agents/skills/<name>` directory and intentionally
-                // has no lock entry, so the lock cannot answer for it and a
-                // lock-only lookup called every one of them absent. Ask the
-                // agent's own skills directory instead: a skill directory there
-                // is one the agent loads, including when the entry is a link
-                // into `project-skills-dir` — refresh creates those links above,
-                // before this pass runs.
-                None => !agent_skill_dirs.iter().all(|dir| dir.join(skill).is_dir()),
-            })
-            .collect();
+        // An empty set makes `all()` vacuously true, so an agent whose recorded
+        // harnesses resolve to no skills directory would read as having every
+        // declaration met — while in fact it has nowhere to load one from.
+        let missing: Vec<String> = if agent_skill_dirs.is_empty() {
+            declared
+        } else {
+            declared
+                .into_iter()
+                .filter(|skill| match installed_skill_dirs.get(skill) {
+                    Some(dirs) => !agent_skill_dirs.iter().all(|dir| dirs.contains(dir)),
+                    // A project-owned skill assigned to a Codex or Pi agent
+                    // lives in the shared `.agents/skills/<name>` directory and
+                    // intentionally has no lock entry, so the lock cannot answer
+                    // for it and a lock-only lookup called every one of them
+                    // absent. Ask the agent's own skills directory instead — and
+                    // hold the entry there to the bar the rest of vstack applies
+                    // (`vstack check`, the installer): a directory carrying a
+                    // `SKILL.md` is a skill the agent can load, a bare directory
+                    // of the same name is not. Links into `project-skills-dir`
+                    // resolve through, and refresh creates them above, before
+                    // this pass runs.
+                    None => !agent_skill_dirs
+                        .iter()
+                        .all(|dir| dir.join(skill).join("SKILL.md").is_file()),
+                })
+                .collect()
+        };
         if !missing.is_empty() {
             // Recorded, not merely printed: callers gate on `has_missing()`, so
             // a warning alone would let a summary report success while the
