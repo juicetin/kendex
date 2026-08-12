@@ -564,6 +564,64 @@ fn retry_staging_records_deleted_owned_cursor_safety_rules_from_committed_lock()
 }
 
 #[test]
+fn staging_does_not_stage_opencode_hook_instructions_without_hook_ownership() {
+    let project = tmpdir("stage-unowned-opencode-hook");
+    std::fs::create_dir_all(&project).unwrap();
+    init_git_project(&project);
+
+    crate::test_util::with_project_root(&project, || {
+        LockFile::default()
+            .save(&config::lock_file_path(false))
+            .unwrap();
+        write_file(
+            &project.join(".opencode/instructions/vstack-hook-consumer.md"),
+            "consumer instruction\n",
+        );
+
+        stage_project_paths(&[]).unwrap();
+
+        let staged = git_output(&project, &["diff", "--cached", "--name-only"]);
+        assert!(staged.contains(".vstack-lock.json\n"), "{staged}");
+        assert!(
+            !staged.contains(".opencode/instructions/vstack-hook-consumer.md"),
+            "{staged}"
+        );
+    });
+}
+
+#[test]
+fn retry_staging_records_deleted_owned_opencode_hook_instructions_from_committed_lock() {
+    let project = tmpdir("stage-deleted-opencode-hook");
+    std::fs::create_dir_all(&project).unwrap();
+    init_git_project(&project);
+
+    crate::test_util::with_project_root(&project, || {
+        let mut lock = LockFile::default();
+        lock.add(lock_entry("guard", ItemKind::Hook, &["opencode"]));
+        lock.save(&config::lock_file_path(false)).unwrap();
+        write_file(
+            &project.join(".opencode/instructions/vstack-hook-guard.md"),
+            "managed opencode hook\n",
+        );
+        git(&project, &["add", "-A"]);
+        git(&project, &["commit", "-m", "baseline"]);
+
+        LockFile::default()
+            .save(&config::lock_file_path(false))
+            .unwrap();
+        std::fs::remove_file(project.join(".opencode/instructions/vstack-hook-guard.md")).unwrap();
+
+        stage_project_paths(&[]).unwrap();
+        let staged = git_output(&project, &["diff", "--cached", "--name-status"]);
+        assert!(staged.contains("M\t.vstack-lock.json"), "{staged}");
+        assert!(
+            staged.contains("D\t.opencode/instructions/vstack-hook-guard.md"),
+            "{staged}"
+        );
+    });
+}
+
+#[test]
 fn staging_pre_refresh_paths_records_refresh_deletions() {
     let project = tmpdir("stage-delete-project");
     std::fs::create_dir_all(&project).unwrap();
@@ -756,6 +814,52 @@ fn staging_records_tracked_pi_node_modules_deletions_without_untracked_dependenc
             !staged.contains(".pi/packages/dep-pkg/node_modules/new/index.js"),
             "{staged}"
         );
+    });
+}
+
+#[test]
+fn retry_staging_records_deleted_pi_bin_from_committed_manifest_only() {
+    let project = tmpdir("stage-deleted-pi-bin");
+    std::fs::create_dir_all(&project).unwrap();
+    init_git_project(&project);
+
+    crate::test_util::with_project_root(&project, || {
+        let mut lock = LockFile::default();
+        lock.add(lock_entry("demo-pkg", ItemKind::PiExtension, &["pi"]));
+        lock.save(&config::lock_file_path(false)).unwrap();
+        write_file(
+            &project.join(".pi/packages/demo-pkg/package.json"),
+            r#"{"name":"demo-pkg","pi":{"extensions":[]},"bin":{"old-cmd":"bin/old.js"}}"#,
+        );
+        write_file(
+            &project.join(".pi/packages/demo-pkg/bin/old.js"),
+            "old bin\n",
+        );
+        write_file(&project.join(".pi/bin/old-cmd"), "managed old link\n");
+        write_file(&project.join(".pi/bin/consumer-cmd"), "consumer link\n");
+        git(&project, &["add", "-A"]);
+        git(&project, &["commit", "-m", "baseline"]);
+
+        write_file(
+            &project.join(".pi/packages/demo-pkg/package.json"),
+            r#"{"name":"demo-pkg","pi":{"extensions":[]},"bin":{}}"#,
+        );
+        std::fs::remove_file(project.join(".pi/packages/demo-pkg/bin/old.js")).unwrap();
+        std::fs::remove_file(project.join(".pi/bin/old-cmd")).unwrap();
+        std::fs::remove_file(project.join(".pi/bin/consumer-cmd")).unwrap();
+
+        stage_project_paths(&[]).unwrap();
+        let staged = git_output(&project, &["diff", "--cached", "--name-status"]);
+        assert!(
+            staged.contains("M\t.pi/packages/demo-pkg/package.json"),
+            "{staged}"
+        );
+        assert!(
+            staged.contains("D\t.pi/packages/demo-pkg/bin/old.js"),
+            "{staged}"
+        );
+        assert!(staged.contains("D\t.pi/bin/old-cmd"), "{staged}");
+        assert!(!staged.contains(".pi/bin/consumer-cmd"), "{staged}");
     });
 }
 

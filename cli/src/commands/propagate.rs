@@ -725,11 +725,21 @@ fn git_literal_command() -> Command {
 fn managed_paths_from_git_status(seed_paths: &BTreeSet<PathBuf>) -> Result<Vec<PathBuf>> {
     let git = git_project()?;
     let committed_paths = committed_project_stage_paths(&git)?;
+    let committed_pi_bin_paths = committed_pi_bin_paths(&git)?;
     let owned_shared_paths = owned_shared_status_paths(seed_paths, &committed_paths);
     let owned_deleted_native_hooks = owned_deleted_native_hook_paths(seed_paths, &committed_paths);
     let owned_cursor_safety_rules = owned_cursor_safety_rule_paths(seed_paths, &committed_paths);
-    let status_pathspecs =
-        managed_status_pathspecs(seed_paths, &owned_shared_paths, &owned_cursor_safety_rules)?;
+    let owned_opencode_hook_instructions =
+        owned_opencode_hook_instruction_paths(seed_paths, &committed_paths);
+    let owned_pi_bin_paths =
+        owned_pi_bin_paths(seed_paths, &committed_paths, &committed_pi_bin_paths);
+    let status_pathspecs = managed_status_pathspecs(
+        seed_paths,
+        &owned_shared_paths,
+        &owned_cursor_safety_rules,
+        &owned_opencode_hook_instructions,
+        &owned_pi_bin_paths,
+    )?;
     let pi_package_prefixes = pi_package_status_prefixes(seed_paths);
     let top_level_pathspecs: Vec<PathBuf> = status_pathspecs
         .iter()
@@ -780,6 +790,8 @@ fn managed_paths_from_git_status(seed_paths: &BTreeSet<PathBuf>) -> Result<Vec<P
                 &owned_shared_paths,
                 &owned_deleted_native_hooks,
                 &owned_cursor_safety_rules,
+                &owned_opencode_hook_instructions,
+                &owned_pi_bin_paths,
                 status,
             )
         {
@@ -807,10 +819,30 @@ fn owned_cursor_safety_rule_paths(
     owned
 }
 
-fn committed_project_stage_paths(git: &GitProject) -> Result<BTreeSet<PathBuf>> {
+fn owned_opencode_hook_instruction_paths(
+    seed_paths: &BTreeSet<PathBuf>,
+    committed_paths: &BTreeSet<PathBuf>,
+) -> BTreeSet<PathBuf> {
+    let mut owned = opencode_hook_instruction_paths_from(seed_paths);
+    owned.extend(opencode_hook_instruction_paths_from(committed_paths));
+    owned
+}
+
+fn owned_pi_bin_paths(
+    seed_paths: &BTreeSet<PathBuf>,
+    committed_paths: &BTreeSet<PathBuf>,
+    committed_pi_bin_paths: &BTreeSet<PathBuf>,
+) -> BTreeSet<PathBuf> {
+    let mut owned = pi_bin_paths_from(seed_paths);
+    owned.extend(pi_bin_paths_from(committed_paths));
+    owned.extend(committed_pi_bin_paths.iter().cloned());
+    owned
+}
+
+fn committed_project_lock(git: &GitProject) -> Result<Option<LockFile>> {
     let project_lock_path = project_to_git_path(git, Path::new(".vstack-lock.json"));
     let Some(project_lock_path) = project_lock_path.to_str() else {
-        return Ok(BTreeSet::new());
+        return Ok(None);
     };
     let spec = format!("HEAD:{project_lock_path}");
     let output = Command::new("git")
@@ -818,14 +850,78 @@ fn committed_project_stage_paths(git: &GitProject) -> Result<BTreeSet<PathBuf>> 
         .arg(&git.root)
         .args(["show", &spec])
         .output()
-        .context("reading committed vstack lock for managed hook ownership")?;
+        .context("reading committed vstack lock for managed ownership")?;
     if !output.status.success() {
-        return Ok(BTreeSet::new());
+        return Ok(None);
     }
-    let Ok(lock) = serde_json::from_slice::<LockFile>(&output.stdout) else {
+    Ok(serde_json::from_slice::<LockFile>(&output.stdout).ok())
+}
+
+fn committed_project_stage_paths(git: &GitProject) -> Result<BTreeSet<PathBuf>> {
+    let Some(lock) = committed_project_lock(git)? else {
         return Ok(BTreeSet::new());
     };
     Ok(project_stage_paths(&lock, true)?.into_iter().collect())
+}
+
+fn committed_pi_bin_paths(git: &GitProject) -> Result<BTreeSet<PathBuf>> {
+    let Some(lock) = committed_project_lock(git)? else {
+        return Ok(BTreeSet::new());
+    };
+    let project_root = config::project_root();
+    let mut paths = BTreeSet::new();
+    for entry in lock
+        .entries
+        .values()
+        .filter(|entry| entry.kind == ItemKind::PiExtension)
+    {
+        let package_json =
+            crate::pi_extension::checked_pi_package_path(&entry.name, false)?.join("package.json");
+        let Ok(project_path) = package_json.strip_prefix(&project_root) else {
+            continue;
+        };
+        let git_path = project_to_git_path(git, project_path);
+        let Some(git_path) = git_path.to_str() else {
+            continue;
+        };
+        let spec = format!("HEAD:{git_path}");
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(&git.root)
+            .args(["show", &spec])
+            .output()
+            .with_context(|| format!("reading committed Pi package manifest {}", git_path))?;
+        if !output.status.success() {
+            continue;
+        }
+        for bin_name in pi_bin_names_from_package_manifest(&output.stdout)? {
+            crate::path_safety::validate_item_name(&bin_name)
+                .with_context(|| format!("unsafe committed Pi bin name {bin_name}"))?;
+            let bin_path = config::pi_bin_dir(false).join(bin_name);
+            if let Ok(relative) = bin_path.strip_prefix(&project_root) {
+                paths.insert(relative.to_path_buf());
+            }
+        }
+    }
+    Ok(paths)
+}
+
+fn pi_bin_names_from_package_manifest(bytes: &[u8]) -> Result<BTreeSet<String>> {
+    let manifest: serde_json::Value =
+        serde_json::from_slice(bytes).context("parsing committed Pi package manifest")?;
+    let mut names = BTreeSet::new();
+    match manifest.get("bin") {
+        Some(serde_json::Value::String(_)) => {
+            if let Some(name) = manifest.get("name").and_then(serde_json::Value::as_str) {
+                names.insert(name.to_string());
+            }
+        }
+        Some(serde_json::Value::Object(map)) => {
+            names.extend(map.keys().cloned());
+        }
+        _ => {}
+    }
+    Ok(names)
 }
 
 fn native_hook_paths_from(paths: &BTreeSet<PathBuf>) -> BTreeSet<PathBuf> {
@@ -844,6 +940,22 @@ fn cursor_safety_rule_paths_from(paths: &BTreeSet<PathBuf>) -> BTreeSet<PathBuf>
         .collect()
 }
 
+fn opencode_hook_instruction_paths_from(paths: &BTreeSet<PathBuf>) -> BTreeSet<PathBuf> {
+    paths
+        .iter()
+        .filter(|path| is_opencode_hook_instruction_path(path))
+        .cloned()
+        .collect()
+}
+
+fn pi_bin_paths_from(paths: &BTreeSet<PathBuf>) -> BTreeSet<PathBuf> {
+    paths
+        .iter()
+        .filter(|path| is_pi_bin_path(path))
+        .cloned()
+        .collect()
+}
+
 fn is_native_hook_script_path(path: &Path) -> bool {
     let Some(path_str) = path.to_str() else {
         return false;
@@ -858,6 +970,31 @@ fn is_cursor_safety_rule_path(path: &Path) -> bool {
     };
     path.extension().is_some_and(|extension| extension == "mdc")
         && path_str.starts_with(".cursor/rules/safety-")
+}
+
+fn is_opencode_hook_instruction_path(path: &Path) -> bool {
+    let Some(path_str) = path.to_str() else {
+        return false;
+    };
+    path.extension().is_some_and(|extension| extension == "md")
+        && path_str.starts_with(".opencode/instructions/vstack-hook-")
+}
+
+fn is_pi_bin_path(path: &Path) -> bool {
+    let mut components = path.components();
+    if components
+        .next()
+        .is_none_or(|component| component.as_os_str() != ".pi")
+    {
+        return false;
+    }
+    if components
+        .next()
+        .is_none_or(|component| component.as_os_str() != "bin")
+    {
+        return false;
+    }
+    components.next().is_some() && components.next().is_none()
 }
 
 fn pi_package_status_prefixes(seed_paths: &BTreeSet<PathBuf>) -> BTreeSet<PathBuf> {
@@ -915,6 +1052,8 @@ fn managed_status_pathspecs(
     seed_paths: &BTreeSet<PathBuf>,
     owned_shared_paths: &BTreeSet<PathBuf>,
     owned_cursor_safety_rules: &BTreeSet<PathBuf>,
+    owned_opencode_hook_instructions: &BTreeSet<PathBuf>,
+    owned_pi_bin_paths: &BTreeSet<PathBuf>,
 ) -> Result<Vec<PathBuf>> {
     let mut paths = seed_paths.clone();
     for prefix in pi_package_status_prefixes(seed_paths) {
@@ -922,13 +1061,14 @@ fn managed_status_pathspecs(
     }
     paths.extend(owned_shared_paths.iter().cloned());
     paths.extend(owned_cursor_safety_rules.iter().cloned());
+    paths.extend(owned_opencode_hook_instructions.iter().cloned());
+    paths.extend(owned_pi_bin_paths.iter().cloned());
     for path in [
         ".vstack-lock.json",
         "vstack.toml",
         "vstack.settings.toml",
         ".claude/hooks",
         ".codex/hooks",
-        ".opencode/instructions",
     ] {
         paths.insert(PathBuf::from(path));
     }
@@ -980,6 +1120,8 @@ fn is_managed_status_path(
     owned_shared_paths: &BTreeSet<PathBuf>,
     owned_deleted_native_hooks: &BTreeSet<PathBuf>,
     owned_cursor_safety_rules: &BTreeSet<PathBuf>,
+    owned_opencode_hook_instructions: &BTreeSet<PathBuf>,
+    owned_pi_bin_paths: &BTreeSet<PathBuf>,
     status: &[u8],
 ) -> bool {
     let path = path.components().collect::<PathBuf>();
@@ -992,9 +1134,9 @@ fn is_managed_status_path(
     if owned_shared_paths.contains(&path) {
         return true;
     }
-    let Some(path_str) = path.to_str() else {
+    if path.to_str().is_none() {
         return false;
-    };
+    }
     let is_pi_package_path = pi_package_prefixes
         .iter()
         .any(|prefix| path.starts_with(prefix));
@@ -1002,8 +1144,10 @@ fn is_managed_status_path(
         .components()
         .any(|component| component.as_os_str() == OsStr::new("node_modules"));
     (is_pi_package_path && (!is_node_modules_path || status.contains(&b'D')))
+        || owned_pi_bin_paths.contains(&path)
         || (is_cursor_safety_rule_path(&path) && owned_cursor_safety_rules.contains(&path))
-        || path_str.starts_with(".opencode/instructions/vstack-hook-")
+        || (is_opencode_hook_instruction_path(&path)
+            && owned_opencode_hook_instructions.contains(&path))
         || (status.contains(&b'D')
             && is_native_hook_script_path(&path)
             && owned_deleted_native_hooks.contains(&path))
