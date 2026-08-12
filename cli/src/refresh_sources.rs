@@ -585,6 +585,7 @@ pub(crate) fn remote_cache_key(source: &str) -> String {
 }
 
 fn remote_cache_identity(source: &str) -> String {
+    let source = source.trim().trim_end_matches('/');
     if let Some(slug) = config::parse_github_slug(source) {
         if source.starts_with("git@") {
             return format!("github+scp:{slug}");
@@ -594,7 +595,7 @@ fn remote_cache_identity(source: &str) -> String {
         }
         return format!("github+https:{slug}");
     }
-    redact_remote_userinfo(source.trim().trim_end_matches('/'))
+    remote_identity_without_secret_userinfo(source)
         .trim_end_matches(".git")
         .to_string()
 }
@@ -833,24 +834,69 @@ fn redact_remote_userinfo_in_text(input: &str) -> String {
         .join(" ")
 }
 
-fn redact_remote_userinfo(input: &str) -> String {
-    let Some(scheme_end) = input.find("://") else {
-        return input.to_string();
-    };
+struct UrlUserInfo<'a> {
+    scheme: &'a str,
+    prefix: &'a str,
+    userinfo: &'a str,
+    host: &'a str,
+    suffix: &'a str,
+}
+
+fn split_url_userinfo(input: &str) -> Option<UrlUserInfo<'_>> {
+    let scheme_end = input.find("://")?;
     let authority_start = scheme_end + 3;
     let authority_end = input[authority_start..]
         .find(['/', ' ', '\t', '\n', '\r'])
         .map(|idx| authority_start + idx)
         .unwrap_or(input.len());
     let authority = &input[authority_start..authority_end];
-    let Some(at) = authority.rfind('@') else {
+    let at = authority.rfind('@')?;
+    Some(UrlUserInfo {
+        scheme: &input[..scheme_end],
+        prefix: &input[..authority_start],
+        userinfo: &authority[..at],
+        host: &authority[at + 1..],
+        suffix: &input[authority_end..],
+    })
+}
+
+fn is_ssh_like_scheme(scheme: &str) -> bool {
+    scheme.eq_ignore_ascii_case("ssh") || scheme.eq_ignore_ascii_case("git+ssh")
+}
+
+fn remote_identity_without_secret_userinfo(input: &str) -> String {
+    let Some(parts) = split_url_userinfo(input) else {
         return input.to_string();
     };
+    let username = parts
+        .userinfo
+        .split_once(':')
+        .map(|(username, _)| username)
+        .or_else(|| is_ssh_like_scheme(parts.scheme).then_some(parts.userinfo));
+    match username.filter(|username| !username.is_empty()) {
+        Some(username) => format!("{}{username}@{}{}", parts.prefix, parts.host, parts.suffix),
+        None => format!("{}{}{}", parts.prefix, parts.host, parts.suffix),
+    }
+}
+
+fn redact_remote_userinfo(input: &str) -> String {
+    let Some(parts) = split_url_userinfo(input) else {
+        return input.to_string();
+    };
+    let redacted_userinfo = if let Some((username, _)) = parts.userinfo.split_once(':') {
+        if username.is_empty() {
+            "<redacted>".to_string()
+        } else {
+            format!("{username}:<redacted>")
+        }
+    } else if is_ssh_like_scheme(parts.scheme) {
+        parts.userinfo.to_string()
+    } else {
+        "<redacted>".to_string()
+    };
     format!(
-        "{}{}{}",
-        &input[..authority_start],
-        format!("<redacted>@{}", &authority[at + 1..]),
-        &input[authority_end..]
+        "{}{}@{}{}",
+        parts.prefix, redacted_userinfo, parts.host, parts.suffix
     )
 }
 

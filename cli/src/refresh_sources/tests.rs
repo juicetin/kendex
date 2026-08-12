@@ -467,6 +467,14 @@ fn remote_helpers_redact_urls_and_use_collision_resistant_safe_keys() {
         remote_source_display("https://token@example.com/Owner/Repo.git"),
         "https://<redacted>@example.com/Owner/Repo.git"
     );
+    assert_eq!(
+        remote_source_display("ssh://alice@example.com/Owner/Repo.git"),
+        "ssh://alice@example.com/Owner/Repo.git"
+    );
+    assert_eq!(
+        remote_source_display("ssh://alice:secret@example.com/Owner/Repo.git"),
+        "ssh://alice:<redacted>@example.com/Owner/Repo.git"
+    );
 
     let github_key = remote_cache_key("https://token@github.com/Owner/Repo.git");
     assert!(github_key.starts_with("owner_repo_"));
@@ -484,12 +492,61 @@ fn remote_helpers_redact_urls_and_use_collision_resistant_safe_keys() {
         remote_cache_key("ssh://git@github.com/Owner/Repo.git"),
         "explicit SSH transport keeps a distinct cache identity"
     );
+    assert_ne!(
+        remote_cache_key("ssh://alice@example.com/Owner/Repo.git"),
+        remote_cache_key("ssh://bob@example.com/Owner/Repo.git"),
+        "SSH usernames affect routing and keep distinct cache identities"
+    );
+    assert_eq!(
+        remote_cache_identity("ssh://alice:secret@example.com/Owner/Repo.git"),
+        remote_cache_identity("ssh://alice:other-secret@example.com/Owner/Repo.git"),
+        "passwords do not affect cache identity"
+    );
+    assert!(
+        !remote_cache_identity("ssh://alice:secret@example.com/Owner/Repo.git").contains("secret")
+    );
 
     let err = clone_or_update_remote_source("http://token@example.com/Owner/Repo.git")
         .unwrap_err()
         .to_string();
     assert!(err.contains("plaintext HTTP"), "{err}");
     assert!(!err.contains("token"), "{err}");
+}
+
+#[test]
+fn cached_repo_origin_validation_distinguishes_ssh_usernames() {
+    let root = TempDir::new("remote-cache-ssh-user-mismatch");
+    let cache = root.path().join("cache").join("remote");
+    init_git_repo(&cache);
+    git(
+        &cache,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "ssh://bob:actual-secret@example.com/Owner/Repo.git",
+        ],
+    );
+
+    let err = validate_cached_repo_origin(
+        &remote_source_display("ssh://alice:display-secret@example.com/Owner/Repo.git"),
+        "ssh://alice:expected-secret@example.com/Owner/Repo.git",
+        &cache,
+    )
+    .unwrap_err()
+    .to_string();
+
+    assert!(
+        err.contains("ssh://bob:<redacted>@example.com/Owner/Repo.git"),
+        "{err}"
+    );
+    assert!(
+        err.contains("ssh://alice:<redacted>@example.com/Owner/Repo.git"),
+        "{err}"
+    );
+    assert!(!err.contains("actual-secret"), "{err}");
+    assert!(!err.contains("display-secret"), "{err}");
+    assert!(!err.contains("expected-secret"), "{err}");
 }
 
 #[test]
