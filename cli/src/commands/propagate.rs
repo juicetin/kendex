@@ -139,7 +139,7 @@ pub fn run(
 
     if stage {
         verify_project_auxiliary_installs_before_stage()?;
-        stage_project_paths(&pre_refresh_stage_paths)?;
+        stage_project_paths_after_refresh(&pre_refresh_stage_paths)?;
     }
 
     Ok(())
@@ -457,19 +457,50 @@ fn short_hash(hash: &str) -> String {
     }
 }
 
+/// How a locked source that will not resolve should be treated while
+/// collecting stage paths.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SourceStrictness {
+    /// Fail: the paths this pass returns are the authoritative staged set.
+    Required,
+    /// Skip the item: this pass runs before sources have been resolved, so a
+    /// remote cache may not exist yet on a clean runner. `stage_project_paths`
+    /// recollects with `Required` after the refresh, so nothing is lost.
+    BestEffort,
+}
+
+/// Whether a refresh rewrote the managed tree in this invocation. A Pi package
+/// directory is cleared and re-copied wholesale by install, so after a refresh
+/// every tracked path under it is vstack-driven; without one, a vanished
+/// tracked file is the consumer's own and must not be staged.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RefreshState {
+    Refreshed,
+    NotRefreshed,
+}
+
 fn pre_refresh_project_stage_paths() -> Result<Vec<PathBuf>> {
     let lock = LockFile::load(&config::lock_file_path(false))?;
-    project_stage_paths(&lock, true)
+    // Runs before `detect_drift_for_scope` clones remote sources.
+    project_stage_paths_with(&lock, true, SourceStrictness::BestEffort)
 }
 
 fn stage_project_paths(pre_refresh_paths: &[PathBuf]) -> Result<()> {
+    stage_project_paths_with(pre_refresh_paths, RefreshState::NotRefreshed)
+}
+
+fn stage_project_paths_after_refresh(pre_refresh_paths: &[PathBuf]) -> Result<()> {
+    stage_project_paths_with(pre_refresh_paths, RefreshState::Refreshed)
+}
+
+fn stage_project_paths_with(pre_refresh_paths: &[PathBuf], refreshed: RefreshState) -> Result<()> {
     let lock = LockFile::load(&config::lock_file_path(false))?;
     let mut paths = BTreeSet::new();
     paths.extend(pre_refresh_paths.iter().cloned());
     paths.extend(project_stage_paths(&lock, false)?);
     let mut ownership_paths = paths.clone();
     ownership_paths.extend(project_stage_paths(&lock, true)?);
-    let status_paths = managed_paths_from_git_status(&ownership_paths)?;
+    let status_paths = managed_paths_from_git_status(&ownership_paths, refreshed)?;
     paths.extend(status_paths);
     let paths: Vec<PathBuf> = paths.into_iter().collect();
     stage_paths(&paths)
@@ -513,6 +544,14 @@ fn stage_paths(paths: &[PathBuf]) -> Result<()> {
 }
 
 fn project_stage_paths(lock: &LockFile, include_missing: bool) -> Result<Vec<PathBuf>> {
+    project_stage_paths_with(lock, include_missing, SourceStrictness::Required)
+}
+
+fn project_stage_paths_with(
+    lock: &LockFile,
+    include_missing: bool,
+    strictness: SourceStrictness,
+) -> Result<Vec<PathBuf>> {
     let project_root = config::project_root();
     let mut paths = BTreeSet::new();
     push_if_stageable(
@@ -624,6 +663,7 @@ fn project_stage_paths(lock: &LockFile, include_missing: bool) -> Result<Vec<Pat
                     entry,
                     &package_dir,
                     include_missing,
+                    strictness,
                 )?;
                 if let Ok(ext) = crate::pi_extension::PiExtension::from_dir(&package_dir) {
                     if ext.append_system.is_some() {
@@ -821,21 +861,26 @@ fn push_pi_package_stage_paths(
     entry: &config::LockEntry,
     package_dir: &Path,
     include_missing: bool,
+    strictness: SourceStrictness,
 ) -> Result<()> {
-    let source_root = config::resolve_source_path(&entry.source).with_context(|| {
-        format!(
+    let source_root = match config::resolve_source_path(&entry.source) {
+        Some(root) => root,
+        None if strictness == SourceStrictness::BestEffort => return Ok(()),
+        None => bail!(
             "unable to resolve source for locked Pi package {}",
             entry.name
-        )
-    })?;
-    let source_package_dir = crate::catalog::find_item_path(&source_root, entry.kind, &entry.name)
-        .with_context(|| {
-            format!(
+        ),
+    };
+    let source_package_dir =
+        match crate::catalog::find_item_path(&source_root, entry.kind, &entry.name) {
+            Some(dir) => dir,
+            None if strictness == SourceStrictness::BestEffort => return Ok(()),
+            None => bail!(
                 "unable to find source package {} in {}",
                 entry.name,
                 source_root.display()
-            )
-        })?;
+            ),
+        };
     push_pi_package_files_from(
         paths,
         project_root,
@@ -1075,13 +1120,16 @@ fn git_literal_command() -> Command {
     command
 }
 
-fn managed_paths_from_git_status(seed_paths: &BTreeSet<PathBuf>) -> Result<Vec<PathBuf>> {
+fn managed_paths_from_git_status(
+    seed_paths: &BTreeSet<PathBuf>,
+    refreshed: RefreshState,
+) -> Result<Vec<PathBuf>> {
     let git = git_project()?;
     let mut owned_deleted_locked_skill_paths = committed_locked_skill_stage_paths(&git)?;
     owned_deleted_locked_skill_paths.extend(
         vendored_locked_skill_stage_paths_without_committed_lock(&git)?,
     );
-    let committed_pi_package_paths = committed_pi_package_stage_paths(&git)?;
+    let committed_pi_package_paths = committed_pi_package_stage_paths(&git, refreshed)?;
     let mut committed_paths = committed_project_stage_paths(&git)?;
     committed_paths.extend(owned_deleted_locked_skill_paths.iter().cloned());
     committed_paths.extend(committed_pi_package_paths.iter().cloned());
@@ -1326,7 +1374,10 @@ fn committed_locked_skill_stage_paths_from_lock(
     git_tracked_project_paths_under(git, &dirs)
 }
 
-fn committed_pi_package_stage_paths(git: &GitProject) -> Result<BTreeSet<PathBuf>> {
+fn committed_pi_package_stage_paths(
+    git: &GitProject,
+    refreshed: RefreshState,
+) -> Result<BTreeSet<PathBuf>> {
     let Some(lock) = committed_project_lock(git)? else {
         return Ok(BTreeSet::new());
     };
@@ -1360,7 +1411,14 @@ fn committed_pi_package_stage_paths(git: &GitProject) -> Result<BTreeSet<PathBuf
             &package_dir,
         )?);
     }
-    Ok(git_tracked_project_paths_under(git, &dirs)?
+    let tracked = git_tracked_project_paths_under(git, &dirs)?;
+    if refreshed == RefreshState::Refreshed {
+        // Install clears and re-copies the package directory, so a tracked file
+        // that is gone after a refresh was removed by vstack — including
+        // supporting files no manifest entrypoint names.
+        return Ok(tracked);
+    }
+    Ok(tracked
         .into_iter()
         .filter(|path| owned_paths.contains(path))
         .collect())

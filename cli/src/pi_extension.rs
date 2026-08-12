@@ -726,7 +726,7 @@ fn install_bin_links(ext: &PiExtension, package_dest: &Path, global: bool) -> Re
             let link_target = if global {
                 target.clone()
             } else {
-                crate::installer::relative_path(link.parent().unwrap_or(&bin_dir), &target)?
+                project_bin_link_target(&link, &target)?
             };
             std::os::unix::fs::symlink(&link_target, &link).with_context(|| {
                 format!(
@@ -738,6 +738,45 @@ fn install_bin_links(ext: &PiExtension, package_dest: &Path, global: bool) -> Re
         }
     }
     Ok(())
+}
+
+/// Relative target for a project-scope `.pi/bin/<cmd>` link.
+///
+/// Both link and target are built from `pi_project_dir()`, so the answer is
+/// derived lexically from that shared root. Deliberately not via
+/// `installer::relative_path`: that canonicalizes, and falls back to an
+/// absolute target when the scope directory sits behind symlink indirection —
+/// which is exactly the worktree layout that symlinks `.pi`. A committed
+/// absolute link is broken for everyone else, so an unexpected layout is an
+/// error rather than a silent non-portable link.
+#[cfg(unix)]
+fn project_bin_link_target(link: &Path, target: &Path) -> Result<PathBuf> {
+    let scope_root = crate::installer::normalize_absolute_path(&crate::config::pi_project_dir());
+    let link_dir = crate::installer::normalize_absolute_path(
+        link.parent()
+            .context("Pi bin link has no parent directory")?,
+    );
+    let target = crate::installer::normalize_absolute_path(target);
+    let link_rest = link_dir.strip_prefix(&scope_root).with_context(|| {
+        format!(
+            "Pi bin link {} is outside the project Pi directory {}",
+            link_dir.display(),
+            scope_root.display()
+        )
+    })?;
+    let target_rest = target.strip_prefix(&scope_root).with_context(|| {
+        format!(
+            "Pi bin target {} is outside the project Pi directory {}",
+            target.display(),
+            scope_root.display()
+        )
+    })?;
+    let mut relative = PathBuf::new();
+    for _ in link_rest.components() {
+        relative.push("..");
+    }
+    relative.push(target_rest);
+    Ok(relative)
 }
 
 fn installed_bin_names(package_dest: &Path) -> BTreeSet<String> {
@@ -1952,6 +1991,65 @@ printf 'module.exports = 1;\n' > node_modules/left-pad/index.js
                 PathBuf::from("../packages/pi-bridgey/bin/pi-bridge.js")
             );
             assert!(!target.is_absolute(), "project bin links must be portable");
+            assert!(
+                link.parent().unwrap().join(&target).exists(),
+                "relative target should resolve inside the project"
+            );
+        });
+
+        let _ = std::fs::remove_dir_all(&sandbox);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn project_bin_links_stay_relative_when_the_pi_dir_is_a_symlink() {
+        let sandbox = std::env::temp_dir().join(format!(
+            "vstack_pi_worktree_bin_links_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&sandbox);
+        let source = sandbox.join("src").join("pi-bridgey");
+        std::fs::create_dir_all(source.join("bin")).unwrap();
+        std::fs::create_dir_all(source.join("extensions")).unwrap();
+        std::fs::write(source.join("extensions").join("ext.ts"), "// noop\n").unwrap();
+        std::fs::write(
+            source.join("bin").join("pi-bridge.js"),
+            "#!/usr/bin/env node\n",
+        )
+        .unwrap();
+        std::fs::write(
+            source.join("package.json"),
+            r#"{
+                "name": "pi-bridgey",
+                "pi": { "extensions": ["./extensions/ext.ts"] },
+                "bin": { "pi-bridge": "./bin/pi-bridge.js" }
+            }"#,
+        )
+        .unwrap();
+
+        // Worktree layout: the project's `.pi` is a symlink into a shared store,
+        // which is what made the canonicalizing helper fall back to absolute.
+        let project = sandbox.join("worktree");
+        std::fs::create_dir_all(&project).unwrap();
+        let shared_pi = sandbox.join("shared-pi");
+        std::fs::create_dir_all(&shared_pi).unwrap();
+        std::os::unix::fs::symlink(&shared_pi, project.join(".pi")).unwrap();
+
+        with_project_root(&project, || {
+            let ext = PiExtension::from_dir(&source).unwrap();
+            install_pi_extension(&ext, false).unwrap().unwrap();
+
+            let link = project.join(".pi").join("bin").join("pi-bridge");
+            let target = std::fs::read_link(&link).unwrap();
+            assert!(
+                !target.is_absolute(),
+                "worktree install produced a non-portable absolute link: {}",
+                target.display()
+            );
+            assert_eq!(
+                target,
+                PathBuf::from("../packages/pi-bridgey/bin/pi-bridge.js")
+            );
             assert!(
                 link.parent().unwrap().join(&target).exists(),
                 "relative target should resolve inside the project"

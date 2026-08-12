@@ -209,6 +209,9 @@ fn locate_pi_source_from_sources(entry: &LockEntry, sources: &[RefreshSource]) -
 }
 
 fn verify_skill_install(entry: &LockEntry, global: bool) -> (Option<bool>, Option<String>) {
+    if entry.harnesses.is_empty() {
+        return (Some(false), Some("no harnesses recorded".into()));
+    }
     let mut unknown = Vec::new();
     let mut path_harnesses: BTreeMap<PathBuf, Vec<String>> = BTreeMap::new();
     for h in &entry.harnesses {
@@ -246,6 +249,9 @@ fn verify_agent_install(
     harnesses: &[String],
     global: bool,
 ) -> (Option<bool>, Option<String>) {
+    if harnesses.is_empty() {
+        return (Some(false), Some("no harnesses recorded".into()));
+    }
     let mut missing = Vec::new();
     let mut unknown = Vec::new();
     for h in harnesses {
@@ -517,6 +523,32 @@ mod tests {
 
             let err = run(ScopeFilter::Project, &[]).unwrap_err().to_string();
             assert!(err.contains("verification failed"), "{err}");
+        });
+    }
+
+    #[test]
+    fn verify_fails_when_a_lock_entry_records_no_harnesses() {
+        let project = tmpdir("empty-harness-entry");
+        std::fs::create_dir_all(&project).unwrap();
+
+        crate::test_util::with_project_root(&project, || {
+            let entry = LockEntry {
+                name: "demo".to_string(),
+                kind: ItemKind::Skill,
+                source: "/unused/source".to_string(),
+                source_repo: None,
+                harnesses: Vec::new(),
+                method: InstallMethod::Copy,
+                installed_at: "2026-08-11T00:00:00Z".to_string(),
+                source_hash: "stored-hash".to_string(),
+            };
+            let (ok, note) = verify_skill_install(&entry, false);
+            assert_eq!(ok, Some(false));
+            assert!(note.unwrap().contains("no harnesses"), "skill");
+
+            let (ok, note) = verify_agent_install("demo", &[], false);
+            assert_eq!(ok, Some(false));
+            assert!(note.unwrap().contains("no harnesses"), "agent");
         });
     }
 

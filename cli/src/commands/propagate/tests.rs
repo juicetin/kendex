@@ -2146,3 +2146,77 @@ fn stage_mode_fails_before_staging_when_pi_bin_link_is_replaced() {
         );
     });
 }
+
+#[test]
+fn pre_refresh_stage_paths_tolerate_a_remote_pi_source_with_no_cache_yet() {
+    let project = tmpdir("stage-pi-remote-source-first-run");
+    std::fs::create_dir_all(&project).unwrap();
+
+    crate::test_util::with_project_root(&project, || {
+        let mut entry = lock_entry("demo-pkg", ItemKind::PiExtension, &["pi"]);
+        // A remote shorthand whose cache has not been cloned yet, exactly as on
+        // a clean CI runner before `detect_drift_for_scope` resolves sources.
+        entry.source = "owner/repo".to_string();
+        let mut lock = LockFile::default();
+        lock.add(entry);
+        lock.save(&config::lock_file_path(false)).unwrap();
+
+        // Pre-refresh collection runs before resolution and must not abort.
+        pre_refresh_project_stage_paths().unwrap();
+
+        // Once sources are meant to be resolved, the same lock still fails closed.
+        let err = project_stage_paths(&lock, true).unwrap_err().to_string();
+        assert!(err.contains("demo-pkg"), "{err}");
+        assert!(err.contains("source"), "{err}");
+    });
+}
+
+#[test]
+fn refreshed_staging_records_deleted_supporting_pi_files_not_named_by_the_manifest() {
+    let project = tmpdir("stage-pi-supporting-delete");
+    let source = tmpdir("stage-pi-supporting-delete-source");
+    std::fs::create_dir_all(&project).unwrap();
+    init_git_project(&project);
+    // The advanced source no longer carries `lib/helper.ts`, and no manifest
+    // entrypoint ever named it.
+    write_file(
+        &source.join("pi-extensions/demo-pkg/package.json"),
+        r#"{"name":"demo-pkg","pi":{"extensions":["extensions/main.ts"]}}"#,
+    );
+    write_file(
+        &source.join("pi-extensions/demo-pkg/extensions/main.ts"),
+        "main\n",
+    );
+
+    crate::test_util::with_project_root(&project, || {
+        let mut entry = pi_entry("demo-pkg", &source);
+        entry.source_hash = config::compute_source_hash(&entry);
+        let mut lock = LockFile::default();
+        lock.add(entry);
+        lock.save(&config::lock_file_path(false)).unwrap();
+        write_file(
+            &project.join(".pi/packages/demo-pkg/package.json"),
+            r#"{"name":"demo-pkg","pi":{"extensions":["extensions/main.ts"]}}"#,
+        );
+        write_file(
+            &project.join(".pi/packages/demo-pkg/extensions/main.ts"),
+            "main\n",
+        );
+        write_file(
+            &project.join(".pi/packages/demo-pkg/lib/helper.ts"),
+            "helper\n",
+        );
+        git(&project, &["add", "-A"]);
+        git(&project, &["commit", "-m", "baseline"]);
+
+        // Refresh cleared and re-copied the package, dropping the helper.
+        std::fs::remove_file(project.join(".pi/packages/demo-pkg/lib/helper.ts")).unwrap();
+
+        stage_project_paths_after_refresh(&[]).unwrap();
+        let staged = git_output(&project, &["diff", "--cached", "--name-status"]);
+        assert!(
+            staged.contains("D\t.pi/packages/demo-pkg/lib/helper.ts"),
+            "{staged}"
+        );
+    });
+}
