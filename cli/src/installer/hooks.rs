@@ -609,6 +609,41 @@ fn codex_features_state(lines: &[String]) -> CodexFeaturesState {
     state
 }
 
+/// Whether `<root>/config.toml` enables the Codex hooks runtime — i.e. carries
+/// `hooks = true` inside `[features]`. Codex silently ignores `hooks.json`
+/// without it, so an install is only complete when this is set. A missing or
+/// unreadable file reads as disabled.
+pub(crate) fn codex_hooks_feature_enabled(config_path: &Path) -> bool {
+    let Ok(content) = std::fs::read_to_string(config_path) else {
+        return false;
+    };
+    let mut in_features = false;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed == "[features]" {
+            in_features = true;
+            continue;
+        }
+        if in_features && is_toml_table_header(trimmed) {
+            in_features = false;
+        }
+        if !in_features {
+            continue;
+        }
+        if toml_assignment_key(line) == Some("hooks") {
+            return toml_assignment_value(line).is_some_and(|value| {
+                value
+                    .split_once('#')
+                    .map_or(value, |(head, _)| head)
+                    .trim()
+                    .trim_matches('"')
+                    == "true"
+            });
+        }
+    }
+    false
+}
+
 fn is_toml_table_header(trimmed_line: &str) -> bool {
     trimmed_line.starts_with('[') && trimmed_line.ends_with(']')
 }

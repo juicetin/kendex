@@ -22,7 +22,7 @@
 //! with shell pipelines (`vstack verify -g && pi`).
 
 use crate::config::{self, ItemKind, LockEntry};
-use crate::refresh_sources::ResolvedSource;
+use crate::refresh_sources::{RefreshSource, ResolvedSource};
 use crate::scope::ScopeFilter;
 use anyhow::{Result, bail};
 use std::collections::BTreeMap;
@@ -62,17 +62,20 @@ pub(crate) fn run_with_source_records(
         }
         let scope_label = if global { "GLOBAL" } else { "PROJECT" };
         eprintln!("\n─ verify ({scope_label}) ─");
-        let source_records = resolved_records
+        // Catalog discovery walks the whole source tree, so load each scope's
+        // sources once here rather than per lock entry.
+        let refresh_sources = resolved_records
             .iter()
             .find(|(scope_global, _)| *scope_global == global)
-            .map(|(_, records)| records.as_slice());
+            .map(|(_, records)| crate::refresh_sources::load_refresh_sources(records));
+        let refresh_sources = refresh_sources.as_deref();
 
         let mut rows: Vec<VerifyRow> = Vec::new();
         for (entry_name, entry) in &lock.entries {
             if !names.is_empty() && !names.iter().any(|n| n == entry_name) {
                 continue;
             }
-            rows.push(verify_entry(entry, global, source_records));
+            rows.push(verify_entry(entry, global, refresh_sources));
         }
         rows.sort_by(|a, b| a.name.cmp(&b.name));
 
@@ -125,11 +128,7 @@ pub(crate) fn run_with_source_records(
     Ok(())
 }
 
-fn verify_entry(
-    entry: &LockEntry,
-    global: bool,
-    source_records: Option<&[ResolvedSource]>,
-) -> VerifyRow {
+fn verify_entry(entry: &LockEntry, global: bool, sources: Option<&[RefreshSource]>) -> VerifyRow {
     let kind = entry.kind.label_short();
     let name = entry.name.clone();
 
@@ -145,7 +144,7 @@ fn verify_entry(
 
     // Per-kind install check.
     let (install_ok, note) = match entry.kind {
-        ItemKind::PiExtension => verify_pi_install(entry, global, source_records),
+        ItemKind::PiExtension => verify_pi_install(entry, global, sources),
         ItemKind::Skill => verify_skill_install(entry, global),
         ItemKind::Agent => verify_agent_install(&entry.name, &entry.harnesses, global),
         ItemKind::Hook => verify_hook_install(&entry.name, &entry.harnesses, global),
@@ -164,14 +163,14 @@ fn verify_entry(
 fn verify_pi_install(
     entry: &LockEntry,
     global: bool,
-    source_records: Option<&[ResolvedSource]>,
+    sources: Option<&[RefreshSource]>,
 ) -> (Option<bool>, Option<String>) {
     let name = &entry.name;
     let install_dir = config::pi_packages_dir(global).join(name);
     if !install_dir.is_dir() {
         return (Some(false), Some("install path missing".into()));
     }
-    let source_dir = match locate_pi_source_for_entry(entry, global, source_records) {
+    let source_dir = match locate_pi_source_for_entry(entry, global, sources) {
         Some(p) => p,
         None => return (None, Some("source path unresolvable".into())),
     };
@@ -193,19 +192,18 @@ fn verify_pi_install(
 fn locate_pi_source_for_entry(
     entry: &LockEntry,
     global: bool,
-    source_records: Option<&[ResolvedSource]>,
+    sources: Option<&[RefreshSource]>,
 ) -> Option<PathBuf> {
-    if let Some(records) = source_records
-        && let Some(path) = locate_pi_source_from_records(entry, records)
+    if let Some(sources) = sources
+        && let Some(path) = locate_pi_source_from_sources(entry, sources)
     {
         return Some(path);
     }
     locate_pi_source(&entry.name, global)
 }
 
-fn locate_pi_source_from_records(entry: &LockEntry, records: &[ResolvedSource]) -> Option<PathBuf> {
-    let sources = crate::refresh_sources::load_refresh_sources(records);
-    let source = crate::refresh_sources::refresh_source_for_entry(&sources, entry)?;
+fn locate_pi_source_from_sources(entry: &LockEntry, sources: &[RefreshSource]) -> Option<PathBuf> {
+    let source = crate::refresh_sources::refresh_source_for_entry(sources, entry)?;
     crate::refresh_sources::source_pi_extension_for_lock_name(&source.pi_extensions, &entry.name)
         .map(|ext| ext.source_dir.clone())
 }

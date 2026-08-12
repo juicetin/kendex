@@ -197,6 +197,18 @@ fn verify_hook_auxiliary_install(name: &str, harness: Harness, failures: &mut Ve
                     &format!("Codex hook {name}"),
                     failures,
                 );
+                // Codex ignores hooks.json entirely unless the runtime feature
+                // is on, so a registered hook with the flag off or the config
+                // deleted is a broken install, not a stageable state.
+                let config_toml = Path::new(".codex").join("config.toml");
+                if !crate::installer::codex_hooks_feature_enabled(
+                    &config::project_root().join(&config_toml),
+                ) {
+                    failures.push(format!(
+                        "{} missing [features] hooks = true for Codex hook {name}",
+                        config_toml.display()
+                    ));
+                }
             }
         }
         _ => {}
@@ -234,13 +246,59 @@ fn verify_pi_auxiliary_install(name: &str, failures: &mut Vec<String>) -> Result
             crate::pi_extension::validate_pi_bin_name(bin_name)
                 .with_context(|| format!("unsafe Pi bin name {bin_name}"))?;
             let bin = config::pi_bin_dir(false).join(bin_name);
-            if std::fs::symlink_metadata(&bin).is_err() {
-                failures.push(format!(".pi/bin/{bin_name} missing for Pi package {name}"));
+            if let Some(failure) = pi_bin_link_failure(&bin, bin_name, &package_dir, name) {
+                failures.push(failure);
             }
         }
     }
 
     Ok(())
+}
+
+/// A locked `.pi/bin/<cmd>` is only a valid install when it is a symlink that
+/// resolves into its own package. An inode alone is not evidence: a
+/// consumer-owned regular file, or a link redirected elsewhere, is a
+/// replacement that staging must refuse rather than absorb into a PR.
+#[cfg(unix)]
+fn pi_bin_link_failure(
+    bin: &Path,
+    bin_name: &str,
+    package_dir: &Path,
+    package_name: &str,
+) -> Option<String> {
+    let Ok(meta) = std::fs::symlink_metadata(bin) else {
+        return Some(format!(
+            ".pi/bin/{bin_name} missing for Pi package {package_name}"
+        ));
+    };
+    if !meta.file_type().is_symlink() {
+        return Some(format!(
+            ".pi/bin/{bin_name} is not a symlink for Pi package {package_name}"
+        ));
+    }
+    let Ok(target) = std::fs::read_link(bin) else {
+        return Some(format!(
+            ".pi/bin/{bin_name} is an unreadable symlink for Pi package {package_name}"
+        ));
+    };
+    let resolved = if target.is_absolute() {
+        target
+    } else {
+        bin.parent().unwrap_or(Path::new(".")).join(target)
+    };
+    let resolved = crate::installer::normalize_absolute_path(&resolved);
+    let package_dir = crate::installer::normalize_absolute_path(package_dir);
+    if !resolved.starts_with(&package_dir) {
+        return Some(format!(
+            ".pi/bin/{bin_name} does not point into Pi package {package_name}"
+        ));
+    }
+    if !resolved.exists() {
+        return Some(format!(
+            ".pi/bin/{bin_name} is a dangling symlink for Pi package {package_name}"
+        ));
+    }
+    None
 }
 
 fn require_json_string_fragment(
@@ -481,6 +539,7 @@ fn project_stage_paths(lock: &LockFile, include_missing: bool) -> Result<Vec<Pat
     let mut has_claude_hook = false;
     let mut has_codex_hook = false;
     let mut has_pi_package = false;
+    let mut has_pi_append_system = false;
 
     for entry in lock.entries.values() {
         if entry.kind == ItemKind::PiExtension {
@@ -567,6 +626,9 @@ fn project_stage_paths(lock: &LockFile, include_missing: bool) -> Result<Vec<Pat
                     include_missing,
                 )?;
                 if let Ok(ext) = crate::pi_extension::PiExtension::from_dir(&package_dir) {
+                    if ext.append_system.is_some() {
+                        has_pi_append_system = true;
+                    }
                     for bin_name in ext.bin.keys() {
                         crate::path_safety::validate_item_name(bin_name)
                             .with_context(|| format!("unsafe Pi bin name {bin_name}"))?;
@@ -636,12 +698,17 @@ fn project_stage_paths(lock: &LockFile, include_missing: bool) -> Result<Vec<Pat
             config::pi_source_index_path(false),
             include_missing,
         );
-        push_abs_if_exists(
-            &mut paths,
-            &project_root,
-            crate::pi_extension::append_system_path(false),
-            include_missing,
-        );
+    }
+    // Owning a Pi package is not ownership of the whole prompt file. Stage
+    // `.pi/APPEND_SYSTEM.md` only when a locked package actually contributes a
+    // block, or when the file still carries one that a package drop must
+    // remove; a purely consumer-authored prompt stays out of the PR.
+    let append_system = crate::pi_extension::append_system_path(false);
+    if has_pi_package
+        && (has_pi_append_system
+            || crate::pi_extension::append_system_has_managed_block(&append_system))
+    {
+        push_abs_if_exists(&mut paths, &project_root, append_system, include_missing);
     }
 
     Ok(paths.into_iter().collect())
@@ -1429,7 +1496,18 @@ fn git_head_has_project_path(git: &GitProject, project_path: &Path) -> Result<bo
         .arg(&top_level_path)
         .output()
         .context("reading committed vstack-managed marker for ownership")?;
-    Ok(output.status.success() && !output.stdout.is_empty())
+    // `git ls-tree` exits 0 with empty output when the path simply is not in
+    // HEAD. A non-zero exit is a dependency failure, not an absence answer —
+    // reporting it as "no marker" would silently drop managed paths from the
+    // staged set. Callers only reach here once a committed lock was read, so
+    // HEAD is known to exist.
+    if !output.status.success() {
+        bail!(
+            "git ls-tree failed while reading the committed vstack-managed marker for {}",
+            top_level_path.display()
+        );
+    }
+    Ok(!output.stdout.is_empty())
 }
 
 fn committed_pi_bin_paths(git: &GitProject) -> Result<BTreeSet<PathBuf>> {

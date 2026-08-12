@@ -735,7 +735,15 @@ fn legacy_remote_cache_dirs(source: &str, cache_dir: &Path) -> Vec<PathBuf> {
     };
     let mut paths = Vec::new();
     let mut push_key = |key: String| {
-        if key.is_empty() {
+        // A legacy key is a single directory name under the cache root. Refuse
+        // anything that could still traverse: either separator form, or any
+        // relative component. Windows treats a backslash as a separator too,
+        // so a recorded source carrying one must not escape the cache root.
+        if key.is_empty()
+            || key.contains('/')
+            || key.contains('\\')
+            || Path::new(&key).components().count() != 1
+        {
             return;
         }
         let path = parent.join(key);
@@ -745,7 +753,7 @@ fn legacy_remote_cache_dirs(source: &str, cache_dir: &Path) -> Vec<PathBuf> {
     };
 
     if source.contains('/') && !source.starts_with('.') && !source.starts_with('/') {
-        push_key(source.replace('/', "_"));
+        push_key(source.replace(['/', '\\'], "_"));
     }
     if let Some(slug) = config::parse_github_slug(source) {
         push_key(sanitize_cache_component(&slug.replace('/', "_")));

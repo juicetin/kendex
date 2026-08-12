@@ -1954,3 +1954,195 @@ fn stage_mode_refreshes_verifies_updates_lock_and_stages_outputs() {
         );
     });
 }
+
+#[test]
+fn git_head_marker_lookup_fails_closed_when_ls_tree_fails() {
+    let project = tmpdir("git-head-marker-fail-closed");
+    std::fs::create_dir_all(&project).unwrap();
+
+    // Not a git repository: `git ls-tree HEAD` exits non-zero. Reporting that
+    // as "marker absent" would silently drop managed paths from staging.
+    let git = GitProject {
+        root: project.clone(),
+        prefix: PathBuf::new(),
+    };
+    let err = git_head_has_project_path(&git, Path::new(".agents/skills/demo/.vstack-refreshed"))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("git ls-tree failed"), "{err}");
+}
+
+#[test]
+fn stage_mode_fails_before_staging_when_codex_hooks_feature_is_off() {
+    let project = tmpdir("stage-no-drift-codex-hooks-feature-off");
+    let source = tmpdir("stage-no-drift-codex-hooks-feature-off-source");
+    std::fs::create_dir_all(&project).unwrap();
+    init_git_project(&project);
+    write_hook_source(&source, "guard");
+
+    crate::test_util::with_project_root(&project, || {
+        let mut entry = hook_entry("guard", &source, &["codex"]);
+        entry.source_hash = config::compute_source_hash(&entry);
+        let mut lock = LockFile::default();
+        lock.add(entry);
+        lock.save(&config::lock_file_path(false)).unwrap();
+        write_file(
+            &project.join(".codex/hooks/guard.sh"),
+            "#!/bin/sh\nexit 0\n",
+        );
+        write_file(
+            &project.join(".codex/hooks.json"),
+            r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"bash \"$(git rev-parse --show-toplevel)/.codex/hooks/guard.sh\""}]}]}}"#,
+        );
+        write_file(
+            &project.join(".codex/config.toml"),
+            "[features]\nhooks = true\n",
+        );
+        git(&project, &["add", "-A"]);
+        git(&project, &["commit", "-m", "baseline"]);
+
+        // Codex will not run the locked hook with the feature off, so this must
+        // not be stageable even though hooks.json still registers the script.
+        write_file(
+            &project.join(".codex/config.toml"),
+            "[features]\nhooks = false\n",
+        );
+
+        let err = run(ScopeFilter::Project, false, false, true, true)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("auxiliary verification failed"), "{err}");
+        assert!(err.contains(".codex/config.toml"), "{err}");
+        assert!(err.contains("hooks = true"), "{err}");
+        let staged = git_output(&project, &["diff", "--cached", "--name-only"]);
+        assert!(staged.is_empty(), "{staged}");
+
+        // A deleted config.toml is the same broken install.
+        std::fs::remove_file(project.join(".codex/config.toml")).unwrap();
+        let err = run(ScopeFilter::Project, false, false, true, true)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains(".codex/config.toml"), "{err}");
+        let staged = git_output(&project, &["diff", "--cached", "--name-only"]);
+        assert!(staged.is_empty(), "{staged}");
+    });
+}
+
+#[test]
+fn staging_leaves_consumer_owned_append_system_alone_and_stages_an_owned_one() {
+    let project = tmpdir("stage-pi-append-system-ownership");
+    let source = tmpdir("stage-pi-append-system-ownership-source");
+    std::fs::create_dir_all(&project).unwrap();
+    init_git_project(&project);
+    write_file(
+        &source.join("pi-extensions/demo-pkg/package.json"),
+        r#"{"name":"demo-pkg","pi":{"extensions":[]}}"#,
+    );
+
+    crate::test_util::with_project_root(&project, || {
+        let mut entry = pi_entry("demo-pkg", &source);
+        entry.source_hash = config::compute_source_hash(&entry);
+        let mut lock = LockFile::default();
+        lock.add(entry);
+        lock.save(&config::lock_file_path(false)).unwrap();
+        // Installed manifest declares no appendSystem, so the prompt file below
+        // is entirely the consumer's.
+        write_file(
+            &project.join(".pi/packages/demo-pkg/package.json"),
+            r#"{"name":"demo-pkg","pi":{"extensions":[]}}"#,
+        );
+        write_file(
+            &project.join(".pi/APPEND_SYSTEM.md"),
+            "consumer house rules\n",
+        );
+        git(&project, &["add", "-A"]);
+        git(&project, &["commit", "-m", "baseline"]);
+
+        write_file(
+            &project.join(".pi/APPEND_SYSTEM.md"),
+            "consumer house rules, revised\n",
+        );
+        stage_project_paths(&[]).unwrap();
+        let staged = git_output(&project, &["diff", "--cached", "--name-only"]);
+        assert!(!staged.contains(".pi/APPEND_SYSTEM.md"), "{staged}");
+
+        // A manifest that owns an append-system block puts the file back in scope.
+        write_file(
+            &project.join(".pi/packages/demo-pkg/package.json"),
+            r#"{"name":"demo-pkg","pi":{"extensions":[],"appendSystem":"APPEND.md"}}"#,
+        );
+        write_file(&project.join(".pi/packages/demo-pkg/APPEND.md"), "rule\n");
+        stage_project_paths(&[]).unwrap();
+        let staged = git_output(&project, &["diff", "--cached", "--name-only"]);
+        assert!(staged.contains(".pi/APPEND_SYSTEM.md"), "{staged}");
+    });
+}
+
+#[test]
+#[cfg(unix)]
+fn stage_mode_fails_before_staging_when_pi_bin_link_is_replaced() {
+    let project = tmpdir("stage-no-drift-pi-bin-replaced");
+    let source = tmpdir("stage-no-drift-pi-bin-replaced-source");
+    std::fs::create_dir_all(&project).unwrap();
+    init_git_project(&project);
+    write_file(
+        &source.join("pi-extensions/demo-pkg/package.json"),
+        r#"{"name":"demo-pkg","pi":{"extensions":[]},"bin":{"demo-tool":"bin/tool.js"}}"#,
+    );
+    write_file(&source.join("pi-extensions/demo-pkg/bin/tool.js"), "tool\n");
+
+    crate::test_util::with_project_root(&project, || {
+        let mut entry = pi_entry("demo-pkg", &source);
+        entry.source_hash = config::compute_source_hash(&entry);
+        let mut lock = LockFile::default();
+        lock.add(entry);
+        lock.save(&config::lock_file_path(false)).unwrap();
+        write_file(
+            &project.join(".pi/packages/demo-pkg/package.json"),
+            r#"{"name":"demo-pkg","pi":{"extensions":[]},"bin":{"demo-tool":"bin/tool.js"}}"#,
+        );
+        write_file(&project.join(".pi/packages/demo-pkg/bin/tool.js"), "tool\n");
+        write_file(
+            &project.join(".pi/settings.json"),
+            r#"{"packages":[".pi/packages/demo-pkg"]}"#,
+        );
+        std::fs::create_dir_all(project.join(".pi/bin")).unwrap();
+        std::os::unix::fs::symlink(
+            "../packages/demo-pkg/bin/tool.js",
+            project.join(".pi/bin/demo-tool"),
+        )
+        .unwrap();
+        git(&project, &["add", "-A"]);
+        git(&project, &["commit", "-m", "baseline"]);
+
+        // A consumer-owned regular file in place of the managed link.
+        std::fs::remove_file(project.join(".pi/bin/demo-tool")).unwrap();
+        write_file(&project.join(".pi/bin/demo-tool"), "#!/bin/sh\necho hi\n");
+
+        let err = run(ScopeFilter::Project, false, false, true, true)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("auxiliary verification failed"), "{err}");
+        assert!(err.contains(".pi/bin/demo-tool"), "{err}");
+        assert!(err.contains("not a symlink"), "{err}");
+        assert!(
+            git_output(&project, &["diff", "--cached", "--name-only"]).is_empty(),
+            "nothing may be staged"
+        );
+
+        // A symlink redirected outside its own package is the same replacement.
+        std::fs::remove_file(project.join(".pi/bin/demo-tool")).unwrap();
+        write_file(&project.join(".pi/consumer-tool.js"), "consumer\n");
+        std::os::unix::fs::symlink("../consumer-tool.js", project.join(".pi/bin/demo-tool"))
+            .unwrap();
+
+        let err = run(ScopeFilter::Project, false, false, true, true)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("does not point into Pi package"), "{err}");
+        assert!(
+            git_output(&project, &["diff", "--cached", "--name-only"]).is_empty(),
+            "nothing may be staged"
+        );
+    });
+}

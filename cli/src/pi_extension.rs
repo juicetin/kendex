@@ -1078,6 +1078,18 @@ pub fn append_system_path(global: bool) -> PathBuf {
     }
 }
 
+/// Marker prefix every vstack-owned APPEND_SYSTEM block carries. A file that
+/// contains none is entirely consumer-authored.
+const APPEND_SYSTEM_MARKER_PREFIX: &str = "<!-- vstack:append-system ";
+
+/// Whether `path` holds at least one vstack-managed append-system block.
+/// A missing or unreadable file reads as unmanaged.
+pub fn append_system_has_managed_block(path: &Path) -> bool {
+    std::fs::read_to_string(path)
+        .map(|content| content.contains(APPEND_SYSTEM_MARKER_PREFIX))
+        .unwrap_or(false)
+}
+
 fn append_system_block_markers(name: &str) -> (String, String) {
     (
         format!("<!-- vstack:append-system {name} begin -->"),

@@ -10,9 +10,10 @@ mod hooks;
 
 pub(crate) use crate::path_safety::{validate_item_name, validate_new_item_name};
 pub(crate) use hooks::{
-    codex_event_for, codex_root, cursor_hook_rule_contents, cursor_hook_rule_path,
-    install_codex_fallback_hooks_for_agents, install_hook, migrate_codex_config,
-    opencode_hook_instruction_contents, opencode_hook_instruction_path, remove_hook_install,
+    codex_event_for, codex_hooks_feature_enabled, codex_root, cursor_hook_rule_contents,
+    cursor_hook_rule_path, install_codex_fallback_hooks_for_agents, install_hook,
+    migrate_codex_config, opencode_hook_instruction_contents, opencode_hook_instruction_path,
+    remove_hook_install,
 };
 
 pub(crate) fn codex_hook_safety_block(hook: &Hook) -> String {
@@ -914,7 +915,7 @@ fn remove_existing(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn normalize_absolute_path(path: &Path) -> PathBuf {
+pub(crate) fn normalize_absolute_path(path: &Path) -> PathBuf {
     let absolute = if path.is_absolute() {
         path.to_path_buf()
     } else {

@@ -283,6 +283,9 @@ fn resolve_source_path_uses_validated_legacy_remote_cache_when_canonical_is_abse
 }
 
 #[test]
+// The legacy cache spelling this fixture reproduces contains ':', which is not a
+// legal Windows path component, so the directory can never exist there.
+#[cfg(unix)]
 fn resolve_source_path_uses_validated_git_at_legacy_remote_cache() {
     let root = TempDir::new("legacy-git-at-cache-resolution");
     let home = root.path().join("home");
@@ -305,6 +308,9 @@ fn resolve_source_path_uses_validated_git_at_legacy_remote_cache() {
 }
 
 #[test]
+// The legacy cache spelling this fixture reproduces contains ':', which is not a
+// legal Windows path component, so the directory can never exist there.
+#[cfg(unix)]
 fn resolve_source_path_uses_validated_non_github_legacy_remote_cache() {
     let root = TempDir::new("legacy-non-github-cache-resolution");
     let home = root.path().join("home");
@@ -943,4 +949,29 @@ fn remote_diagnostics_redact_url_userinfo_only() {
         "fatal: could not read https://<redacted>@example.com/Owner/Repo.git"
     );
     assert!(!redacted.contains("token"));
+}
+
+#[test]
+fn legacy_remote_cache_keys_never_carry_a_path_separator() {
+    let cache_dir = Path::new("/home/u/.vstack/cache/hashed_key");
+
+    let escaping = legacy_remote_cache_dirs("git@github.com:owner/repo\\..\\..\\target", cache_dir);
+    for dir in &escaping {
+        assert!(
+            dir.starts_with("/home/u/.vstack/cache"),
+            "legacy dir escaped the cache root: {}",
+            dir.display()
+        );
+        assert!(
+            !dir.to_string_lossy().contains('\\'),
+            "legacy key retained a backslash separator: {}",
+            dir.display()
+        );
+    }
+
+    assert_eq!(
+        legacy_remote_cache_dirs("owner/repo", cache_dir),
+        vec![PathBuf::from("/home/u/.vstack/cache/owner_repo")],
+        "ordinary slug sources keep their legacy key"
+    );
 }
