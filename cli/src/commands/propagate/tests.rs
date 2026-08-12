@@ -19,14 +19,25 @@ fn tmpdir(label: &str) -> PathBuf {
     ))
 }
 
+fn demo_skill_source(body: &str) -> String {
+    format!("---\nname: demo\ndescription: Demo skill\nlicense: MIT\n---\n\n{body}")
+}
+
 fn write_skill_source(root: &Path, body: &str) {
     let skill_dir = root.join("skills").join("demo");
     std::fs::create_dir_all(&skill_dir).unwrap();
-    std::fs::write(
-        skill_dir.join("SKILL.md"),
-        format!("---\nname: demo\ndescription: Demo skill\nlicense: MIT\n---\n\n{body}"),
-    )
-    .unwrap();
+    std::fs::write(skill_dir.join("SKILL.md"), demo_skill_source(body)).unwrap();
+}
+
+/// The bytes `installer::install_skill` leaves at an installed `SKILL.md` for
+/// the skill `write_skill_source` writes. A fixture that writes the raw source
+/// there has not written an install: the pre-stage check holds an installed
+/// skill to its rendered source and reads the difference as a local edit.
+fn write_installed_skill_md(path: &Path, body: &str) {
+    write_file(
+        path,
+        &crate::skill::render_installed_skill_md(&demo_skill_source(body), None),
+    );
 }
 
 fn write_agent_skill_source(root: &Path, role_skills: bool) {
@@ -249,10 +260,7 @@ fn detects_and_refreshes_mapping_only_role_skill_drift() {
         lock.add(rust);
         lock.add(demo);
         lock.save(&config::lock_file_path(false)).unwrap();
-        write_file(
-            &project.join(".agents/skills/demo/SKILL.md"),
-            "---\nname: demo\ndescription: Demo skill\nlicense: MIT\n---\n\n# Demo\n",
-        );
+        write_installed_skill_md(&project.join(".agents/skills/demo/SKILL.md"), "# Demo\n");
         write_file(&project.join(".claude/agents/rust.md"), "# Rust\n");
 
         let lock = LockFile::load(&config::lock_file_path(false)).unwrap();
@@ -1269,7 +1277,10 @@ fn staging_a_linked_project_skills_entry_names_its_in_repo_target() {
         stage_project_paths(&[]).unwrap();
 
         let staged = git_output(&project, &["diff", "--cached", "--name-only"]);
-        assert!(staged.contains("vendor-skills/shared/SKILL.md\n"), "{staged}");
+        assert!(
+            staged.contains("vendor-skills/shared/SKILL.md\n"),
+            "{staged}"
+        );
         assert!(
             !staged.contains("project-skills/shared/SKILL.md"),
             "git refuses a pathspec that walks through the link: {staged}"
@@ -1453,14 +1464,8 @@ fn stage_mode_verifies_and_stages_when_hashes_are_current() {
         let mut lock = LockFile::default();
         lock.add(entry);
         lock.save(&config::lock_file_path(false)).unwrap();
-        write_file(
-            &project.join(".agents/skills/demo/SKILL.md"),
-            "---\nname: demo\ndescription: Demo skill\nlicense: MIT\n---\n\nv1\n",
-        );
-        write_file(
-            &project.join(".claude/skills/demo/SKILL.md"),
-            "---\nname: demo\ndescription: Demo skill\nlicense: MIT\n---\n\nv1\n",
-        );
+        write_installed_skill_md(&project.join(".agents/skills/demo/SKILL.md"), "v1\n");
+        write_installed_skill_md(&project.join(".claude/skills/demo/SKILL.md"), "v1\n");
         // `vstack.toml` is consumer-authored project config, so it is committed
         // and clean here: a pre-existing edit to it is refused, not absorbed.
         write_file(&project.join("vstack.toml"), "[agent-skills]\n");
@@ -1482,15 +1487,203 @@ fn stage_mode_verifies_and_stages_when_hashes_are_current() {
         );
 
         // A consumer edit to the project config blocks the automated commit.
-        write_file(
-            &project.join("vstack.toml"),
-            "[agent-skills]\nextra = true\n",
-        );
+        write_file(&project.join("vstack.toml"), "[agent-skills]\nrust = []\n");
         let err = run(ScopeFilter::Project, false, false, true, true)
             .unwrap_err()
             .to_string();
         assert!(err.contains("refusing to stage"), "{err}");
         assert!(err.contains("vstack.toml"), "{err}");
+    });
+}
+
+/// `verify::run` reads a locked skill's `SKILL.md` for existence and its
+/// harness path for canonical identity, and no file's contents. A replaced
+/// auxiliary script, one deleted outright, one whose execute bit was cleared,
+/// and a rewritten `SKILL.md` all pass it — and staging owns every one of those
+/// paths, so `--stage` would commit the breakage as though propagation produced
+/// it. The source never moved, so every later run reports no drift and the
+/// broken skill stays committed.
+#[test]
+fn stage_mode_rejects_an_installed_skill_that_no_longer_matches_its_source() {
+    let project = tmpdir("stage-skill-content-drift");
+    let source = tmpdir("stage-skill-content-drift-source");
+    std::fs::create_dir_all(&project).unwrap();
+    init_git_project(&project);
+    write_skill_source(&source, "v1\n");
+    write_file(
+        &source.join("skills/demo/scripts/helper.sh"),
+        "#!/bin/sh\nexit 0\n",
+    );
+    write_file(&source.join("skills/demo/docs/note.md"), "note\n");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            source.join("skills/demo/scripts/helper.sh"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+    }
+
+    crate::test_util::with_project_root(&project, || {
+        let mut entry = demo_copy_entry(&source);
+        entry.source_hash = config::compute_source_hash(&entry);
+        let mut lock = LockFile::default();
+        lock.add(entry);
+        lock.save(&config::lock_file_path(false)).unwrap();
+        let install = project.join(".claude/skills/demo");
+        let write_faithful_install = || {
+            write_installed_skill_md(&install.join("SKILL.md"), "v1\n");
+            write_file(&install.join("scripts/helper.sh"), "#!/bin/sh\nexit 0\n");
+            write_file(&install.join("docs/note.md"), "note\n");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(
+                    install.join("scripts/helper.sh"),
+                    std::fs::Permissions::from_mode(0o755),
+                )
+                .unwrap();
+            }
+        };
+        write_faithful_install();
+
+        // Control: the fixture is an install propagation would produce, so
+        // every refusal below is the edit made to it and not fixture noise.
+        run(ScopeFilter::Project, false, false, true, true).unwrap();
+        git(&project, &["commit", "-m", "baseline"]);
+        assert!(
+            git_output(&project, &["status", "--porcelain"]).is_empty(),
+            "the control run must leave a clean tree"
+        );
+
+        // A replaced auxiliary script.
+        write_file(&install.join("scripts/helper.sh"), "#!/bin/sh\nrm -rf /\n");
+        let err = run(ScopeFilter::Project, false, false, true, true)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("auxiliary verification failed"), "{err}");
+        assert!(
+            err.contains(".claude/skills/demo/scripts/helper.sh does not match the locked source"),
+            "{err}"
+        );
+        assert!(
+            git_output(&project, &["diff", "--cached", "--name-only"]).is_empty(),
+            "nothing may be staged"
+        );
+
+        // An auxiliary file deleted outright: the tracked deletion staging
+        // would otherwise record as a propagated removal.
+        write_faithful_install();
+        std::fs::remove_file(install.join("docs/note.md")).unwrap();
+        let err = run(ScopeFilter::Project, false, false, true, true)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains(".claude/skills/demo/docs/note.md is missing from the install"),
+            "{err}"
+        );
+        assert!(
+            git_output(&project, &["diff", "--cached", "--name-only"]).is_empty(),
+            "nothing may be staged"
+        );
+
+        // Identical bytes with the execute bit cleared still cannot run.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            write_faithful_install();
+            std::fs::set_permissions(
+                install.join("scripts/helper.sh"),
+                std::fs::Permissions::from_mode(0o644),
+            )
+            .unwrap();
+            let err = run(ScopeFilter::Project, false, false, true, true)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains(".claude/skills/demo/scripts/helper.sh does not carry the file mode"),
+                "{err}"
+            );
+            assert!(
+                git_output(&project, &["diff", "--cached", "--name-only"]).is_empty(),
+                "nothing may be staged"
+            );
+        }
+
+        // A rewritten SKILL.md body.
+        write_faithful_install();
+        write_installed_skill_md(&install.join("SKILL.md"), "locally rewritten\n");
+        let err = run(ScopeFilter::Project, false, false, true, true)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains(".claude/skills/demo/SKILL.md does not match the locked source"),
+            "{err}"
+        );
+        assert!(
+            git_output(&project, &["diff", "--cached", "--name-only"]).is_empty(),
+            "nothing may be staged"
+        );
+    });
+}
+
+/// The installed `SKILL.md` is rendered, not copied: it carries the consumer's
+/// `[skill-instructions]` section and the do-not-edit notice. Holding it to the
+/// raw source bytes would refuse every correctly rendered install, so the
+/// expectation is rendered the same way the installer renders it.
+#[test]
+fn stage_mode_holds_an_installed_skill_md_to_its_rendered_project_instructions() {
+    let project = tmpdir("stage-skill-rendered-instructions");
+    let source = tmpdir("stage-skill-rendered-instructions-source");
+    std::fs::create_dir_all(&project).unwrap();
+    init_git_project(&project);
+    write_skill_source(&source, "v1\n");
+
+    crate::test_util::with_project_root(&project, || {
+        write_file(
+            &project.join("vstack.toml"),
+            "[skill-instructions]\ndemo = \"House rule.\"\n",
+        );
+        // Consumer-authored config is committed and clean, or the shared-config
+        // guard refuses before the install is ever looked at.
+        git(&project, &["add", "vstack.toml"]);
+        git(&project, &["commit", "-m", "project config"]);
+        let mut entry = demo_copy_entry(&source);
+        entry.source_hash = config::compute_source_hash(&entry);
+        let mut lock = LockFile::default();
+        lock.add(entry);
+        lock.save(&config::lock_file_path(false)).unwrap();
+        let skill_md = project.join(".claude/skills/demo/SKILL.md");
+        let rendered = crate::skill::render_installed_skill_md(
+            &demo_skill_source("v1\n"),
+            Some("House rule."),
+        );
+        // Control: the configured section really is part of the rendering, so
+        // the acceptance below is not a comparison against the raw source.
+        assert!(
+            rendered.contains("House rule.") && !demo_skill_source("v1\n").contains("House rule."),
+            "the fixture instructions must change the rendered SKILL.md"
+        );
+        write_file(&skill_md, &rendered);
+
+        run(ScopeFilter::Project, false, false, true, true).unwrap();
+        git(&project, &["commit", "-m", "baseline"]);
+
+        // The raw source bytes are what an install that dropped the rendering
+        // carries, and it is no longer the file propagation produces.
+        write_file(&skill_md, &demo_skill_source("v1\n"));
+        let err = run(ScopeFilter::Project, false, false, true, true)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains(".claude/skills/demo/SKILL.md does not match the locked source"),
+            "{err}"
+        );
+        assert!(
+            git_output(&project, &["diff", "--cached", "--name-only"]).is_empty(),
+            "nothing may be staged"
+        );
     });
 }
 
@@ -1513,28 +1706,29 @@ fn stage_mode_scopes_locked_skill_staging_to_source_owned_files() {
         let mut lock = LockFile::default();
         lock.add(entry);
         lock.save(&config::lock_file_path(false)).unwrap();
-        write_file(
-            &project.join(".agents/skills/demo/SKILL.md"),
-            "---\nname: demo\ndescription: Demo skill\nlicense: MIT\n---\n\nv1\n",
-        );
+        write_installed_skill_md(&project.join(".agents/skills/demo/SKILL.md"), "v1\n");
         write_file(&project.join(".agents/skills/demo/owned.txt"), "owned\n");
-        write_file(
-            &project.join(".claude/skills/demo/SKILL.md"),
-            "---\nname: demo\ndescription: Demo skill\nlicense: MIT\n---\n\nv1\n",
-        );
+        write_installed_skill_md(&project.join(".claude/skills/demo/SKILL.md"), "v1\n");
         write_file(&project.join(".claude/skills/demo/owned.txt"), "owned\n");
+        // Committed under the locked skill, and gone from the source: the file
+        // an upstream removal takes out of the install on the next refresh.
+        write_file(&project.join(".claude/skills/demo/retired.md"), "retired\n");
         git(&project, &["add", "-A"]);
         git(&project, &["commit", "-m", "baseline"]);
 
-        write_file(
+        write_installed_skill_md(
             &project.join(".agents/skills/demo/SKILL.md"),
-            "---\nname: demo\ndescription: Demo skill\nlicense: MIT\n---\n\nmanaged edit\n",
+            "managed edit\n",
         );
         write_file(
             &project.join(".agents/skills/demo/new-upstream.md"),
             "new upstream\n",
         );
-        std::fs::remove_file(project.join(".claude/skills/demo/owned.txt")).unwrap();
+        write_file(
+            &project.join(".claude/skills/demo/new-upstream.md"),
+            "new upstream\n",
+        );
+        std::fs::remove_file(project.join(".claude/skills/demo/retired.md")).unwrap();
         write_file(
             &project.join(".agents/skills/demo/consumer-secret.txt"),
             "consumer secret\n",
@@ -1556,7 +1750,7 @@ fn stage_mode_scopes_locked_skill_staging_to_source_owned_files() {
             "{staged}"
         );
         assert!(
-            staged.contains("D\t.claude/skills/demo/owned.txt"),
+            staged.contains("D\t.claude/skills/demo/retired.md"),
             "{staged}"
         );
         assert!(
@@ -1664,18 +1858,12 @@ fn retry_stage_records_locked_skill_deletions_from_committed_install() {
         let mut lock = LockFile::default();
         lock.add(entry);
         lock.save(&config::lock_file_path(false)).unwrap();
-        write_file(
-            &project.join(".agents/skills/demo/SKILL.md"),
-            "---\nname: demo\ndescription: Demo skill\nlicense: MIT\n---\n\nv1\n",
-        );
+        write_installed_skill_md(&project.join(".agents/skills/demo/SKILL.md"), "v1\n");
         write_file(
             &project.join(".agents/skills/demo/removed-upstream.md"),
             "removed\n",
         );
-        write_file(
-            &project.join(".claude/skills/demo/SKILL.md"),
-            "---\nname: demo\ndescription: Demo skill\nlicense: MIT\n---\n\nv1\n",
-        );
+        write_installed_skill_md(&project.join(".claude/skills/demo/SKILL.md"), "v1\n");
         write_file(
             &project.join(".claude/skills/demo/removed-upstream.md"),
             "removed\n",
@@ -1684,18 +1872,13 @@ fn retry_stage_records_locked_skill_deletions_from_committed_install() {
         git(&project, &["commit", "-m", "baseline"]);
 
         write_skill_source(&source, "v2\n");
+        std::fs::remove_file(source.join("skills/demo/removed-upstream.md")).unwrap();
         let mut lock = LockFile::load(&config::lock_file_path(false)).unwrap();
         let entry = lock.entries.get_mut("demo").unwrap();
         entry.source_hash = config::compute_source_hash(entry);
         lock.save(&config::lock_file_path(false)).unwrap();
-        write_file(
-            &project.join(".agents/skills/demo/SKILL.md"),
-            "---\nname: demo\ndescription: Demo skill\nlicense: MIT\n---\n\nv2\n",
-        );
-        write_file(
-            &project.join(".claude/skills/demo/SKILL.md"),
-            "---\nname: demo\ndescription: Demo skill\nlicense: MIT\n---\n\nv2\n",
-        );
+        write_installed_skill_md(&project.join(".agents/skills/demo/SKILL.md"), "v2\n");
+        write_installed_skill_md(&project.join(".claude/skills/demo/SKILL.md"), "v2\n");
         std::fs::remove_file(project.join(".agents/skills/demo/removed-upstream.md")).unwrap();
         std::fs::remove_file(project.join(".claude/skills/demo/removed-upstream.md")).unwrap();
 
@@ -1728,10 +1911,7 @@ fn retry_stage_records_vendored_skill_deletions_when_lock_is_ignored() {
         lock.add(entry);
         lock.save(&config::lock_file_path(false)).unwrap();
         write_file(&project.join(".gitignore"), ".vstack-lock.json\n");
-        write_file(
-            &project.join(".agents/skills/demo/SKILL.md"),
-            "---\nname: demo\ndescription: Demo skill\nlicense: MIT\n---\n\nv1\n",
-        );
+        write_installed_skill_md(&project.join(".agents/skills/demo/SKILL.md"), "v1\n");
         write_file(
             &project.join(".agents/skills/demo/removed-upstream.md"),
             "removed\n",
@@ -1740,10 +1920,7 @@ fn retry_stage_records_vendored_skill_deletions_when_lock_is_ignored() {
             &project.join(".agents/skills/demo/.vstack-refreshed"),
             "1\n",
         );
-        write_file(
-            &project.join(".claude/skills/demo/SKILL.md"),
-            "---\nname: demo\ndescription: Demo skill\nlicense: MIT\n---\n\nv1\n",
-        );
+        write_installed_skill_md(&project.join(".claude/skills/demo/SKILL.md"), "v1\n");
         write_file(
             &project.join(".claude/skills/demo/removed-upstream.md"),
             "removed\n",
@@ -1755,14 +1932,8 @@ fn retry_stage_records_vendored_skill_deletions_when_lock_is_ignored() {
         git(&project, &["add", "-A"]);
         git(&project, &["commit", "-m", "baseline"]);
 
-        write_file(
-            &project.join(".agents/skills/demo/SKILL.md"),
-            "---\nname: demo\ndescription: Demo skill\nlicense: MIT\n---\n\nv2\n",
-        );
-        write_file(
-            &project.join(".claude/skills/demo/SKILL.md"),
-            "---\nname: demo\ndescription: Demo skill\nlicense: MIT\n---\n\nv2\n",
-        );
+        write_installed_skill_md(&project.join(".agents/skills/demo/SKILL.md"), "v2\n");
+        write_installed_skill_md(&project.join(".claude/skills/demo/SKILL.md"), "v2\n");
         std::fs::remove_file(project.join(".agents/skills/demo/removed-upstream.md")).unwrap();
         std::fs::remove_file(project.join(".claude/skills/demo/removed-upstream.md")).unwrap();
         write_file(
@@ -1803,10 +1974,7 @@ fn stage_mode_stages_locked_skill_symlink_root_without_absorbing_target_children
         let mut lock = LockFile::default();
         lock.add(entry);
         lock.save(&config::lock_file_path(false)).unwrap();
-        write_file(
-            &project.join(".agents/skills/demo/SKILL.md"),
-            "---\nname: demo\ndescription: Demo skill\nlicense: MIT\n---\n\nv1\n",
-        );
+        write_installed_skill_md(&project.join(".agents/skills/demo/SKILL.md"), "v1\n");
         write_file(
             &project.join(".agents/skills/demo/consumer-secret.txt"),
             "consumer secret\n",
@@ -2011,14 +2179,8 @@ fn stage_mode_fails_before_staging_when_locked_skill_harness_path_is_missing() {
         let mut lock = LockFile::default();
         lock.add(entry);
         lock.save(&config::lock_file_path(false)).unwrap();
-        write_file(
-            &project.join(".agents/skills/demo/SKILL.md"),
-            "---\nname: demo\ndescription: Demo skill\nlicense: MIT\n---\n\nv1\n",
-        );
-        write_file(
-            &project.join(".claude/skills/demo/SKILL.md"),
-            "---\nname: demo\ndescription: Demo skill\nlicense: MIT\n---\n\nv1\n",
-        );
+        write_installed_skill_md(&project.join(".agents/skills/demo/SKILL.md"), "v1\n");
+        write_installed_skill_md(&project.join(".claude/skills/demo/SKILL.md"), "v1\n");
         git(&project, &["add", "-A"]);
         git(&project, &["commit", "-m", "baseline"]);
 
@@ -2221,10 +2383,7 @@ fn stage_mode_refreshes_verifies_updates_lock_and_stages_outputs() {
         let mut lock = LockFile::default();
         lock.add(entry);
         lock.save(&config::lock_file_path(false)).unwrap();
-        write_file(
-            &project.join(".agents/skills/demo/SKILL.md"),
-            "---\nname: demo\ndescription: Demo skill\nlicense: MIT\n---\n\nv1\n",
-        );
+        write_installed_skill_md(&project.join(".agents/skills/demo/SKILL.md"), "v1\n");
         git(&project, &["add", "-A"]);
         git(&project, &["commit", "-m", "baseline"]);
 

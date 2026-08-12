@@ -61,6 +61,70 @@ fn init_repo_with_commit(dir: &Path) -> bool {
         && git_ok(dir, &["commit", "-q", "-m", "base"])
 }
 
+/// The `vstack add` line the advertised recovery carries for `spec` on a POSIX
+/// host: one line, single-quoted, with an embedded quote closed, escaped and
+/// reopened.
+fn posix_add_command(spec: &str, skills: &str) -> String {
+    format!(
+        "`vstack add '{}' --skill {skills}`",
+        spec.replace('\'', "'\\''")
+    )
+}
+
+/// The same line on Windows, where the message carries one labelled line per
+/// native shell. The `cmd.exe` line is dropped for an argument carrying a `%`,
+/// so the PowerShell line — its label included — is the one always present.
+fn windows_add_command(spec: &str, skills: &str) -> String {
+    format!(
+        "`vstack add '{}' --skill {skills}` (PowerShell)",
+        spec.replace('\'', "''")
+    )
+}
+
+/// The line to look for in a recovery message on the host the test runs on.
+/// `cfg!` rather than `#[cfg]` so the spelling for the other platform still
+/// compiles here and can be held to its renderer below.
+fn advertised_add_command(spec: &str, skills: &str) -> String {
+    if cfg!(unix) {
+        posix_add_command(spec, skills)
+    } else {
+        windows_add_command(spec, skills)
+    }
+}
+
+/// The expected spellings above are hand-written, and the Windows one never
+/// runs on a unix host — a typo in it would surface only on Windows, which is
+/// exactly how a recovery-command assertion silently stops constraining
+/// anything. Both are held to the renderer that produces them.
+#[test]
+fn the_expected_recovery_commands_match_what_the_shell_renderer_produces() {
+    for spec in ["/my source (v2)", r"C:\my source (v2)", "a'b"] {
+        let parts = [
+            crate::shell::Part::Fixed("vstack add"),
+            crate::shell::Part::Arg(spec),
+            crate::shell::Part::Fixed("--skill shared"),
+        ];
+        let windows = crate::shell::windows_command(&parts);
+        assert!(
+            windows.contains(&windows_add_command(spec, "shared")),
+            "expected {} in {windows}",
+            windows_add_command(spec, "shared")
+        );
+        #[cfg(unix)]
+        {
+            let posix = crate::shell::command(&parts);
+            assert_eq!(posix, posix_add_command(spec, "shared"));
+        }
+    }
+
+    // Control: the two spellings really differ, so a platform picking the wrong
+    // one could not satisfy the other's assertion.
+    assert_ne!(
+        posix_add_command("a'b", "shared"),
+        windows_add_command("a'b", "shared")
+    );
+}
+
 fn tmpdir(label: &str) -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1534,7 +1598,7 @@ fn refresh_quotes_a_local_source_in_the_advertised_recovery_command() {
         .get("rust")
         .expect("an uninstalled declared skill must be recorded as incomplete");
     assert!(
-        reason.contains(&format!("vstack add '{spec}' --skill shared")),
+        reason.contains(&advertised_add_command(&spec, "shared")),
         "the recovery command does not shell-quote the source: {reason}"
     );
 
@@ -2607,8 +2671,14 @@ fn refresh_recovers_a_missing_skill_from_its_own_locked_source() {
         .get("rust")
         .expect("a skill missing from the agent's harness is an unmet dependency");
     let spec = other.to_string_lossy().into_owned();
+    // Control: the fixture only proves anything if the source spec really is a
+    // string the shell would not survive verbatim.
     assert!(
-        reason.contains(&format!("vstack add '{spec}' --skill house-rules")),
+        spec.contains(' ') && spec.contains('('),
+        "control failed: the fixture source spec needs quoting to be interesting: {spec}"
+    );
+    assert!(
+        reason.contains(&advertised_add_command(&spec, "house-rules")),
         "the remedy must reinstall from the skill's own locked source: {reason}"
     );
     assert!(

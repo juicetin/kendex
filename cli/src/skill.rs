@@ -62,18 +62,6 @@ const SKILL_INSTRUCTIONS_HEADER: &str = "## Project Instructions";
 const SKILL_INSTRUCTIONS_START: &str = "<!-- vstack:project-instructions:start -->";
 const SKILL_INSTRUCTIONS_END: &str = "<!-- vstack:project-instructions:end -->";
 
-/// Inject a "## Project Instructions" section at the top of a SKILL.md file,
-/// immediately after the YAML frontmatter closing `---`.
-pub fn inject_skill_instructions(skill_md_path: &Path, instructions: &str) {
-    let Ok(content) = std::fs::read_to_string(skill_md_path) else {
-        return;
-    };
-    let new_content = render_skill_instructions(&content, Some(instructions));
-    if new_content != content {
-        let _ = std::fs::write(skill_md_path, new_content);
-    }
-}
-
 /// Synchronize the reserved project-instructions section in a project-owned
 /// skill. `Ok(None)` means the skill had no configured or previously injected
 /// section and was intentionally left outside vstack ownership. `Ok(Some(x))`
@@ -97,20 +85,16 @@ pub(crate) fn sync_project_owned_skill_instructions(
     Ok(Some(true))
 }
 
-/// Inject a do-not-edit notice after frontmatter in a SKILL.md file.
-pub fn inject_vstack_notice(skill_md_path: &Path) {
-    let Ok(content) = std::fs::read_to_string(skill_md_path) else {
-        return;
-    };
-
+/// The do-not-edit notice, placed after the YAML frontmatter.
+fn render_vstack_notice(content: &str) -> String {
     let notice = "> **Never edit this file directly.** To make additions or modifications, edit the appropriate section in the managing project's vstack config — `vstack.toml` at the vstack project root, or `vstack-local.toml` in a source-catalog checkout. Then run `vstack refresh`.";
 
     // Already present? Skip.
     if content.contains("Never edit this file directly") {
-        return;
+        return content.to_string();
     }
 
-    let new_content = if let Some(pos) = find_frontmatter_end(&content) {
+    if let Some(pos) = find_frontmatter_end(content) {
         format!(
             "{}\n{}\n\n{}",
             &content[..pos],
@@ -119,9 +103,7 @@ pub fn inject_vstack_notice(skill_md_path: &Path) {
         )
     } else {
         format!("{}\n\n{}", notice, content)
-    };
-
-    let _ = std::fs::write(skill_md_path, new_content);
+    }
 }
 
 /// Find the byte offset just after the closing `---` of YAML frontmatter.
@@ -144,6 +126,23 @@ fn find_frontmatter_end(content: &str) -> Option<usize> {
     } else {
         None
     }
+}
+
+/// The exact SKILL.md bytes `installer::install_skill` leaves in an install
+/// rendered from `source`: the project instruction section first, then the
+/// do-not-edit notice, in the order the installer applies them. `None`
+/// instructions is the installer skipping the injection outright, which is not
+/// the same as rendering an empty section — that would strip a section the
+/// source itself ships.
+///
+/// The one place the rendering is spelled, so a checker comparing an installed
+/// SKILL.md against its source cannot drift from what the installer writes.
+pub(crate) fn render_installed_skill_md(source: &str, instructions: Option<&str>) -> String {
+    let injected = match instructions {
+        Some(text) => render_skill_instructions(source, Some(text)),
+        None => source.to_string(),
+    };
+    render_vstack_notice(&injected)
 }
 
 fn render_skill_instructions(content: &str, instructions: Option<&str>) -> String {

@@ -65,7 +65,7 @@ pub(crate) fn posix_quote(arg: &str) -> String {
 /// inside a quoted argument. Advertising the line anyway would hand the
 /// operator a command that silently names a different path.
 #[cfg(any(not(unix), test))]
-fn windows_command(parts: &[Part<'_>]) -> String {
+pub(crate) fn windows_command(parts: &[Part<'_>]) -> String {
     let powershell = render(parts, |arg| Some(powershell_quote(arg)))
         .expect("PowerShell single-quoting renders every argument");
     match render(parts, cmd_quote) {

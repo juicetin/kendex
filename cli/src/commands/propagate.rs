@@ -205,6 +205,12 @@ fn codex_prose_carrier_paths(lock: &LockFile) -> Vec<PathBuf> {
 fn verify_project_auxiliary_installs_before_stage() -> Result<()> {
     let lock = LockFile::load(&config::lock_file_path(false))?;
     let codex_prose_carriers = codex_prose_carrier_paths(&lock);
+    // Strict, the same way the project refresh that produced these installs
+    // loads it: a config that cannot be parsed is not an empty one, and reading
+    // it as empty would render every skill's expected SKILL.md without the
+    // instruction section the install actually carries.
+    let project_config =
+        crate::project_config::ProjectConfig::load_strict(&config::project_root())?;
     let mut failures = Vec::new();
     for entry in lock.entries.values() {
         match entry.kind {
@@ -229,10 +235,13 @@ fn verify_project_auxiliary_installs_before_stage() -> Result<()> {
             ItemKind::PiExtension => {
                 verify_pi_auxiliary_install(&entry.name, &mut failures)?;
             }
-            // Skills, agents, and extras have no auxiliary registration to
-            // check: they are files, verified by `verify::run`. Listed rather
-            // than wildcarded so a new kind has to be considered here.
-            ItemKind::Skill | ItemKind::Agent | ItemKind::Extra => {}
+            ItemKind::Skill => {
+                verify_skill_content_before_stage(entry, &project_config, &mut failures);
+            }
+            // Agents and extras have no auxiliary registration to check: they
+            // are files, verified by `verify::run`. Listed rather than
+            // wildcarded so a new kind has to be considered here.
+            ItemKind::Agent | ItemKind::Extra => {}
         }
     }
     if failures.is_empty() {
@@ -242,6 +251,227 @@ fn verify_project_auxiliary_installs_before_stage() -> Result<()> {
             "auxiliary verification failed before staging: {}",
             failures.join("; ")
         )
+    }
+}
+
+/// Every byte of an installed skill comes from its source: `copy_dir`
+/// reproduces the source tree, and only `SKILL.md` is rendered on top.
+/// `verify::run` proves `SKILL.md` exists and that a harness link still lands
+/// inside the canonical skill tree; it reads no file's contents. A locally
+/// replaced `scripts/foo` — or one deleted outright — therefore passes it, and
+/// is exactly what the staging pass then commits as though propagation
+/// produced it. The source never moved, so every later run reports no drift and
+/// the broken skill stays committed.
+///
+/// Enumerated from the source the same way `push_locked_skill_stage_paths`
+/// enumerates the paths it stages, so nothing outside the files staging already
+/// owns is read and a consumer's own file that merely sits beside them is never
+/// compared to anything.
+fn verify_skill_content_before_stage(
+    entry: &config::LockEntry,
+    project_config: &crate::project_config::ProjectConfig,
+    failures: &mut Vec<String>,
+) {
+    let project_root = config::project_root();
+    let source_dir = config::resolve_source_path(&entry.source)
+        .and_then(|source_root| {
+            crate::catalog::find_item_path(&source_root, entry.kind, &entry.name)
+        })
+        .filter(|dir| dir.is_dir());
+    let Some(source_dir) = source_dir else {
+        failures.push(format!(
+            "cannot read the locked source for skill {}; refusing to verify its install",
+            entry.name
+        ));
+        return;
+    };
+    let instructions = project_config.skill_instructions_for(&entry.name);
+    for install_dir in installer_written_skill_dirs(&project_root, entry) {
+        let Ok(metadata) = std::fs::symlink_metadata(&install_dir) else {
+            // A missing install is `verify::run`'s finding, and staging takes
+            // nothing from a directory that is not there.
+            continue;
+        };
+        if metadata.file_type().is_symlink() {
+            // Staging records the link itself, and whether it still resolves
+            // into the canonical tree is `verify_skill_install`'s check. What
+            // it points at is the canonical directory, which this same set
+            // carries whenever it lives in this checkout.
+            continue;
+        }
+        require_installed_skill_matches_source(
+            &install_dir,
+            &source_dir,
+            &entry.name,
+            instructions.as_deref(),
+            failures,
+        );
+    }
+}
+
+/// The directories `installer::install_skill` writes for this entry: every
+/// harness install path, plus the `.agents/skills` canonical the symlink method
+/// renders into.
+///
+/// A narrower set than `locked_skill_stage_dirs`, which also carries that
+/// canonical for a copy-method entry no harness anchors there. The installer
+/// never renders into it under copy, so holding it to the source would refuse
+/// propagation over a directory propagation does not maintain.
+fn installer_written_skill_dirs(
+    project_root: &Path,
+    entry: &config::LockEntry,
+) -> BTreeSet<PathBuf> {
+    let mut dirs: BTreeSet<PathBuf> = entry
+        .harnesses
+        .iter()
+        .filter_map(|id| Harness::from_id(id))
+        .map(|harness| harness.skills_dir(false).join(&entry.name))
+        .collect();
+    if entry.method == config::InstallMethod::Symlink {
+        dirs.insert(
+            project_root
+                .join(".agents")
+                .join("skills")
+                .join(&entry.name),
+        );
+    }
+    dirs
+}
+
+/// Compare one installed skill directory against the source it was copied
+/// from, walking the source so the check covers precisely the files
+/// `push_installed_files_from_source` hands to `git add`.
+fn require_installed_skill_matches_source(
+    install_dir: &Path,
+    source_dir: &Path,
+    name: &str,
+    instructions: Option<&str>,
+    failures: &mut Vec<String>,
+) {
+    let project_root = config::project_root();
+    let mut stack = vec![source_dir.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(err) => {
+                failures.push(format!(
+                    "cannot read the locked source of skill {name} at {}: {err}; refusing to verify its install",
+                    dir.display()
+                ));
+                return;
+            }
+        };
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(err) => {
+                    failures.push(format!(
+                        "cannot read the locked source of skill {name} at {}: {err}; refusing to verify its install",
+                        dir.display()
+                    ));
+                    return;
+                }
+            };
+            let source_path = entry.path();
+            // The install marker is written by the installer, not copied, and
+            // `push_installed_files_from_source` skips it for the same reason.
+            if entry.file_name() == OsStr::new(".vstack-refreshed") {
+                continue;
+            }
+            let Ok(file_type) = entry.file_type() else {
+                failures.push(format!(
+                    "cannot read the locked source of skill {name} at {}; refusing to verify its install",
+                    source_path.display()
+                ));
+                return;
+            };
+            if file_type.is_dir() {
+                stack.push(source_path);
+                continue;
+            }
+            if !file_type.is_file() && !file_type.is_symlink() {
+                continue;
+            }
+            let Ok(relative) = source_path.strip_prefix(source_dir) else {
+                continue;
+            };
+            let installed_path = install_dir.join(relative);
+            let display = installed_path
+                .strip_prefix(&project_root)
+                .unwrap_or(installed_path.as_path())
+                .display()
+                .to_string();
+            let Ok(installed_meta) = std::fs::symlink_metadata(&installed_path) else {
+                failures.push(format!(
+                    "{display} is missing from the install of skill {name}, whose source ships it"
+                ));
+                continue;
+            };
+            // `copy_dir` recreates a source symlink rather than dereferencing
+            // it, so the installed entry's own kind is part of a correct
+            // install: a link replaced by a regular file is a local edit.
+            if file_type.is_symlink() {
+                match (
+                    std::fs::read_link(&source_path),
+                    std::fs::read_link(&installed_path),
+                ) {
+                    (Ok(expected), Ok(installed)) if expected == installed => {}
+                    (Ok(_), Ok(_)) | (Ok(_), Err(_)) => failures.push(format!(
+                        "{display} does not match the locked source of skill {name}"
+                    )),
+                    (Err(err), _) => failures.push(format!(
+                        "cannot read the locked source of skill {name} at {}: {err}; refusing to verify {display}",
+                        source_path.display()
+                    )),
+                }
+                continue;
+            }
+            if installed_meta.file_type().is_symlink() || !installed_meta.is_file() {
+                failures.push(format!(
+                    "{display} does not match the locked source of skill {name}"
+                ));
+                continue;
+            }
+            let expected = match std::fs::read(&source_path) {
+                Ok(bytes) => bytes,
+                Err(err) => {
+                    failures.push(format!(
+                        "cannot read the locked source of skill {name} at {}: {err}; refusing to verify {display}",
+                        source_path.display()
+                    ));
+                    continue;
+                }
+            };
+            // `SKILL.md` is the one installed file the installer renders rather
+            // than copies; every other file is the source verbatim.
+            let expected = if relative == Path::new("SKILL.md") {
+                match String::from_utf8(expected) {
+                    Ok(text) => {
+                        crate::skill::render_installed_skill_md(&text, instructions).into_bytes()
+                    }
+                    Err(bytes) => bytes.into_bytes(),
+                }
+            } else {
+                expected
+            };
+            match std::fs::read(&installed_path) {
+                Ok(installed) if installed == expected => {}
+                Ok(_) => failures.push(format!(
+                    "{display} does not match the locked source of skill {name}"
+                )),
+                Err(err) => failures.push(format!("{display} is unreadable: {err}")),
+            }
+            // Both copy paths preserve modes, so an install whose execute bit
+            // was cleared no longer runs the script the skill ships.
+            #[cfg(unix)]
+            if config::executable_hash_bit(&source_path)
+                != config::executable_hash_bit(&installed_path)
+            {
+                failures.push(format!(
+                    "{display} does not carry the file mode of the locked source of skill {name}"
+                ));
+            }
+        }
     }
 }
 

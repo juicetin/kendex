@@ -58,6 +58,22 @@ pub fn install_agent(
     })
 }
 
+/// Render an installed `SKILL.md` in place: the project instruction section
+/// from the consumer's config, then the do-not-edit notice.
+///
+/// Both install methods go through this, and so does the pre-stage check that
+/// holds an installed skill to its source, so the expected bytes cannot drift
+/// from the written ones.
+fn render_installed_skill_md(skill_md: &Path, instructions: Option<&str>) {
+    let Ok(content) = std::fs::read_to_string(skill_md) else {
+        return;
+    };
+    let rendered = crate::skill::render_installed_skill_md(&content, instructions);
+    if rendered != content {
+        let _ = std::fs::write(skill_md, rendered);
+    }
+}
+
 /// Install a skill directory to a specific harness.
 ///
 /// Symlink mode: copy to a canonical dir (`.agents/skills/<name>/`) in the
@@ -364,12 +380,7 @@ pub fn install_skill(
                 remove_existing(&canonical)?;
                 copy_dir(&skill.source_dir, &canonical)?;
 
-                // Inject skill instructions from project config
-                let skill_md = canonical.join("SKILL.md");
-                if let Some(text) = instructions {
-                    crate::skill::inject_skill_instructions(&skill_md, text);
-                }
-                crate::skill::inject_vstack_notice(&skill_md);
+                render_installed_skill_md(&canonical.join("SKILL.md"), instructions);
 
                 // Mark as done for this process
                 let _ = std::fs::write(&marker, std::process::id().to_string());
@@ -470,12 +481,7 @@ pub fn install_skill(
             remove_existing(&dest)?;
             copy_dir(&skill.source_dir, &dest)?;
 
-            // Inject skill instructions from project config
-            let skill_md = dest.join("SKILL.md");
-            if let Some(text) = instructions {
-                crate::skill::inject_skill_instructions(&skill_md, text);
-            }
-            crate::skill::inject_vstack_notice(&skill_md);
+            render_installed_skill_md(&dest.join("SKILL.md"), instructions);
 
             // Write marker so reconciliation can detect vstack-managed skills
             let _ = std::fs::write(
