@@ -659,6 +659,10 @@ pub(crate) fn hash_file_bytes(path: &Path) -> u64 {
 /// target string. Must match verify::SYMLINK_HASH_TAG.
 pub(crate) const SYMLINK_HASH_TAG: &[u8] = b"\0vstack-symlink\0";
 
+/// Folded in place of a link target that cannot be read, so a filesystem
+/// failure moves the hash instead of reading as "unchanged".
+pub(crate) const UNREADABLE_SYMLINK_HASH_SENTINEL: &str = "\0vstack-unreadable-symlink\0";
+
 fn hash_dir_bytes(dir: &Path) -> u64 {
     hash_dir_bytes_excluding(dir, &[])
 }
@@ -691,13 +695,15 @@ pub(crate) fn hash_dir_bytes_excluding(dir: &Path, exclude_files: &[&str]) -> u6
         // rather than dereferencing them, so a retargeted link is a real source
         // change. Skipping them let a target-only edit read as no drift.
         if entry.file_type().is_symlink() {
-            let Ok(target) = std::fs::read_link(entry.path()) else {
-                continue;
-            };
+            // An unreadable link is not "unchanged": fold a sentinel so the
+            // hash still moves rather than silently matching the last good one.
+            let target = std::fs::read_link(entry.path())
+                .map(|target| target.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| UNREADABLE_SYMLINK_HASH_SENTINEL.to_string());
             let rel = entry.path().strip_prefix(dir).unwrap_or(entry.path());
             state = fnv1a_chain(state, rel.to_string_lossy().as_bytes());
             state = fnv1a_chain(state, SYMLINK_HASH_TAG);
-            state = fnv1a_chain(state, target.to_string_lossy().as_bytes());
+            state = fnv1a_chain(state, target.as_bytes());
             continue;
         }
         if !entry.file_type().is_file() {
@@ -3485,6 +3491,23 @@ echo foreign
             vec!["codex".to_string()]
         );
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unreadable_symlink_sentinel_cannot_equal_a_real_target() {
+        // Unix paths are NUL-terminated, so no readable link target can spell
+        // the sentinel — an unreadable link therefore always moves the hash
+        // rather than colliding with some legitimate target.
+        assert!(
+            UNREADABLE_SYMLINK_HASH_SENTINEL.contains('\0'),
+            "the sentinel must be unspellable as a path"
+        );
+        assert!(
+            std::str::from_utf8(SYMLINK_HASH_TAG)
+                .unwrap()
+                .contains('\0'),
+            "the separator must be unspellable as a path"
+        );
     }
 
     #[test]

@@ -1279,7 +1279,11 @@ fn stage_mode_verifies_and_stages_when_hashes_are_current() {
             &project.join(".claude/skills/demo/SKILL.md"),
             "---\nname: demo\ndescription: Demo skill\nlicense: MIT\n---\n\nv1\n",
         );
+        // `vstack.toml` is consumer-authored project config, so it is committed
+        // and clean here: a pre-existing edit to it is refused, not absorbed.
         write_file(&project.join("vstack.toml"), "[agent-skills]\n");
+        git(&project, &["add", "vstack.toml"]);
+        git(&project, &["commit", "-m", "project config"]);
         write_file(
             &project.join(".pi/packages/manual/package.json"),
             r#"{"name":"manual","pi":{"extensions":[]}}"#,
@@ -1288,11 +1292,23 @@ fn stage_mode_verifies_and_stages_when_hashes_are_current() {
         run(ScopeFilter::Project, false, false, true, true).unwrap();
 
         let staged = git_output(&project, &["diff", "--cached", "--name-only"]);
-        assert!(staged.contains("vstack.toml\n"), "{staged}");
+        assert!(staged.contains(".agents/skills/demo/SKILL.md"), "{staged}");
+        assert!(staged.contains(".claude/skills/demo/SKILL.md"), "{staged}");
         assert!(
             !staged.contains(".pi/packages/manual/package.json"),
             "{staged}"
         );
+
+        // A consumer edit to the project config blocks the automated commit.
+        write_file(
+            &project.join("vstack.toml"),
+            "[agent-skills]\nextra = true\n",
+        );
+        let err = run(ScopeFilter::Project, false, false, true, true)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("refusing to stage"), "{err}");
+        assert!(err.contains("vstack.toml"), "{err}");
     });
 }
 
@@ -1686,21 +1702,24 @@ fn hook_registration_requires_the_exact_installer_command_under_its_event() {
             }
         })
     };
+    let matcher = Some("Bash");
 
     assert!(hook_command_registered(
         &registration(&expected),
         &expected,
-        Some("PreToolUse")
+        "PreToolUse",
+        matcher
     ));
     assert!(
-        !hook_command_registered(&registration(&expected), &expected, Some("Stop")),
+        !hook_command_registered(&registration(&expected), &expected, "Stop", matcher),
         "a registration under another event is not a registration for this one"
     );
     assert!(
         !hook_command_registered(
             &registration(".claude/hooks/guard.sh"),
             &expected,
-            Some("PreToolUse")
+            "PreToolUse",
+            matcher
         ),
         "a bare path is not the installer-generated command"
     );
@@ -1708,7 +1727,8 @@ fn hook_registration_requires_the_exact_installer_command_under_its_event() {
         !hook_command_registered(
             &registration(&format!("echo {expected}")),
             &expected,
-            Some("PreToolUse")
+            "PreToolUse",
+            matcher
         ),
         "a command that merely mentions the script must not pass"
     );
@@ -1716,7 +1736,8 @@ fn hook_registration_requires_the_exact_installer_command_under_its_event() {
         !hook_command_registered(
             &registration(&expected.replace(".sh", ".sh.disabled")),
             &expected,
-            Some("PreToolUse")
+            "PreToolUse",
+            matcher
         ),
         "a disabled script path must not pass"
     );
@@ -1724,10 +1745,74 @@ fn hook_registration_requires_the_exact_installer_command_under_its_event() {
         !hook_command_registered(
             &serde_json::json!({ "note": expected.clone(), "hooks": {} }),
             &expected,
-            Some("PreToolUse")
+            "PreToolUse",
+            matcher
         ),
         "a path in unrelated metadata is not a registration"
     );
+    assert!(
+        !hook_command_registered(
+            &registration(&expected),
+            &expected,
+            "PreToolUse",
+            Some("Edit")
+        ),
+        "a rewritten matcher disables the hook for its intended tool calls"
+    );
+    assert!(
+        !hook_command_registered(&registration(&expected), &expected, "PreToolUse", None),
+        "an unmatched-matcher entry is not an unmatchered registration"
+    );
+}
+
+#[test]
+fn hook_registration_fails_closed_when_the_locked_event_cannot_be_read() {
+    let project = tmpdir("hook-registration-unknown-event");
+    std::fs::create_dir_all(&project).unwrap();
+
+    crate::test_util::with_project_root(&project, || {
+        let expected = crate::installer::claude_project_hook_command("guard");
+        write_file(
+            &project.join(".claude/settings.json"),
+            &serde_json::json!({
+                "hooks": {
+                    "PreToolUse": [{
+                        "matcher": "Bash",
+                        "hooks": [{ "type": "command", "command": expected }]
+                    }]
+                }
+            })
+            .to_string(),
+        );
+
+        // The source definition could not be read: a dependency failure must
+        // not be accepted as "registered under some event".
+        let mut failures = Vec::new();
+        require_hook_command_registration(
+            Path::new(".claude/settings.json"),
+            &expected,
+            None,
+            "Claude hook guard",
+            &mut failures,
+        );
+        assert!(
+            failures
+                .iter()
+                .any(|f| f.contains("cannot read the locked event")),
+            "{failures:?}"
+        );
+
+        // With the event and matcher known, the same config verifies.
+        let mut failures = Vec::new();
+        require_hook_command_registration(
+            Path::new(".claude/settings.json"),
+            &expected,
+            Some(("PreToolUse", Some("Bash"))),
+            "Claude hook guard",
+            &mut failures,
+        );
+        assert!(failures.is_empty(), "{failures:?}");
+    });
 }
 
 #[test]

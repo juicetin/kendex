@@ -223,12 +223,13 @@ fn verify_skill_install(entry: &LockEntry, global: bool) -> (Option<bool>, Optio
         path_harnesses.entry(path).or_default().push(h.clone());
     }
 
+    let canonical_targets = accepted_canonical_skill_targets(entry, global);
     let mut missing = Vec::new();
     let mut retargeted = Vec::new();
     for (path, harnesses) in path_harnesses {
         if !path.join("SKILL.md").is_file() {
             missing.extend(harnesses);
-        } else if !skill_link_resolves_to_canonical_install(&path, &entry.name) {
+        } else if !skill_link_resolves_to_canonical_install(&path, &canonical_targets) {
             retargeted.extend(harnesses);
         }
     }
@@ -253,13 +254,50 @@ fn verify_skill_install(entry: &LockEntry, global: bool) -> (Option<bool>, Optio
     }
 }
 
-/// A skill install that is a symlink must land on a canonical skill tree entry:
-/// every checkout spells that `<root>/.agents/skills/<name>`, and the installer
-/// only ever points these links at one. Following the link and finding *a*
-/// `SKILL.md` is not enough — a redirected link would otherwise pass
-/// verification and let `propagate --stage` commit a pointer to unrelated
-/// instructions. A non-symlink install (copy method) is not constrained here.
-fn skill_link_resolves_to_canonical_install(path: &Path, name: &str) -> bool {
+/// Every canonical location `installer::install_skill` is allowed to point a
+/// link for this entry at, canonicalized. Scope- and harness-specific: global
+/// Codex canonicals live under `codex_home_dir()/skills`, other global
+/// canonicals under `global_state_dir()/skills`, and project canonicals at
+/// `<checkout>/.agents/skills` — this checkout's, plus any same-repository
+/// checkout the harness layout is anchored in (VST-195).
+fn accepted_canonical_skill_targets(entry: &LockEntry, global: bool) -> Vec<PathBuf> {
+    let name = &entry.name;
+    let harnesses: Vec<crate::harness::Harness> = entry
+        .harnesses
+        .iter()
+        .filter_map(|id| crate::harness::Harness::from_id(id))
+        .collect();
+    let mut targets = Vec::new();
+    if global {
+        targets.push(config::codex_home_dir().join("skills").join(name));
+        targets.push(config::global_state_dir().join("skills").join(name));
+    } else {
+        targets.push(
+            config::project_root()
+                .join(".agents")
+                .join("skills")
+                .join(name),
+        );
+        targets.extend(
+            crate::installer::anchored_canonical_skill_roots(&harnesses)
+                .into_iter()
+                .map(|(root, _)| root.join(name)),
+        );
+    }
+    targets
+        .into_iter()
+        .map(|path| std::fs::canonicalize(&path).unwrap_or(path))
+        .collect()
+}
+
+/// A skill install that is a symlink must land on one of this entry's own
+/// canonical locations. Following the link and finding *a* `SKILL.md` is not
+/// enough, and neither is a path that merely ends in `.agents/skills/<name>`:
+/// an unrelated checkout spells its canonicals the same way. A redirected link
+/// would otherwise pass verification and let `propagate --stage` commit a
+/// pointer to unrelated instructions. A non-symlink install (copy method) is
+/// not constrained here.
+fn skill_link_resolves_to_canonical_install(path: &Path, canonical_targets: &[PathBuf]) -> bool {
     let Ok(meta) = std::fs::symlink_metadata(path) else {
         return false;
     };
@@ -269,7 +307,7 @@ fn skill_link_resolves_to_canonical_install(path: &Path, name: &str) -> bool {
     let Ok(resolved) = std::fs::canonicalize(path) else {
         return false;
     };
-    resolved.ends_with(Path::new(".agents").join("skills").join(name))
+    canonical_targets.contains(&resolved)
 }
 
 fn verify_agent_install(
@@ -406,14 +444,16 @@ fn hash_dir_walk(dir: &Path) -> u64 {
         // Mirrors config::hash_dir_bytes_excluding: a symlink contributes its
         // path and its target, so a retargeted link reads as drift.
         if entry.file_type().is_symlink() {
-            let Ok(target) = std::fs::read_link(entry.path()) else {
-                continue;
-            };
+            // An unreadable link is not "unchanged": fold a sentinel so the
+            // hash still moves rather than silently matching the last good one.
+            let target = std::fs::read_link(entry.path())
+                .map(|target| target.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| config::UNREADABLE_SYMLINK_HASH_SENTINEL.to_string());
             let rel = entry.path().strip_prefix(dir).unwrap_or(entry.path());
             for bytes in [
                 rel.to_string_lossy().as_bytes(),
                 config::SYMLINK_HASH_TAG,
-                target.to_string_lossy().as_bytes(),
+                target.as_bytes(),
             ] {
                 for &b in bytes {
                     state ^= b as u64;
@@ -570,6 +610,56 @@ mod tests {
 
             let err = run(ScopeFilter::Project, &[]).unwrap_err().to_string();
             assert!(err.contains("verification failed"), "{err}");
+        });
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn verify_skill_accepts_the_global_canonical_and_rejects_lookalikes() {
+        let root = tmpdir("global-canonical-skill-symlink");
+        let home = root.join("home");
+        let config_home = root.join("config");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&config_home).unwrap();
+
+        crate::test_util::with_home_and_config(&home, &config_home, || {
+            let canonical = config::global_state_dir().join("skills").join("demo");
+            write_file(&canonical.join("SKILL.md"), "---\nname: demo\n---\n");
+            // A lookalike outside every canonical tree, spelled the project way.
+            let lookalike = root
+                .join("elsewhere")
+                .join(".agents")
+                .join("skills")
+                .join("demo");
+            write_file(&lookalike.join("SKILL.md"), "---\nname: other\n---\n");
+
+            let entry = LockEntry {
+                name: "demo".to_string(),
+                kind: ItemKind::Skill,
+                source: "/unused/source".to_string(),
+                source_repo: None,
+                harnesses: vec!["claude-code".to_string()],
+                method: InstallMethod::Symlink,
+                installed_at: "2026-08-11T00:00:00Z".to_string(),
+                source_hash: "stored-hash".to_string(),
+            };
+
+            let link = crate::harness::Harness::ClaudeCode
+                .skills_dir(true)
+                .join("demo");
+            std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+            std::os::unix::fs::symlink(&canonical, &link).unwrap();
+            let (ok, note) = verify_skill_install(&entry, true);
+            assert_eq!(ok, Some(true), "global canonical must pass: {note:?}");
+
+            std::fs::remove_file(&link).unwrap();
+            std::os::unix::fs::symlink(&lookalike, &link).unwrap();
+            let (ok, note) = verify_skill_install(&entry, true);
+            assert_eq!(ok, Some(false));
+            assert!(
+                note.unwrap().contains("outside the canonical skill tree"),
+                "a path merely spelled .agents/skills/<name> is not this entry's canonical"
+            );
         });
     }
 

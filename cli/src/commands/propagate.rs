@@ -178,12 +178,12 @@ fn verify_project_auxiliary_installs_before_stage() -> Result<()> {
     for entry in lock.entries.values() {
         match entry.kind {
             ItemKind::Hook => {
-                let event = locked_hook_event(entry);
+                let registration = locked_hook_registration(entry);
                 for harness in entry.harnesses.iter().filter_map(|id| Harness::from_id(id)) {
                     verify_hook_auxiliary_install(
                         &entry.name,
                         harness,
-                        event.as_deref(),
+                        registration.as_ref(),
                         &mut failures,
                     );
                 }
@@ -207,7 +207,7 @@ fn verify_project_auxiliary_installs_before_stage() -> Result<()> {
 fn verify_hook_auxiliary_install(
     name: &str,
     harness: Harness,
-    event: Option<&str>,
+    registration: Option<&LockedHookRegistration>,
     failures: &mut Vec<String>,
 ) {
     match harness {
@@ -219,7 +219,7 @@ fn verify_hook_auxiliary_install(
                 require_hook_command_registration(
                     Path::new(".claude").join("settings.json").as_path(),
                     &crate::installer::claude_project_hook_command(name),
-                    event,
+                    registration.map(|r| (r.event.as_str(), r.matcher.as_deref())),
                     &format!("Claude hook {name}"),
                     failures,
                 );
@@ -231,7 +231,10 @@ fn verify_hook_auxiliary_install(
                 require_hook_command_registration(
                     Path::new(".codex").join("hooks.json").as_path(),
                     &crate::installer::codex_project_hook_command(name),
-                    event.and_then(crate::installer::codex_event_for),
+                    registration.and_then(|r| {
+                        crate::installer::codex_event_for(&r.event)
+                            .map(|event| (event, r.matcher.as_deref()))
+                    }),
                     &format!("Codex hook {name}"),
                     failures,
                 );
@@ -299,17 +302,25 @@ fn opencode_config_lists_instruction(json: &serde_json::Value, expected: &str) -
         .is_some_and(|entries| entries.iter().any(|entry| entry.as_str() == Some(expected)))
 }
 
-/// The event a locked hook is registered under, read from its source
-/// definition. Best effort: a source that will not resolve leaves the event
-/// unknown rather than failing the whole pre-stage verification, and the
-/// handler-shape check still applies.
-fn locked_hook_event(entry: &config::LockEntry) -> Option<String> {
+/// The event and matcher a locked hook must be registered with, read from its
+/// source definition. `None` means the definition could not be read — a
+/// dependency failure, not a pass: callers refuse to stage rather than accept a
+/// registration they cannot check.
+struct LockedHookRegistration {
+    event: String,
+    matcher: Option<String>,
+}
+
+fn locked_hook_registration(entry: &config::LockEntry) -> Option<LockedHookRegistration> {
     let source_root = config::resolve_source_path(&entry.source)?;
     crate::catalog::discover_hooks(&source_root)
         .ok()?
         .into_iter()
         .find(|hook| hook.name == entry.name)
-        .map(|hook| hook.event)
+        .map(|hook| LockedHookRegistration {
+            event: hook.event,
+            matcher: hook.matcher,
+        })
 }
 
 fn verify_pi_auxiliary_install(name: &str, failures: &mut Vec<String>) -> Result<()> {
@@ -447,32 +458,37 @@ fn pi_bin_link_failure(
 }
 
 /// Require the exact command the installer writes to be live in the harness
-/// config. The harness only runs `hooks.<event>[].hooks[]` entries whose
-/// `type` is `command`, so a path in an unrelated metadata string is not a
-/// registration — and neither is a command that merely mentions the script
-/// (`echo <script>`, `bash <script>.disabled`), which is why this compares the
-/// whole command rather than searching within it. When the hook's event is
-/// known the handler must sit under that event; when it is not (the source
-/// definition could not be read), any event still proves the handler shape.
+/// config, under the locked event and with the locked matcher. The harness only
+/// runs `hooks.<event>[].hooks[]` entries whose `type` is `command`, so a path
+/// in an unrelated metadata string is not a registration — and neither is a
+/// command that merely mentions the script (`echo <script>`,
+/// `bash <script>.disabled`), which is why this compares the whole command
+/// rather than searching within it. The matcher decides which tool calls reach
+/// the hook, so a rewritten matcher disables it just as effectively.
+///
+/// `expected` is `None` only when the source definition could not be read.
+/// That is a dependency failure, not a pass: it fails closed rather than
+/// accepting a registration under an unverified event.
 fn require_hook_command_registration(
     relative: &Path,
     expected_command: &str,
-    event: Option<&str>,
+    expected: Option<(&str, Option<&str>)>,
     label: &str,
     failures: &mut Vec<String>,
 ) {
+    let Some((event, matcher)) = expected else {
+        failures.push(format!(
+            "cannot read the locked event for {label} from its source; refusing to verify {}",
+            relative.display()
+        ));
+        return;
+    };
     match read_project_json(relative) {
-        Ok(json) if hook_command_registered(&json, expected_command, event) => {}
-        Ok(_) => {
-            let scope = match event {
-                Some(event) => format!(" under {event}"),
-                None => String::new(),
-            };
-            failures.push(format!(
-                "{} missing command registration{scope} for {label}",
-                relative.display()
-            ));
-        }
+        Ok(json) if hook_command_registered(&json, expected_command, event, matcher) => {}
+        Ok(_) => failures.push(format!(
+            "{} missing command registration under {event} for {label}",
+            relative.display()
+        )),
         Err(err) => failures.push(format!("{} {err}", relative.display())),
     }
 }
@@ -480,16 +496,20 @@ fn require_hook_command_registration(
 fn hook_command_registered(
     json: &serde_json::Value,
     expected_command: &str,
-    event: Option<&str>,
+    event: &str,
+    matcher: Option<&str>,
 ) -> bool {
-    let Some(hooks) = json.get("hooks").and_then(serde_json::Value::as_object) else {
+    let Some(entries) = json
+        .get("hooks")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|hooks| hooks.get(event))
+        .and_then(serde_json::Value::as_array)
+    else {
         return false;
     };
-    hooks
+    entries
         .iter()
-        .filter(|(event_name, _)| event.is_none_or(|wanted| wanted == event_name.as_str()))
-        .filter_map(|(_, entries)| entries.as_array())
-        .flatten()
+        .filter(|entry| entry.get("matcher").and_then(serde_json::Value::as_str) == matcher)
         .filter_map(|entry| entry.get("hooks").and_then(serde_json::Value::as_array))
         .flatten()
         .any(|handler| {
@@ -1893,6 +1913,8 @@ fn owned_shared_status_paths(
 /// could otherwise ride along into an automated propagation commit.
 const SHARED_CONFIG_PATHS: &[&str] = &[
     ".agents/skill-failure-reporting.md",
+    "vstack.toml",
+    "vstack.settings.toml",
     ".claude/settings.json",
     ".codex/hooks.json",
     ".codex/config.toml",
