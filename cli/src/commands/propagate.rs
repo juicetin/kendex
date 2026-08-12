@@ -116,6 +116,7 @@ pub fn run(
         }
         crate::commands::verify::run(scope, &[])?;
         if stage {
+            verify_project_auxiliary_installs_before_stage()?;
             stage_project_paths(&pre_refresh_stage_paths)?;
         } else {
             eprintln!("No propagation needed.");
@@ -137,10 +138,162 @@ pub fn run(
     crate::commands::verify::run(scope, &[])?;
 
     if stage {
+        verify_project_auxiliary_installs_before_stage()?;
         stage_project_paths(&pre_refresh_stage_paths)?;
     }
 
     Ok(())
+}
+
+fn verify_project_auxiliary_installs_before_stage() -> Result<()> {
+    let lock = LockFile::load(&config::lock_file_path(false))?;
+    let mut failures = Vec::new();
+    for entry in lock.entries.values() {
+        match entry.kind {
+            ItemKind::Hook => {
+                for harness in entry.harnesses.iter().filter_map(|id| Harness::from_id(id)) {
+                    verify_hook_auxiliary_install(&entry.name, harness, &mut failures);
+                }
+            }
+            ItemKind::PiExtension => {
+                verify_pi_auxiliary_install(&entry.name, &mut failures)?;
+            }
+            _ => {}
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        bail!(
+            "auxiliary verification failed before staging: {}",
+            failures.join("; ")
+        )
+    }
+}
+
+fn verify_hook_auxiliary_install(name: &str, harness: Harness, failures: &mut Vec<String>) {
+    match harness {
+        Harness::ClaudeCode => {
+            let script = Path::new(".claude")
+                .join("hooks")
+                .join(format!("{name}.sh"));
+            if config::project_root().join(&script).exists() {
+                require_json_string_fragment(
+                    Path::new(".claude").join("settings.json").as_path(),
+                    &script.to_string_lossy(),
+                    &format!("Claude hook {name}"),
+                    failures,
+                );
+            }
+        }
+        Harness::Codex => {
+            let script = Path::new(".codex").join("hooks").join(format!("{name}.sh"));
+            if config::project_root().join(&script).exists() {
+                require_json_string_fragment(
+                    Path::new(".codex").join("hooks.json").as_path(),
+                    &script.to_string_lossy(),
+                    &format!("Codex hook {name}"),
+                    failures,
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
+fn verify_pi_auxiliary_install(name: &str, failures: &mut Vec<String>) -> Result<()> {
+    let package_dir = crate::pi_extension::checked_pi_package_path(name, false)?;
+    if std::fs::symlink_metadata(&package_dir).is_err() {
+        return Ok(());
+    }
+    let settings_path = config::pi_settings_path(false);
+    let relative_settings = settings_path
+        .strip_prefix(config::project_root())
+        .unwrap_or(settings_path.as_path());
+    match read_project_json(relative_settings) {
+        Ok(settings) => {
+            if !pi_settings_references_package(&settings, name, &package_dir) {
+                failures.push(format!(
+                    "{} missing registration for Pi package {name}",
+                    relative_settings.display()
+                ));
+            }
+        }
+        Err(err) => failures.push(format!("{} {err}", relative_settings.display())),
+    }
+
+    #[cfg(unix)]
+    if let Ok(ext) = crate::pi_extension::PiExtension::from_dir(&package_dir) {
+        for bin_name in ext.bin.keys() {
+            crate::pi_extension::validate_pi_bin_name(bin_name)
+                .with_context(|| format!("unsafe Pi bin name {bin_name}"))?;
+            let bin = config::pi_bin_dir(false).join(bin_name);
+            if std::fs::symlink_metadata(&bin).is_err() {
+                failures.push(format!(".pi/bin/{bin_name} missing for Pi package {name}"));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn require_json_string_fragment(
+    relative: &Path,
+    needle: &str,
+    label: &str,
+    failures: &mut Vec<String>,
+) {
+    match read_project_json(relative) {
+        Ok(json) if json_contains_string_fragment(&json, needle) => {}
+        Ok(_) => failures.push(format!(
+            "{} missing registration for {label}",
+            relative.display()
+        )),
+        Err(err) => failures.push(format!("{} {err}", relative.display())),
+    }
+}
+
+fn read_project_json(relative: &Path) -> Result<serde_json::Value> {
+    let path = config::project_root().join(relative);
+    let content =
+        std::fs::read_to_string(&path).with_context(|| "missing or unreadable".to_string())?;
+    serde_json::from_str(&content).with_context(|| "contains invalid JSON".to_string())
+}
+
+fn json_contains_string_fragment(value: &serde_json::Value, needle: &str) -> bool {
+    match value {
+        serde_json::Value::String(value) => value.contains(needle),
+        serde_json::Value::Array(values) => values
+            .iter()
+            .any(|value| json_contains_string_fragment(value, needle)),
+        serde_json::Value::Object(values) => values
+            .values()
+            .any(|value| json_contains_string_fragment(value, needle)),
+        _ => false,
+    }
+}
+
+fn pi_settings_references_package(
+    settings: &serde_json::Value,
+    name: &str,
+    package_dir: &Path,
+) -> bool {
+    let canonical = format!("./packages/{name}");
+    let absolute = package_dir.to_string_lossy();
+    let matches = |value: &str| value == canonical || value == absolute;
+    settings
+        .get("packages")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|packages| {
+            packages.iter().any(|entry| match entry {
+                serde_json::Value::String(value) => matches(value),
+                serde_json::Value::Object(map) => map
+                    .get("source")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(matches),
+                _ => false,
+            })
+        })
 }
 
 fn detect_drift_for_scope(global: bool) -> Result<ScopeDrift> {

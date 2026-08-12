@@ -50,6 +50,15 @@ fn write_agent_skill_source(root: &Path, role_skills: bool) {
     std::fs::write(root.join("vstack.toml"), mapping).unwrap();
 }
 
+fn write_hook_source(root: &Path, name: &str) {
+    write_file(
+        &root.join("hooks").join(format!("{name}.sh")),
+        &format!(
+            "# ---\n# name: {name}\n# event: PreToolUse\n# matcher: Bash\n# description: Guard shell commands\n# safety: Keep shell commands safe\n# ---\n#!/bin/sh\nexit 0\n"
+        ),
+    );
+}
+
 fn demo_entry(source: &Path) -> LockEntry {
     LockEntry {
         name: "demo".to_string(),
@@ -70,6 +79,22 @@ fn agent_entry(name: &str, source: &Path) -> LockEntry {
         source: source.display().to_string(),
         source_repo: None,
         harnesses: vec!["claude-code".to_string()],
+        method: InstallMethod::Copy,
+        installed_at: "2026-08-11T00:00:00Z".to_string(),
+        source_hash: String::new(),
+    }
+}
+
+fn hook_entry(name: &str, source: &Path, harnesses: &[&str]) -> LockEntry {
+    LockEntry {
+        name: name.to_string(),
+        kind: ItemKind::Hook,
+        source: source.display().to_string(),
+        source_repo: None,
+        harnesses: harnesses
+            .iter()
+            .map(|harness| (*harness).to_string())
+            .collect(),
         method: InstallMethod::Copy,
         installed_at: "2026-08-11T00:00:00Z".to_string(),
         source_hash: String::new(),
@@ -1174,6 +1199,185 @@ fn stage_mode_fails_before_staging_when_locked_skill_harness_path_is_missing() {
             .unwrap_err()
             .to_string();
         assert!(err.contains("verification failed"), "{err}");
+        let staged = git_output(&project, &["diff", "--cached", "--name-only"]);
+        assert!(staged.is_empty(), "{staged}");
+    });
+}
+
+#[test]
+fn stage_mode_fails_before_staging_when_claude_hook_settings_missing() {
+    let project = tmpdir("stage-no-drift-claude-settings-missing");
+    let source = tmpdir("stage-no-drift-claude-settings-source");
+    std::fs::create_dir_all(&project).unwrap();
+    init_git_project(&project);
+    write_hook_source(&source, "guard");
+
+    crate::test_util::with_project_root(&project, || {
+        let mut entry = hook_entry("guard", &source, &["claude-code"]);
+        entry.source_hash = config::compute_source_hash(&entry);
+        let mut lock = LockFile::default();
+        lock.add(entry);
+        lock.save(&config::lock_file_path(false)).unwrap();
+        write_file(
+            &project.join(".claude/hooks/guard.sh"),
+            "#!/bin/sh\nexit 0\n",
+        );
+        write_file(
+            &project.join(".claude/settings.json"),
+            r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/guard.sh\""}]}]}}"#,
+        );
+        git(&project, &["add", "-A"]);
+        git(&project, &["commit", "-m", "baseline"]);
+
+        std::fs::remove_file(project.join(".claude/settings.json")).unwrap();
+
+        let err = run(ScopeFilter::Project, false, false, true, true)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("auxiliary verification failed"), "{err}");
+        assert!(err.contains(".claude/settings.json"), "{err}");
+        let staged = git_output(&project, &["diff", "--cached", "--name-only"]);
+        assert!(staged.is_empty(), "{staged}");
+    });
+}
+
+#[test]
+fn stage_mode_fails_before_staging_when_codex_hooks_registry_missing() {
+    let project = tmpdir("stage-no-drift-codex-hooks-missing");
+    let source = tmpdir("stage-no-drift-codex-hooks-source");
+    std::fs::create_dir_all(&project).unwrap();
+    init_git_project(&project);
+    write_hook_source(&source, "guard");
+
+    crate::test_util::with_project_root(&project, || {
+        let mut entry = hook_entry("guard", &source, &["codex"]);
+        entry.source_hash = config::compute_source_hash(&entry);
+        let mut lock = LockFile::default();
+        lock.add(entry);
+        lock.save(&config::lock_file_path(false)).unwrap();
+        write_file(
+            &project.join(".codex/hooks/guard.sh"),
+            "#!/bin/sh\nexit 0\n",
+        );
+        write_file(
+            &project.join(".codex/hooks.json"),
+            r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"bash \"$(git rev-parse --show-toplevel)/.codex/hooks/guard.sh\""}]}]}}"#,
+        );
+        write_file(
+            &project.join(".codex/config.toml"),
+            "[features]\nhooks = true\n",
+        );
+        git(&project, &["add", "-A"]);
+        git(&project, &["commit", "-m", "baseline"]);
+
+        std::fs::remove_file(project.join(".codex/hooks.json")).unwrap();
+
+        let err = run(ScopeFilter::Project, false, false, true, true)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("auxiliary verification failed"), "{err}");
+        assert!(err.contains(".codex/hooks.json"), "{err}");
+        let staged = git_output(&project, &["diff", "--cached", "--name-only"]);
+        assert!(staged.is_empty(), "{staged}");
+    });
+}
+
+#[test]
+fn stage_mode_fails_before_staging_when_pi_settings_missing() {
+    let project = tmpdir("stage-no-drift-pi-settings-missing");
+    let source = tmpdir("stage-no-drift-pi-settings-source");
+    std::fs::create_dir_all(&project).unwrap();
+    init_git_project(&project);
+    write_file(
+        &source.join("pi-extensions/demo-pkg/package.json"),
+        r#"{"name":"demo-pkg","pi":{"extensions":[]},"bin":{"demo-tool":"bin/tool.js"}}"#,
+    );
+    write_file(&source.join("pi-extensions/demo-pkg/bin/tool.js"), "tool\n");
+
+    crate::test_util::with_project_root(&project, || {
+        let mut entry = pi_entry("demo-pkg", &source);
+        entry.source_hash = config::compute_source_hash(&entry);
+        let mut lock = LockFile::default();
+        lock.add(entry);
+        lock.save(&config::lock_file_path(false)).unwrap();
+        write_file(
+            &project.join(".pi/.vstack-source.json"),
+            &format!(
+                r#"{{"demo-pkg":{{"sourcePath":"{}"}}}}"#,
+                source.join("pi-extensions/demo-pkg").display()
+            ),
+        );
+        write_file(
+            &project.join(".pi/packages/demo-pkg/package.json"),
+            r#"{"name":"demo-pkg","pi":{"extensions":[]},"bin":{"demo-tool":"bin/tool.js"}}"#,
+        );
+        write_file(&project.join(".pi/packages/demo-pkg/bin/tool.js"), "tool\n");
+        write_file(
+            &project.join(".pi/settings.json"),
+            r#"{"packages":["./packages/demo-pkg"]}"#,
+        );
+        write_file(&project.join(".pi/bin/demo-tool"), "managed bin link\n");
+        git(&project, &["add", "-A"]);
+        git(&project, &["commit", "-m", "baseline"]);
+
+        std::fs::remove_file(project.join(".pi/settings.json")).unwrap();
+
+        let err = run(ScopeFilter::Project, false, false, true, true)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("auxiliary verification failed"), "{err}");
+        assert!(err.contains(".pi/settings.json"), "{err}");
+        let staged = git_output(&project, &["diff", "--cached", "--name-only"]);
+        assert!(staged.is_empty(), "{staged}");
+    });
+}
+
+#[test]
+#[cfg(unix)]
+fn stage_mode_fails_before_staging_when_current_pi_bin_missing() {
+    let project = tmpdir("stage-no-drift-pi-bin-missing");
+    let source = tmpdir("stage-no-drift-pi-bin-source");
+    std::fs::create_dir_all(&project).unwrap();
+    init_git_project(&project);
+    write_file(
+        &source.join("pi-extensions/demo-pkg/package.json"),
+        r#"{"name":"demo-pkg","pi":{"extensions":[]},"bin":{"demo-tool":"bin/tool.js"}}"#,
+    );
+    write_file(&source.join("pi-extensions/demo-pkg/bin/tool.js"), "tool\n");
+
+    crate::test_util::with_project_root(&project, || {
+        let mut entry = pi_entry("demo-pkg", &source);
+        entry.source_hash = config::compute_source_hash(&entry);
+        let mut lock = LockFile::default();
+        lock.add(entry);
+        lock.save(&config::lock_file_path(false)).unwrap();
+        write_file(
+            &project.join(".pi/.vstack-source.json"),
+            &format!(
+                r#"{{"demo-pkg":{{"sourcePath":"{}"}}}}"#,
+                source.join("pi-extensions/demo-pkg").display()
+            ),
+        );
+        write_file(
+            &project.join(".pi/packages/demo-pkg/package.json"),
+            r#"{"name":"demo-pkg","pi":{"extensions":[]},"bin":{"demo-tool":"bin/tool.js"}}"#,
+        );
+        write_file(&project.join(".pi/packages/demo-pkg/bin/tool.js"), "tool\n");
+        write_file(
+            &project.join(".pi/settings.json"),
+            r#"{"packages":["./packages/demo-pkg"]}"#,
+        );
+        write_file(&project.join(".pi/bin/demo-tool"), "managed bin link\n");
+        git(&project, &["add", "-A"]);
+        git(&project, &["commit", "-m", "baseline"]);
+
+        std::fs::remove_file(project.join(".pi/bin/demo-tool")).unwrap();
+
+        let err = run(ScopeFilter::Project, false, false, true, true)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("auxiliary verification failed"), "{err}");
+        assert!(err.contains(".pi/bin/demo-tool"), "{err}");
         let staged = git_output(&project, &["diff", "--cached", "--name-only"]);
         assert!(staged.is_empty(), "{staged}");
     });

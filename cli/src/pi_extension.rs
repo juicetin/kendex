@@ -1832,6 +1832,7 @@ printf 'module.exports = 1;\n' > node_modules/left-pad/index.js
     }
 
     #[test]
+    #[cfg(unix)]
     fn install_creates_and_remove_clears_bin_symlinks() {
         let sandbox =
             std::env::temp_dir().join(format!("vstack_pi_bin_links_{}", std::process::id()));
@@ -1883,6 +1884,7 @@ printf 'module.exports = 1;\n' > node_modules/left-pad/index.js
     }
 
     #[test]
+    #[cfg(unix)]
     fn reinstall_removes_stale_managed_bin_symlinks_only() {
         let sandbox =
             std::env::temp_dir().join(format!("vstack_pi_stale_bin_links_{}", std::process::id()));
@@ -1943,6 +1945,7 @@ printf 'module.exports = 1;\n' > node_modules/left-pad/index.js
     }
 
     #[test]
+    #[cfg(unix)]
     fn reinstall_preserves_stale_bin_symlink_that_escapes_package_with_parent_components() {
         let sandbox = std::env::temp_dir().join(format!(
             "vstack_pi_stale_bin_parent_escape_{}",
