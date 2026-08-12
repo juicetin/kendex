@@ -543,30 +543,7 @@ fn install_pi_extension_inner(
     let dest = checked_pi_package_path(&ext.name, global)?;
     let previous_bin_names = installed_bin_names(&dest);
 
-    // Preflight the bin names before anything destructive: catching a collision
-    // inside `install_bin_links` would leave the old package already cleared,
-    // recopied, and its earlier links replaced, with Pi able to load the new
-    // package through its existing settings entry.
-    #[cfg(unix)]
-    {
-        let bin_dir = crate::config::pi_bin_dir(global);
-        for (cli_name, rel_target) in &ext.bin {
-            validate_pi_bin_name(cli_name)?;
-            // `install_bin_links` skips a bin whose manifest target does not
-            // exist, so the preflight must skip it too: refusing here would
-            // fail a reinstall over a name the install was never going to
-            // claim, leaving a partially available extension uninstallable
-            // whenever a consumer owns that name. The copy has not happened
-            // yet, so the source directory is where the target either ships or
-            // does not — `copy_dir` reproduces it verbatim into `dest`.
-            let source_target =
-                checked_package_child_path(&ext.source_dir, rel_target, "Pi bin target")?;
-            if !source_target.exists() {
-                continue;
-            }
-            reject_foreign_bin_link(&bin_dir.join(cli_name), cli_name, &dest, &ext.name)?;
-        }
-    }
+    reject_bin_link_collisions(ext, &dest, global)?;
 
     // Idempotent reinstall: clear any prior copy. NotFound is fine; other
     // errors (EACCES etc.) propagate so we don't copy onto a broken state.
@@ -722,6 +699,32 @@ pub fn remove_pi_extension(name: &str, global: bool) -> Result<Vec<PathBuf>> {
     }
     let _ = remove_from_source_index(name, global);
     Ok(removed)
+}
+
+/// Preflight the bin names before anything destructive. `install_bin_links`
+/// rejects a foreign bin name on every platform, but by the time it runs the
+/// old package has been cleared, recopied and its earlier links replaced, with
+/// Pi able to load the new package through its existing settings entry — so
+/// this runs on every platform too, ahead of the replacement.
+fn reject_bin_link_collisions(ext: &PiExtension, dest: &Path, global: bool) -> Result<()> {
+    let bin_dir = crate::config::pi_bin_dir(global);
+    for (cli_name, rel_target) in &ext.bin {
+        validate_pi_bin_name(cli_name)?;
+        // `install_bin_links` skips a bin whose manifest target does not exist,
+        // so the preflight must skip it too: refusing here would fail a
+        // reinstall over a name the install was never going to claim, leaving a
+        // partially available extension uninstallable whenever a consumer owns
+        // that name. The copy has not happened yet, so the source directory is
+        // where the target either ships or does not — `copy_dir` reproduces it
+        // verbatim into `dest`.
+        let source_target =
+            checked_package_child_path(&ext.source_dir, rel_target, "Pi bin target")?;
+        if !source_target.exists() {
+            continue;
+        }
+        reject_foreign_bin_link(&bin_dir.join(cli_name), cli_name, dest, &ext.name)?;
+    }
+    Ok(())
 }
 
 /// Create symlinks at `<scope>/bin/<cli-name>` for every entry in the
@@ -3536,5 +3539,49 @@ printf 'module.exports = 1;\n' > node_modules/left-pad/index.js
             "unscoped package alongside scope dir must still appear; got {names:?}"
         );
         let _ = std::fs::remove_dir_all(&sandbox);
+    }
+
+    /// The source text of a top-level `fn`, from its signature to the closing
+    /// brace in column zero.
+    fn top_level_fn_body(source: &str, signature: &str) -> String {
+        let start = source
+            .find(signature)
+            .unwrap_or_else(|| panic!("{signature} not found in module source"));
+        let rest = &source[start..];
+        let end = rest
+            .find("\n}\n")
+            .unwrap_or_else(|| panic!("{signature} has no closing brace in column zero"));
+        rest[..end].to_string()
+    }
+
+    #[test]
+    fn bin_collision_preflight_is_compiled_wherever_the_rejection_is() {
+        let source = include_str!("pi_extension.rs");
+        // The control: the scanner must see a `#[cfg]` where one really is.
+        // `install_bin_links` gates only the symlink call it wraps, so it keeps
+        // one and pins that a clean result below is a finding, not a miss.
+        assert!(
+            top_level_fn_body(source, "fn install_bin_links(").contains("#[cfg("),
+            "the scanner cannot see a cfg gate that is present"
+        );
+        let install = top_level_fn_body(source, "fn install_pi_extension_inner(");
+        // `install_bin_links` rejects a foreign bin name on every platform, and
+        // it runs after the package has been cleared and recopied. A preflight
+        // compiled on fewer platforms than that rejection leaves the rest
+        // failing late, over an already replaced package.
+        assert!(
+            !install.contains("#[cfg("),
+            "the install path is platform-conditional, so its preflight cannot cover every platform the rejection runs on"
+        );
+        let preflight = install
+            .find("reject_bin_link_collisions(")
+            .expect("the install path does not preflight bin collisions");
+        let replace = install
+            .find("clear_path(&dest)")
+            .expect("the install path does not clear the previous package");
+        assert!(
+            preflight < replace,
+            "the bin-collision preflight does not run before the package is replaced"
+        );
     }
 }

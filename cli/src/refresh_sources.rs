@@ -512,9 +512,7 @@ fn clone_or_update_remote_source_at(
     }
 
     eprintln!("Cloning {display} into vstack source cache...");
-    let output = std::process::Command::new("git")
-        .args(["clone", "--depth", "1", &git_url])
-        .arg(cache_dir)
+    let output = cache_clone_command(&git_url, cache_dir)
         .stdout(std::process::Stdio::null())
         .output()
         .with_context(|| format!("running git clone for {display}"))?;
@@ -837,9 +835,8 @@ fn legacy_add_cache_key(source: &str) -> Option<String> {
 }
 
 fn validate_cached_repo_origin(display: &str, expected_url: &str, repo_dir: &Path) -> Result<()> {
-    let output = std::process::Command::new("git")
+    let output = cache_git_command(repo_dir)
         .args(["remote", "get-url", "origin"])
-        .current_dir(repo_dir)
         .output()
         .with_context(|| format!("reading origin for cached source {display}"))?;
     if !output.status.success() {
@@ -905,23 +902,37 @@ fn batch_mode_ssh_command(inherited: Option<&str>) -> String {
     format!("{base} -o BatchMode=yes")
 }
 
-/// A `git` invocation pinned to the cache entry: the working directory decides
-/// the repository, with every inherited override cleared.
-fn cache_git_command(repo_dir: &Path) -> std::process::Command {
+/// The one constructor every `git` invocation in this module is built from.
+/// Cloning, reading an origin and updating all run unattended inside a refresh:
+/// a credential prompt in any of them hangs the run, and an inherited
+/// repository override in any of them points git outside the cache.
+fn cache_git_program() -> std::process::Command {
     let mut command = std::process::Command::new("git");
-    command.current_dir(repo_dir);
     for key in GIT_LOCATION_ENV_VARS {
         command.env_remove(key);
     }
-    // A cache whose origin needs credentials would otherwise block on git's
-    // username prompt — `update_cached_repo_strict` runs unattended, so that is
-    // a hang, not a question. Refuse the prompt in both transports and let the
-    // command fail with a message instead.
     command.env("GIT_TERMINAL_PROMPT", "0");
     command.env(
         "GIT_SSH_COMMAND",
         batch_mode_ssh_command(std::env::var("GIT_SSH_COMMAND").ok().as_deref()),
     );
+    command
+}
+
+/// The `git clone` that mints a fresh cache entry. The destination is named on
+/// the command line, so this one runs from the caller's working directory.
+fn cache_clone_command(git_url: &str, cache_dir: &Path) -> std::process::Command {
+    let mut command = cache_git_program();
+    command.args(["clone", "--depth", "1", git_url]);
+    command.arg(cache_dir);
+    command
+}
+
+/// A `git` invocation pinned to an existing cache entry: the working directory
+/// decides the repository, with every inherited override cleared.
+fn cache_git_command(repo_dir: &Path) -> std::process::Command {
+    let mut command = cache_git_program();
+    command.current_dir(repo_dir);
     command
 }
 

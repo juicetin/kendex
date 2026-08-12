@@ -1256,3 +1256,45 @@ fn batch_mode_ssh_command_extends_an_inherited_command() {
         "ssh -i /keys/id_ed25519 -o BatchMode=yes"
     );
 }
+
+fn git_command_environment(
+    command: &std::process::Command,
+) -> std::collections::BTreeMap<String, Option<String>> {
+    command
+        .get_envs()
+        .map(|(key, value)| {
+            (
+                key.to_string_lossy().into_owned(),
+                value.map(|v| v.to_string_lossy().into_owned()),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn every_cache_git_invocation_carries_the_same_non_interactive_environment() {
+    let cache_dir = Path::new("/vstack/cache/owner_repo");
+    let update = git_command_environment(&cache_git_command(cache_dir));
+    // The control: an unhardened `git` carries none of it, so an equality that
+    // holds is a claim about the hardening and not about two empty maps.
+    assert_ne!(
+        git_command_environment(&std::process::Command::new("git")),
+        update,
+        "the comparison would pass against a bare git command"
+    );
+    assert!(
+        !update.is_empty(),
+        "the update path carries no environment to compare against"
+    );
+    // Cloning is as unattended as updating: a credential prompt there is a
+    // hang in the same propagation run, so the clone must be built by the same
+    // hardened constructor.
+    assert_eq!(
+        git_command_environment(&cache_clone_command(
+            "https://github.com/owner/repo.git",
+            cache_dir
+        )),
+        update,
+        "the clone path does not match the update path's environment"
+    );
+}
