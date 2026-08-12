@@ -13,7 +13,8 @@ pub(crate) use hooks::{
     claude_project_hook_command, codex_event_for, codex_hooks_feature_enabled,
     codex_project_hook_command, codex_root, cursor_hook_rule_contents, cursor_hook_rule_path,
     install_codex_fallback_hooks_for_agents, install_hook, migrate_codex_config,
-    opencode_hook_instruction_contents, opencode_hook_instruction_path, remove_hook_install,
+    opencode_hook_instruction_contents, opencode_hook_instruction_path,
+    opencode_hook_instruction_ref, remove_hook_install,
 };
 
 pub(crate) fn codex_hook_safety_block(hook: &Hook) -> String {

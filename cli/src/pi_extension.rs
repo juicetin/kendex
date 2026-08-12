@@ -1132,6 +1132,49 @@ pub fn append_system_has_managed_block(path: &Path) -> Result<bool> {
     }
 }
 
+/// The body of `name`'s managed block in `target`, or `None` when the file has
+/// no such block. Whitespace is trimmed so it compares directly against the
+/// declared source content, which `append_system_upsert` also trims.
+pub fn append_system_block_content(target: &Path, name: &str) -> Result<Option<String>> {
+    let existing = match std::fs::read_to_string(target) {
+        Ok(existing) => existing,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err).with_context(|| format!("reading {}", target.display())),
+    };
+    let (begin, end) = append_system_block_markers(name);
+    let Some(start) = existing.find(&begin) else {
+        return Ok(None);
+    };
+    let after = &existing[start + begin.len()..];
+    let Some(stop) = after.find(&end) else {
+        return Ok(None);
+    };
+    Ok(Some(after[..stop].trim().to_string()))
+}
+
+/// The append-system body `name`'s installed package declares, or `None` when
+/// it declares none (or the declared file is missing or empty — the same
+/// conditions under which install removes the block).
+pub fn declared_append_system_content(package_dir: &Path) -> Result<Option<String>> {
+    let ext = PiExtension::from_dir(package_dir)?;
+    let Some(rel) = ext.append_system.as_deref() else {
+        return Ok(None);
+    };
+    let source =
+        checked_package_child_path(package_dir, rel, "appendSystem").with_context(|| {
+            format!(
+                "invalid pi.appendSystem path for package {}: `{rel}`",
+                ext.name
+            )
+        })?;
+    match std::fs::read_to_string(&source) {
+        Ok(content) if content.trim().is_empty() => Ok(None),
+        Ok(content) => Ok(Some(content.trim().to_string())),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err).with_context(|| format!("reading {}", source.display())),
+    }
+}
+
 fn append_system_block_markers(name: &str) -> (String, String) {
     (
         format!("<!-- vstack:append-system {name} begin -->"),

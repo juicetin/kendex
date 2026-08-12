@@ -37,7 +37,7 @@ pub(crate) fn opencode_hook_instruction_path(global: bool, name: &str) -> PathBu
     opencode_hook_instruction_dir(global).join(file_name)
 }
 
-fn opencode_hook_instruction_ref(global: bool, name: &str) -> String {
+pub(crate) fn opencode_hook_instruction_ref(global: bool, name: &str) -> String {
     let file_name = format!("vstack-hook-{name}.md");
     if global {
         format!("instructions/{file_name}")

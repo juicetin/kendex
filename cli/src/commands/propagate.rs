@@ -119,7 +119,10 @@ pub fn run(
         }
         crate::commands::verify::run_with_source_records(scope, &[], &source_records_by_scope)?;
         if stage {
+            // Install breakage first: it is the more actionable diagnostic, and
+            // the shared-config guard below still runs before anything stages.
             verify_project_auxiliary_installs_before_stage()?;
+            refuse_pre_existing_shared_config_edits(&pre_refresh_dirty_shared)?;
             stage_project_paths(&pre_refresh_stage_paths)?;
         } else {
             eprintln!("No propagation needed.");
@@ -141,18 +144,20 @@ pub fn run(
     crate::commands::verify::run_with_source_records(scope, &[], &source_records_by_scope)?;
 
     if stage {
-        refuse_pre_existing_shared_config_edits(&pre_refresh_dirty_shared)?;
         verify_project_auxiliary_installs_before_stage()?;
+        refuse_pre_existing_shared_config_edits(&pre_refresh_dirty_shared)?;
         stage_project_paths_after_refresh(&pre_refresh_stage_paths)?;
     }
 
     Ok(())
 }
 
-/// A shared config file that was already modified before the refresh carries
-/// consumer edits propagation did not make. Git stages whole files, so the
-/// only way not to absorb them is to refuse and let the consumer separate
-/// their work first.
+/// A shared config file that was already modified or untracked before
+/// propagation ran carries consumer state propagation did not make. Git stages
+/// whole files, so the only way not to absorb it is to refuse and let the
+/// consumer separate their work first. Applied on both staging paths: the
+/// no-drift branch stages the same shared files and is the one a scheduled job
+/// hits most often.
 fn refuse_pre_existing_shared_config_edits(dirty: &[PathBuf]) -> Result<()> {
     if dirty.is_empty() {
         return Ok(());
@@ -162,7 +167,7 @@ fn refuse_pre_existing_shared_config_edits(dirty: &[PathBuf]) -> Result<()> {
         .map(|path| path.display().to_string())
         .collect();
     bail!(
-        "refusing to stage: shared vstack-managed config file(s) already had uncommitted changes before propagation ran: {}. Commit or stash them first so the automated commit carries only propagated changes.",
+        "refusing to stage: shared vstack-managed config file(s) already had uncommitted changes before propagation ran: {}. Commit them (or stash, including untracked) first so the automated commit carries only propagated changes.",
         display.join(", ")
     )
 }
@@ -244,8 +249,54 @@ fn verify_hook_auxiliary_install(
                 }
             }
         }
+        Harness::OpenCode => {
+            let instruction = crate::installer::opencode_hook_instruction_path(false, name);
+            if instruction.exists() {
+                require_opencode_instruction_registration(name, failures);
+            }
+        }
         _ => {}
     }
+}
+
+/// OpenCode only loads an instruction file listed in the active config's
+/// `instructions` array — the file existing on disk proves nothing. Both
+/// config spellings are checked, and a config that is absent or does not list
+/// the exact ref the installer writes is a broken install, not a stageable
+/// state.
+fn require_opencode_instruction_registration(name: &str, failures: &mut Vec<String>) {
+    let expected = crate::installer::opencode_hook_instruction_ref(false, name);
+    let project_root = config::project_root();
+    let configs = ["opencode.json", "opencode.jsonc"];
+    let mut present = Vec::new();
+    for config_name in configs {
+        let relative = Path::new(config_name);
+        if !project_root.join(relative).exists() {
+            continue;
+        }
+        present.push(config_name);
+        match read_project_json(relative) {
+            Ok(json) if opencode_config_lists_instruction(&json, &expected) => return,
+            Ok(_) => {}
+            Err(err) => failures.push(format!("{config_name} {err}")),
+        }
+    }
+    if present.is_empty() {
+        failures.push(format!(
+            "opencode.json missing registration for OpenCode hook {name}"
+        ));
+    } else {
+        failures.push(format!(
+            "{} missing instructions entry {expected} for OpenCode hook {name}",
+            present.join("/")
+        ));
+    }
+}
+
+fn opencode_config_lists_instruction(json: &serde_json::Value, expected: &str) -> bool {
+    json.get("instructions")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|entries| entries.iter().any(|entry| entry.as_str() == Some(expected)))
 }
 
 /// The event a locked hook is registered under, read from its source
@@ -282,6 +333,9 @@ fn verify_pi_auxiliary_install(name: &str, failures: &mut Vec<String>) -> Result
         Err(err) => failures.push(format!("{} {err}", relative_settings.display())),
     }
 
+    verify_pi_append_system_block(name, &package_dir, failures)?;
+    verify_pi_source_index_entry(name, failures);
+
     #[cfg(unix)]
     if let Ok(ext) = crate::pi_extension::PiExtension::from_dir(&package_dir) {
         for (bin_name, rel_target) in &ext.bin {
@@ -301,6 +355,47 @@ fn verify_pi_auxiliary_install(name: &str, failures: &mut Vec<String>) -> Result
     }
 
     Ok(())
+}
+
+/// Pi loads `.pi/APPEND_SYSTEM.md` as the project's whole append-system
+/// payload, and nothing else checks it: package hashing covers the package
+/// directory, not this file. A package that declares `pi.appendSystem` must
+/// therefore have its marker-delimited block present and byte-equal to the
+/// content it declares, or the prompt silently lost instructions the lock says
+/// are installed.
+fn verify_pi_append_system_block(
+    name: &str,
+    package_dir: &Path,
+    failures: &mut Vec<String>,
+) -> Result<()> {
+    let declared = crate::pi_extension::declared_append_system_content(package_dir)?;
+    let append_path = crate::pi_extension::append_system_path(false);
+    let installed = crate::pi_extension::append_system_block_content(&append_path, name)?;
+    match (declared, installed) {
+        (None, _) => {}
+        (Some(_), None) => failures.push(format!(
+            ".pi/APPEND_SYSTEM.md missing the block for Pi package {name}"
+        )),
+        (Some(declared), Some(installed)) if declared != installed => failures.push(format!(
+            ".pi/APPEND_SYSTEM.md block for Pi package {name} does not match the package content"
+        )),
+        (Some(_), Some(_)) => {}
+    }
+    Ok(())
+}
+
+/// `.pi/.vstack-source.json` is the sidecar `vstack update-pi` and
+/// pi-extension-manager read for update detection. Source records resolved
+/// elsewhere let verification succeed without it, so a missing, malformed, or
+/// incomplete sidecar would otherwise survive a clean no-drift run.
+fn verify_pi_source_index_entry(name: &str, failures: &mut Vec<String>) {
+    match crate::pi_extension::read_source_index(false) {
+        Ok(index) if index.contains_key(name) => {}
+        Ok(_) => failures.push(format!(
+            ".pi/.vstack-source.json missing the entry for Pi package {name}"
+        )),
+        Err(err) => failures.push(format!(".pi/.vstack-source.json {err}")),
+    }
 }
 
 /// A locked `.pi/bin/<cmd>` is only a valid install when it is a symlink that
@@ -1831,7 +1926,7 @@ fn dirty_shared_config_paths() -> Result<Vec<PathBuf>> {
             "status",
             "--porcelain=v1",
             "-z",
-            "--untracked-files=no",
+            "--untracked-files=all",
             "--",
         ])
         .args(&pathspecs)

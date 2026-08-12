@@ -8,7 +8,10 @@ use std::path::{Path, PathBuf};
 mod opencode;
 
 use opencode::{install_hook_opencode, remove_hook_from_opencode_json};
-pub(crate) use opencode::{opencode_hook_instruction_contents, opencode_hook_instruction_path};
+pub(crate) use opencode::{
+    opencode_hook_instruction_contents, opencode_hook_instruction_path,
+    opencode_hook_instruction_ref,
+};
 
 fn validate_file_name(file_name: &str) -> Result<()> {
     if file_name.is_empty()

@@ -2498,3 +2498,234 @@ fn refreshed_staging_does_not_read_pi_sources_or_committed_manifests() {
         assert!(err.contains("unsafe committed Pi package path"), "{err}");
     });
 }
+
+/// Baseline for the Pi auxiliary checks: a package whose settings registration,
+/// source index, append-system block, and bin link are all valid.
+fn write_valid_pi_install(project: &Path, source: &Path) {
+    write_file(
+        &source.join("pi-extensions/demo-pkg/package.json"),
+        r#"{"name":"demo-pkg","pi":{"extensions":[],"appendSystem":"APPEND.md"}}"#,
+    );
+    write_file(
+        &source.join("pi-extensions/demo-pkg/APPEND.md"),
+        "house rule\n",
+    );
+    write_file(
+        &project.join(".pi/packages/demo-pkg/package.json"),
+        r#"{"name":"demo-pkg","pi":{"extensions":[],"appendSystem":"APPEND.md"}}"#,
+    );
+    write_file(
+        &project.join(".pi/packages/demo-pkg/APPEND.md"),
+        "house rule\n",
+    );
+    write_file(
+        &project.join(".pi/settings.json"),
+        r#"{"packages":["./packages/demo-pkg"]}"#,
+    );
+    write_file(
+        &project.join(".pi/.vstack-source.json"),
+        r#"{"demo-pkg":{"sourcePath":"/somewhere"}}"#,
+    );
+    write_file(
+        &project.join(".pi/APPEND_SYSTEM.md"),
+        "<!-- vstack:append-system demo-pkg begin -->\nhouse rule\n<!-- vstack:append-system demo-pkg end -->\n",
+    );
+}
+
+#[test]
+fn stage_mode_verifies_the_pi_append_system_block_and_source_index() {
+    let project = tmpdir("stage-pi-append-block-and-index");
+    let source = tmpdir("stage-pi-append-block-and-index-source");
+    std::fs::create_dir_all(&project).unwrap();
+    init_git_project(&project);
+    write_valid_pi_install(&project, &source);
+
+    crate::test_util::with_project_root(&project, || {
+        let mut entry = pi_entry("demo-pkg", &source);
+        entry.source_hash = config::compute_source_hash(&entry);
+        let mut lock = LockFile::default();
+        lock.add(entry);
+        lock.save(&config::lock_file_path(false)).unwrap();
+        git(&project, &["add", "-A"]);
+        git(&project, &["commit", "-m", "baseline"]);
+
+        // Control: the valid install passes auxiliary verification.
+        let mut failures = Vec::new();
+        verify_pi_auxiliary_install("demo-pkg", &mut failures).unwrap();
+        assert!(failures.is_empty(), "{failures:?}");
+
+        // The managed block was edited away from the package content.
+        write_file(
+            &project.join(".pi/APPEND_SYSTEM.md"),
+            "<!-- vstack:append-system demo-pkg begin -->\ntampered\n<!-- vstack:append-system demo-pkg end -->\n",
+        );
+        let mut failures = Vec::new();
+        verify_pi_auxiliary_install("demo-pkg", &mut failures).unwrap();
+        assert!(
+            failures
+                .iter()
+                .any(|f| f.contains("does not match the package content")),
+            "{failures:?}"
+        );
+
+        // The block is gone entirely.
+        write_file(&project.join(".pi/APPEND_SYSTEM.md"), "consumer prose\n");
+        let mut failures = Vec::new();
+        verify_pi_auxiliary_install("demo-pkg", &mut failures).unwrap();
+        assert!(
+            failures.iter().any(|f| f.contains("missing the block")),
+            "{failures:?}"
+        );
+
+        // The source-index sidecar lost its entry.
+        write_valid_pi_install(&project, &source);
+        write_file(&project.join(".pi/.vstack-source.json"), r#"{"other":{}}"#);
+        let mut failures = Vec::new();
+        verify_pi_auxiliary_install("demo-pkg", &mut failures).unwrap();
+        assert!(
+            failures
+                .iter()
+                .any(|f| f.contains(".pi/.vstack-source.json missing the entry")),
+            "{failures:?}"
+        );
+
+        // ...and is malformed.
+        write_file(&project.join(".pi/.vstack-source.json"), "{ not json");
+        let mut failures = Vec::new();
+        verify_pi_auxiliary_install("demo-pkg", &mut failures).unwrap();
+        assert!(
+            failures
+                .iter()
+                .any(|f| f.contains(".pi/.vstack-source.json")),
+            "{failures:?}"
+        );
+    });
+}
+
+#[test]
+fn stage_mode_requires_the_opencode_instruction_to_be_registered() {
+    let project = tmpdir("stage-opencode-instruction-registration");
+    std::fs::create_dir_all(&project).unwrap();
+
+    crate::test_util::with_project_root(&project, || {
+        let instruction = crate::installer::opencode_hook_instruction_path(false, "guard");
+        write_file(&instruction, "# Safety: guard\n");
+        let expected = crate::installer::opencode_hook_instruction_ref(false, "guard");
+
+        // Registered: passes.
+        write_file(
+            &project.join("opencode.json"),
+            &format!(r#"{{"instructions":["{expected}"]}}"#),
+        );
+        let mut failures = Vec::new();
+        verify_hook_auxiliary_install("guard", Harness::OpenCode, None, &mut failures);
+        assert!(failures.is_empty(), "{failures:?}");
+
+        // Present but no longer referenced: OpenCode never loads it.
+        write_file(&project.join("opencode.json"), r#"{"instructions":[]}"#);
+        let mut failures = Vec::new();
+        verify_hook_auxiliary_install("guard", Harness::OpenCode, None, &mut failures);
+        assert!(
+            failures
+                .iter()
+                .any(|f| f.contains("missing instructions entry")),
+            "{failures:?}"
+        );
+
+        // No config at all.
+        std::fs::remove_file(project.join("opencode.json")).unwrap();
+        let mut failures = Vec::new();
+        verify_hook_auxiliary_install("guard", Harness::OpenCode, None, &mut failures);
+        assert!(
+            failures.iter().any(|f| f.contains("missing registration")),
+            "{failures:?}"
+        );
+    });
+}
+
+#[test]
+#[cfg(unix)]
+fn stage_mode_refuses_an_untracked_shared_config_and_guards_the_no_drift_path() {
+    let project = tmpdir("stage-untracked-shared-config");
+    std::fs::create_dir_all(&project).unwrap();
+    init_git_project(&project);
+
+    crate::test_util::with_project_root(&project, || {
+        write_file(&project.join("README.md"), "hi\n");
+        git(&project, &["add", "-A"]);
+        git(&project, &["commit", "-m", "baseline"]);
+
+        assert!(dirty_shared_config_paths().unwrap().is_empty());
+
+        // A shared config the consumer wrote but never committed is still theirs.
+        write_file(
+            &project.join(".pi/settings.json"),
+            r#"{"consumerSecret":"do-not-publish"}"#,
+        );
+        let dirty = dirty_shared_config_paths().unwrap();
+        assert_eq!(dirty, vec![PathBuf::from(".pi/settings.json")]);
+        assert!(refuse_pre_existing_shared_config_edits(&dirty).is_err());
+    });
+}
+
+#[test]
+fn no_drift_stage_path_refuses_pre_existing_shared_config_edits() {
+    let project = tmpdir("stage-no-drift-shared-config-guard");
+    let source = tmpdir("stage-no-drift-shared-config-guard-source");
+    std::fs::create_dir_all(&project).unwrap();
+    init_git_project(&project);
+    write_hook_source(&source, "guard");
+
+    crate::test_util::with_project_root(&project, || {
+        let mut entry = hook_entry("guard", &source, &["claude-code"]);
+        entry.source_hash = config::compute_source_hash(&entry);
+        let mut lock = LockFile::default();
+        lock.add(entry);
+        lock.save(&config::lock_file_path(false)).unwrap();
+        write_file(
+            &project.join(".claude/hooks/guard.sh"),
+            "#!/bin/sh\nexit 0\n",
+        );
+        let command = crate::installer::claude_project_hook_command("guard");
+        write_file(
+            &project.join(".claude/settings.json"),
+            &serde_json::json!({
+                "hooks": {
+                    "PreToolUse": [{
+                        "matcher": "Bash",
+                        "hooks": [{ "type": "command", "command": command }]
+                    }]
+                }
+            })
+            .to_string(),
+        );
+        git(&project, &["add", "-A"]);
+        git(&project, &["commit", "-m", "baseline"]);
+
+        // Source hashes match, so this takes the no-drift staging branch — the
+        // one a scheduled propagation hits most often.
+        write_file(
+            &project.join(".claude/settings.json"),
+            &serde_json::json!({
+                "consumerSecret": "do-not-publish",
+                "hooks": {
+                    "PreToolUse": [{
+                        "matcher": "Bash",
+                        "hooks": [{ "type": "command", "command": command }]
+                    }]
+                }
+            })
+            .to_string(),
+        );
+
+        let err = run(ScopeFilter::Project, false, false, true, true)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("refusing to stage"), "{err}");
+        assert!(err.contains(".claude/settings.json"), "{err}");
+        assert!(
+            git_output(&project, &["diff", "--cached", "--name-only"]).is_empty(),
+            "nothing may be staged"
+        );
+    });
+}

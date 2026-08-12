@@ -996,3 +996,27 @@ fn legacy_remote_cache_dirs_reproduce_the_previous_add_cache_key() {
         "{https:?}"
     );
 }
+
+#[test]
+#[cfg(unix)]
+fn cached_repo_update_refuses_a_symlinked_cache_entry() {
+    let root = TempDir::new("symlinked-cache-entry");
+    let checkout = root.path().join("user-checkout");
+    init_git_repo(&checkout);
+    // Destructive git commands here would wipe the user's uncommitted work.
+    std::fs::write(checkout.join("uncommitted.txt"), "precious\n").unwrap();
+
+    let cache = root.path().join("cache").join("owner_repo");
+    std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&checkout, &cache).unwrap();
+
+    let err = update_cached_repo_strict("owner/repo", &cache)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("refusing to update"), "{err}");
+    assert!(err.contains("symlink"), "{err}");
+    assert!(
+        checkout.join("uncommitted.txt").exists(),
+        "the linked checkout must be untouched"
+    );
+}

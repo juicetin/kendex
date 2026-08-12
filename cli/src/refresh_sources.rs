@@ -729,6 +729,29 @@ fn update_cached_repo_best_effort(source: &str, repo_dir: &Path) {
     }
 }
 
+/// `update_cached_repo_strict` runs `reset --hard` and `clean -ffdx`, which
+/// delete uncommitted work and ignored files wherever they land. A cache entry
+/// that is a symlink lands somewhere vstack does not own — a user checkout with
+/// the same `origin` passes origin validation — so it must never be the target
+/// of those commands. Only a real directory may be updated in place.
+fn reject_unsafe_cache_dir(display: &str, repo_dir: &Path) -> Result<()> {
+    let meta = std::fs::symlink_metadata(repo_dir)
+        .with_context(|| format!("inspecting cached source {display}"))?;
+    if meta.file_type().is_symlink() {
+        bail!(
+            "refusing to update cached source {display}: {} is a symlink, and updating it would run destructive git commands outside the cache",
+            repo_dir.display()
+        );
+    }
+    if !meta.is_dir() {
+        bail!(
+            "refusing to update cached source {display}: {} is not a directory",
+            repo_dir.display()
+        );
+    }
+    Ok(())
+}
+
 fn legacy_remote_cache_dirs(source: &str, cache_dir: &Path) -> Vec<PathBuf> {
     let Some(parent) = cache_dir.parent() else {
         return Vec::new();
@@ -816,6 +839,7 @@ fn update_existing_remote_cache(source: &str, repo_dir: &Path) -> Result<()> {
 }
 
 fn update_cached_repo_strict(display: &str, repo_dir: &Path) -> Result<()> {
+    reject_unsafe_cache_dir(display, repo_dir)?;
     eprintln!("Updating cached repo {display}...");
     let fetch = std::process::Command::new("git")
         .args([
