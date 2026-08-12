@@ -1016,6 +1016,10 @@ fn cached_repo_update_refuses_a_symlinked_cache_entry() {
     assert!(err.contains("refusing to update"), "{err}");
     assert!(err.contains("symlink"), "{err}");
     assert!(
+        !err.contains(&cache.display().to_string()),
+        "a legacy cache path can embed URL userinfo and must not be printed: {err}"
+    );
+    assert!(
         checkout.join("uncommitted.txt").exists(),
         "the linked checkout must be untouched"
     );

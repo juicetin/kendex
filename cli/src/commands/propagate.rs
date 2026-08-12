@@ -262,37 +262,31 @@ fn verify_hook_auxiliary_install(
     }
 }
 
-/// OpenCode only loads an instruction file listed in the active config's
-/// `instructions` array — the file existing on disk proves nothing. Both
-/// config spellings are checked, and a config that is absent or does not list
-/// the exact ref the installer writes is a broken install, not a stageable
-/// state.
+/// OpenCode only loads an instruction file listed in the *active* config's
+/// `instructions` array — the file existing on disk proves nothing, and a
+/// registration sitting in the inactive spelling is not loaded either. The
+/// active file is whichever `config::opencode_project_config_path` selects,
+/// the same one the installer writes to.
 fn require_opencode_instruction_registration(name: &str, failures: &mut Vec<String>) {
     let expected = crate::installer::opencode_hook_instruction_ref(false, name);
+    let config_path = config::opencode_project_config_path();
     let project_root = config::project_root();
-    let configs = ["opencode.json", "opencode.jsonc"];
-    let mut present = Vec::new();
-    for config_name in configs {
-        let relative = Path::new(config_name);
-        if !project_root.join(relative).exists() {
-            continue;
-        }
-        present.push(config_name);
-        match read_project_json(relative) {
-            Ok(json) if opencode_config_lists_instruction(&json, &expected) => return,
-            Ok(_) => {}
-            Err(err) => failures.push(format!("{config_name} {err}")),
-        }
+    let relative = config_path
+        .strip_prefix(&project_root)
+        .unwrap_or(config_path.as_path());
+    let label = relative.display();
+    if !config_path.exists() {
+        failures.push(format!(
+            "{label} missing registration for OpenCode hook {name}"
+        ));
+        return;
     }
-    if present.is_empty() {
-        failures.push(format!(
-            "opencode.json missing registration for OpenCode hook {name}"
-        ));
-    } else {
-        failures.push(format!(
-            "{} missing instructions entry {expected} for OpenCode hook {name}",
-            present.join("/")
-        ));
+    match read_project_json(relative) {
+        Ok(json) if opencode_config_lists_instruction(&json, &expected) => {}
+        Ok(_) => failures.push(format!(
+            "{label} missing instructions entry {expected} for OpenCode hook {name}"
+        )),
+        Err(err) => failures.push(format!("{label} {err}")),
     }
 }
 
@@ -383,7 +377,10 @@ fn verify_pi_append_system_block(
     let append_path = crate::pi_extension::append_system_path(false);
     let installed = crate::pi_extension::append_system_block_content(&append_path, name)?;
     match (declared, installed) {
-        (None, _) => {}
+        (None, None) => {}
+        (None, Some(_)) => failures.push(format!(
+            ".pi/APPEND_SYSTEM.md still carries a block for Pi package {name}, which no longer declares one"
+        )),
         (Some(_), None) => failures.push(format!(
             ".pi/APPEND_SYSTEM.md missing the block for Pi package {name}"
         )),
@@ -401,12 +398,32 @@ fn verify_pi_append_system_block(
 /// incomplete sidecar would otherwise survive a clean no-drift run.
 fn verify_pi_source_index_entry(name: &str, failures: &mut Vec<String>) {
     match crate::pi_extension::read_source_index(false) {
-        Ok(index) if index.contains_key(name) => {}
-        Ok(_) => failures.push(format!(
-            ".pi/.vstack-source.json missing the entry for Pi package {name}"
-        )),
+        Ok(index) => match index.get(name) {
+            // A key alone is not metadata: `vstack update-pi` and
+            // pi-extension-manager classify a record with no source to compare
+            // against as Unknown. Either locator is enough — a recorded path
+            // may be stale without being useless, which verification already
+            // tolerates by resolving sources separately.
+            Some(entry) if source_index_entry_has_locator(entry) => {}
+            Some(_) => failures.push(format!(
+                ".pi/.vstack-source.json entry for Pi package {name} records no source repo or path"
+            )),
+            None => failures.push(format!(
+                ".pi/.vstack-source.json missing the entry for Pi package {name}"
+            )),
+        },
         Err(err) => failures.push(format!(".pi/.vstack-source.json {err}")),
     }
+}
+
+fn source_index_entry_has_locator(entry: &crate::pi_extension::SourceIndexEntry) -> bool {
+    [&entry.source_repo, &entry.source_path]
+        .into_iter()
+        .any(|value| {
+            value
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty())
+        })
 }
 
 /// A locked `.pi/bin/<cmd>` is only a valid install when it is a symlink that

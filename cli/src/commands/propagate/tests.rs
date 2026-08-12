@@ -2662,8 +2662,36 @@ fn stage_mode_verifies_the_pi_append_system_block_and_source_index() {
             "{failures:?}"
         );
 
-        // The source-index sidecar lost its entry.
+        // The package stopped declaring appendSystem but its block is still
+        // installed: the prompt disagrees with the package.
         write_valid_pi_install(&project, &source);
+        write_file(
+            &project.join(".pi/packages/demo-pkg/package.json"),
+            r#"{"name":"demo-pkg","pi":{"extensions":[]}}"#,
+        );
+        let mut failures = Vec::new();
+        verify_pi_auxiliary_install("demo-pkg", &mut failures).unwrap();
+        assert!(
+            failures.iter().any(|f| f.contains("still carries a block")),
+            "{failures:?}"
+        );
+
+        // The source-index record carries no locator at all.
+        write_valid_pi_install(&project, &source);
+        write_file(
+            &project.join(".pi/.vstack-source.json"),
+            r#"{"demo-pkg":{}}"#,
+        );
+        let mut failures = Vec::new();
+        verify_pi_auxiliary_install("demo-pkg", &mut failures).unwrap();
+        assert!(
+            failures
+                .iter()
+                .any(|f| f.contains("records no source repo or path")),
+            "{failures:?}"
+        );
+
+        // The source-index sidecar lost its entry.
         write_file(&project.join(".pi/.vstack-source.json"), r#"{"other":{}}"#);
         let mut failures = Vec::new();
         verify_pi_auxiliary_install("demo-pkg", &mut failures).unwrap();
@@ -2717,8 +2745,29 @@ fn stage_mode_requires_the_opencode_instruction_to_be_registered() {
             "{failures:?}"
         );
 
-        // No config at all.
+        // A registration that lives only in the inactive spelling is not
+        // loaded: `opencode.json` wins when both exist.
+        write_file(
+            &project.join("opencode.jsonc"),
+            &format!(r#"{{"instructions":["{expected}"]}}"#),
+        );
+        let mut failures = Vec::new();
+        verify_hook_auxiliary_install("guard", Harness::OpenCode, None, &mut failures);
+        assert!(
+            failures
+                .iter()
+                .any(|f| f.contains("opencode.json missing instructions entry")),
+            "{failures:?}"
+        );
+
+        // With only the .jsonc spelling present it becomes the active config.
         std::fs::remove_file(project.join("opencode.json")).unwrap();
+        let mut failures = Vec::new();
+        verify_hook_auxiliary_install("guard", Harness::OpenCode, None, &mut failures);
+        assert!(failures.is_empty(), "{failures:?}");
+
+        // No config at all.
+        std::fs::remove_file(project.join("opencode.jsonc")).unwrap();
         let mut failures = Vec::new();
         verify_hook_auxiliary_install("guard", Harness::OpenCode, None, &mut failures);
         assert!(

@@ -737,17 +737,16 @@ fn update_cached_repo_best_effort(source: &str, repo_dir: &Path) {
 fn reject_unsafe_cache_dir(display: &str, repo_dir: &Path) -> Result<()> {
     let meta = std::fs::symlink_metadata(repo_dir)
         .with_context(|| format!("inspecting cached source {display}"))?;
+    // The path is never printed: a legacy cache key is reconstructed from the
+    // recorded source and can embed URL userinfo, which the surrounding
+    // redaction would otherwise not reach. `display` is already redacted.
     if meta.file_type().is_symlink() {
         bail!(
-            "refusing to update cached source {display}: {} is a symlink, and updating it would run destructive git commands outside the cache",
-            repo_dir.display()
+            "refusing to update cached source {display}: its cache entry is a symlink, and updating it would run destructive git commands outside the cache"
         );
     }
     if !meta.is_dir() {
-        bail!(
-            "refusing to update cached source {display}: {} is not a directory",
-            repo_dir.display()
-        );
+        bail!("refusing to update cached source {display}: its cache entry is not a directory");
     }
     Ok(())
 }
