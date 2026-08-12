@@ -1,0 +1,478 @@
+use super::*;
+use crate::config::{InstallMethod, LockEntry};
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+struct TempDir {
+    path: PathBuf,
+}
+
+impl TempDir {
+    fn new(label: &str) -> Self {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before epoch")
+            .as_nanos();
+        Self {
+            path: std::env::temp_dir().join(format!(
+                "vstack-refresh-source-{label}-{}-{nanos}",
+                std::process::id()
+            )),
+        }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+fn make_vstack_source(root: &Path, name: &str) -> PathBuf {
+    let source = root.join(name);
+    std::fs::create_dir_all(source.join("agents")).unwrap();
+    std::fs::create_dir_all(source.join("skills")).unwrap();
+    source
+}
+
+fn lock_entry(name: &str, source: &str) -> LockEntry {
+    LockEntry {
+        name: name.into(),
+        kind: ItemKind::Agent,
+        source: source.into(),
+        source_repo: None,
+        harnesses: vec!["claude-code".into()],
+        method: InstallMethod::Copy,
+        installed_at: "2026-07-03T00:00:00Z".into(),
+        source_hash: String::new(),
+    }
+}
+
+#[test]
+fn resolve_single_source_accepts_absolute_vstack_source() {
+    let root = TempDir::new("absolute");
+    let source = root.path().join("source");
+    std::fs::create_dir_all(source.join("agents")).unwrap();
+    std::fs::create_dir_all(source.join("hooks")).unwrap();
+
+    assert_eq!(
+        resolve_single_source(&source.to_string_lossy()),
+        Some(source.clone())
+    );
+    assert!(resolve_single_source(&root.path().to_string_lossy()).is_none());
+}
+
+/// `vstack add <SOURCE>` accepts any directory holding the asset, so a lock
+/// entry may record one that the discovery heuristic rejects — a dot-named
+/// dir, or one carrying only `skills/`. Dropping it here is what made
+/// refresh fall back to the majority source and stop propagating edits.
+#[test]
+fn resolve_source_records_keeps_a_source_the_layout_heuristic_rejects() {
+    let root = TempDir::new("recorded-alternate");
+    let alternate = root.path().join(".agents");
+    std::fs::create_dir_all(alternate.join("skills/demo")).unwrap();
+    assert!(
+        !crate::resolve::is_vstack_source(&alternate),
+        "fixture must exercise the heuristic-rejected case"
+    );
+    assert_eq!(resolve_single_source(&alternate.to_string_lossy()), None);
+
+    assert_eq!(
+        resolve_recorded_source(&alternate.to_string_lossy()),
+        Some(alternate.clone())
+    );
+
+    let mut lock = config::LockFile::default();
+    lock.add(lock_entry("demo", &alternate.to_string_lossy()));
+    let records = resolve_source_records(&lock);
+
+    assert_eq!(
+        records.iter().map(|r| r.root.clone()).collect::<Vec<_>>(),
+        vec![alternate]
+    );
+}
+
+#[test]
+fn resolve_source_records_resolves_relative_sources_from_project_root() {
+    let root = TempDir::new("recorded-relative");
+    let project = root.path().join("project");
+    let relative_source = project.join("vendor").join("vstack");
+    std::fs::create_dir_all(relative_source.join("skills/demo")).unwrap();
+
+    let mut lock = config::LockFile::default();
+    lock.add(lock_entry("demo", "./vendor/vstack"));
+
+    let records = crate::test_util::with_project_root(&project, || {
+        assert_eq!(
+            resolve_recorded_source("./vendor/vstack"),
+            Some(std::fs::canonicalize(&relative_source).unwrap())
+        );
+        assert!(recorded_source_exists("./vendor/vstack"));
+        resolve_source_records(&lock)
+    });
+
+    assert_eq!(records.len(), 1);
+    assert_eq!(
+        records[0].root,
+        std::fs::canonicalize(&relative_source).unwrap()
+    );
+    assert_eq!(records[0].aliases, vec!["./vendor/vstack".to_string()]);
+}
+
+#[test]
+fn resolve_source_records_records_remote_shorthand_repo_identity() {
+    let root = TempDir::new("remote-identity");
+    let source = make_vstack_source(root.path(), "source");
+    let mut lock = config::LockFile::default();
+    lock.add(lock_entry("demo", "vanillagreencom/vstack"));
+
+    let records = resolve_source_records_with(&lock, |source_name| {
+        if source_name == "vanillagreencom/vstack" {
+            Some(source.clone())
+        } else {
+            None
+        }
+    });
+
+    assert_eq!(records.len(), 1);
+    assert_eq!(
+        records[0].source_repo.as_deref(),
+        Some("vanillagreencom/vstack")
+    );
+}
+
+#[test]
+fn resolve_source_records_does_not_infer_identity_from_local_layout() {
+    let root = TempDir::new("local-layout-identity");
+    let source = make_vstack_source(root.path(), "source");
+    let mut lock = config::LockFile::default();
+    lock.add(lock_entry("demo", &source.to_string_lossy()));
+
+    let records = resolve_source_records(&lock);
+
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].source_repo, None);
+}
+
+#[test]
+fn relative_parent_source_uses_current_worktree_lexical_neighbor() {
+    let root = TempDir::new("recorded-relative-parent");
+    let main_project = root.path().join("dev").join("consumer");
+    let main_checkout_neighbor = root.path().join("dev").join("vstack");
+    let linked_worktree = root
+        .path()
+        .join("dev")
+        .join(".worktrees")
+        .join("consumer")
+        .join("issue-1");
+    let worktree_neighbor = root
+        .path()
+        .join("dev")
+        .join(".worktrees")
+        .join("consumer")
+        .join("vstack");
+    std::fs::create_dir_all(&main_project).unwrap();
+    std::fs::create_dir_all(main_checkout_neighbor.join("skills/demo")).unwrap();
+    std::fs::create_dir_all(&linked_worktree).unwrap();
+    std::fs::create_dir_all(worktree_neighbor.join("skills/demo")).unwrap();
+
+    let resolved = crate::test_util::with_project_root(&linked_worktree, || {
+        resolve_recorded_source("../vstack")
+    });
+
+    assert_eq!(
+        resolved,
+        Some(std::fs::canonicalize(&worktree_neighbor).unwrap()),
+        "copied relative lock sources are resolved from the current worktree root"
+    );
+    assert_ne!(
+        resolved,
+        Some(std::fs::canonicalize(&main_checkout_neighbor).unwrap()),
+        "../vstack must not silently keep pointing at the main checkout after a lock is copied"
+    );
+}
+
+#[test]
+fn recorded_remote_shorthand_does_not_bind_to_project_local_shadow_dir() {
+    let root = TempDir::new("remote-shadow");
+    let project = root.path().join("project");
+    let shadow = project.join("owner").join("repo");
+    std::fs::create_dir_all(&shadow).unwrap();
+
+    crate::test_util::with_project_root(&project, || {
+        assert!(resolve_recorded_local_source("owner/repo").is_none());
+        assert!(!recorded_source_exists("owner/repo"));
+    });
+}
+
+/// An entry whose own source still exists must never be silently rebound to
+/// the sole other loaded source; that reinstalled it from the wrong repo.
+/// The fallback stays available for a source that has genuinely gone away.
+#[test]
+fn refresh_source_for_entry_only_falls_back_when_the_recorded_source_is_gone() {
+    let root = TempDir::new("no-rebind");
+    let alternate = root.path().join(".agents");
+    std::fs::create_dir_all(alternate.join("skills/demo")).unwrap();
+    let only_source = make_vstack_source(root.path(), "other");
+    let sources = vec![RefreshSource::from_root(&only_source)];
+
+    let live = lock_entry("demo", &alternate.to_string_lossy());
+    assert!(
+        refresh_source_for_entry(&sources, &live).is_none(),
+        "an entry whose recorded source exists must not bind to a different source"
+    );
+
+    let vanished = lock_entry("demo", &root.path().join("deleted-repo").to_string_lossy());
+    assert_eq!(
+        refresh_source_for_entry(&sources, &vanished).map(|s| s.root.clone()),
+        Some(only_source),
+        "legacy lock with a missing source keeps the single-source fallback"
+    );
+}
+
+#[test]
+fn refresh_source_for_entry_does_not_fallback_for_live_relative_source() {
+    let root = TempDir::new("relative-no-rebind");
+    let project = root.path().join("project");
+    let relative_source = project.join("vendor").join("vstack");
+    std::fs::create_dir_all(relative_source.join("skills/demo")).unwrap();
+    let only_source = make_vstack_source(root.path(), "other");
+    let sources = vec![RefreshSource::from_root(&only_source)];
+    let live_relative = lock_entry("demo", "./vendor/vstack");
+
+    crate::test_util::with_project_root(&project, || {
+        assert!(
+            refresh_source_for_entry(&sources, &live_relative).is_none(),
+            "a live relative source must not rebind to the sole loaded source"
+        );
+    });
+}
+
+#[test]
+fn resolve_source_records_calls_resolver_once_per_unique_lock_source() {
+    let root = TempDir::new("resolver-count");
+    let source_a = root.path().join("source-a");
+    let source_b = root.path().join("source-b");
+    let mut lock = config::LockFile::default();
+    lock.add(lock_entry("rust", "owner/repo"));
+    lock.add(LockEntry {
+        name: "dev".into(),
+        kind: ItemKind::Skill,
+        source: "owner/repo".into(),
+        source_repo: None,
+        harnesses: vec!["claude-code".into()],
+        method: InstallMethod::Copy,
+        installed_at: "2026-07-03T00:00:00Z".into(),
+        source_hash: String::new(),
+    });
+    lock.add(lock_entry("scout", "other/repo"));
+
+    let counts: RefCell<HashMap<String, usize>> = RefCell::new(HashMap::new());
+    let records = resolve_source_records_with(&lock, |source| {
+        *counts.borrow_mut().entry(source.to_string()).or_default() += 1;
+        match source {
+            "owner/repo" => Some(source_a.clone()),
+            "other/repo" => Some(source_b.clone()),
+            _ => None,
+        }
+    });
+
+    assert_eq!(records.len(), 2);
+    assert_eq!(counts.borrow().get("owner/repo"), Some(&1));
+    assert_eq!(counts.borrow().get("other/repo"), Some(&1));
+}
+
+fn git(repo: &Path, args: &[&str]) {
+    let status = std::process::Command::new("git")
+        .args(args)
+        .current_dir(repo)
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "git {:?} failed in {}",
+        args,
+        repo.display()
+    );
+}
+
+fn git_output(repo: &Path, args: &[&str]) -> String {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(repo)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "git {:?} failed", args);
+    String::from_utf8(output.stdout).unwrap()
+}
+
+fn write_skill(root: &Path, body: &str) {
+    let skill_dir = root.join("skills").join("demo");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        format!("---\nname: demo\ndescription: Demo\n---\n\n{body}"),
+    )
+    .unwrap();
+}
+
+fn init_git_repo(repo: &Path) {
+    std::fs::create_dir_all(repo).unwrap();
+    git(repo, &["init"]);
+    git(repo, &["checkout", "-B", "main"]);
+    git(repo, &["config", "user.email", "test@example.com"]);
+    git(repo, &["config", "user.name", "VStack Test"]);
+    git(repo, &["config", "commit.gpgsign", "false"]);
+    git(repo, &["config", "core.hooksPath", "/dev/null"]);
+}
+
+#[test]
+fn remote_helpers_redact_urls_and_use_collision_resistant_safe_keys() {
+    assert_eq!(
+        remote_git_url("owner/repo").unwrap(),
+        "https://github.com/owner/repo.git"
+    );
+    assert_eq!(
+        remote_git_url("ssh://git@github.com/Owner/Repo.git").unwrap(),
+        "ssh://git@github.com/Owner/Repo.git"
+    );
+    assert!(remote_git_url("../local-source").is_none());
+
+    assert_eq!(
+        remote_source_display("https://token@github.com/Owner/Repo.git"),
+        "https://<redacted>@github.com/Owner/Repo.git"
+    );
+    assert_eq!(
+        remote_source_display("https://token@example.com/Owner/Repo.git"),
+        "https://<redacted>@example.com/Owner/Repo.git"
+    );
+
+    let github_key = remote_cache_key("https://token@github.com/Owner/Repo.git");
+    assert!(github_key.starts_with("owner_repo_"));
+    assert!(!github_key.contains("token"));
+    assert!(!github_key.contains(':'));
+    assert!(!github_key.contains('/'));
+    assert!(!github_key.contains('\\'));
+
+    assert_ne!(
+        remote_cache_key("foo/bar_baz"),
+        remote_cache_key("foo_bar/baz")
+    );
+    assert_ne!(
+        remote_cache_key("https://github.com/Owner/Repo.git"),
+        remote_cache_key("ssh://git@github.com/Owner/Repo.git"),
+        "explicit SSH transport keeps a distinct cache identity"
+    );
+}
+
+#[test]
+fn clone_or_update_remote_source_at_clones_updates_and_fails_closed() {
+    let root = TempDir::new("remote-clone");
+    let remote = root.path().join("remote.git");
+    let source = root.path().join("source");
+    let cache = root.path().join("cache").join("owner_repo");
+    std::fs::create_dir_all(root.path()).unwrap();
+    git(root.path(), &["init", "--bare", remote.to_str().unwrap()]);
+
+    init_git_repo(&source);
+    write_skill(&source, "v1\n");
+    git(&source, &["add", "."]);
+    git(&source, &["commit", "-m", "initial"]);
+    git(
+        &source,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    git(&source, &["push", "origin", "main"]);
+    git(&remote, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+
+    let remote_url = remote.to_string_lossy().to_string();
+    let cloned = clone_or_update_remote_source_at("owner/repo", &remote_url, &cache).unwrap();
+    assert_eq!(cloned, cache);
+    assert!(cache.join(".git").is_dir());
+    assert!(std::fs::read_to_string(cache.join("skills/demo/SKILL.md"))
+        .unwrap()
+        .contains("v1"));
+
+    write_skill(&source, "v2\n");
+    git(&source, &["add", "."]);
+    git(&source, &["commit", "-m", "update"]);
+    git(&source, &["push", "origin", "main"]);
+    clone_or_update_remote_source_at("owner/repo", &remote_url, &cache).unwrap();
+    assert!(std::fs::read_to_string(cache.join("skills/demo/SKILL.md"))
+        .unwrap()
+        .contains("v2"));
+
+    let other_remote = root.path().join("other.git");
+    git(
+        root.path(),
+        &["init", "--bare", other_remote.to_str().unwrap()],
+    );
+    git(
+        &cache,
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            other_remote.to_str().unwrap(),
+        ],
+    );
+    let err = clone_or_update_remote_source_at("owner/repo", &remote_url, &cache)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("has origin"), "{err}");
+
+    let log = git_output(&cache, &["log", "--oneline", "-1"]);
+    assert!(log.contains("update"));
+}
+
+#[test]
+fn cached_repo_fetch_failure_reports_git_cause_without_reusing_stale_cache() {
+    let root = TempDir::new("remote-fetch-failure");
+    let remote = root.path().join("remote.git");
+    let source = root.path().join("source");
+    let cache = root.path().join("cache").join("repo");
+    std::fs::create_dir_all(root.path()).unwrap();
+    git(root.path(), &["init", "--bare", remote.to_str().unwrap()]);
+
+    init_git_repo(&source);
+    write_skill(&source, "v1\n");
+    git(&source, &["add", "."]);
+    git(&source, &["commit", "-m", "initial"]);
+    git(
+        &source,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    git(&source, &["push", "origin", "main"]);
+    git(&remote, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+
+    let remote_url = remote.to_string_lossy().to_string();
+    clone_or_update_remote_source_at("local remote", &remote_url, &cache).unwrap();
+    std::fs::remove_dir_all(&remote).unwrap();
+
+    let err = clone_or_update_remote_source_at("local remote", &remote_url, &cache)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("git fetch failed"), "{err}");
+    assert!(
+        err.contains("fatal") || err.contains("does not appear to be a git repository"),
+        "git cause should be present: {err}"
+    );
+}
+
+#[test]
+fn remote_diagnostics_redact_url_userinfo_only() {
+    let redacted = redact_remote_userinfo_in_text(
+        "fatal: could not read https://token@example.com/Owner/Repo.git",
+    );
+    assert_eq!(
+        redacted,
+        "fatal: could not read https://<redacted>@example.com/Owner/Repo.git"
+    );
+    assert!(!redacted.contains("token"));
+}

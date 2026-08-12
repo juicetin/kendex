@@ -170,7 +170,7 @@ Secret values may also be injected by the parent process at launch time. GitHub 
 
 ### Automated Consumer Refresh PRs
 
-Consumer repos can schedule `vstack propagate --scope project --stage` to keep tracked vstack installs current. The command updates recorded remote source caches to `origin/HEAD`, compares lock hashes, treats missing legacy hashes as needing normalization, runs `vstack refresh`, verifies the result only when propagation is needed, and stages only vstack-managed project paths. Repos then commit the staged diff with their normal PR bot.
+Consumer repos can schedule `vstack propagate --scope project --stage` to keep tracked vstack installs current. The command updates recorded remote source caches to `origin/HEAD`, compares lock hashes, treats missing legacy hashes as needing normalization, runs `vstack refresh` when needed, verifies the result, and stages only vstack-managed project paths. Repos then commit the staged diff with their normal PR bot.
 
 Keep any repo-owned follow-up steps between propagation and the commit:
 
@@ -183,7 +183,7 @@ gh pr create --title "chore(vstack): refresh installed assets" --body "Automated
 
 Have the workflow skip the commit/PR steps when `git diff --cached --quiet --exit-code` reports no staged diff. Put repo-specific copy or manifest-pin steps after `vstack propagate` and before that diff check, then stage those repo-owned paths explicitly. The propagation command does not absorb review threads or bypass merge queues; keep those policies in the consumer repo's PR workflow.
 
-`--check` is non-mutating and exits non-zero when drift, legacy lock normalization, or an unavailable source would require action. `--verbose` passes through to refresh's old->new hash report. `--scope project|global|all` chooses installed scopes; explicitly selecting an empty scope is an error so scheduled workflows catch misconfiguration. Remote sources are cached under the user vstack cache and are cloned or fetched during the check; fetch/reset failure is treated as unavailable instead of reusing stale cache. `--stage` is project-scope only and stages the lock file plus refresh-produced harness/config paths, including managed OpenCode config, never whole harness roots.
+`--check` does not alter project outputs and exits non-zero when drift, legacy lock normalization, or an unavailable source would require action. It may still clone or update recorded remote source caches under the user vstack cache so comparisons use `origin/HEAD`; fetch/reset failure is treated as unavailable instead of reusing stale cache. `--verbose` passes through to refresh's old->new hash report. `--scope project|global|all` chooses installed scopes; explicitly selecting an empty scope is an error so scheduled workflows catch misconfiguration. `--stage` is project-scope only and stages the lock file plus refresh-produced harness/config paths, including managed OpenCode config, never whole harness roots.
 
 ## Supported Tools
 

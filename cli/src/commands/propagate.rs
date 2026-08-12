@@ -1,7 +1,7 @@
 use crate::config::{self, ItemKind, LockFile};
 use crate::harness::Harness;
 use crate::scope::ScopeFilter;
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -62,6 +62,11 @@ pub fn run(
         bail!("--stage is only supported with --scope project");
     }
 
+    let pre_refresh_stage_paths = if stage {
+        pre_refresh_project_stage_paths()?
+    } else {
+        Vec::new()
+    };
     let mut checked_any = false;
     let mut drift_any = false;
     let mut unavailable_sources = false;
@@ -96,7 +101,13 @@ pub fn run(
     }
 
     if !drift_any {
-        eprintln!("No propagation needed.");
+        if stage {
+            eprintln!("No source drift; verifying and staging current managed changes...");
+            crate::commands::verify::run(scope, &[])?;
+            stage_project_paths(&pre_refresh_stage_paths)?;
+        } else {
+            eprintln!("No propagation needed.");
+        }
         return Ok(());
     }
 
@@ -114,7 +125,7 @@ pub fn run(
     crate::commands::verify::run(scope, &[])?;
 
     if stage {
-        stage_project_paths()?;
+        stage_project_paths(&pre_refresh_stage_paths)?;
     }
 
     Ok(())
@@ -217,15 +228,35 @@ fn short_hash(hash: &str) -> String {
     }
 }
 
-fn stage_project_paths() -> Result<()> {
+fn pre_refresh_project_stage_paths() -> Result<Vec<PathBuf>> {
     let lock = LockFile::load(&config::lock_file_path(false))?;
-    let paths = project_stage_paths(&lock)?;
+    project_stage_paths(&lock, true)
+}
+
+fn stage_project_paths(pre_refresh_paths: &[PathBuf]) -> Result<()> {
+    let lock = LockFile::load(&config::lock_file_path(false))?;
+    let mut paths = BTreeSet::new();
+    paths.extend(pre_refresh_paths.iter().cloned());
+    paths.extend(project_stage_paths(&lock, false)?);
+    paths.extend(managed_paths_from_git_status()?);
+    let paths: Vec<PathBuf> = paths.into_iter().collect();
     stage_paths(&paths)
 }
 
 fn stage_paths(paths: &[PathBuf]) -> Result<()> {
     let project_root = config::project_root();
-    if paths.is_empty() {
+    let (stageable, ignored) = filter_stageable_paths(paths)?;
+    if !ignored.is_empty() {
+        let display: Vec<String> = ignored
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect();
+        eprintln!(
+            "Skipped ignored vstack-managed paths: {}",
+            display.join(", ")
+        );
+    }
+    if stageable.is_empty() {
         eprintln!("No vstack-managed project paths exist to stage.");
         return Ok(());
     }
@@ -234,14 +265,14 @@ fn stage_paths(paths: &[PathBuf]) -> Result<()> {
         .arg("-C")
         .arg(&project_root)
         .args(["add", "-A", "--"])
-        .args(paths)
+        .args(&stageable)
         .status()
         .context("running git add for vstack-managed paths")?;
     if !status.success() {
         bail!("git add failed while staging vstack-managed paths");
     }
 
-    let display: Vec<String> = paths
+    let display: Vec<String> = stageable
         .iter()
         .map(|path| path.display().to_string())
         .collect();
@@ -249,12 +280,27 @@ fn stage_paths(paths: &[PathBuf]) -> Result<()> {
     Ok(())
 }
 
-fn project_stage_paths(lock: &LockFile) -> Result<Vec<PathBuf>> {
+fn project_stage_paths(lock: &LockFile, include_missing: bool) -> Result<Vec<PathBuf>> {
     let project_root = config::project_root();
     let mut paths = BTreeSet::new();
-    push_if_exists(&mut paths, &project_root, Path::new(".vstack-lock.json"));
-    push_if_exists(&mut paths, &project_root, Path::new("vstack.toml"));
-    push_if_exists(&mut paths, &project_root, Path::new("vstack.settings.toml"));
+    push_if_stageable(
+        &mut paths,
+        &project_root,
+        Path::new(".vstack-lock.json"),
+        include_missing,
+    );
+    push_if_stageable(
+        &mut paths,
+        &project_root,
+        Path::new("vstack.toml"),
+        include_missing,
+    );
+    push_if_stageable(
+        &mut paths,
+        &project_root,
+        Path::new("vstack.settings.toml"),
+        include_missing,
+    );
 
     let mut has_agent = false;
     let mut has_opencode_hook = false;
@@ -263,8 +309,13 @@ fn project_stage_paths(lock: &LockFile) -> Result<Vec<PathBuf>> {
     let mut has_pi_package = false;
 
     for entry in lock.entries.values() {
-        crate::path_safety::validate_item_name(&entry.name)
-            .with_context(|| format!("unsafe locked item name {}", entry.name))?;
+        if entry.kind == ItemKind::PiExtension {
+            crate::pi_extension::checked_pi_package_path(&entry.name, false)
+                .with_context(|| format!("unsafe locked Pi package name {}", entry.name))?;
+        } else {
+            crate::path_safety::validate_item_name(&entry.name)
+                .with_context(|| format!("unsafe locked item name {}", entry.name))?;
+        }
         match entry.kind {
             ItemKind::Agent => {
                 has_agent = true;
@@ -275,20 +326,23 @@ fn project_stage_paths(lock: &LockFile) -> Result<Vec<PathBuf>> {
                         harness
                             .agents_dir(false)
                             .join(harness.agent_filename(&entry.name)),
+                        include_missing,
                     );
                 }
             }
             ItemKind::Skill => {
-                push_if_exists(
+                push_if_stageable(
                     &mut paths,
                     &project_root,
                     &Path::new(".agents").join("skills").join(&entry.name),
+                    include_missing,
                 );
                 for harness in entry.harnesses.iter().filter_map(|id| Harness::from_id(id)) {
                     push_abs_if_exists(
                         &mut paths,
                         &project_root,
                         harness.skills_dir(false).join(&entry.name),
+                        include_missing,
                     );
                 }
             }
@@ -297,12 +351,13 @@ fn project_stage_paths(lock: &LockFile) -> Result<Vec<PathBuf>> {
                     match harness {
                         Harness::ClaudeCode => {
                             has_claude_hook = true;
-                            push_if_exists(
+                            push_if_stageable(
                                 &mut paths,
                                 &project_root,
                                 &Path::new(".claude")
                                     .join("hooks")
                                     .join(format!("{}.sh", entry.name)),
+                                include_missing,
                             );
                         }
                         Harness::Cursor => {
@@ -310,6 +365,7 @@ fn project_stage_paths(lock: &LockFile) -> Result<Vec<PathBuf>> {
                                 &mut paths,
                                 &project_root,
                                 crate::installer::cursor_hook_rule_path(false, &entry.name),
+                                include_missing,
                             );
                         }
                         Harness::OpenCode => {
@@ -321,16 +377,18 @@ fn project_stage_paths(lock: &LockFile) -> Result<Vec<PathBuf>> {
                                     false,
                                     &entry.name,
                                 ),
+                                include_missing,
                             );
                         }
                         Harness::Codex => {
                             has_codex_hook = true;
-                            push_if_exists(
+                            push_if_stageable(
                                 &mut paths,
                                 &project_root,
                                 &Path::new(".codex")
                                     .join("hooks")
                                     .join(format!("{}.sh", entry.name)),
+                                include_missing,
                             );
                         }
                         Harness::Pi => {}
@@ -339,8 +397,13 @@ fn project_stage_paths(lock: &LockFile) -> Result<Vec<PathBuf>> {
             }
             ItemKind::PiExtension => {
                 has_pi_package = true;
-                let package_dir = config::pi_packages_dir(false).join(&entry.name);
-                push_abs_if_exists(&mut paths, &project_root, package_dir.clone());
+                let package_dir = crate::pi_extension::checked_pi_package_path(&entry.name, false)?;
+                push_abs_if_exists(
+                    &mut paths,
+                    &project_root,
+                    package_dir.clone(),
+                    include_missing,
+                );
                 if let Ok(ext) = crate::pi_extension::PiExtension::from_dir(&package_dir) {
                     for bin_name in ext.bin.keys() {
                         crate::path_safety::validate_item_name(bin_name)
@@ -349,6 +412,7 @@ fn project_stage_paths(lock: &LockFile) -> Result<Vec<PathBuf>> {
                             &mut paths,
                             &project_root,
                             config::pi_bin_dir(false).join(bin_name),
+                            include_missing,
                         );
                     }
                 }
@@ -357,30 +421,36 @@ fn project_stage_paths(lock: &LockFile) -> Result<Vec<PathBuf>> {
         }
     }
 
+    push_project_owned_skill_paths(&mut paths, &project_root, lock, include_missing)?;
+
     if has_agent {
         push_abs_if_exists(
             &mut paths,
             &project_root,
             crate::agent::failure_reporting_reference_path(false),
+            include_missing,
         );
     }
     if has_claude_hook {
-        push_if_exists(
+        push_if_stageable(
             &mut paths,
             &project_root,
             Path::new(".claude").join("settings.json").as_path(),
+            include_missing,
         );
     }
     if has_codex_hook {
-        push_if_exists(
+        push_if_stageable(
             &mut paths,
             &project_root,
             Path::new(".codex").join("hooks.json").as_path(),
+            include_missing,
         );
-        push_if_exists(
+        push_if_stageable(
             &mut paths,
             &project_root,
             Path::new(".codex").join("config.toml").as_path(),
+            include_missing,
         );
     }
     if has_opencode_hook {
@@ -388,31 +458,283 @@ fn project_stage_paths(lock: &LockFile) -> Result<Vec<PathBuf>> {
             &mut paths,
             &project_root,
             config::opencode_project_config_path(),
+            include_missing,
         );
     }
     if has_pi_package {
-        push_abs_if_exists(&mut paths, &project_root, config::pi_settings_path(false));
+        push_abs_if_exists(
+            &mut paths,
+            &project_root,
+            config::pi_settings_path(false),
+            include_missing,
+        );
         push_abs_if_exists(
             &mut paths,
             &project_root,
             config::pi_source_index_path(false),
+            include_missing,
+        );
+        push_abs_if_exists(
+            &mut paths,
+            &project_root,
+            crate::pi_extension::append_system_path(false),
+            include_missing,
         );
     }
 
     Ok(paths.into_iter().collect())
 }
 
-fn push_if_exists(paths: &mut BTreeSet<PathBuf>, project_root: &Path, relative: &Path) {
+fn push_if_stageable(
+    paths: &mut BTreeSet<PathBuf>,
+    project_root: &Path,
+    relative: &Path,
+    include_missing: bool,
+) {
     let path = project_root.join(relative);
-    push_abs_if_exists(paths, project_root, path);
+    push_abs_if_exists(paths, project_root, path, include_missing);
 }
 
-fn push_abs_if_exists(paths: &mut BTreeSet<PathBuf>, project_root: &Path, path: PathBuf) {
-    if !path.exists() {
+fn push_abs_if_exists(
+    paths: &mut BTreeSet<PathBuf>,
+    project_root: &Path,
+    path: PathBuf,
+    include_missing: bool,
+) {
+    if !include_missing && std::fs::symlink_metadata(&path).is_err() {
         return;
     }
     if let Ok(relative) = path.strip_prefix(project_root) {
         paths.insert(relative.to_path_buf());
+    }
+}
+
+fn push_project_owned_skill_paths(
+    paths: &mut BTreeSet<PathBuf>,
+    project_root: &Path,
+    lock: &LockFile,
+    include_missing: bool,
+) -> Result<()> {
+    push_project_skill_dirs_from(
+        paths,
+        project_root,
+        &project_root.join(".agents").join("skills"),
+        lock,
+        include_missing,
+    )?;
+
+    let project_config = crate::project_config::ProjectConfig::load(project_root);
+    let Some(configured) = project_config.project_skills_dir.as_deref() else {
+        return Ok(());
+    };
+    let relative = configured.trim().trim_end_matches('/');
+    if relative.is_empty() {
+        return Ok(());
+    }
+    let configured_path = safe_project_relative_path(relative)
+        .with_context(|| format!("invalid project-skills-dir `{relative}`"))?;
+    push_project_skill_dirs_from(
+        paths,
+        project_root,
+        &project_root.join(configured_path),
+        lock,
+        include_missing,
+    )
+}
+
+fn push_project_skill_dirs_from(
+    paths: &mut BTreeSet<PathBuf>,
+    project_root: &Path,
+    skills_root: &Path,
+    lock: &LockFile,
+    include_missing: bool,
+) -> Result<()> {
+    let Ok(entries) = std::fs::read_dir(skills_root) else {
+        return Ok(());
+    };
+    for entry in entries {
+        let entry = entry.with_context(|| format!("reading {}", skills_root.display()))?;
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if lock.entries.contains_key(name)
+            || crate::path_safety::validate_new_item_name(name).is_err()
+        {
+            continue;
+        }
+        if path.join("SKILL.md").is_file() {
+            push_abs_if_exists(paths, project_root, path, include_missing);
+        }
+    }
+    Ok(())
+}
+
+fn safe_project_relative_path(relative: &str) -> Result<PathBuf> {
+    let path = Path::new(relative);
+    if path.is_absolute() {
+        bail!("path must be relative");
+    }
+    for component in path.components() {
+        match component {
+            std::path::Component::Normal(_) | std::path::Component::CurDir => {}
+            _ => bail!("path must stay inside the project"),
+        }
+    }
+    Ok(path.to_path_buf())
+}
+
+fn managed_paths_from_git_status() -> Result<Vec<PathBuf>> {
+    let project_root = config::project_root();
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(&project_root)
+        .args(["status", "--porcelain=v1", "-z", "--untracked-files=all"])
+        .output()
+        .context("running git status for vstack-managed paths")?;
+    if !output.status.success() {
+        bail!("git status failed while inspecting vstack-managed paths");
+    }
+
+    let project_skill_prefixes = project_skill_status_prefixes(&project_root)?;
+    let mut paths = BTreeSet::new();
+    let mut skip_next = false;
+    for record in output.stdout.split(|byte| *byte == 0) {
+        if record.is_empty() {
+            continue;
+        }
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if record.len() < 4 {
+            continue;
+        }
+        let status = &record[..2];
+        let path = path_from_git_status_bytes(&record[3..])?;
+        if status[0] == b'R' || status[0] == b'C' {
+            skip_next = true;
+        }
+        if is_safe_relative_path(&path) && is_managed_status_path(&path, &project_skill_prefixes) {
+            paths.insert(path);
+        }
+    }
+    Ok(paths.into_iter().collect())
+}
+
+fn project_skill_status_prefixes(project_root: &Path) -> Result<Vec<PathBuf>> {
+    let mut prefixes = vec![PathBuf::from(".agents").join("skills")];
+    let project_config = crate::project_config::ProjectConfig::load(project_root);
+    if let Some(configured) = project_config.project_skills_dir.as_deref() {
+        let relative = configured.trim().trim_end_matches('/');
+        if !relative.is_empty() {
+            prefixes.push(
+                safe_project_relative_path(relative)
+                    .with_context(|| format!("invalid project-skills-dir `{relative}`"))?,
+            );
+        }
+    }
+    Ok(prefixes)
+}
+
+fn path_from_git_status_bytes(bytes: &[u8]) -> Result<PathBuf> {
+    let value = String::from_utf8(bytes.to_vec()).context("git status path was not UTF-8")?;
+    Ok(PathBuf::from(value))
+}
+
+fn is_safe_relative_path(path: &Path) -> bool {
+    !path.is_absolute()
+        && path.components().all(|component| {
+            matches!(
+                component,
+                std::path::Component::Normal(_) | std::path::Component::CurDir
+            )
+        })
+}
+
+fn is_managed_status_path(path: &Path, project_skill_prefixes: &[PathBuf]) -> bool {
+    let path = path.components().collect::<PathBuf>();
+    if matches!(
+        path.to_str(),
+        Some(".vstack-lock.json")
+            | Some("vstack.toml")
+            | Some("vstack.settings.toml")
+            | Some(".agents/skill-failure-reporting.md")
+            | Some(".claude/settings.json")
+            | Some(".codex/hooks.json")
+            | Some(".codex/config.toml")
+            | Some("opencode.json")
+            | Some("opencode.jsonc")
+            | Some(".pi/settings.json")
+            | Some(".pi/.vstack-source.json")
+            | Some(".pi/APPEND_SYSTEM.md")
+    ) {
+        return true;
+    }
+    let Some(path_str) = path.to_str() else {
+        return false;
+    };
+    project_skill_prefixes
+        .iter()
+        .any(|prefix| path == *prefix || path.starts_with(prefix))
+        || path_str.starts_with(".cursor/rules/safety-")
+        || path_str.starts_with(".opencode/instructions/vstack-hook-")
+}
+
+fn filter_stageable_paths(paths: &[PathBuf]) -> Result<(Vec<PathBuf>, Vec<PathBuf>)> {
+    let project_root = config::project_root();
+    let mut stageable = Vec::new();
+    let mut ignored = Vec::new();
+    let mut seen = BTreeSet::new();
+    for path in paths {
+        if !seen.insert(path.clone()) {
+            continue;
+        }
+        if !is_safe_relative_path(path) {
+            bail!("refusing to stage unsafe path {}", path.display());
+        }
+        if git_has_tracked_entries(&project_root, path)? {
+            stageable.push(path.clone());
+            continue;
+        }
+        if std::fs::symlink_metadata(project_root.join(path)).is_err() {
+            continue;
+        }
+        if git_check_ignore(&project_root, path)? {
+            ignored.push(path.clone());
+        } else {
+            stageable.push(path.clone());
+        }
+    }
+    Ok((stageable, ignored))
+}
+
+fn git_has_tracked_entries(project_root: &Path, path: &Path) -> Result<bool> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(project_root)
+        .args(["ls-files", "--"])
+        .arg(path)
+        .output()
+        .with_context(|| format!("checking tracked paths under {}", path.display()))?;
+    if !output.status.success() {
+        bail!("git ls-files failed while checking {}", path.display());
+    }
+    Ok(!output.stdout.is_empty())
+}
+
+fn git_check_ignore(project_root: &Path, path: &Path) -> Result<bool> {
+    let status = Command::new("git")
+        .arg("-C")
+        .arg(project_root)
+        .args(["check-ignore", "-q", "--"])
+        .arg(path)
+        .status()
+        .with_context(|| format!("checking ignore status for {}", path.display()))?;
+    match status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => bail!("git check-ignore failed while checking {}", path.display()),
     }
 }
 
@@ -458,13 +780,26 @@ mod tests {
         }
     }
 
-    fn git(project: &Path, args: &[&str]) -> bool {
-        Command::new("git")
+    fn git(project: &Path, args: &[&str]) {
+        let status = Command::new("git")
             .args(args)
             .current_dir(project)
             .status()
-            .unwrap()
-            .success()
+            .unwrap();
+        assert!(
+            status.success(),
+            "git {:?} failed in {}",
+            args,
+            project.display()
+        );
+    }
+
+    fn init_git_project(project: &Path) {
+        git(project, &["init"]);
+        git(project, &["config", "user.email", "test@example.com"]);
+        git(project, &["config", "user.name", "VStack Test"]);
+        git(project, &["config", "commit.gpgsign", "false"]);
+        git(project, &["config", "core.hooksPath", "/dev/null"]);
     }
 
     fn git_output(project: &Path, args: &[&str]) -> String {
@@ -647,14 +982,13 @@ mod tests {
     fn stage_paths_are_scoped_to_lock_outputs_and_opencode_config() {
         let project = tmpdir("stage-project");
         std::fs::create_dir_all(&project).unwrap();
-        if !git(&project, &["init"]) {
-            return;
-        }
+        init_git_project(&project);
 
         crate::test_util::with_project_root(&project, || {
             let mut lock = LockFile::default();
             lock.add(lock_entry("worker", ItemKind::Agent, &["opencode"]));
             lock.add(lock_entry("protect", ItemKind::Hook, &["opencode"]));
+            lock.add(lock_entry("@scope/pkg", ItemKind::PiExtension, &["pi"]));
             lock.save(&config::lock_file_path(false)).unwrap();
 
             write_file(
@@ -670,13 +1004,29 @@ mod tests {
                 "managed hook\n",
             );
             write_file(&project.join("opencode.json"), "{}\n");
+            write_file(
+                &project.join(".pi/packages/@scope/pkg/package.json"),
+                r#"{"name":"@scope/pkg","pi":{"extensions":[],"appendSystem":"instructions.md"},"bin":{"pi-tool":"bin/tool.js"}}"#,
+            );
+            write_file(
+                &project.join(".pi/packages/@scope/pkg/instructions.md"),
+                "pi rules\n",
+            );
+            write_file(
+                &project.join(".pi/packages/@scope/pkg/bin/tool.js"),
+                "tool\n",
+            );
+            write_file(&project.join(".pi/bin/pi-tool"), "tool link\n");
+            write_file(&project.join(".pi/settings.json"), "{}\n");
+            write_file(&project.join(".pi/.vstack-source.json"), "{}\n");
+            write_file(&project.join(".pi/APPEND_SYSTEM.md"), "append\n");
             write_file(&project.join(".opencode/secret.txt"), "repo secret\n");
             write_file(
                 &project.join(".opencode/agents/unrelated.md"),
                 "unrelated agent\n",
             );
 
-            let paths = project_stage_paths(&lock).unwrap();
+            let paths = project_stage_paths(&lock, false).unwrap();
             assert!(paths.contains(&PathBuf::from(".vstack-lock.json")));
             assert!(paths.contains(&PathBuf::from(".opencode/agents/worker.md")));
             assert!(paths.contains(&PathBuf::from(".agents/skill-failure-reporting.md")));
@@ -684,6 +1034,11 @@ mod tests {
             assert!(paths.contains(&PathBuf::from(
                 ".opencode/instructions/vstack-hook-protect.md"
             )));
+            assert!(paths.contains(&PathBuf::from(".pi/packages/@scope/pkg")));
+            assert!(paths.contains(&PathBuf::from(".pi/bin/pi-tool")));
+            assert!(paths.contains(&PathBuf::from(".pi/settings.json")));
+            assert!(paths.contains(&PathBuf::from(".pi/.vstack-source.json")));
+            assert!(paths.contains(&PathBuf::from(".pi/APPEND_SYSTEM.md")));
             assert!(!paths.contains(&PathBuf::from(".opencode/secret.txt")));
             assert!(!paths.contains(&PathBuf::from(".opencode/agents/unrelated.md")));
 
@@ -694,8 +1049,106 @@ mod tests {
             assert!(staged.contains(".agents/skill-failure-reporting.md\n"));
             assert!(staged.contains("opencode.json\n"));
             assert!(staged.contains(".opencode/instructions/vstack-hook-protect.md\n"));
+            assert!(staged.contains(".pi/packages/@scope/pkg/package.json\n"));
+            assert!(staged.contains(".pi/bin/pi-tool\n"));
+            assert!(staged.contains(".pi/APPEND_SYSTEM.md\n"));
             assert!(!staged.contains(".opencode/secret.txt"));
             assert!(!staged.contains(".opencode/agents/unrelated.md"));
+        });
+    }
+
+    #[test]
+    fn staging_pre_refresh_paths_records_refresh_deletions() {
+        let project = tmpdir("stage-delete-project");
+        std::fs::create_dir_all(&project).unwrap();
+        init_git_project(&project);
+
+        crate::test_util::with_project_root(&project, || {
+            let mut pre_lock = LockFile::default();
+            pre_lock.add(lock_entry("protect", ItemKind::Hook, &["opencode"]));
+            pre_lock.save(&config::lock_file_path(false)).unwrap();
+            write_file(
+                &project.join(".opencode/instructions/vstack-hook-protect.md"),
+                "managed hook\n",
+            );
+            git(&project, &["add", "-A"]);
+            git(&project, &["commit", "-m", "baseline"]);
+
+            let pre_paths = project_stage_paths(&pre_lock, true).unwrap();
+            LockFile::default()
+                .save(&config::lock_file_path(false))
+                .unwrap();
+            std::fs::remove_file(project.join(".opencode/instructions/vstack-hook-protect.md"))
+                .unwrap();
+
+            stage_project_paths(&pre_paths).unwrap();
+            let staged = git_output(&project, &["diff", "--cached", "--name-status"]);
+            assert!(staged.contains("M\t.vstack-lock.json"), "{staged}");
+            assert!(
+                staged.contains("D\t.opencode/instructions/vstack-hook-protect.md"),
+                "{staged}"
+            );
+        });
+    }
+
+    #[test]
+    fn staging_skips_ignored_managed_paths_and_stages_remaining_paths() {
+        let project = tmpdir("stage-ignored-project");
+        std::fs::create_dir_all(&project).unwrap();
+        init_git_project(&project);
+
+        crate::test_util::with_project_root(&project, || {
+            let mut lock = LockFile::default();
+            lock.add(lock_entry("ignored-pkg", ItemKind::PiExtension, &["pi"]));
+            lock.save(&config::lock_file_path(false)).unwrap();
+            write_file(&project.join(".gitignore"), ".pi/packages/ignored-pkg/\n");
+            write_file(
+                &project.join(".pi/packages/ignored-pkg/package.json"),
+                r#"{"name":"ignored-pkg","pi":{"extensions":[]}}"#,
+            );
+
+            let paths = project_stage_paths(&lock, false).unwrap();
+            assert!(paths.contains(&PathBuf::from(".pi/packages/ignored-pkg")));
+            stage_paths(&paths).unwrap();
+
+            let staged = git_output(&project, &["diff", "--cached", "--name-only"]);
+            assert!(staged.contains(".vstack-lock.json\n"), "{staged}");
+            assert!(!staged.contains(".pi/packages/ignored-pkg"), "{staged}");
+        });
+    }
+
+    #[test]
+    fn stage_mode_verifies_and_stages_when_hashes_are_current() {
+        let project = tmpdir("stage-no-drift-project");
+        let source = tmpdir("stage-no-drift-source");
+        std::fs::create_dir_all(&project).unwrap();
+        init_git_project(&project);
+        write_skill_source(&source, "v1\n");
+
+        crate::test_util::with_project_root(&project, || {
+            let mut entry = demo_entry(&source);
+            entry.source_hash = config::compute_source_hash(&entry);
+            let mut lock = LockFile::default();
+            lock.add(entry);
+            lock.save(&config::lock_file_path(false)).unwrap();
+            write_file(
+                &project.join(".agents/skills/demo/SKILL.md"),
+                "---\nname: demo\ndescription: Demo skill\nlicense: MIT\n---\n\nv1\n",
+            );
+            write_file(&project.join("vstack.toml"), "[agent-skills]\n");
+            write_file(
+                &project.join(".pi/packages/manual/package.json"),
+                r#"{"name":"manual","pi":{"extensions":[]}}"#,
+            );
+
+            run(ScopeFilter::Project, false, false, true, true).unwrap();
+
+            let staged = git_output(&project, &["diff", "--cached", "--name-only"]);
+            assert!(staged.contains("vstack.toml\n"), "{staged}");
+            assert!(
+                !staged.contains(".pi/packages/manual/package.json"),
+                "{staged}"
+            );
         });
     }
 }

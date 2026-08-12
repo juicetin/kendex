@@ -356,7 +356,7 @@ fn validate_pi_package_name(name: &str) -> Result<()> {
     validate_safe_component("Pi package name", name)
 }
 
-fn checked_pi_package_path(name: &str, global: bool) -> Result<PathBuf> {
+pub(crate) fn checked_pi_package_path(name: &str, global: bool) -> Result<PathBuf> {
     validate_pi_package_name(name)?;
     let base = crate::config::pi_packages_dir(global);
     let dest = base.join(name);

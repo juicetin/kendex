@@ -257,13 +257,14 @@ enum Commands {
 
     /// Refresh stale installed items for consumer propagation PRs.
     /// Updates recorded remote source caches to origin/HEAD, compares lock
-    /// hashes, then runs refresh + verify only when propagation is needed.
-    /// With --check, exits non-zero when drift or legacy lock hashes need a refresh.
+    /// hashes, runs refresh when needed, verifies installs, and can stage
+    /// vstack-managed project paths. With --check, exits non-zero when drift
+    /// or legacy lock hashes need a refresh.
     Propagate {
-        /// Report drift only; do not refresh.
+        /// Report drift only; do not refresh project outputs.
         #[arg(short, long)]
         check: bool,
-        /// Stage only vstack-managed project paths after a successful refresh.
+        /// Stage only vstack-managed project paths after verify.
         #[arg(long)]
         stage: bool,
         /// Shortcut for `--scope global`.

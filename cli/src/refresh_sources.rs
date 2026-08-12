@@ -391,9 +391,7 @@ fn find_vstack_source_from_cwd() -> Option<PathBuf> {
 }
 
 pub(crate) fn looks_like_remote_source(source: &str) -> bool {
-    (source.contains('/') && !source.starts_with('.') && !source.starts_with('/'))
-        || source.starts_with("https://")
-        || source.starts_with("git@")
+    remote_git_url(source).is_some()
 }
 
 pub(crate) fn clone_or_update_remote_source(source: &str) -> Result<Option<PathBuf>> {
@@ -416,28 +414,33 @@ fn clone_or_update_remote_source_at(
     }
 
     if cache_dir.join(".git").exists() {
+        validate_cached_repo_origin(display, git_url, cache_dir)?;
         update_cached_repo_strict(&display, &cache_dir)?;
         return Ok(cache_dir.to_path_buf());
     }
 
     eprintln!("Cloning {display} into vstack source cache...");
-    let status = std::process::Command::new("git")
+    let output = std::process::Command::new("git")
         .args(["clone", "--depth", "1", &git_url])
         .arg(cache_dir)
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
+        .output()
         .with_context(|| format!("running git clone for {display}"))?;
-    if !status.success() {
+    if !output.status.success() {
         bail!(
-            "git clone failed while caching source {display}. For private repos, verify Git access with gh auth login or SSH credentials."
+            "git clone failed while caching source {display}: {}. For private repos, verify Git access with gh auth login or SSH credentials.",
+            git_output_summary(&output)
         );
     }
     Ok(cache_dir.to_path_buf())
 }
 
 fn remote_git_url(source: &str) -> Option<String> {
-    if source.starts_with("https://") || source.starts_with("git@") {
+    if source.starts_with("https://")
+        || source.starts_with("http://")
+        || source.starts_with("ssh://")
+        || source.starts_with("git@")
+    {
         return Some(source.to_string());
     }
     let slug = config::parse_github_slug(source)?;
@@ -445,16 +448,13 @@ fn remote_git_url(source: &str) -> Option<String> {
 }
 
 pub(crate) fn remote_source_display(source: &str) -> String {
-    if let Some(slug) = config::parse_github_slug(source) {
+    if let Some(slug) = config::parse_github_slug(source)
+        && !source.contains("://")
+        && !source.contains('@')
+    {
         return slug;
     }
-    if source.starts_with("https://") {
-        return "https://<redacted>".to_string();
-    }
-    if source.starts_with("git@") {
-        return "git@<redacted>".to_string();
-    }
-    source.to_string()
+    redact_remote_userinfo(source)
 }
 
 pub(crate) fn remote_cache_dir(source: &str) -> Option<PathBuf> {
@@ -470,10 +470,26 @@ pub(crate) fn remote_cache_dir(source: &str) -> Option<PathBuf> {
 }
 
 pub(crate) fn remote_cache_key(source: &str) -> String {
+    let identity = remote_cache_identity(source);
+    let prefix = config::parse_github_slug(source)
+        .map(|slug| sanitize_cache_component(&slug.replace('/', "_")))
+        .unwrap_or_else(|| "remote".to_string());
+    format!("{}_{}", prefix, fnv64_hex(&identity))
+}
+
+fn remote_cache_identity(source: &str) -> String {
     if let Some(slug) = config::parse_github_slug(source) {
-        return sanitize_cache_component(&slug.replace('/', "_"));
+        if source.starts_with("git@") {
+            return format!("github+scp:{slug}");
+        }
+        if source.starts_with("ssh://") {
+            return format!("github+ssh:{slug}");
+        }
+        return format!("github+https:{slug}");
     }
-    format!("remote_{}", fnv64_hex(source))
+    redact_remote_userinfo(source.trim().trim_end_matches('/'))
+        .trim_end_matches(".git")
+        .to_string()
 }
 
 fn sanitize_cache_component(input: &str) -> String {
@@ -552,440 +568,106 @@ fn update_cached_repo_best_effort(source: &str, repo_dir: &Path) {
     }
 }
 
+fn validate_cached_repo_origin(display: &str, expected_url: &str, repo_dir: &Path) -> Result<()> {
+    let output = std::process::Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .current_dir(repo_dir)
+        .output()
+        .with_context(|| format!("reading origin for cached source {display}"))?;
+    if !output.status.success() {
+        bail!(
+            "failed to read origin for cached source {display}: {}",
+            git_output_summary(&output)
+        );
+    }
+    let actual = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if remote_cache_identity(&actual) != remote_cache_identity(expected_url) {
+        bail!(
+            "cached source {display} at {} has origin {}, expected {}; remove the cache directory and retry",
+            repo_dir.display(),
+            remote_source_display(&actual),
+            remote_source_display(expected_url)
+        );
+    }
+    Ok(())
+}
+
 fn update_cached_repo_strict(display: &str, repo_dir: &Path) -> Result<()> {
     eprintln!("Updating cached repo {display}...");
     let fetch = std::process::Command::new("git")
         .args(["fetch", "origin", "--quiet"])
         .current_dir(repo_dir)
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
+        .output()
         .with_context(|| format!("running git fetch for cached source {display}"))?;
-    if !fetch.success() {
-        bail!("git fetch failed for cached source {display}");
+    if !fetch.status.success() {
+        bail!(
+            "git fetch failed for cached source {display}: {}",
+            git_output_summary(&fetch)
+        );
     }
     let reset = std::process::Command::new("git")
         .args(["reset", "--hard", "origin/HEAD"])
         .current_dir(repo_dir)
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
+        .output()
         .with_context(|| format!("running git reset for cached source {display}"))?;
-    if !reset.success() {
-        bail!("git reset failed for cached source {display}");
+    if !reset.status.success() {
+        bail!(
+            "git reset failed for cached source {display}: {}",
+            git_output_summary(&reset)
+        );
     }
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::config::{InstallMethod, LockEntry};
-    use std::cell::RefCell;
-    use std::collections::HashMap;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    fn tmpdir(label: &str) -> PathBuf {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system clock before epoch")
-            .as_nanos();
-        std::env::temp_dir().join(format!(
-            "vstack-refresh-source-{label}-{}-{nanos}",
-            std::process::id()
-        ))
-    }
-
-    fn make_vstack_source(root: &Path, name: &str) -> PathBuf {
-        let source = root.join(name);
-        std::fs::create_dir_all(source.join("agents")).unwrap();
-        std::fs::create_dir_all(source.join("skills")).unwrap();
-        source
-    }
-
-    fn lock_entry(name: &str, source: &str) -> LockEntry {
-        LockEntry {
-            name: name.into(),
-            kind: ItemKind::Agent,
-            source: source.into(),
-            source_repo: None,
-            harnesses: vec!["claude-code".into()],
-            method: InstallMethod::Copy,
-            installed_at: "2026-07-03T00:00:00Z".into(),
-            source_hash: String::new(),
-        }
-    }
-
-    #[test]
-    fn resolve_single_source_accepts_absolute_vstack_source() {
-        let root = tmpdir("absolute");
-        let source = root.join("source");
-        std::fs::create_dir_all(source.join("agents")).unwrap();
-        std::fs::create_dir_all(source.join("hooks")).unwrap();
-
-        assert_eq!(
-            resolve_single_source(&source.to_string_lossy()),
-            Some(source.clone())
-        );
-        assert!(resolve_single_source(&root.to_string_lossy()).is_none());
-
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    /// `vstack add <SOURCE>` accepts any directory holding the asset, so a lock
-    /// entry may record one that the discovery heuristic rejects — a dot-named
-    /// dir, or one carrying only `skills/`. Dropping it here is what made
-    /// refresh fall back to the majority source and stop propagating edits.
-    #[test]
-    fn resolve_source_records_keeps_a_source_the_layout_heuristic_rejects() {
-        let root = tmpdir("recorded-alternate");
-        let alternate = root.join(".agents");
-        std::fs::create_dir_all(alternate.join("skills/demo")).unwrap();
-        assert!(
-            !crate::resolve::is_vstack_source(&alternate),
-            "fixture must exercise the heuristic-rejected case"
-        );
-        assert_eq!(resolve_single_source(&alternate.to_string_lossy()), None);
-
-        assert_eq!(
-            resolve_recorded_source(&alternate.to_string_lossy()),
-            Some(alternate.clone())
-        );
-
-        let mut lock = config::LockFile::default();
-        lock.add(lock_entry("demo", &alternate.to_string_lossy()));
-        let records = resolve_source_records(&lock);
-
-        assert_eq!(
-            records.iter().map(|r| r.root.clone()).collect::<Vec<_>>(),
-            vec![alternate]
-        );
-
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn resolve_source_records_resolves_relative_sources_from_project_root() {
-        let root = tmpdir("recorded-relative");
-        let project = root.join("project");
-        let relative_source = project.join("vendor").join("vstack");
-        std::fs::create_dir_all(relative_source.join("skills/demo")).unwrap();
-
-        let mut lock = config::LockFile::default();
-        lock.add(lock_entry("demo", "./vendor/vstack"));
-
-        let records = crate::test_util::with_project_root(&project, || {
-            assert_eq!(
-                resolve_recorded_source("./vendor/vstack"),
-                Some(std::fs::canonicalize(&relative_source).unwrap())
-            );
-            assert!(recorded_source_exists("./vendor/vstack"));
-            resolve_source_records(&lock)
-        });
-
-        assert_eq!(records.len(), 1);
-        assert_eq!(
-            records[0].root,
-            std::fs::canonicalize(&relative_source).unwrap()
-        );
-        assert_eq!(records[0].aliases, vec!["./vendor/vstack".to_string()]);
-
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn resolve_source_records_records_remote_shorthand_repo_identity() {
-        let root = tmpdir("remote-identity");
-        let source = make_vstack_source(&root, "source");
-        let mut lock = config::LockFile::default();
-        lock.add(lock_entry("demo", "vanillagreencom/vstack"));
-
-        let records = resolve_source_records_with(&lock, |source_name| {
-            if source_name == "vanillagreencom/vstack" {
-                Some(source.clone())
-            } else {
-                None
-            }
-        });
-
-        assert_eq!(records.len(), 1);
-        assert_eq!(
-            records[0].source_repo.as_deref(),
-            Some("vanillagreencom/vstack")
-        );
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn resolve_source_records_does_not_infer_identity_from_local_layout() {
-        let root = tmpdir("local-layout-identity");
-        let source = make_vstack_source(&root, "source");
-        let mut lock = config::LockFile::default();
-        lock.add(lock_entry("demo", &source.to_string_lossy()));
-
-        let records = resolve_source_records(&lock);
-
-        assert_eq!(records.len(), 1);
-        assert_eq!(records[0].source_repo, None);
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn relative_parent_source_uses_current_worktree_lexical_neighbor() {
-        let root = tmpdir("recorded-relative-parent");
-        let main_project = root.join("dev").join("consumer");
-        let main_checkout_neighbor = root.join("dev").join("vstack");
-        let linked_worktree = root
-            .join("dev")
-            .join(".worktrees")
-            .join("consumer")
-            .join("issue-1");
-        let worktree_neighbor = root
-            .join("dev")
-            .join(".worktrees")
-            .join("consumer")
-            .join("vstack");
-        std::fs::create_dir_all(&main_project).unwrap();
-        std::fs::create_dir_all(main_checkout_neighbor.join("skills/demo")).unwrap();
-        std::fs::create_dir_all(&linked_worktree).unwrap();
-        std::fs::create_dir_all(worktree_neighbor.join("skills/demo")).unwrap();
-
-        let resolved = crate::test_util::with_project_root(&linked_worktree, || {
-            resolve_recorded_source("../vstack")
-        });
-
-        assert_eq!(
-            resolved,
-            Some(std::fs::canonicalize(&worktree_neighbor).unwrap()),
-            "copied relative lock sources are resolved from the current worktree root"
-        );
-        assert_ne!(
-            resolved,
-            Some(std::fs::canonicalize(&main_checkout_neighbor).unwrap()),
-            "../vstack must not silently keep pointing at the main checkout after a lock is copied"
-        );
-
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn recorded_remote_shorthand_does_not_bind_to_project_local_shadow_dir() {
-        let root = tmpdir("remote-shadow");
-        let project = root.join("project");
-        let shadow = project.join("owner").join("repo");
-        std::fs::create_dir_all(&shadow).unwrap();
-
-        crate::test_util::with_project_root(&project, || {
-            assert!(resolve_recorded_local_source("owner/repo").is_none());
-            assert!(!recorded_source_exists("owner/repo"));
-        });
-
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    /// An entry whose own source still exists must never be silently rebound to
-    /// the sole other loaded source; that reinstalled it from the wrong repo.
-    /// The fallback stays available for a source that has genuinely gone away.
-    #[test]
-    fn refresh_source_for_entry_only_falls_back_when_the_recorded_source_is_gone() {
-        let root = tmpdir("no-rebind");
-        let alternate = root.join(".agents");
-        std::fs::create_dir_all(alternate.join("skills/demo")).unwrap();
-        let only_source = make_vstack_source(&root, "other");
-        let sources = vec![RefreshSource::from_root(&only_source)];
-
-        let live = lock_entry("demo", &alternate.to_string_lossy());
-        assert!(
-            refresh_source_for_entry(&sources, &live).is_none(),
-            "an entry whose recorded source exists must not bind to a different source"
-        );
-
-        let vanished = lock_entry("demo", &root.join("deleted-repo").to_string_lossy());
-        assert_eq!(
-            refresh_source_for_entry(&sources, &vanished).map(|s| s.root.clone()),
-            Some(only_source),
-            "legacy lock with a missing source keeps the single-source fallback"
-        );
-
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn refresh_source_for_entry_does_not_fallback_for_live_relative_source() {
-        let root = tmpdir("relative-no-rebind");
-        let project = root.join("project");
-        let relative_source = project.join("vendor").join("vstack");
-        std::fs::create_dir_all(relative_source.join("skills/demo")).unwrap();
-        let only_source = make_vstack_source(&root, "other");
-        let sources = vec![RefreshSource::from_root(&only_source)];
-        let live_relative = lock_entry("demo", "./vendor/vstack");
-
-        crate::test_util::with_project_root(&project, || {
-            assert!(
-                refresh_source_for_entry(&sources, &live_relative).is_none(),
-                "a live relative source must not rebind to the sole loaded source"
-            );
-        });
-
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn resolve_source_records_calls_resolver_once_per_unique_lock_source() {
-        let root = tmpdir("resolver-count");
-        let source_a = root.join("source-a");
-        let source_b = root.join("source-b");
-        let mut lock = config::LockFile::default();
-        lock.add(lock_entry("rust", "owner/repo"));
-        lock.add(LockEntry {
-            name: "dev".into(),
-            kind: ItemKind::Skill,
-            source: "owner/repo".into(),
-            source_repo: None,
-            harnesses: vec!["claude-code".into()],
-            method: InstallMethod::Copy,
-            installed_at: "2026-07-03T00:00:00Z".into(),
-            source_hash: String::new(),
-        });
-        lock.add(lock_entry("scout", "other/repo"));
-
-        let counts: RefCell<HashMap<String, usize>> = RefCell::new(HashMap::new());
-        let records = resolve_source_records_with(&lock, |source| {
-            *counts.borrow_mut().entry(source.to_string()).or_default() += 1;
-            match source {
-                "owner/repo" => Some(source_a.clone()),
-                "other/repo" => Some(source_b.clone()),
-                _ => None,
-            }
-        });
-
-        assert_eq!(records.len(), 2);
-        assert_eq!(counts.borrow().get("owner/repo"), Some(&1));
-        assert_eq!(counts.borrow().get("other/repo"), Some(&1));
-
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    fn git(repo: &Path, args: &[&str]) -> bool {
-        std::process::Command::new("git")
-            .args(args)
-            .current_dir(repo)
-            .status()
-            .unwrap()
-            .success()
-    }
-
-    fn git_output(repo: &Path, args: &[&str]) -> String {
-        let output = std::process::Command::new("git")
-            .args(args)
-            .current_dir(repo)
-            .output()
-            .unwrap();
-        assert!(output.status.success(), "git {:?} failed", args);
-        String::from_utf8(output.stdout).unwrap()
-    }
-
-    fn write_skill(root: &Path, body: &str) {
-        let skill_dir = root.join("skills").join("demo");
-        std::fs::create_dir_all(&skill_dir).unwrap();
-        std::fs::write(
-            skill_dir.join("SKILL.md"),
-            format!("---\nname: demo\ndescription: Demo\n---\n\n{body}"),
-        )
-        .unwrap();
-    }
-
-    fn init_git_repo(repo: &Path) {
-        std::fs::create_dir_all(repo).unwrap();
-        assert!(git(repo, &["init"]));
-        assert!(git(repo, &["checkout", "-B", "main"]));
-        assert!(git(repo, &["config", "user.email", "test@example.com"]));
-        assert!(git(repo, &["config", "user.name", "VStack Test"]));
-    }
-
-    #[test]
-    fn remote_helpers_redact_urls_and_use_windows_safe_keys() {
-        assert_eq!(
-            remote_git_url("owner/repo").unwrap(),
-            "https://github.com/owner/repo.git"
-        );
-        assert_eq!(
-            remote_git_url("https://token@github.com/Owner/Repo.git").unwrap(),
-            "https://token@github.com/Owner/Repo.git"
-        );
-        assert!(remote_git_url("../local-source").is_none());
-
-        assert_eq!(
-            remote_source_display("https://token@github.com/Owner/Repo.git"),
-            "owner/repo"
-        );
-        assert_eq!(
-            remote_source_display("https://token@example.com/Owner/Repo.git"),
-            "https://<redacted>"
-        );
-
-        let github_key = remote_cache_key("https://token@github.com/Owner/Repo.git");
-        assert_eq!(github_key, "owner_repo");
-
-        let opaque_key = remote_cache_key("https://token@example.com/Owner/Repo.git");
-        assert!(opaque_key.starts_with("remote_"));
-        assert!(!opaque_key.contains("token"));
-        assert!(!opaque_key.contains(':'));
-        assert!(!opaque_key.contains('/'));
-        assert!(!opaque_key.contains('\\'));
-    }
-
-    #[test]
-    fn clone_or_update_remote_source_at_clones_updates_and_fails_closed() {
-        let root = tmpdir("remote-clone");
-        let remote = root.join("remote.git");
-        let source = root.join("source");
-        let cache = root.join("cache").join("owner_repo");
-        std::fs::create_dir_all(&root).unwrap();
-        assert!(git(&root, &["init", "--bare", remote.to_str().unwrap()]));
-
-        init_git_repo(&source);
-        write_skill(&source, "v1\n");
-        assert!(git(&source, &["add", "."]));
-        assert!(git(&source, &["commit", "-m", "initial"]));
-        assert!(git(
-            &source,
-            &["remote", "add", "origin", remote.to_str().unwrap()]
-        ));
-        assert!(git(&source, &["push", "origin", "main"]));
-        assert!(git(&remote, &["symbolic-ref", "HEAD", "refs/heads/main"]));
-
-        let remote_url = remote.to_string_lossy().to_string();
-        let cloned = clone_or_update_remote_source_at("owner/repo", &remote_url, &cache).unwrap();
-        assert_eq!(cloned, cache);
-        assert!(cache.join(".git").is_dir());
-        assert!(
-            std::fs::read_to_string(cache.join("skills/demo/SKILL.md"))
-                .unwrap()
-                .contains("v1")
-        );
-
-        write_skill(&source, "v2\n");
-        assert!(git(&source, &["add", "."]));
-        assert!(git(&source, &["commit", "-m", "update"]));
-        assert!(git(&source, &["push", "origin", "main"]));
-        clone_or_update_remote_source_at("owner/repo", &remote_url, &cache).unwrap();
-        assert!(
-            std::fs::read_to_string(cache.join("skills/demo/SKILL.md"))
-                .unwrap()
-                .contains("v2")
-        );
-
-        assert!(git(
-            &cache,
-            &["remote", "set-url", "origin", "/missing/vstack.git"]
-        ));
-        let err = clone_or_update_remote_source_at("owner/repo", &remote_url, &cache)
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("git fetch failed"));
-
-        let log = git_output(&cache, &["log", "--oneline", "-1"]);
-        assert!(log.contains("update"));
+fn git_output_summary(output: &std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = stderr.trim();
+    let stdout = stdout.trim();
+    let combined = match (stderr.is_empty(), stdout.is_empty()) {
+        (false, false) => format!("{stderr}\n{stdout}"),
+        (false, true) => stderr.to_string(),
+        (true, false) => stdout.to_string(),
+        (true, true) => String::new(),
+    };
+    let sanitized = redact_remote_userinfo_in_text(combined.trim());
+    if sanitized.is_empty() {
+        "git exited without stderr".to_string()
+    } else {
+        sanitized
     }
 }
+
+fn redact_remote_userinfo_in_text(input: &str) -> String {
+    input
+        .split_whitespace()
+        .map(redact_remote_userinfo)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn redact_remote_userinfo(input: &str) -> String {
+    let Some(scheme_end) = input.find("://") else {
+        return input.to_string();
+    };
+    let authority_start = scheme_end + 3;
+    let authority_end = input[authority_start..]
+        .find(['/', ' ', '\t', '\n', '\r'])
+        .map(|idx| authority_start + idx)
+        .unwrap_or(input.len());
+    let authority = &input[authority_start..authority_end];
+    let Some(at) = authority.rfind('@') else {
+        return input.to_string();
+    };
+    format!(
+        "{}{}{}",
+        &input[..authority_start],
+        format!("<redacted>@{}", &authority[at + 1..]),
+        &input[authority_end..]
+    )
+}
+
+#[cfg(test)]
+mod tests;
