@@ -310,12 +310,12 @@ pub fn refresh_items_in_scope(
         let declared = source
             .mapping
             .declared_skills_for_agent(&agent.name, &agent.role);
+        // A declaration whose asset is absent from the source catalog counts
+        // too: filtering it out here would leave the agent permanently short of
+        // a skill the mapping calls required while every later run read clean.
         let missing: Vec<String> = declared
             .into_iter()
-            .filter(|skill| {
-                !installed_skills.iter().any(|installed| installed == skill)
-                    && source.skills.iter().any(|s| &s.name == skill)
-            })
+            .filter(|skill| !installed_skills.iter().any(|installed| installed == skill))
             .collect();
         if !missing.is_empty() {
             // Recorded, not merely printed: callers gate on `has_missing()`, so

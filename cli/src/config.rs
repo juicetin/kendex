@@ -663,6 +663,22 @@ pub(crate) const SYMLINK_HASH_TAG: &[u8] = b"\0vstack-symlink\0";
 /// failure moves the hash instead of reading as "unchanged".
 pub(crate) const UNREADABLE_SYMLINK_HASH_SENTINEL: &str = "\0vstack-unreadable-symlink\0";
 
+/// Raw bytes of a path for hashing. Unix paths are arbitrary bytes, and
+/// `to_string_lossy` collapses every invalid sequence to the same replacement
+/// character — two distinct link targets would hash identically and a retarget
+/// between them would read as no change.
+pub(crate) fn os_str_hash_bytes(value: &std::ffi::OsStr) -> Vec<u8> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        value.as_bytes().to_vec()
+    }
+    #[cfg(not(unix))]
+    {
+        value.to_string_lossy().as_bytes().to_vec()
+    }
+}
+
 fn hash_dir_bytes(dir: &Path) -> u64 {
     hash_dir_bytes_excluding(dir, &[])
 }
@@ -698,12 +714,12 @@ pub(crate) fn hash_dir_bytes_excluding(dir: &Path, exclude_files: &[&str]) -> u6
             // An unreadable link is not "unchanged": fold a sentinel so the
             // hash still moves rather than silently matching the last good one.
             let target = std::fs::read_link(entry.path())
-                .map(|target| target.to_string_lossy().into_owned())
-                .unwrap_or_else(|_| UNREADABLE_SYMLINK_HASH_SENTINEL.to_string());
+                .map(|target| os_str_hash_bytes(target.as_os_str()))
+                .unwrap_or_else(|_| UNREADABLE_SYMLINK_HASH_SENTINEL.as_bytes().to_vec());
             let rel = entry.path().strip_prefix(dir).unwrap_or(entry.path());
-            state = fnv1a_chain(state, rel.to_string_lossy().as_bytes());
+            state = fnv1a_chain(state, &os_str_hash_bytes(rel.as_os_str()));
             state = fnv1a_chain(state, SYMLINK_HASH_TAG);
-            state = fnv1a_chain(state, target.as_bytes());
+            state = fnv1a_chain(state, &target);
             continue;
         }
         if !entry.file_type().is_file() {
@@ -3508,6 +3524,30 @@ echo foreign
                 .contains('\0'),
             "the separator must be unspellable as a path"
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn hash_dir_bytes_distinguishes_non_utf8_symlink_targets() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let dir = sandbox("hash_dir_symlink_non_utf8");
+        let tree = dir.join("pkg");
+        fs::create_dir_all(&tree).unwrap();
+
+        // Two distinct targets that both lossy-convert to the replacement char.
+        std::os::unix::fs::symlink(OsStr::from_bytes(b"\xff"), tree.join("entry")).unwrap();
+        let first = hash_dir_bytes(&tree);
+        fs::remove_file(tree.join("entry")).unwrap();
+        std::os::unix::fs::symlink(OsStr::from_bytes(b"\xfe"), tree.join("entry")).unwrap();
+        let second = hash_dir_bytes(&tree);
+
+        assert_ne!(
+            first, second,
+            "distinct non-UTF-8 link targets must not hash alike"
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

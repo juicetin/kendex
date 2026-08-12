@@ -310,7 +310,11 @@ fn accepted_canonical_skill_targets(entry: &LockEntry, global: bool) -> Vec<Path
             let resolved_root = std::fs::canonicalize(&root).unwrap_or_else(|_| root.clone());
             let target = root.join(name);
             let resolved = std::fs::canonicalize(&target).unwrap_or(target);
-            resolved.starts_with(&resolved_root).then_some(resolved)
+            // Containment alone is not identity: `.agents/skills/a` retargeted
+            // at `.agents/skills/b` stays under the root while loading another
+            // skill entirely, so the resolved entry must still be this name.
+            let keeps_identity = resolved.file_name() == Some(std::ffi::OsStr::new(name.as_str()));
+            (resolved.starts_with(&resolved_root) && keeps_identity).then_some(resolved)
         })
         .collect()
 }
@@ -475,14 +479,16 @@ fn hash_dir_walk(dir: &Path) -> u64 {
             // An unreadable link is not "unchanged": fold a sentinel so the
             // hash still moves rather than silently matching the last good one.
             let target = std::fs::read_link(entry.path())
-                .map(|target| target.to_string_lossy().into_owned())
-                .unwrap_or_else(|_| config::UNREADABLE_SYMLINK_HASH_SENTINEL.to_string());
-            let rel = entry.path().strip_prefix(dir).unwrap_or(entry.path());
-            for bytes in [
-                rel.to_string_lossy().as_bytes(),
-                config::SYMLINK_HASH_TAG,
-                target.as_bytes(),
-            ] {
+                .map(|target| config::os_str_hash_bytes(target.as_os_str()))
+                .unwrap_or_else(|_| config::UNREADABLE_SYMLINK_HASH_SENTINEL.as_bytes().to_vec());
+            let rel = config::os_str_hash_bytes(
+                entry
+                    .path()
+                    .strip_prefix(dir)
+                    .unwrap_or(entry.path())
+                    .as_os_str(),
+            );
+            for bytes in [rel.as_slice(), config::SYMLINK_HASH_TAG, target.as_slice()] {
                 for &b in bytes {
                     state ^= b as u64;
                     state = state.wrapping_mul(FNV_PRIME);
@@ -733,6 +739,44 @@ mod tests {
             entry.harnesses.push("codex".to_string());
             let (ok, note) = verify_skill_install(&entry, true);
             assert_eq!(ok, Some(true), "{note:?}");
+        });
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn verify_skill_rejects_a_canonical_redirected_to_another_skill() {
+        let project = tmpdir("canonical-redirected-to-sibling");
+        std::fs::create_dir_all(&project).unwrap();
+        let skills_root = project.join(".agents").join("skills");
+        // A sibling skill inside the same canonical root.
+        write_file(
+            &skills_root.join("b").join("SKILL.md"),
+            "---\nname: b\n---\n",
+        );
+        std::os::unix::fs::symlink(skills_root.join("b"), skills_root.join("a")).unwrap();
+
+        crate::test_util::with_project_root(&project, || {
+            let entry = LockEntry {
+                name: "a".to_string(),
+                kind: ItemKind::Skill,
+                source: "/unused/source".to_string(),
+                source_repo: None,
+                harnesses: vec!["claude-code".to_string()],
+                method: InstallMethod::Symlink,
+                installed_at: "2026-08-11T00:00:00Z".to_string(),
+                source_hash: "stored-hash".to_string(),
+            };
+            let link = project.join(".claude").join("skills").join("a");
+            std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+            std::os::unix::fs::symlink(skills_root.join("a"), &link).unwrap();
+
+            let (ok, note) = verify_skill_install(&entry, false);
+            assert_eq!(
+                ok,
+                Some(false),
+                "a canonical that loads another skill is not this entry's canonical"
+            );
+            assert!(note.unwrap().contains("outside the canonical skill tree"));
         });
     }
 

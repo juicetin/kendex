@@ -1464,5 +1464,27 @@ fn refresh_withholds_agent_success_when_a_declared_skill_is_not_installed() {
             .collect::<Vec<_>>()
     );
 
+    // A declaration whose asset is not in the source catalog at all is still a
+    // dependency the agent never received — it must not read as satisfied
+    // either, or the mapping hash is recorded and every later run is clean.
+    std::fs::write(
+        source.join("vstack.toml"),
+        "[agent-skills]\nrust = [\"shared\", \"never-shipped\"]\n",
+    )
+    .unwrap();
+    let sources = vec![RefreshSource::from_root(&source)];
+    let stats = crate::test_util::with_project_root(&project, || {
+        let mut project_config = ProjectConfig::default();
+        refresh_items_in_scope(false, &lock, &sources, &mut project_config, &project, None)
+    });
+    assert!(
+        !stats.successful_items.contains("rust"),
+        "a declared skill missing from the source catalog must still withhold success"
+    );
+    assert!(
+        stats.has_incomplete(),
+        "and must be recorded, not just printed"
+    );
+
     let _ = std::fs::remove_dir_all(root);
 }
