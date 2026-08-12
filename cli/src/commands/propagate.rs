@@ -723,8 +723,10 @@ fn git_literal_command() -> Command {
 fn managed_paths_from_git_status(seed_paths: &BTreeSet<PathBuf>) -> Result<Vec<PathBuf>> {
     let project_root = config::project_root();
     let git = git_project()?;
-    let status_pathspecs = managed_status_pathspecs(seed_paths)?;
-    let owned_deleted_native_hooks = owned_deleted_native_hook_paths(seed_paths, &git)?;
+    let committed_paths = committed_project_stage_paths(&git)?;
+    let owned_shared_paths = owned_shared_status_paths(seed_paths, &committed_paths);
+    let status_pathspecs = managed_status_pathspecs(seed_paths, &owned_shared_paths)?;
+    let owned_deleted_native_hooks = owned_deleted_native_hook_paths(seed_paths, &committed_paths);
     let pi_package_prefixes = pi_package_status_prefixes(seed_paths);
     let top_level_pathspecs: Vec<PathBuf> = status_pathspecs
         .iter()
@@ -774,6 +776,7 @@ fn managed_paths_from_git_status(seed_paths: &BTreeSet<PathBuf>) -> Result<Vec<P
                 &path,
                 &project_skill_prefixes,
                 &pi_package_prefixes,
+                &owned_shared_paths,
                 &owned_deleted_native_hooks,
                 status,
             )
@@ -786,11 +789,11 @@ fn managed_paths_from_git_status(seed_paths: &BTreeSet<PathBuf>) -> Result<Vec<P
 
 fn owned_deleted_native_hook_paths(
     seed_paths: &BTreeSet<PathBuf>,
-    git: &GitProject,
-) -> Result<BTreeSet<PathBuf>> {
+    committed_paths: &BTreeSet<PathBuf>,
+) -> BTreeSet<PathBuf> {
     let mut owned = native_hook_paths_from(seed_paths);
-    owned.extend(native_hook_paths_from(&committed_project_stage_paths(git)?));
-    Ok(owned)
+    owned.extend(native_hook_paths_from(committed_paths));
+    owned
 }
 
 fn committed_project_stage_paths(git: &GitProject) -> Result<BTreeSet<PathBuf>> {
@@ -854,29 +857,51 @@ fn pi_package_prefix_from_path(path: &Path) -> Option<PathBuf> {
     }
 }
 
-fn managed_status_pathspecs(seed_paths: &BTreeSet<PathBuf>) -> Result<Vec<PathBuf>> {
+fn owned_shared_status_paths(
+    seed_paths: &BTreeSet<PathBuf>,
+    committed_paths: &BTreeSet<PathBuf>,
+) -> BTreeSet<PathBuf> {
+    seed_paths
+        .iter()
+        .chain(committed_paths.iter())
+        .filter(|path| is_shared_status_path(path))
+        .cloned()
+        .collect()
+}
+
+fn is_shared_status_path(path: &Path) -> bool {
+    matches!(
+        path.to_str(),
+        Some(".agents/skill-failure-reporting.md")
+            | Some(".claude/settings.json")
+            | Some(".codex/hooks.json")
+            | Some(".codex/config.toml")
+            | Some("opencode.json")
+            | Some("opencode.jsonc")
+            | Some(".pi/settings.json")
+            | Some(".pi/.vstack-source.json")
+            | Some(".pi/APPEND_SYSTEM.md")
+    )
+}
+
+fn managed_status_pathspecs(
+    seed_paths: &BTreeSet<PathBuf>,
+    owned_shared_paths: &BTreeSet<PathBuf>,
+) -> Result<Vec<PathBuf>> {
     let project_root = config::project_root();
     let mut paths = seed_paths.clone();
     for prefix in pi_package_status_prefixes(seed_paths) {
         paths.insert(prefix);
     }
+    paths.extend(owned_shared_paths.iter().cloned());
     for path in [
         ".vstack-lock.json",
         "vstack.toml",
         "vstack.settings.toml",
-        ".agents/skill-failure-reporting.md",
-        ".claude/settings.json",
         ".claude/hooks",
-        ".codex/hooks.json",
-        ".codex/config.toml",
         ".codex/hooks",
         ".cursor/rules",
         ".opencode/instructions",
-        "opencode.json",
-        "opencode.jsonc",
-        ".pi/settings.json",
-        ".pi/.vstack-source.json",
-        ".pi/APPEND_SYSTEM.md",
     ] {
         paths.insert(PathBuf::from(path));
     }
@@ -944,25 +969,18 @@ fn is_managed_status_path(
     path: &Path,
     project_skill_prefixes: &[PathBuf],
     pi_package_prefixes: &BTreeSet<PathBuf>,
+    owned_shared_paths: &BTreeSet<PathBuf>,
     owned_deleted_native_hooks: &BTreeSet<PathBuf>,
     status: &[u8],
 ) -> bool {
     let path = path.components().collect::<PathBuf>();
     if matches!(
         path.to_str(),
-        Some(".vstack-lock.json")
-            | Some("vstack.toml")
-            | Some("vstack.settings.toml")
-            | Some(".agents/skill-failure-reporting.md")
-            | Some(".claude/settings.json")
-            | Some(".codex/hooks.json")
-            | Some(".codex/config.toml")
-            | Some("opencode.json")
-            | Some("opencode.jsonc")
-            | Some(".pi/settings.json")
-            | Some(".pi/.vstack-source.json")
-            | Some(".pi/APPEND_SYSTEM.md")
+        Some(".vstack-lock.json") | Some("vstack.toml") | Some("vstack.settings.toml")
     ) {
+        return true;
+    }
+    if owned_shared_paths.contains(&path) {
         return true;
     }
     let Some(path_str) = path.to_str() else {

@@ -350,6 +350,47 @@ fn stage_paths_are_scoped_to_lock_outputs_and_opencode_config() {
 }
 
 #[test]
+fn staging_does_not_stage_shared_configs_without_lock_ownership() {
+    let project = tmpdir("stage-unowned-shared-config");
+    std::fs::create_dir_all(&project).unwrap();
+    init_git_project(&project);
+
+    crate::test_util::with_project_root(&project, || {
+        let mut lock = LockFile::default();
+        lock.add(lock_entry("demo", ItemKind::Skill, &["claude-code"]));
+        lock.save(&config::lock_file_path(false)).unwrap();
+        write_file(
+            &project.join(".agents/skill-failure-reporting.md"),
+            "consumer reference\n",
+        );
+        write_file(&project.join(".claude/settings.json"), "{}\n");
+        write_file(
+            &project.join(".codex/config.toml"),
+            "approval_policy = \"never\"\n",
+        );
+        write_file(&project.join("opencode.json"), "{}\n");
+        write_file(&project.join(".pi/settings.json"), "{}\n");
+        write_file(&project.join(".pi/.vstack-source.json"), "{}\n");
+        write_file(&project.join(".pi/APPEND_SYSTEM.md"), "consumer prompt\n");
+
+        stage_project_paths(&[]).unwrap();
+
+        let staged = git_output(&project, &["diff", "--cached", "--name-only"]);
+        assert!(staged.contains(".vstack-lock.json\n"), "{staged}");
+        assert!(
+            !staged.contains(".agents/skill-failure-reporting.md"),
+            "{staged}"
+        );
+        assert!(!staged.contains(".claude/settings.json"), "{staged}");
+        assert!(!staged.contains(".codex/config.toml"), "{staged}");
+        assert!(!staged.contains("opencode.json"), "{staged}");
+        assert!(!staged.contains(".pi/settings.json"), "{staged}");
+        assert!(!staged.contains(".pi/.vstack-source.json"), "{staged}");
+        assert!(!staged.contains(".pi/APPEND_SYSTEM.md"), "{staged}");
+    });
+}
+
+#[test]
 fn staging_pre_refresh_paths_records_refresh_deletions() {
     let project = tmpdir("stage-delete-project");
     std::fs::create_dir_all(&project).unwrap();
@@ -380,6 +421,35 @@ fn staging_pre_refresh_paths_records_refresh_deletions() {
             staged.contains("D\t.opencode/instructions/vstack-hook-protect.md"),
             "{staged}"
         );
+    });
+}
+
+#[test]
+fn retry_staging_records_deleted_owned_shared_config_from_committed_lock() {
+    let project = tmpdir("stage-deleted-owned-shared-config");
+    std::fs::create_dir_all(&project).unwrap();
+    init_git_project(&project);
+
+    crate::test_util::with_project_root(&project, || {
+        let mut lock = LockFile::default();
+        lock.add(lock_entry("guard", ItemKind::Hook, &["codex"]));
+        lock.save(&config::lock_file_path(false)).unwrap();
+        write_file(
+            &project.join(".codex/config.toml"),
+            "approval_policy = \"never\"\n",
+        );
+        git(&project, &["add", "-A"]);
+        git(&project, &["commit", "-m", "baseline"]);
+
+        LockFile::default()
+            .save(&config::lock_file_path(false))
+            .unwrap();
+        std::fs::remove_file(project.join(".codex/config.toml")).unwrap();
+
+        stage_project_paths(&[]).unwrap();
+        let staged = git_output(&project, &["diff", "--cached", "--name-status"]);
+        assert!(staged.contains("M\t.vstack-lock.json"), "{staged}");
+        assert!(staged.contains("D\t.codex/config.toml"), "{staged}");
     });
 }
 

@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -537,6 +537,7 @@ fn install_pi_extension_inner(
     let dest_dir = crate::config::pi_packages_dir(global);
     std::fs::create_dir_all(&dest_dir)?;
     let dest = checked_pi_package_path(&ext.name, global)?;
+    let previous_bin_names = installed_bin_names(&dest);
 
     // Idempotent reinstall: clear any prior copy. NotFound is fine; other
     // errors (EACCES etc.) propagate so we don't copy onto a broken state.
@@ -546,6 +547,12 @@ fn install_pi_extension_inner(
     install_production_dependencies_if_needed(&ext.name, &dest)?;
     let append_system_action = append_system_install_action(ext, &dest)?;
     install_bin_links(ext, &dest, global)?;
+    remove_stale_bin_links(
+        &previous_bin_names,
+        &ext.bin.keys().cloned().collect(),
+        &dest,
+        global,
+    )?;
     crate::path_safety::ensure_file_write_target_safe(&append_system_path(global))?;
     register_in_pi_settings(&ext.name, &dest, global)?;
     apply_append_system_action(&ext.name, append_system_action, global)?;
@@ -715,6 +722,57 @@ fn install_bin_links(ext: &PiExtension, package_dest: &Path, global: bool) -> Re
             .with_context(|| format!("symlinking bin {} → {}", link.display(), target.display()))?;
     }
     Ok(())
+}
+
+fn installed_bin_names(package_dest: &Path) -> BTreeSet<String> {
+    if std::fs::symlink_metadata(package_dest).is_ok_and(|meta| meta.is_dir())
+        && let Ok(ext) = PiExtension::from_dir(package_dest)
+    {
+        return ext.bin.keys().cloned().collect();
+    }
+    BTreeSet::new()
+}
+
+fn remove_stale_bin_links(
+    previous_bin_names: &BTreeSet<String>,
+    current_bin_names: &BTreeSet<String>,
+    package_dest: &Path,
+    global: bool,
+) -> Result<()> {
+    for cli_name in previous_bin_names.difference(current_bin_names) {
+        validate_safe_component("Pi bin name", cli_name)?;
+        let link = crate::config::pi_bin_dir(global).join(cli_name);
+        if !is_package_bin_symlink(&link, package_dest)? {
+            continue;
+        }
+        match std::fs::remove_file(&link) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err.into()),
+        }
+    }
+    Ok(())
+}
+
+fn is_package_bin_symlink(link: &Path, package_dest: &Path) -> Result<bool> {
+    let Ok(meta) = std::fs::symlink_metadata(link) else {
+        return Ok(false);
+    };
+    if !meta.file_type().is_symlink() {
+        return Ok(false);
+    }
+    let target =
+        std::fs::read_link(link).with_context(|| format!("reading bin link {}", link.display()))?;
+    let absolute_target = if target.is_absolute() {
+        target
+    } else {
+        link.parent().unwrap_or_else(|| Path::new(".")).join(target)
+    };
+    Ok(normalize_path(&absolute_target).starts_with(&normalize_path(package_dest)))
+}
+
+fn normalize_path(path: &Path) -> PathBuf {
+    path.components().collect()
 }
 
 /// The canonical `packages` entry vstack writes for a given package name.
@@ -1794,6 +1852,66 @@ printf 'module.exports = 1;\n' > node_modules/left-pad/index.js
                 link.display()
             );
             assert!(!link.exists(), "bin link should be gone");
+        });
+
+        let _ = std::fs::remove_dir_all(&sandbox);
+    }
+
+    #[test]
+    fn reinstall_removes_stale_managed_bin_symlinks_only() {
+        let sandbox =
+            std::env::temp_dir().join(format!("vstack_pi_stale_bin_links_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&sandbox);
+        let source = sandbox.join("src").join("pi-bridgey");
+        std::fs::create_dir_all(source.join("bin")).unwrap();
+        std::fs::create_dir_all(source.join("extensions")).unwrap();
+        std::fs::write(source.join("extensions").join("ext.ts"), "// noop\n").unwrap();
+        std::fs::write(source.join("bin").join("old.js"), "#!/usr/bin/env node\n").unwrap();
+        std::fs::write(source.join("bin").join("user.js"), "#!/usr/bin/env node\n").unwrap();
+        std::fs::write(
+            source.join("package.json"),
+            r#"{
+                "name": "pi-bridgey",
+                "pi": { "extensions": ["./extensions/ext.ts"] },
+                "bin": { "old-cmd": "./bin/old.js", "user-cmd": "./bin/user.js" }
+            }"#,
+        )
+        .unwrap();
+        let pi_dir = sandbox.join("agent");
+
+        with_pi_dir(&pi_dir, || {
+            let old_ext = PiExtension::from_dir(&source).unwrap();
+            install_pi_extension(&old_ext, true).unwrap().unwrap();
+            let old_link = pi_dir.join("bin").join("old-cmd");
+            let user_path = pi_dir.join("bin").join("user-cmd");
+            assert!(old_link.is_symlink());
+            assert!(user_path.is_symlink());
+
+            std::fs::remove_file(&user_path).unwrap();
+            std::fs::write(&user_path, "consumer-owned\n").unwrap();
+            std::fs::write(source.join("bin").join("new.js"), "#!/usr/bin/env node\n").unwrap();
+            std::fs::write(
+                source.join("package.json"),
+                r#"{
+                    "name": "pi-bridgey",
+                    "pi": { "extensions": ["./extensions/ext.ts"] },
+                    "bin": { "new-cmd": "./bin/new.js" }
+                }"#,
+            )
+            .unwrap();
+
+            let new_ext = PiExtension::from_dir(&source).unwrap();
+            install_pi_extension(&new_ext, true).unwrap().unwrap();
+
+            assert!(
+                std::fs::symlink_metadata(&old_link).is_err(),
+                "removed upstream bin symlink should be gone"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&user_path).unwrap(),
+                "consumer-owned\n"
+            );
+            assert!(pi_dir.join("bin").join("new-cmd").is_symlink());
         });
 
         let _ = std::fs::remove_dir_all(&sandbox);

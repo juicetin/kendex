@@ -406,6 +406,40 @@ pub(crate) fn clone_or_update_remote_source(source: &str) -> Result<Option<PathB
     clone_or_update_remote_source_at(source, &display, &git_url, &cache_dir).map(Some)
 }
 
+pub(crate) fn clone_or_update_remote_source_best_effort(source: &str) -> Result<Option<PathBuf>> {
+    reject_plaintext_http_remote(source)?;
+    let Some(git_url) = remote_git_url(source) else {
+        return Ok(None);
+    };
+    let display = remote_source_display(source);
+    let cache_dir = remote_cache_dir(source).expect("remote source has cache dir");
+
+    if cache_dir.join(".git").exists() {
+        validate_cached_repo_origin(&display, &git_url, &cache_dir)?;
+        update_cached_repo_best_effort(source, &cache_dir);
+        return Ok(Some(cache_dir));
+    }
+
+    if let Some(legacy_dir) = legacy_remote_cache_dir(source, &cache_dir)
+        && legacy_dir.join(".git").exists()
+    {
+        match validate_cached_repo_origin(&display, &git_url, &legacy_dir) {
+            Ok(()) => {
+                update_cached_repo_best_effort(source, &legacy_dir);
+                return Ok(Some(legacy_dir));
+            }
+            Err(err) => {
+                eprintln!(
+                    "  Warning: ignoring legacy vstack source cache {}: {err}",
+                    legacy_dir.display()
+                );
+            }
+        }
+    }
+
+    clone_or_update_remote_source_at(source, &display, &git_url, &cache_dir).map(Some)
+}
+
 pub(crate) fn refresh_remote_cache_best_effort(source: &str) {
     if let Err(err) = clone_or_update_remote_source(source) {
         eprintln!("  Warning: {err}; using cached version if available");

@@ -488,6 +488,20 @@ mod source_option_tests {
         assert!(status.success());
     }
 
+    fn git(dir: &Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .status()
+            .unwrap();
+        assert!(
+            status.success(),
+            "git {:?} failed in {}",
+            args,
+            dir.display()
+        );
+    }
+
     fn write_demo_skill(source: &Path) {
         let skill_dir = source.join("skills").join("demo");
         std::fs::create_dir_all(&skill_dir).unwrap();
@@ -739,6 +753,36 @@ role: engineer
             resolved.source_repo.as_deref(),
             Some("vanillagreencom/vstack")
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn resolve_source_for_app_uses_valid_remote_cache_when_fetch_fails() {
+        let root = tmpdir("source-repo-cached-fetch-failure");
+        let project = root.join("project");
+        let home = root.join("home");
+        let config_home = root.join("config");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&config_home).unwrap();
+
+        crate::test_util::with_home_and_config(&home, &config_home, || {
+            let source = "owner/repo";
+            let cache = crate::refresh_sources::remote_cache_dir(source).unwrap();
+            std::fs::create_dir_all(&cache).unwrap();
+            init_git_origin(&cache, "https://github.com/owner/repo.git");
+            git(&cache, &["config", "http.proxy", "http://127.0.0.1:1"]);
+            write_demo_skill(&cache);
+            std::fs::create_dir_all(cache.join("agents")).unwrap();
+
+            let registry = config::SourceRegistry::default();
+            let resolved = resolve_source_for_app(Some(source), &registry, &project).unwrap();
+
+            assert_eq!(resolved.dir, cache);
+            assert_eq!(resolved.source, source);
+            assert_eq!(resolved.source_repo.as_deref(), Some("owner/repo"));
+        });
+
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -2687,7 +2731,8 @@ fn resolve_source(source: Option<&str>) -> Result<PathBuf> {
 }
 
 fn clone_or_update(source: &str) -> Result<PathBuf> {
-    let Some(repo_dir) = crate::refresh_sources::clone_or_update_remote_source(source)? else {
+    let Some(repo_dir) = crate::refresh_sources::clone_or_update_remote_source_best_effort(source)?
+    else {
         anyhow::bail!("Source is not a supported GitHub remote: {source}");
     };
 
