@@ -1321,20 +1321,15 @@ fn run_one_with_source_records(
         preflight_project_refresh(&project_root)?;
     }
 
-    // Reconcile lock with disk before refreshing (recovers orphaned entries)
-    let source_hint = lock
-        .entries
-        .values()
-        .next()
-        .map(|e| e.source.clone())
-        .unwrap_or_default();
-    if config::reconcile_lock_with_disk(&mut lock, global, &source_hint) {
-        lock.save(&lock_path)?;
-    }
-
     // Resolve source directories once per refresh. Callers that already ran a
     // strict remote update can pass those records so refresh does not fetch
     // the same remote cache a second time.
+    //
+    // Invariant: nothing here may mutate the lock, the install tree, or the
+    // project before the mapping validates. Reconciliation deletes broken skill
+    // symlinks and saves the lock, so a check behind it drops the lock entry of
+    // a skill whose artifact went missing and only then aborts, leaving nothing
+    // to reinstall from once the mapping is repaired.
     let source_records = resolved_records
         .map(|records| records.to_vec())
         .unwrap_or_else(|| resolve_source_records(&lock));
@@ -1345,6 +1340,17 @@ fn run_one_with_source_records(
     let sources = load_refresh_sources(&source_records);
     if let Some((config_path, err)) = invalid_source_mapping(&sources) {
         anyhow::bail!("{}: {err}", config_path.display());
+    }
+
+    // Reconcile lock with disk before refreshing (recovers orphaned entries)
+    let source_hint = lock
+        .entries
+        .values()
+        .next()
+        .map(|e| e.source.clone())
+        .unwrap_or_default();
+    if config::reconcile_lock_with_disk(&mut lock, global, &source_hint) {
+        lock.save(&lock_path)?;
     }
 
     // Self-heal hook lock entries: drop harness ids the hook no longer

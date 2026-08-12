@@ -1939,6 +1939,124 @@ fn refresh_run_leaves_project_config_untouched_when_source_mapping_is_schema_inv
     let _ = std::fs::remove_dir_all(root);
 }
 
+/// Every path under `root` paired with what it is — directory, symlink target,
+/// or file bytes — without following links.
+fn snapshot_tree(root: &Path) -> Vec<(String, String)> {
+    fn walk(dir: &Path, base: &Path, out: &mut Vec<(String, String)>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let rel = path
+                .strip_prefix(base)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .into_owned();
+            let meta = std::fs::symlink_metadata(&path).expect("stat snapshot entry");
+            if meta.is_symlink() {
+                let target = std::fs::read_link(&path).expect("read snapshot link");
+                out.push((rel, format!("symlink:{}", target.display())));
+            } else if meta.is_dir() {
+                out.push((rel, "dir".to_string()));
+                walk(&path, base, out);
+            } else {
+                let bytes = std::fs::read(&path).expect("read snapshot file");
+                // Text renders readably in a failure diff; anything else keeps
+                // its exact bytes so the comparison stays byte-for-byte.
+                out.push((
+                    rel,
+                    match String::from_utf8(bytes) {
+                        Ok(text) => format!("file:{text}"),
+                        Err(err) => format!("bytes:{:?}", err.into_bytes()),
+                    },
+                ));
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+    walk(root, root, &mut out);
+    out.sort();
+    out
+}
+
+/// The mapping check must sit ahead of EVERY mutation, not merely ahead of the
+/// project write. `reconcile_lock_with_disk` deletes broken skill symlinks and
+/// saves the lock, so a check placed after it drops the lock entry of a skill
+/// whose artifact went missing and only then aborts: repairing the mapping and
+/// re-running can no longer reinstall that skill, because nothing records it.
+#[test]
+fn refresh_run_mutates_nothing_when_source_mapping_is_schema_invalid() {
+    let root = tmpdir("invalid-mapping-no-mutation");
+    let project = root.join("project");
+    let source = make_source(&root, "source");
+    std::fs::create_dir_all(project.join(".agents/skills")).unwrap();
+    std::fs::create_dir_all(project.join(".claude/skills")).unwrap();
+    write_colliding_source(&source, "1", "PreToolUse", "model-x");
+    // Valid TOML, wrong schema: `[agent-skills]` values must be lists.
+    std::fs::write(
+        source.join("vstack.toml"),
+        "[agent-skills]\nrust = \"shared\"\n",
+    )
+    .unwrap();
+    std::fs::write(project.join("vstack.toml"), "# consumer config\n").unwrap();
+
+    // A skill whose installed artifact is gone: reconciliation drops its lock
+    // entry, and its dangling harness link is a managed symlink it deletes.
+    std::os::unix::fs::symlink(
+        project.join(".agents/skills/ghost"),
+        project.join(".claude/skills/ghost"),
+    )
+    .unwrap();
+
+    let mut lock = LockFile::default();
+    lock.add(lock_entry(
+        "rust",
+        ItemKind::Agent,
+        &source,
+        vec!["claude-code"],
+    ));
+    lock.add(lock_entry(
+        "ghost",
+        ItemKind::Skill,
+        &source,
+        vec!["claude-code"],
+    ));
+    let lock_path = project.join(".vstack-lock.json");
+    lock.save(&lock_path).unwrap();
+
+    let lock_before = std::fs::read(&lock_path).unwrap();
+    let tree_before = snapshot_tree(&project);
+
+    let records = vec![ResolvedSource {
+        root: source.clone(),
+        aliases: vec![source.to_string_lossy().into_owned()],
+        source_repo: None,
+    }];
+    let err = crate::test_util::with_project_root(&project, || {
+        run_one_with_source_records(false, false, Some(&records))
+    })
+    .expect_err("schema-invalid source mapping must fail the refresh");
+
+    assert_eq!(
+        snapshot_tree(&project),
+        tree_before,
+        "refresh mutated the install tree before validating the source mapping"
+    );
+    assert_eq!(
+        std::fs::read(&lock_path).unwrap(),
+        lock_before,
+        "refresh rewrote the lock before validating the source mapping"
+    );
+    assert!(
+        err.to_string().contains("source mapping will not parse"),
+        "wrong failure: {err}"
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
 /// An agent whose recorded harnesses resolve to no skills directory at all has
 /// nowhere to load a declared dependency from, so the satisfaction check must
 /// not read as met — `all()` over an empty set is vacuously true.
