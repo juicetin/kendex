@@ -12,7 +12,7 @@ use crate::refresh_sources::{
 };
 use crate::skill::Skill;
 use anyhow::Result;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 /// Result counts from one invocation of [`refresh_items_in_scope`].
@@ -279,6 +279,25 @@ pub fn refresh_items_in_scope(
         .filter(|(_, e)| e.kind == ItemKind::Skill)
         .map(|(name, _)| name.clone())
         .collect();
+    // Where each installed skill actually lands. Satisfaction is per install
+    // directory rather than per harness id, so the harnesses that share one
+    // (project Codex and Pi both use `.agents/skills`) count for each other,
+    // while a skill installed only for OpenCode does not satisfy a Claude agent.
+    let installed_skill_dirs: BTreeMap<String, BTreeSet<PathBuf>> = lock
+        .entries
+        .iter()
+        .filter(|(_, e)| e.kind == ItemKind::Skill)
+        .map(|(name, e)| {
+            (
+                name.clone(),
+                e.harnesses
+                    .iter()
+                    .filter_map(|id| Harness::from_id(id))
+                    .map(|harness| harness.skills_dir(global))
+                    .collect(),
+            )
+        })
+        .collect();
     let mut regenerated_codex_agents = Vec::new();
 
     // ── Agents ───────────────────────────────────────────────
@@ -313,9 +332,20 @@ pub fn refresh_items_in_scope(
         // A declaration whose asset is absent from the source catalog counts
         // too: filtering it out here would leave the agent permanently short of
         // a skill the mapping calls required while every later run read clean.
+        // So does one installed for a harness this agent does not use — the
+        // agent references a skill that is not in its own skills directory.
+        let agent_skill_dirs: BTreeSet<PathBuf> = entry
+            .harnesses
+            .iter()
+            .filter_map(|id| Harness::from_id(id))
+            .map(|harness| harness.skills_dir(global))
+            .collect();
         let missing: Vec<String> = declared
             .into_iter()
-            .filter(|skill| !installed_skills.iter().any(|installed| installed == skill))
+            .filter(|skill| match installed_skill_dirs.get(skill) {
+                Some(dirs) => !agent_skill_dirs.iter().all(|dir| dirs.contains(dir)),
+                None => true,
+            })
             .collect();
         if !missing.is_empty() {
             // Recorded, not merely printed: callers gate on `has_missing()`, so

@@ -1489,6 +1489,65 @@ fn refresh_withholds_agent_success_when_a_declared_skill_is_not_installed() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+/// A skill installed only for another harness does not satisfy the agent: it is
+/// absent from the agent's own skills directory, so the agent is regenerated
+/// referencing a skill it cannot load.
+#[test]
+fn refresh_withholds_agent_success_when_a_declared_skill_targets_another_harness() {
+    let root = tmpdir("declared-skill-other-harness");
+    let project = root.join("project");
+    let source = make_source(&root, "source");
+    std::fs::create_dir_all(&project).unwrap();
+    write_colliding_source(&source, "1", "PreToolUse", "source-model");
+
+    let sources = vec![RefreshSource::from_root(&source)];
+    let mut lock = LockFile::default();
+    lock.add(lock_entry(
+        "rust",
+        ItemKind::Agent,
+        &source,
+        vec!["claude-code"],
+    ));
+    // `shared` is declared for `rust`, but installed only into OpenCode's dir.
+    lock.add(lock_entry(
+        "shared",
+        ItemKind::Skill,
+        &source,
+        vec!["opencode"],
+    ));
+
+    let stats = crate::test_util::with_project_root(&project, || {
+        let mut project_config = ProjectConfig::default();
+        refresh_items_in_scope(false, &lock, &sources, &mut project_config, &project, None)
+    });
+    assert!(
+        !stats.successful_items.contains("rust"),
+        "a skill in another harness's directory does not satisfy this agent"
+    );
+
+    // Installing it for the agent's own harness satisfies the declaration.
+    let mut lock = LockFile::default();
+    lock.add(lock_entry(
+        "rust",
+        ItemKind::Agent,
+        &source,
+        vec!["claude-code"],
+    ));
+    lock.add(lock_entry(
+        "shared",
+        ItemKind::Skill,
+        &source,
+        vec!["claude-code"],
+    ));
+    let stats = crate::test_util::with_project_root(&project, || {
+        let mut project_config = ProjectConfig::default();
+        refresh_items_in_scope(false, &lock, &sources, &mut project_config, &project, None)
+    });
+    assert!(stats.successful_items.contains("rust"));
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
 /// An incomplete refresh must stop the run: the lock hash is deliberately
 /// withheld, so returning success would let propagation stage the incomplete
 /// artifact and would never converge — every later run sees the same drift.
