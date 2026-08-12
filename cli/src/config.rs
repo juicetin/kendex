@@ -843,6 +843,26 @@ fn extract_toml_section_for(path: &Path, name: &str) -> Vec<u8> {
     result
 }
 
+/// The `[agent-skills]` entry for `name` alone. Narrower than
+/// [`extract_toml_section_for`] on purpose: only skill assignment is aliased to
+/// the stripped `reviewer-` form, so pulling that agent's other tables in would
+/// stale installs on edits that never reach the aliased agent.
+fn extract_agent_skills_entry_for(path: &Path, name: &str) -> Vec<u8> {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let Ok(toml::Value::Table(root)) = content.parse::<toml::Value>() else {
+        return Vec::new();
+    };
+    let Some(toml::Value::Table(agent_skills)) = root.get("agent-skills") else {
+        return Vec::new();
+    };
+    let Some(value) = agent_skills.get(name) else {
+        return Vec::new();
+    };
+    format!("agent-skills.{name} = {value}\n").into_bytes()
+}
+
 fn extract_role_skill_section_for_agent(source_root: &Path, entry: &LockEntry) -> Vec<u8> {
     let Some(agent_file) =
         crate::catalog::find_item_path(source_root, ItemKind::Agent, &entry.name)
@@ -1052,6 +1072,21 @@ pub fn compute_source_hash(entry: &LockEntry) -> String {
                 let shared = extract_shared_instruction_sections(config_path, AGENT_SHARED_TABLES);
                 if !shared.is_empty() {
                     state = fnv1a_chain(state, &shared);
+                }
+            }
+            // `MappingConfig::skills_for_agent` applies `[agent-skills] foo` to
+            // `reviewer-foo` as well, so an edit there changes the generated
+            // agent. Hashing only the full name left that edit invisible and
+            // `propagate --check` reported no drift.
+            if let Some(alias) = entry.name.strip_prefix("reviewer-") {
+                for config_path in [
+                    &source_config,
+                    &crate::project_config::project_config_path(&proj_root),
+                ] {
+                    let aliased = extract_agent_skills_entry_for(config_path, alias);
+                    if !aliased.is_empty() {
+                        state = fnv1a_chain(state, &aliased);
+                    }
                 }
             }
             let role_skills = extract_role_skill_section_for_agent(&source_root, entry);
@@ -3506,6 +3541,50 @@ echo foreign
             lock.entries.get("foo-bar").unwrap().harnesses,
             vec!["codex".to_string()]
         );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn agent_hash_tracks_the_stripped_reviewer_alias_agent_skills_entry() {
+        let dir = sandbox("agent_hash_reviewer_alias");
+        let source = dir.join("source");
+        fs::create_dir_all(source.join("agents")).unwrap();
+        fs::write(
+            source.join("agents").join("reviewer-doc.md"),
+            "---\nname: reviewer-doc\ndescription: Doc reviewer\nrole: reviewer\n---\n# Doc\n",
+        )
+        .unwrap();
+        fs::write(
+            source.join("vstack.toml"),
+            "[agent-skills]\ndoc = [\"one\"]\n",
+        )
+        .unwrap();
+
+        let entry = LockEntry {
+            name: "reviewer-doc".to_string(),
+            kind: ItemKind::Agent,
+            source: source.to_string_lossy().into_owned(),
+            source_repo: None,
+            harnesses: vec!["claude-code".to_string()],
+            method: InstallMethod::Copy,
+            installed_at: "2026-08-11T00:00:00Z".to_string(),
+            source_hash: String::new(),
+        };
+
+        let project = dir.join("project");
+        fs::create_dir_all(&project).unwrap();
+        crate::test_util::with_project_root(&project, || {
+            let before = compute_source_hash(&entry);
+            // The mapping applies `[agent-skills] doc` to `reviewer-doc`, so
+            // this edit changes the generated agent and must stale it.
+            fs::write(
+                source.join("vstack.toml"),
+                "[agent-skills]\ndoc = [\"one\", \"two\"]\n",
+            )
+            .unwrap();
+            assert_ne!(before, compute_source_hash(&entry));
+        });
+
         let _ = fs::remove_dir_all(&dir);
     }
 

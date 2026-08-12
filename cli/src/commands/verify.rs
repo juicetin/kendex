@@ -310,11 +310,12 @@ fn accepted_canonical_skill_targets(entry: &LockEntry, global: bool) -> Vec<Path
             let resolved_root = std::fs::canonicalize(&root).unwrap_or_else(|_| root.clone());
             let target = root.join(name);
             let resolved = std::fs::canonicalize(&target).unwrap_or(target);
-            // Containment alone is not identity: `.agents/skills/a` retargeted
-            // at `.agents/skills/b` stays under the root while loading another
-            // skill entirely, so the resolved entry must still be this name.
-            let keeps_identity = resolved.file_name() == Some(std::ffi::OsStr::new(name.as_str()));
-            (resolved.starts_with(&resolved_root) && keeps_identity).then_some(resolved)
+            // Containment is not identity, and neither is a matching basename:
+            // `.agents/skills/a` retargeted at `.agents/skills/b`, or at
+            // `.agents/skills/b/a`, satisfies both while loading something else.
+            // The resolved entry must be the root's own direct child for this
+            // name — nothing weaker survives a redirect.
+            (resolved == resolved_root.join(name.as_str())).then_some(resolved)
         })
         .collect()
 }
@@ -777,6 +778,18 @@ mod tests {
                 "a canonical that loads another skill is not this entry's canonical"
             );
             assert!(note.unwrap().contains("outside the canonical skill tree"));
+
+            // A nested same-named directory satisfies containment and basename
+            // alike, so neither is sufficient on its own.
+            std::fs::remove_file(skills_root.join("a")).unwrap();
+            write_file(
+                &skills_root.join("b").join("a").join("SKILL.md"),
+                "---\nname: a\n---\n",
+            );
+            std::os::unix::fs::symlink(skills_root.join("b").join("a"), skills_root.join("a"))
+                .unwrap();
+            let (ok, note) = verify_skill_install(&entry, false);
+            assert_eq!(ok, Some(false), "{note:?}");
         });
     }
 
