@@ -260,6 +260,12 @@ fn verify_skill_install(entry: &LockEntry, global: bool) -> (Option<bool>, Optio
 /// canonicals under `global_state_dir()/skills`, and project canonicals at
 /// `<checkout>/.agents/skills` — this checkout's, plus any same-repository
 /// checkout the harness layout is anchored in (VST-195).
+///
+/// The canonical entry is itself mutable, so each candidate is accepted only
+/// when it still resolves *inside* its own root. A shared layout where the
+/// root is the symlink stays valid (the root canonicalizes with it), while a
+/// canonical child retargeted at an unrelated directory drops out instead of
+/// becoming the trusted target for every harness link pointing through it.
 fn accepted_canonical_skill_targets(entry: &LockEntry, global: bool) -> Vec<PathBuf> {
     let name = &entry.name;
     let harnesses: Vec<crate::harness::Harness> = entry
@@ -267,36 +273,36 @@ fn accepted_canonical_skill_targets(entry: &LockEntry, global: bool) -> Vec<Path
         .iter()
         .filter_map(|id| crate::harness::Harness::from_id(id))
         .collect();
-    let mut targets = Vec::new();
+    let mut roots = Vec::new();
     if global {
         // Codex keeps its global canonical under its own home; every other
         // harness shares `global_state_dir()`. Only offer a tree this entry's
         // harnesses actually install into.
         if harnesses.contains(&crate::harness::Harness::Codex) {
-            targets.push(config::codex_home_dir().join("skills").join(name));
+            roots.push(config::codex_home_dir().join("skills"));
         }
         if harnesses
             .iter()
             .any(|harness| *harness != crate::harness::Harness::Codex)
         {
-            targets.push(config::global_state_dir().join("skills").join(name));
+            roots.push(config::global_state_dir().join("skills"));
         }
     } else {
-        targets.push(
-            config::project_root()
-                .join(".agents")
-                .join("skills")
-                .join(name),
-        );
-        targets.extend(
+        roots.push(config::project_root().join(".agents").join("skills"));
+        roots.extend(
             crate::installer::anchored_canonical_skill_roots(&harnesses)
                 .into_iter()
-                .map(|(root, _)| root.join(name)),
+                .map(|(root, _)| root),
         );
     }
-    targets
+    roots
         .into_iter()
-        .map(|path| std::fs::canonicalize(&path).unwrap_or(path))
+        .filter_map(|root| {
+            let resolved_root = std::fs::canonicalize(&root).unwrap_or_else(|_| root.clone());
+            let target = root.join(name);
+            let resolved = std::fs::canonicalize(&target).unwrap_or(target);
+            resolved.starts_with(&resolved_root).then_some(resolved)
+        })
         .collect()
 }
 
@@ -714,6 +720,52 @@ mod tests {
             // The same link is legitimate once Codex is one of its harnesses.
             entry.harnesses.push("codex".to_string());
             let (ok, note) = verify_skill_install(&entry, true);
+            assert_eq!(ok, Some(true), "{note:?}");
+        });
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn verify_skill_rejects_a_retargeted_canonical_entry() {
+        let project = tmpdir("retargeted-canonical-entry");
+        std::fs::create_dir_all(&project).unwrap();
+        let skills_root = project.join(".agents").join("skills");
+        std::fs::create_dir_all(&skills_root).unwrap();
+        // Unrelated instructions the canonical is redirected at.
+        let elsewhere = project.join("elsewhere").join("demo");
+        write_file(&elsewhere.join("SKILL.md"), "---\nname: other\n---\n");
+        let canonical = skills_root.join("demo");
+        std::os::unix::fs::symlink(&elsewhere, &canonical).unwrap();
+
+        crate::test_util::with_project_root(&project, || {
+            let entry = LockEntry {
+                name: "demo".to_string(),
+                kind: ItemKind::Skill,
+                source: "/unused/source".to_string(),
+                source_repo: None,
+                harnesses: vec!["claude-code".to_string()],
+                method: InstallMethod::Symlink,
+                installed_at: "2026-08-11T00:00:00Z".to_string(),
+                source_hash: "stored-hash".to_string(),
+            };
+
+            // A harness link pointing through the compromised canonical must not
+            // inherit its trust.
+            let link = project.join(".claude").join("skills").join("demo");
+            std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+            std::os::unix::fs::symlink(&canonical, &link).unwrap();
+
+            let (ok, note) = verify_skill_install(&entry, false);
+            assert_eq!(ok, Some(false));
+            assert!(
+                note.unwrap().contains("outside the canonical skill tree"),
+                "a canonical that leaves its own root is not a trusted target"
+            );
+
+            // Repairing the canonical to a real directory restores the install.
+            std::fs::remove_file(&canonical).unwrap();
+            write_file(&canonical.join("SKILL.md"), "---\nname: demo\n---\n");
+            let (ok, note) = verify_skill_install(&entry, false);
             assert_eq!(ok, Some(true), "{note:?}");
         });
     }
