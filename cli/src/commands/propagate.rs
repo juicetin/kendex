@@ -553,6 +553,15 @@ fn require_installed_hook_script_matches_source(
         )),
         Err(err) => failures.push(format!("{} is unreadable: {err}", relative.display())),
     }
+    // Both installers create the script 0755 explicitly. Identical text with the
+    // execute bit cleared still leaves the registered command unable to run the
+    // hook, so the mode is part of a correct install.
+    if config::executable_hash_bit(&path) == 0 {
+        failures.push(format!(
+            "{} is not executable for {label}",
+            relative.display()
+        ));
+    }
 }
 
 /// A translated safety artifact — an OpenCode instruction file, a Cursor rule —

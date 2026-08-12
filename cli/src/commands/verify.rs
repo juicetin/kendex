@@ -511,6 +511,9 @@ fn hash_dir_walk(dir: &Path) -> u64 {
                 state = state.wrapping_mul(FNV_PRIME);
             }
         }
+        // Mirrors config::hash_dir_bytes_excluding: a mode-only change is drift.
+        state ^= config::executable_hash_bit(entry.path()) as u64;
+        state = state.wrapping_mul(FNV_PRIME);
     }
     state
 }
@@ -876,6 +879,27 @@ mod tests {
             assert!(note.contains("outside the canonical skill tree"), "{note}");
             assert!(note.contains("claude-code"), "{note}");
         });
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn verify_hash_walk_tracks_the_executable_bit_like_the_source_hash() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tmpdir("verify-hash-exec-bit");
+        let tree = root.join("pkg");
+        std::fs::create_dir_all(&tree).unwrap();
+        let script = tree.join("tool.sh");
+        std::fs::write(&script, b"#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let non_executable = hash_dir_walk(&tree);
+
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_ne!(
+            non_executable,
+            hash_dir_walk(&tree),
+            "install drift must see a mode-only change"
+        );
     }
 
     #[test]

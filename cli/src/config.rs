@@ -735,8 +735,28 @@ pub(crate) fn hash_dir_bytes_excluding(dir: &Path, exclude_files: &[&str]) -> u6
         let rel = entry.path().strip_prefix(dir).unwrap_or(entry.path());
         state = fnv1a_chain(state, rel.to_string_lossy().as_bytes());
         state = fnv1a_chain(state, &content);
+        state = fnv1a_chain(state, &[executable_hash_bit(entry.path())]);
     }
     state
+}
+
+/// Whether a file is executable, folded into directory hashes so a mode-only
+/// change is drift. Only the execute bits are considered — read/write bits move
+/// with the umask and would make hashes machine-dependent. Both copy paths
+/// preserve modes, so this stays symmetric between a source and its install.
+pub(crate) fn executable_hash_bit(path: &Path) -> u8 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path)
+            .map(|meta| u8::from(meta.permissions().mode() & 0o111 != 0))
+            .unwrap_or(0)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        0
+    }
 }
 
 fn should_skip_hash_dir(name: &str) -> bool {
@@ -3603,6 +3623,29 @@ echo foreign
                 .contains('\0'),
             "the separator must be unspellable as a path"
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn hash_dir_bytes_tracks_the_executable_bit() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = sandbox("hash_dir_exec_bit");
+        let tree = dir.join("pkg");
+        fs::create_dir_all(&tree).unwrap();
+        let script = tree.join("tool.sh");
+        fs::write(&script, b"#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o644)).unwrap();
+        let non_executable = hash_dir_bytes(&tree);
+
+        // Contents and path are untouched; only the mode changes.
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_ne!(
+            non_executable,
+            hash_dir_bytes(&tree),
+            "an upstream chmod +x must read as drift"
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

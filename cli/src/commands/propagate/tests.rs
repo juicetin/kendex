@@ -58,6 +58,17 @@ fn hook_script_contents(name: &str) -> String {
     )
 }
 
+/// Write an installed native hook script the way the installer does: exact
+/// source bytes, mode 0755.
+fn write_installed_hook_script(path: &Path, name: &str) {
+    write_file(path, &hook_script_contents(name));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+}
+
 fn write_hook_source(root: &Path, name: &str) {
     write_file(
         &root.join("hooks").join(format!("{name}.sh")),
@@ -1871,10 +1882,7 @@ fn stage_mode_fails_before_staging_when_claude_hook_settings_missing() {
         let mut lock = LockFile::default();
         lock.add(entry);
         lock.save(&config::lock_file_path(false)).unwrap();
-        write_file(
-            &project.join(".claude/hooks/guard.sh"),
-            &hook_script_contents("guard"),
-        );
+        write_installed_hook_script(&project.join(".claude/hooks/guard.sh"), "guard");
         write_file(
             &project.join(".claude/settings.json"),
             r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/guard.sh\""}]}]}}"#,
@@ -1908,10 +1916,7 @@ fn stage_mode_fails_before_staging_when_codex_hooks_registry_missing() {
         let mut lock = LockFile::default();
         lock.add(entry);
         lock.save(&config::lock_file_path(false)).unwrap();
-        write_file(
-            &project.join(".codex/hooks/guard.sh"),
-            &hook_script_contents("guard"),
-        );
+        write_installed_hook_script(&project.join(".codex/hooks/guard.sh"), "guard");
         write_file(
             &project.join(".codex/hooks.json"),
             r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"bash \"$(git rev-parse --show-toplevel)/.codex/hooks/guard.sh\""}]}]}}"#,
@@ -2109,10 +2114,7 @@ fn stage_mode_fails_before_staging_when_codex_hooks_feature_is_off() {
         let mut lock = LockFile::default();
         lock.add(entry);
         lock.save(&config::lock_file_path(false)).unwrap();
-        write_file(
-            &project.join(".codex/hooks/guard.sh"),
-            &hook_script_contents("guard"),
-        );
+        write_installed_hook_script(&project.join(".codex/hooks/guard.sh"), "guard");
         write_file(
             &project.join(".codex/hooks.json"),
             r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"bash \"$(git rev-parse --show-toplevel)/.codex/hooks/guard.sh\""}]}]}}"#,
@@ -2361,10 +2363,7 @@ fn stage_mode_rejects_a_codex_hooks_feature_written_as_a_string() {
         let mut lock = LockFile::default();
         lock.add(entry);
         lock.save(&config::lock_file_path(false)).unwrap();
-        write_file(
-            &project.join(".codex/hooks/guard.sh"),
-            &hook_script_contents("guard"),
-        );
+        write_installed_hook_script(&project.join(".codex/hooks/guard.sh"), "guard");
         write_file(
             &project.join(".codex/hooks.json"),
             r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"bash \"$(git rev-parse --show-toplevel)/.codex/hooks/guard.sh\""}]}]}}"#,
@@ -2408,10 +2407,7 @@ fn stage_mode_rejects_a_hook_path_that_is_not_a_live_command_handler() {
         let mut lock = LockFile::default();
         lock.add(entry);
         lock.save(&config::lock_file_path(false)).unwrap();
-        write_file(
-            &project.join(".claude/hooks/guard.sh"),
-            &hook_script_contents("guard"),
-        );
+        write_installed_hook_script(&project.join(".claude/hooks/guard.sh"), "guard");
         // The script path appears only in an unrelated metadata string, so the
         // harness will never invoke it.
         write_file(
@@ -2507,10 +2503,7 @@ fn stage_mode_refuses_when_a_shared_config_file_already_carried_consumer_edits()
         let mut lock = LockFile::default();
         lock.add(entry);
         lock.save(&config::lock_file_path(false)).unwrap();
-        write_file(
-            &project.join(".claude/hooks/guard.sh"),
-            &hook_script_contents("guard"),
-        );
+        write_installed_hook_script(&project.join(".claude/hooks/guard.sh"), "guard");
         write_file(
             &project.join(".claude/settings.json"),
             r#"{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/guard.sh\""}]}]}}"#,
@@ -2909,10 +2902,7 @@ fn no_drift_stage_path_refuses_pre_existing_shared_config_edits() {
         let mut lock = LockFile::default();
         lock.add(entry);
         lock.save(&config::lock_file_path(false)).unwrap();
-        write_file(
-            &project.join(".claude/hooks/guard.sh"),
-            &hook_script_contents("guard"),
-        );
+        write_installed_hook_script(&project.join(".claude/hooks/guard.sh"), "guard");
         let command = crate::installer::claude_project_hook_command("guard");
         write_file(
             &project.join(".claude/settings.json"),
@@ -3005,10 +2995,7 @@ fn stage_mode_rejects_a_locally_edited_managed_hook_script() {
         let mut lock = LockFile::default();
         lock.add(entry);
         lock.save(&config::lock_file_path(false)).unwrap();
-        write_file(
-            &project.join(".claude/hooks/guard.sh"),
-            &hook_script_contents("guard"),
-        );
+        write_installed_hook_script(&project.join(".claude/hooks/guard.sh"), "guard");
         let command = crate::installer::claude_project_hook_command("guard");
         write_file(
             &project.join(".claude/settings.json"),
@@ -3041,6 +3028,26 @@ fn stage_mode_rejects_a_locally_edited_managed_hook_script() {
             .to_string();
         assert!(err.contains("auxiliary verification failed"), "{err}");
         assert!(err.contains("does not match the locked script"), "{err}");
+        assert!(
+            git_output(&project, &["diff", "--cached", "--name-only"]).is_empty(),
+            "nothing may be staged"
+        );
+
+        // Identical text with the execute bit cleared is equally broken.
+        write_installed_hook_script(&project.join(".claude/hooks/guard.sh"), "guard");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                project.join(".claude/hooks/guard.sh"),
+                std::fs::Permissions::from_mode(0o644),
+            )
+            .unwrap();
+        }
+        let err = run(ScopeFilter::Project, false, false, true, true)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("is not executable"), "{err}");
         assert!(
             git_output(&project, &["diff", "--cached", "--name-only"]).is_empty(),
             "nothing may be staged"
