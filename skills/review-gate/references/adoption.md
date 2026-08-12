@@ -31,9 +31,24 @@ trusting an adoption.
 2. **Copy `.agents/skills/review-gate/templates/review-gate-writer.yml`**
    into `.github/workflows/`.
    Repo-owned after the copy — workflow YAML is not an ongoing sync target.
-   The one workflow is the ONLY writer of the gate status: it runs the
-   default-branch engine on every leg, so no PR can influence its own gate
+   The one workflow is the ONLY writer of the gate status: every leg that
+   runs the engine runs the DEFAULT-branch one (PR-attached legs run no
+   engine at all — they relay), so no PR can influence its own gate
    evaluation and no trust-posture decision exists.
+   The ADAPT markers in the file are the three `|| 'main'` default-branch
+   fallbacks (both checkouts and the relay's dispatch ref) — set them to the
+   repo's default branch. Nothing else needs editing: the vendored script
+   paths are already the consumer's, and the relay derives its own workflow
+   file name from `github.workflow_ref`, so renaming the copy needs no
+   further change.
+   While editing those fallbacks, note that the relay's whole `env:` block is
+   load-bearing, not just the three you are changing: every binding in it is
+   read by the step, and a dropped line does not red the job — it degrades it.
+   `GH_REPO` or `DISPATCH_REF` missing makes the relay refuse to dispatch at
+   all (fail-closed, with a warning naming the binding) and every event falls
+   to the cron floor; `WORKFLOW_REF` missing does the same; `EVENT_NAME` or
+   `CHECK_NAME` missing turns off one of the loop breakers. Change the
+   fallback values, keep the lines.
 3. **Add the ungated selftest job** to the repo's CI (below).
 4. **Set the repo's `REVIEW_GATE_*` keys** in `vstack.settings.toml`
    (decision axes below; full key table in [settings.md](settings.md)).
@@ -100,6 +115,125 @@ cases from the repo's actual trust values.
   queue shas unconditionally (queue entries are post-approval by
   construction). Verify the queue's required checks include both the gate
   context and the test aggregate.
+- **Required checks must NOT include the writer's own job names.** The
+  gate's enforcement point is the commit STATUS context, never the workflow
+  that posts it. The writer's jobs skip by design on the legs they do not
+  own (a queue entry runs only `merge-group`; a PR push runs only the
+  relay), and a repo that required a writer job name would block on a
+  context that leg never creates.
+
+## Updating an already-adopted copy (relay/converge split, VST-210)
+
+Consumer copies are repo-owned, so `vstack refresh` will NOT deliver this —
+each repo takes it as its own PR. What changed in the template:
+
+- A new `request-converge` job (the relay) now runs every PR-attached leg;
+  the `write` job's `if:` narrowed to `workflow_dispatch`/`schedule`.
+- **Permissions delta**: the relay holds `actions: write` and nothing else
+  — because job-level `permissions` replace the workflow default rather than
+  extend it, that is its complete scope: no `contents`, no `statuses`, no
+  `issues`. Know what that scope actually grants, because it is coarser than
+  its purpose: `actions: write` is the finest grain GitHub offers here, and it
+  authorizes dispatching **any** workflow in the repo, plus cancelling and
+  re-running runs and deleting runs, logs and artifacts. There is no
+  one-workflow scoping. The containment argument is the job, not the token:
+  the relay checks nothing out and executes no PR-controlled code, so nothing
+  a PR author writes can reach that token. Keep it that way when you edit the
+  copy — a checkout added to this job is what turns the delta into an
+  exposure. The `write` job still holds no `actions` scope, so the writer
+  still never re-runs CI.
+- **The relay carries no VST-36 escalation, by decision.** The rolling
+  incident issue stays on the `write` job. Because the relay also does not
+  redden the PR (below), a sustained dispatch outage is detected through
+  **gate staleness** rather than through any individual relay run: every
+  event falls back to the cron floor, gates sit unconverged past that
+  floor's period, and `pr-watch.sh --heal` is the reducer that already
+  watches for exactly that across every open PR (`gate-stale` → one writer
+  dispatch per invocation). Each relay run's own log carries a
+  `::warning::`. This is a deliberate trade — not reddening PRs and not
+  widening the relay's permissions, at the cost of no per-run alarm — so if
+  you need a louder signal, add it to your staleness monitoring, not to the
+  relay's scope.
+- **`workflow_dispatch` must stay in `on:`** — it is the dispatch target,
+  not just the manual kick. Dropping it strips every event-fast path down
+  to the cron floor. (`workflow_dispatch` is one of the two events
+  `GITHUB_TOKEN` is documented to trigger, which is what makes the relay
+  work where the recursion suppression stops other self-triggering.)
+- A repo with the opt-in `check_run` trigger moves its check-name guard
+  from the `write` job's `if:` to the relay's. The relay's `if:` is a
+  *negative* list, so with `check_run` on, this workflow's own job
+  completions become relayable events — the step refuses to dispatch on a
+  `check_run` naming one of its own three jobs, and your check-name guard on
+  the `if:` is what keeps every other repo check from billing a skipped run.
+  That refusal is a literal list of the three job `name:` values, so if you
+  rename a job in your copy, rename it in the list too — the template's suite
+  pins the two together, but only within the copy it reads. A rename that
+  lands alone leaves a guard that matches nothing, and the relay holds no
+  concurrency group to throttle the self-amplification that follows.
+- **Check the ruleset first** if it ever named a writer JOB (rather than the
+  gate status context): the job appearing on PR heads is now the relay, so a
+  required `Evaluate and write the review gate` would block every PR. Per
+  the wiring rule above, require the status context only.
+
+- **The relay never exits non-zero.** Treat this as an invariant when you
+  edit the copy: the job runs on PR-attached legs, so a red — or a hang long
+  enough to be cancelled — is a failed check on the PR head and the defect
+  this change removes. Every fault warns and exits 0, and every wait is
+  bounded (`timeout` per dispatch attempt, a floored and capped backoff, and a
+  `timeout-minutes` proven to outlast the worst case). Two
+  dispatch attempts (the retry honors `retry-after`/`x-ratelimit-reset`,
+  floored at 60s and capped at 120s — a 5-second retry lands inside every
+  secondary-rate-limit window and could never succeed against the one
+  failure class it exists for, and the cap keeps the wait inside the job's
+  `timeout-minutes`. A window the server names beyond that cap is not waited
+  out at all: the event defers to the cron floor rather than pay for a retry
+  guaranteed to land inside the window. A plain transient retries in 5s — the
+  minute is for rate limits, not for blips. A permanent answer is not retried
+  at all: 400, 404 for a renamed workflow file, 405, 422 for a bad ref, 401
+  for a revoked token, and **403 with no rate-limit evidence**, which is the
+  `Resource not accessible by integration` shape a trimmed permissions block
+  or an org token policy produces — the likeliest permanent failure this job
+  has, since it is the only one needing `actions: write`. Note that
+  `x-ratelimit-reset` rides on every GitHub response, so it counts as a wait
+  instruction only when `x-ratelimit-remaining` is 0);
+  on double failure it warns and exits 0 instead of exiting non-zero. The
+  reasoning: it
+  holds no `statuses` scope, so a skipped dispatch cannot make the gate look
+  converged — only leave it stale, which the cron floor already owns —
+  whereas a red relay check pins the PR at `UNSTABLE`, the defect being
+  fixed. Do not "restore fail-loud" here without also moving the visibility
+  somewhere that is not a PR's mergeability.
+
+Why bother, per repo: without it, a burst of PR events leaves an evicted
+writer run as a `CANCELLED` check on the PR, and `mergeStateStatus` reads
+`UNSTABLE` until someone manually reruns it — a false not-ready signal for
+every human and tool that reads it.
+
+What it costs, per repo: one extra Actions run per PR-attached event —
+seconds and a billed minimum on the success path, and up to about 4.2
+minutes of runner hold in the worst modeled failure (a 60s-bounded attempt,
+a wait capped at 120s plus up to 14s of jitter, a second 60s-bounded
+attempt), which still fits inside the job's 5-minute budget. The relay is unconditional and deliberately group-less,
+so unlike the writer group it coalesces nothing — that is one run per event,
+including every `status` transition every CI provider posts on every open
+head — and the event-fast path now waits on two runner allocations instead
+of one. Repos on a constrained or self-hosted runner pool should size that
+before adopting. The residual is honest: this removes *eviction-driven*
+cancelled checks, not every cancelled check — a relay hung to its
+`timeout-minutes` still leaves one.
+
+Verify after adopting — and note that the first check alone passes even when
+the relay is deferring every event, so run both:
+
+1. **Something was actually dispatched.** After a push to an open PR,
+   `gh run list --workflow "Review gate writer" --event workflow_dispatch --limit 5`
+   must show a run created just after it. This is the only check that
+   distinguishes a working relay from one that defers everything — the
+   failure mode a missing `actions: write` produces. If nothing appears, the
+   relay's own run log carries a `::warning::` naming the reason.
+2. **No cancelled check pins the PR.** Push twice in quick succession, then
+   confirm `gh pr checks` shows no cancelled writer entry and
+   `gh pr view --json mergeStateStatus` is not `UNSTABLE` on that account.
 
 ## Per-repo settings — decision axes
 

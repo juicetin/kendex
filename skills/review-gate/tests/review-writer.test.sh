@@ -51,8 +51,11 @@
 #   w30. zero open PRs / ghost author        -> clean pass
 #   wp1-wp3. pagination merges               -> page-two PRs enumerate; a
 #                                               page-two guard entry defers
-# Template pins (tpl:*): grep-pins on review-gate-writer.yml for the
-# workflow-level expressions offline runs cannot execute.
+# The WORKFLOW YAML is asserted in its own suite,
+# review-writer-template.test.sh — grep-pins on the expressions offline runs
+# cannot execute, plus the relay step extracted and EXECUTED against a gh
+# stub, both run against the shipped template and the adopted copy. This file
+# is the review-writer.sh engine suite: one instrument class, one subject.
 set -euo pipefail
 
 TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -534,74 +537,6 @@ rc=0; out=$(run_writer STUB_VERDICT_LINE="$AWAITING" STUB_GATE_HISTORY='[]' \
   STUB_PREDICATE_ENV_LOG="$ENV_LOG") || rc=$?
 assert_eq "$rc" "0" "w30b: absent override key exits 0"
 assert_contains "$(cat "$ENV_LOG")" "OUTAGE=<unset>" "w30b: absent key leaves the predicate's own resolution untouched"
-
-echo "=== workflow template pins (review-gate-writer.yml) ==="
-
-# Grep-pins on the shipped template (precedent: the retired
-# workflow-eviction-routing suite pinned approval-rerun.yml the same way). Runtime behavior of workflow-level expressions
-# is offline-untestable — the job-level if: evaluates on GitHub — so F4's
-# billing behavior is asserted in Layer 2 (the sandbox observes push/
-# merge-group completions as SKIPPED writer runs); these pins keep the
-# expressions from being silently dropped or reworded.
-TEMPLATE="$SKILL_ROOT/templates/review-gate-writer.yml"
-pin() { # needle, name
-  if grep -qF -- "$1" "$TEMPLATE"; then
-    PASS=$((PASS + 1)); printf '  ok    %s\n' "$2"
-  else
-    FAIL=$((FAIL + 1)); printf '  FAIL  %s\n        missing from template: %s\n' "$2" "$1"
-  fi
-}
-# Every status STATE converges (no state filter of ANY spelling): under
-# newest-row evidence semantics a success→pending/failure transition is a
-# withdrawal and must close the gate event-fast. Two teeth: the write
-# job's if: is pinned as the complete exact line (an equivalent filter
-# cannot hide in a rewrite), and any `github.event.state` reference at
-# all fails (catches quote variants and inverted filters alike). Grep's
-# exit code is branched explicitly — 1 is the passing absence; anything
-# else (2 = read error) fails rather than laundering into a pass.
-# Scoped to the write job's block (it is the template's last job): a
-# template-wide search could be satisfied by a condition on some other job.
-write_block="$(sed -n '/^  write:/,$p' "$TEMPLATE")"
-if grep -qF -- "    if: github.event_name != 'merge_group'" <<<"$write_block"; then
-  PASS=$((PASS + 1)); printf '  ok    %s\n' "tpl: the write job's if: is exactly the merge_group exclusion"
-else
-  FAIL=$((FAIL + 1)); printf '  FAIL  %s\n' "tpl: the write job's if: is exactly the merge_group exclusion"
-fi
-rc=0; grep -qF -- "github.event.state" "$TEMPLATE" || rc=$?
-case "$rc" in
-  1) PASS=$((PASS + 1)); printf '  ok    %s\n' "tpl: no status state filter of any spelling" ;;
-  0) FAIL=$((FAIL + 1)); printf '  FAIL  %s\n' "tpl: a status state filter returned — withdrawals would wait for the cron floor" ;;
-  *) FAIL=$((FAIL + 1)); printf '  FAIL  %s\n' "tpl: the template could not be read (grep error)" ;;
-esac
-pin "cancel-in-progress: false" "tpl: pending writer runs are never cancelled mid-write"
-pin "group: review-gate-writer" "tpl: single writer concurrency group"
-pin "github.event.pull_request.head.repo.full_name != github.repository" "tpl: fork pull_request_review read-only flag"
-pin "if: failure() || cancelled()" "tpl: VST-36 escalation covers timeout-cancelled jobs"
-pin "persist-credentials: false" "tpl: checkouts drop credentials"
-if grep -qF -- "actions: write" "$TEMPLATE"; then
-  FAIL=$((FAIL + 1)); printf '  FAIL  %s\n' "tpl: template must NOT request actions:write (the writer never re-runs CI)"
-else
-  PASS=$((PASS + 1)); printf '  ok    %s\n' "tpl: no actions:write — the writer never re-runs CI"
-fi
-# The || 'main' arm keeps an empty default_branch expression from letting
-# actions/checkout fall back to the event's own default ref — the
-# merge-group job would get the queue's synthetic ref, the write job's
-# pull_request_target leg the PR's BASE branch (not necessarily the
-# default branch), both under a write-capable token. BOTH checkouts are
-# counted: a one-match pin would stay green if either job regressed to
-# the bare expression.
-fallback_ref_count="$(grep -cF -- "ref: \${{ github.event.repository.default_branch || 'main' }}" "$TEMPLATE" || true)"
-if [[ "$fallback_ref_count" == "2" ]]; then
-  PASS=$((PASS + 1)); printf '  ok    %s\n' "tpl: BOTH checkouts pin the default branch with the empty-expression fallback"
-else
-  FAIL=$((FAIL + 1)); printf '  FAIL  %s\n        expected exactly 2 fallback refs, found %s\n' "tpl: BOTH checkouts pin the default branch with the empty-expression fallback" "$fallback_ref_count"
-fi
-if grep -qF -- 'ref: ${{ github.event.repository.default_branch }}' "$TEMPLATE"; then
-  FAIL=$((FAIL + 1)); printf '  FAIL  %s\n' "tpl: a checkout regressed to the bare default_branch expression (empty resolution would reach actions/checkout's own fallback)"
-else
-  PASS=$((PASS + 1)); printf '  ok    %s\n' "tpl: no checkout uses the bare default_branch expression"
-fi
-
 echo
 printf 'pass: %d   fail: %d\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]

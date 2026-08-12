@@ -120,6 +120,60 @@ nothing else.
 - **Converge-all on every leg.** Every invocation converges EVERY open PR,
   so a run evicted from the concurrency group strands nothing (8 evictions
   observed in one sandbox replay, zero stranded).
+- **Relay / converge split.** PR-attached legs (`pull_request_target`,
+  `pull_request_review`, `status`, an opted-in `check_run`) do NOT run the
+  engine: they run a group-less relay job that dispatches a converge pass
+  and exits — in seconds on the success path, up to about 4.2 minutes when
+  it has to back off (see Cost). Only `workflow_dispatch` and `schedule` hold the
+  single-writer group. Convergence is unchanged — what changes is WHERE an
+  eviction's `CANCELLED` check lands. Attached to a PR head it pinned that
+  PR at `mergeStateStatus UNSTABLE` until a manual rerun; on the
+  default-branch runs the relay dispatches into, nothing gates on it.
+  **Cost**: one *non-evictable* run per PR-attached event — seconds and a
+  billed minimum on the success path, up to about 4.2 minutes of runner hold
+  in the worst modeled failure (a 60s-bounded attempt, a wait capped at 120s
+  plus up to 14s of jitter, a second 60s-bounded attempt), inside the job's
+  5-minute budget — the relay coalesces nothing, so unlike the writer group
+  there is one per event, including every `status` transition from every CI
+  provider. Each run also spends one content-creating API request against the
+  repo's shared secondary-limit budget; exhausting that budget degrades events
+  to the cron floor rather than breaking convergence. Event-fast latency grows
+  by a whole extra run lifecycle (two queue + runner-allocation waits instead
+  of one): typically seconds, well inside the cron floor's period, and when
+  runner allocation exceeds that period the scheduled pass converges the head
+  first and the dispatched run is a redundant no-op — an overrun costs a run,
+  not convergence. Size that before adopting on a capacity-limited runner
+  pool.
+  **Residual**: this removes *eviction-driven* cancelled checks, not every
+  cancelled check — a relay that hangs to its `timeout-minutes` would still
+  be a cancelled check on the PR head, which is why every wait in the step is
+  bounded. Its dispatch failures exit green and warn (below) rather than
+  redden.
+- **The relay never exits non-zero — a pinned invariant, not a per-branch
+  choice.** It holds no
+  `statuses` scope, so a failed dispatch cannot make the gate look
+  converged — only leave it stale, which the cron floor and `pr-watch
+  --heal` already own. Reddening would re-create the exact `UNSTABLE` pin
+  the split removes. Two dispatch attempts (the retry honors
+  a three-way rule. A **rate-limit** answer waits the window the server
+  named — `retry-after`, or `x-ratelimit-reset` *only when
+  `x-ratelimit-remaining` is 0* — floored at 60s; a secondary limit that
+  sends no header is recognized from its body or from an HTTP 429. Every wait
+  then carries bounded jitter, because the relay is group-less: without it, N
+  runs of one event burst read the same headers and re-POST in lockstep. A
+  plain **transient** waits
+  5s. A **permanent** answer is not retried at all: 400, 404 for a renamed
+  workflow file, 405, 422 for a bad ref, 401 for a revoked token, and 403
+  when it carries no rate-limit evidence — the `Resource not accessible by
+  integration` shape, which is the likeliest failure a hand-edited
+  permissions block produces. A named window beyond the 120s budget is not
+  waited out either; both defer to the cron floor. `x-ratelimit-reset` is on
+  *every* GitHub response, so treating it as a wait instruction on its own
+  silently disables the whole retry); on double failure it
+  warns and exits 0. It files no
+  rolling incident of its own — a sustained dispatch outage shows up as
+  **gate staleness**, which `pr-watch --heal` already reduces across
+  every open PR, rather than as N red PRs or a widened relay scope.
 - **Write ordering.** Before any `success` post it re-reads the status and
   defers when any gate entry was created at/after this run's evaluation
   instant — a newer run's state AND description (which carries the audit
@@ -129,8 +183,8 @@ nothing else.
   it no-ops, so idle cron ticks append nothing.
 - **Forks need no special case** — every leg holds a write-capable
   default-branch token. The one exception is `pull_request_review` on a fork
-  PR, whose token GitHub downgrades to read-only: that run exits green as a
-  no-op and the cron floor converges it.
+  PR, whose token GitHub downgrades to read-only: it cannot dispatch, so
+  that run exits green as a no-op and the cron floor converges it.
 - **`pull_request_target` safety**: the job never executes PR-controlled
   code. Every checkout pins the default branch with credentials dropped.
 

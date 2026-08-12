@@ -55,6 +55,91 @@
   updated pre-commit hook arrives with refresh and its preflight lane
   self-gates on the skill being installed. CI use of preflight, like
   review-gate, requires the installed skill committed to the repo.
+- **review-gate: the writer relays PR-attached legs instead of running the
+  evictable job in a PR's check rollup** (VST-210 / #1210). The single-writer
+  concurrency group is global, so a burst evicts pending runs — harmless to
+  convergence (every run converges every open PR), but an evicted run is
+  still a *check run*, and one attached to a PR head left a `CANCELLED` entry
+  that pinned the PR at `mergeStateStatus UNSTABLE` until someone reran it by
+  hand. `templates/review-gate-writer.yml` now splits the two roles: PR-attached
+  legs (`pull_request_target`, `pull_request_review`, `status`, an opted-in
+  `check_run`) run a new group-less `request-converge` relay that dispatches a
+  converge pass and exits in seconds, and only `workflow_dispatch` /
+  `schedule` — whose runs attach to the default-branch head — hold the writer
+  group. Single-writer serialization, converge-all, and the write-ordering
+  guard are unchanged; eviction marks simply land where nothing gates on them.
+  The relay derives its own workflow file from `github.workflow_ref`, so a
+  renamed consumer copy needs no new ADAPT. Its complete scope is
+  `actions: write` (dispatch only — job-level permissions replace the
+  workflow default rather than extend it) — the writer itself still holds no
+  `actions` scope and never re-runs CI. On a
+  fork `pull_request_review` the relay cannot dispatch (read-only token) and
+  stays a green no-op, so fork review evidence converges on the cron floor
+  exactly as before.
+  The relay never reddens a PR to report its own trouble: it holds no
+  `statuses` scope, so a failed dispatch cannot make the gate look converged
+  — only leave it stale, which the cron floor already owns — while a red
+  check would pin the PR at `UNSTABLE`, the very defect being fixed. It
+  retries once after a wait floored at 60s and capped at 120s, plus up to 14s
+  of jitter — nothing is clamped DOWN any more: a window beyond the cap is
+  never slept and never retried, so the set of waits it can sleep is 5s or
+  60-120s (a 5-second retry lands inside every secondary-rate-limit window; a
+  plain transient still retries in 5s; a permanent answer — 400, 401, 404,
+  405, 422, and 403 with no rate-limit evidence — is not retried at all, and
+  neither is a named window beyond the cap, since both would pay for a retry
+  that cannot succeed), then warns and exits 0. Rate-limit evidence is
+  `retry-after`, an exhausted window, a secondary-limit body, or an HTTP 429,
+  all classified at one site; the jitter exists because the relay is
+  group-less, so without it N runs of one event burst compute the same wait
+  from the same headers and re-POST in lockstep. `x-ratelimit-reset` counts
+  as a wait instruction only when `x-ratelimit-remaining` is 0: it rides on
+  every GitHub response, so reading it unconditionally silently disabled the
+  entire retry. Its `env:` block is load-bearing in full — `GH_REPO` or
+  `DISPATCH_REF` unbound makes it refuse to dispatch and name the binding,
+  rather than expand to nothing inside a command substitution and report an
+  API answer that never arrived — and with the `check_run` opt-in enabled it
+  refuses events naming its own jobs, which the negative `if:` would
+  otherwise relay back into itself. Every transient warning names its cause
+  (target, HTTP status, gh exit, or a per-attempt timeout). It carries no
+  escalation of its own: a
+  sustained dispatch outage surfaces as gate staleness, which
+  `pr-watch --heal` already reduces on across every open PR, rather than as
+  N red PRs or a widened relay scope.
+  **The relay never exits non-zero.** That is now the pinned invariant, not
+  a property of one branch: it runs on PR-attached legs, so any red — or any
+  hang long enough to be CANCELLED — is a failed check on the PR head and
+  the original defect all over again. Every fault warns and exits 0
+  (including an underivable `github.workflow_ref`, which is a *permanent*
+  condition that would otherwise have pinned every open PR forever), and
+  every wait is bounded: each dispatch attempt is wrapped in `timeout`, the
+  backoff is floored and capped, and the job's `timeout-minutes` is asserted
+  to outlast the worst case rather than merely stated to.
+  The test harness now runs the extracted step under the shells the runner
+  actually uses — `bash -e` (a `run:` block's default) and
+  `bash -eo pipefail` (an explicit `shell: bash`) — and asserts exit 0 on
+  every modeled path under both. Running it under plain `bash`, as it did
+  before, modeled neither and hid two live reds: the underivable-ref path,
+  and a no-match `grep` in the header helper that killed the step on the
+  ordinary retry path under pipefail.
+  A second, independent loop breaker lives inside the step: the
+  workflow self-dispatches, nothing throttles a group-less relay, and the
+  job `if:` is a line adoption docs invite consumers to hand-edit.
+  **Residual, stated rather than papered over**: this removes
+  *eviction-driven* cancelled checks, not every cancelled check — a relay
+  hung to its `timeout-minutes` still leaves one. **Cost**: one
+  billed-minimum, non-evictable run per PR-attached event, and one more
+  runner allocation on the event-fast path.
+  The workflow assertions now run against BOTH copies — the shipped template
+  and this repo's self-adoption `.github/workflows/` copy, which is
+  hand-maintained and previously had no guard at all. The relay's step script
+  is extracted from each file and EXECUTED against a `gh` stub, and the two
+  extracted steps are asserted byte-identical, so a template edit that is not
+  mirrored fails loudly instead of silently proving a file CI never runs.
+  **Consumer action required**: workflow YAML is repo-owned after adoption, so
+  `vstack refresh` does not deliver this — each repo takes it as its own PR
+  (migration steps, permissions delta, cost note, and the ruleset caveat:
+  `skills/review-gate/references/adoption.md` § Updating an already-adopted
+  copy).
 
 - **second-opinion: a multi-lane review no longer loses its verdict when
   scratch space disappears mid-run** (VST-221 / #1229). The union merge used
