@@ -94,16 +94,28 @@ fn render_vstack_notice(content: &str) -> String {
         return content.to_string();
     }
 
-    if let Some(pos) = find_frontmatter_end(content) {
-        format!(
+    match find_frontmatter_end(content) {
+        Some(pos) => format!(
             "{}\n{}\n\n{}",
             &content[..pos],
             notice,
             content[pos..].trim_start_matches('\n')
-        )
-    } else {
-        format!("{}\n\n{}", notice, content)
+        ),
+        None if opens_frontmatter(content) => join_markdown_blocks(content, notice, ""),
+        None => format!("{}\n\n{}", notice, content),
     }
+}
+
+/// Whether `content` opens a YAML frontmatter claim at byte 0.
+///
+/// [`find_frontmatter_end`] locates the end of a well-formed block; this
+/// separates the two ways it returns `None`. "No frontmatter at all" may be
+/// prefixed freely. "Frontmatter this parser could not close" may not: a
+/// consumer keying on frontmatter-at-byte-0 would read the prefixed file as
+/// having none and drop the fields it carries, so the rendered block is
+/// appended instead.
+fn opens_frontmatter(content: &str) -> bool {
+    content.starts_with("---")
 }
 
 /// Find the byte offset just after the closing `---` of YAML frontmatter.
@@ -154,10 +166,10 @@ fn render_skill_instructions(content: &str, instructions: Option<&str>) -> Strin
         "{SKILL_INSTRUCTIONS_START}\n{SKILL_INSTRUCTIONS_HEADER}\n\n{instructions}\n{SKILL_INSTRUCTIONS_END}"
     );
 
-    if let Some(pos) = find_frontmatter_end(&clean) {
-        join_markdown_blocks(&clean[..pos], &section, &clean[pos..])
-    } else {
-        join_markdown_blocks("", &section, &clean)
+    match find_frontmatter_end(&clean) {
+        Some(pos) => join_markdown_blocks(&clean[..pos], &section, &clean[pos..]),
+        None if opens_frontmatter(&clean) => join_markdown_blocks(&clean, &section, ""),
+        None => join_markdown_blocks("", &section, &clean),
     }
 }
 
@@ -420,6 +432,41 @@ fn parse_dependencies_from_body(body: &str) -> Vec<SkillDep> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A file that opens with `---` claims YAML frontmatter at byte 0.
+    /// Prepending anything there moves the claim off byte 0, and consumers
+    /// that key on frontmatter-at-byte-0 then read the skill as having none —
+    /// dropping `description` and misclassifying or skipping the skill.
+    #[test]
+    fn render_never_moves_a_frontmatter_claim_off_byte_zero() {
+        // Control: well-formed frontmatter keeps byte 0 and the notice lands
+        // after the closing delimiter, so this test constrains placement.
+        let closed = "---\nname: demo\ndescription: Demo\n---\n\n# Demo\n";
+        let rendered = render_installed_skill_md(closed, Some("Rule."));
+        assert!(rendered.starts_with("---\nname: demo"), "{rendered}");
+        let notice = rendered.find("Never edit this file directly").unwrap();
+        let close = rendered.find("\n---\n").unwrap();
+        assert!(
+            notice > close,
+            "control: the notice must follow the frontmatter\n{rendered}"
+        );
+
+        // Unterminated frontmatter is still a byte-0 claim.
+        let unterminated = "---\nname: demo\ndescription: Demo\n\n# Demo\n";
+        let rendered = render_installed_skill_md(unterminated, Some("Rule."));
+        assert!(
+            rendered.starts_with("---\nname: demo"),
+            "nothing may be prepended ahead of a byte-0 frontmatter claim: {rendered}"
+        );
+        assert!(
+            rendered.contains("Never edit this file directly"),
+            "the notice must still be carried: {rendered}"
+        );
+        assert!(
+            rendered.contains("Rule."),
+            "the instruction section must still be carried: {rendered}"
+        );
+    }
 
     #[test]
     fn parse_frontmatter_deps() {

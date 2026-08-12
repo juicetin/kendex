@@ -63,15 +63,24 @@ pub fn install_agent(
 ///
 /// Both install methods go through this, and so does the pre-stage check that
 /// holds an installed skill to its source, so the expected bytes cannot drift
-/// from the written ones.
-fn render_installed_skill_md(skill_md: &Path, instructions: Option<&str>) {
-    let Ok(content) = std::fs::read_to_string(skill_md) else {
-        return;
-    };
+/// from the written ones. Which is why a read or write that does not land is a
+/// failed install rather than a silent skip: the check would otherwise compare
+/// an install against bytes nothing ever wrote.
+///
+/// The rewrite routes through [`crate::path_safety::write_file_no_follow`] like
+/// the sibling `sync_project_owned_skill_instructions` does for this same file.
+/// `copy_dir` recreates a symlink the source ships, so `SKILL.md` in a fresh
+/// install can itself be a link, and a plain write would follow it out of the
+/// install directory.
+fn render_installed_skill_md(skill_md: &Path, instructions: Option<&str>) -> Result<()> {
+    let content = std::fs::read_to_string(skill_md)
+        .with_context(|| format!("reading installed {}", skill_md.display()))?;
     let rendered = crate::skill::render_installed_skill_md(&content, instructions);
-    if rendered != content {
-        let _ = std::fs::write(skill_md, rendered);
+    if rendered == content {
+        return Ok(());
     }
+    crate::path_safety::write_file_no_follow(skill_md, rendered)
+        .with_context(|| format!("rendering installed {}", skill_md.display()))
 }
 
 /// Install a skill directory to a specific harness.
@@ -380,7 +389,7 @@ pub fn install_skill(
                 remove_existing(&canonical)?;
                 copy_dir(&skill.source_dir, &canonical)?;
 
-                render_installed_skill_md(&canonical.join("SKILL.md"), instructions);
+                render_installed_skill_md(&canonical.join("SKILL.md"), instructions)?;
 
                 // Mark as done for this process
                 let _ = std::fs::write(&marker, std::process::id().to_string());
@@ -481,7 +490,7 @@ pub fn install_skill(
             remove_existing(&dest)?;
             copy_dir(&skill.source_dir, &dest)?;
 
-            render_installed_skill_md(&dest.join("SKILL.md"), instructions);
+            render_installed_skill_md(&dest.join("SKILL.md"), instructions)?;
 
             // Write marker so reconciliation can detect vstack-managed skills
             let _ = std::fs::write(
@@ -1452,6 +1461,129 @@ mod tests {
         assert!(
             installed.contains("Shared skill rule."),
             "installed SKILL.md: {installed}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `copy_dir` preserves a symlink the source ships, so a source catalog
+    /// whose `SKILL.md` is a link lands that link in the install. Rendering the
+    /// notice with a plain write then follows it and writes the skill's text
+    /// over whatever the link points at.
+    #[cfg(unix)]
+    #[test]
+    fn install_skill_refuses_to_render_through_a_symlinked_skill_md() {
+        let root = std::env::temp_dir().join(format!(
+            "vstack_skill_md_symlink_{}_{}",
+            std::process::id(),
+            crate::config::now_iso().replace([':', '-'], "")
+        ));
+        let project = root.join("project");
+        let outside = root.join("outside.txt");
+        let source = root.join("source").join("demo");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(&outside, "untouched\n").unwrap();
+        let body = "---\nname: demo\ndescription: Demo\n---\n\n# Demo\n";
+
+        let skill = Skill {
+            name: "demo".into(),
+            description: "Demo".into(),
+            license: None,
+            user_invocable: None,
+            dependencies: None,
+            body: String::new(),
+            source_dir: source.clone(),
+            resolved_deps: Vec::new(),
+        };
+
+        // Control: with a regular file the render really does rewrite the
+        // installed SKILL.md, so the symlink case below is constrained by the
+        // render happening and not by this path doing nothing.
+        std::fs::write(source.join("SKILL.md"), body).unwrap();
+        let control = crate::test_util::with_project_root(&project, || {
+            install_skill(
+                &skill,
+                Harness::ClaudeCode,
+                false,
+                InstallMethod::Copy,
+                None,
+            )
+            .unwrap()
+        });
+        let control_md = std::fs::read_to_string(control.path.join("SKILL.md")).unwrap();
+        assert!(
+            control_md.contains("Never edit this file directly"),
+            "control: the render must rewrite a regular SKILL.md: {control_md}"
+        );
+
+        std::fs::remove_file(source.join("SKILL.md")).unwrap();
+        std::os::unix::fs::symlink(&outside, source.join("SKILL.md")).unwrap();
+        let result = crate::test_util::with_project_root(&project, || {
+            install_skill(
+                &skill,
+                Harness::ClaudeCode,
+                false,
+                InstallMethod::Copy,
+                None,
+            )
+        });
+        assert_eq!(
+            std::fs::read_to_string(&outside).unwrap(),
+            "untouched\n",
+            "the render must not follow the link out of the install"
+        );
+        assert!(
+            result.is_err(),
+            "a symlinked SKILL.md must refuse, not be written through"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// An install that cannot read or rewrite the SKILL.md it just laid down
+    /// has not enforced the expected content; reporting success there lets the
+    /// pre-stage check compare against bytes nothing wrote.
+    #[test]
+    fn install_skill_fails_when_the_installed_skill_md_is_absent() {
+        let root = std::env::temp_dir().join(format!(
+            "vstack_skill_md_absent_{}_{}",
+            std::process::id(),
+            crate::config::now_iso().replace([':', '-'], "")
+        ));
+        let project = root.join("project");
+        let source = root.join("source").join("demo");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("other.md"), "no SKILL.md here\n").unwrap();
+
+        let skill = Skill {
+            name: "demo".into(),
+            description: "Demo".into(),
+            license: None,
+            user_invocable: None,
+            dependencies: None,
+            body: String::new(),
+            source_dir: source.clone(),
+            resolved_deps: Vec::new(),
+        };
+
+        let result = crate::test_util::with_project_root(&project, || {
+            install_skill(
+                &skill,
+                Harness::ClaudeCode,
+                false,
+                InstallMethod::Copy,
+                None,
+            )
+        });
+        let err = match result {
+            Ok(result) => panic!("install must fail; it reported {}", result.detail),
+            Err(err) => format!("{err:#}"),
+        };
+        assert!(
+            err.contains("SKILL.md"),
+            "the failure must name the file it could not render: {err}"
         );
 
         let _ = std::fs::remove_dir_all(&root);
