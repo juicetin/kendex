@@ -66,10 +66,13 @@ pub fn run(
         bail!("--stage is only supported with --scope project");
     }
 
-    let pre_refresh_stage_paths = if stage {
-        pre_refresh_project_stage_paths()?
+    let (pre_refresh_stage_paths, pre_refresh_dirty_shared) = if stage {
+        (
+            pre_refresh_project_stage_paths()?,
+            dirty_shared_config_paths()?,
+        )
     } else {
-        Vec::new()
+        (Vec::new(), Vec::new())
     };
     let mut checked_any = false;
     let mut drift_any = false;
@@ -138,11 +141,30 @@ pub fn run(
     crate::commands::verify::run_with_source_records(scope, &[], &source_records_by_scope)?;
 
     if stage {
+        refuse_pre_existing_shared_config_edits(&pre_refresh_dirty_shared)?;
         verify_project_auxiliary_installs_before_stage()?;
         stage_project_paths_after_refresh(&pre_refresh_stage_paths)?;
     }
 
     Ok(())
+}
+
+/// A shared config file that was already modified before the refresh carries
+/// consumer edits propagation did not make. Git stages whole files, so the
+/// only way not to absorb them is to refuse and let the consumer separate
+/// their work first.
+fn refuse_pre_existing_shared_config_edits(dirty: &[PathBuf]) -> Result<()> {
+    if dirty.is_empty() {
+        return Ok(());
+    }
+    let display: Vec<String> = dirty
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect();
+    bail!(
+        "refusing to stage: shared vstack-managed config file(s) already had uncommitted changes before propagation ran: {}. Commit or stash them first so the automated commit carries only propagated changes.",
+        display.join(", ")
+    )
 }
 
 fn verify_project_auxiliary_installs_before_stage() -> Result<()> {
@@ -1436,6 +1458,11 @@ fn committed_pi_package_stage_paths(
         return Ok(BTreeSet::new());
     };
     let project_root = config::project_root();
+    // Install clears and re-copies the package directory, so after a refresh a
+    // tracked file that is gone was removed by vstack — including supporting
+    // files no manifest entrypoint names. The ownership set is only needed
+    // without a refresh, so it is not computed (and cannot fail) otherwise.
+    let refreshed = refreshed == RefreshState::Refreshed;
     let mut dirs = BTreeSet::new();
     let mut owned_paths = BTreeSet::new();
     for entry in lock
@@ -1446,6 +1473,9 @@ fn committed_pi_package_stage_paths(
         let package_dir = crate::pi_extension::checked_pi_package_path(&entry.name, false)?;
         if let Ok(relative) = package_dir.strip_prefix(&project_root) {
             dirs.insert(relative.to_path_buf());
+        }
+        if refreshed {
+            continue;
         }
         if let Some(source_root) = config::resolve_source_path(&entry.source)
             && let Some(source_package_dir) =
@@ -1466,10 +1496,7 @@ fn committed_pi_package_stage_paths(
         )?);
     }
     let tracked = git_tracked_project_paths_under(git, &dirs)?;
-    if refreshed == RefreshState::Refreshed {
-        // Install clears and re-copies the package directory, so a tracked file
-        // that is gone after a refresh was removed by vstack — including
-        // supporting files no manifest entrypoint names.
+    if refreshed {
         return Ok(tracked);
     }
     Ok(tracked
@@ -1767,19 +1794,81 @@ fn owned_shared_status_paths(
         .collect()
 }
 
+/// Files vstack owns only part of: it maintains its own entries or
+/// marker-delimited blocks inside them and consumers own the rest. Git stages
+/// whole files, so these are the paths where an unrelated concurrent edit
+/// could otherwise ride along into an automated propagation commit.
+const SHARED_CONFIG_PATHS: &[&str] = &[
+    ".agents/skill-failure-reporting.md",
+    ".claude/settings.json",
+    ".codex/hooks.json",
+    ".codex/config.toml",
+    "opencode.json",
+    "opencode.jsonc",
+    ".pi/settings.json",
+    ".pi/.vstack-source.json",
+    ".pi/APPEND_SYSTEM.md",
+];
+
 fn is_shared_status_path(path: &Path) -> bool {
-    matches!(
-        path.to_str(),
-        Some(".agents/skill-failure-reporting.md")
-            | Some(".claude/settings.json")
-            | Some(".codex/hooks.json")
-            | Some(".codex/config.toml")
-            | Some("opencode.json")
-            | Some("opencode.jsonc")
-            | Some(".pi/settings.json")
-            | Some(".pi/.vstack-source.json")
-            | Some(".pi/APPEND_SYSTEM.md")
-    )
+    path.to_str()
+        .is_some_and(|path| SHARED_CONFIG_PATHS.contains(&path))
+}
+
+/// Shared config files that already carry uncommitted modifications. Read
+/// before the refresh runs, so anything listed is a consumer edit propagation
+/// did not produce — staging the file would sweep it into the automated PR.
+/// Untracked files are not included: a shared file that does not exist in HEAD
+/// yet has nothing of the consumer's to lose.
+fn dirty_shared_config_paths() -> Result<Vec<PathBuf>> {
+    let git = git_project()?;
+    let pathspecs: Vec<PathBuf> = SHARED_CONFIG_PATHS
+        .iter()
+        .map(|path| project_to_git_path(&git, Path::new(path)))
+        .collect();
+    let output = git_literal_command()
+        .arg("-C")
+        .arg(&git.root)
+        .args([
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=no",
+            "--",
+        ])
+        .args(&pathspecs)
+        .output()
+        .context("running git status for shared vstack-managed config files")?;
+    if !output.status.success() {
+        bail!("git status failed while inspecting shared vstack-managed config files");
+    }
+    let mut dirty = Vec::new();
+    let mut skip_next = false;
+    for record in output.stdout.split(|byte| *byte == 0) {
+        if record.is_empty() {
+            continue;
+        }
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if record.len() < 4 {
+            continue;
+        }
+        let status = &record[..2];
+        if status[0] == b'R' || status[0] == b'C' {
+            skip_next = true;
+        }
+        let top_level_path = path_from_git_status_bytes(&record[3..]);
+        let Some(path) = git_to_project_path(&git, &top_level_path) else {
+            continue;
+        };
+        if is_shared_status_path(&path) && !dirty.contains(&path) {
+            dirty.push(path);
+        }
+    }
+    dirty.sort();
+    Ok(dirty)
 }
 
 fn managed_status_pathspecs(

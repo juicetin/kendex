@@ -2381,3 +2381,100 @@ fn stage_mode_rejects_a_pi_bin_link_redirected_inside_its_own_package() {
         );
     });
 }
+
+#[test]
+fn stage_mode_refuses_when_a_shared_config_file_already_carried_consumer_edits() {
+    let project = tmpdir("stage-shared-config-dirty");
+    let source = tmpdir("stage-shared-config-dirty-source");
+    std::fs::create_dir_all(&project).unwrap();
+    init_git_project(&project);
+    write_hook_source(&source, "guard");
+
+    crate::test_util::with_project_root(&project, || {
+        let mut entry = hook_entry("guard", &source, &["claude-code"]);
+        entry.source_hash = config::compute_source_hash(&entry);
+        let mut lock = LockFile::default();
+        lock.add(entry);
+        lock.save(&config::lock_file_path(false)).unwrap();
+        write_file(
+            &project.join(".claude/hooks/guard.sh"),
+            "#!/bin/sh\nexit 0\n",
+        );
+        write_file(
+            &project.join(".claude/settings.json"),
+            r#"{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/guard.sh\""}]}]}}"#,
+        );
+        git(&project, &["add", "-A"]);
+        git(&project, &["commit", "-m", "baseline"]);
+
+        // An unrelated consumer edit sitting in the shared file before
+        // propagation runs. `git add -A` would sweep it into the automated PR.
+        write_file(
+            &project.join(".claude/settings.json"),
+            r#"{"consumerSecret":"do-not-publish","hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/guard.sh\""}]}]}}"#,
+        );
+
+        let dirty = dirty_shared_config_paths().unwrap();
+        assert_eq!(dirty, vec![PathBuf::from(".claude/settings.json")]);
+        let err = refuse_pre_existing_shared_config_edits(&dirty)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("refusing to stage"), "{err}");
+        assert!(err.contains(".claude/settings.json"), "{err}");
+
+        // A clean tree is not refused.
+        git(&project, &["checkout", "--", ".claude/settings.json"]);
+        assert!(dirty_shared_config_paths().unwrap().is_empty());
+    });
+}
+
+#[test]
+fn refreshed_staging_does_not_read_pi_sources_or_committed_manifests() {
+    let project = tmpdir("stage-pi-refreshed-no-source-scan");
+    let source = tmpdir("stage-pi-refreshed-no-source-scan-source");
+    std::fs::create_dir_all(&project).unwrap();
+    init_git_project(&project);
+    write_file(
+        &source.join("pi-extensions/demo-pkg/package.json"),
+        r#"{"name":"demo-pkg","pi":{"extensions":[]}}"#,
+    );
+
+    crate::test_util::with_project_root(&project, || {
+        let mut entry = pi_entry("demo-pkg", &source);
+        entry.source_hash = config::compute_source_hash(&entry);
+        let mut lock = LockFile::default();
+        lock.add(entry);
+        lock.save(&config::lock_file_path(false)).unwrap();
+        // The committed manifest declares an escaping path, so any attempt to
+        // derive ownership from it errors.
+        write_file(
+            &project.join(".pi/packages/demo-pkg/package.json"),
+            r#"{"name":"demo-pkg","pi":{"extensions":["../escape.js"]}}"#,
+        );
+        write_file(
+            &project.join(".pi/packages/demo-pkg/lib/helper.ts"),
+            "old\n",
+        );
+        git(&project, &["add", "-A"]);
+        git(&project, &["commit", "-m", "baseline"]);
+
+        write_file(
+            &project.join(".pi/packages/demo-pkg/package.json"),
+            r#"{"name":"demo-pkg","pi":{"extensions":[]}}"#,
+        );
+        std::fs::remove_file(project.join(".pi/packages/demo-pkg/lib/helper.ts")).unwrap();
+
+        // After a refresh the tracked set alone decides ownership, so the
+        // committed manifest is never parsed and staging succeeds.
+        stage_project_paths_after_refresh(&[]).unwrap();
+        let staged = git_output(&project, &["diff", "--cached", "--name-status"]);
+        assert!(
+            staged.contains("D\t.pi/packages/demo-pkg/lib/helper.ts"),
+            "{staged}"
+        );
+
+        // Without a refresh the same tree still consults it, and reports why.
+        let err = stage_project_paths(&[]).unwrap_err().to_string();
+        assert!(err.contains("unsafe committed Pi package path"), "{err}");
+    });
+}
