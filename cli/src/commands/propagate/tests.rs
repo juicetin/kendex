@@ -1179,6 +1179,57 @@ fn staging_project_owned_skills_keeps_unmanaged_descendants_unstaged() {
     });
 }
 
+/// `refresh` links `.agents/skills/<name>` at the tracked skill under
+/// `project-skills-dir`; git refuses any pathspec that walks through that link
+/// ("is beyond a symbolic link"), so staging must name the link target's real
+/// path instead of its through-link descendant.
+#[cfg(unix)]
+#[test]
+fn staging_relocated_project_skills_names_the_real_tracked_path() {
+    let project = tmpdir("stage-relocated-project-skill");
+    std::fs::create_dir_all(&project).unwrap();
+    init_git_project(&project);
+
+    crate::test_util::with_project_root(&project, || {
+        LockFile::default()
+            .save(&config::lock_file_path(false))
+            .unwrap();
+        write_file(
+            &project.join("vstack.toml"),
+            "project-skills-dir = \"project-skills\"\n",
+        );
+        write_file(
+            &project.join("project-skills/local/SKILL.md"),
+            "---\nname: local\ndescription: Local skill\n---\n\n# Local\n",
+        );
+        std::fs::create_dir_all(project.join(".agents/skills")).unwrap();
+        std::os::unix::fs::symlink(
+            "../../project-skills/local",
+            project.join(".agents/skills/local"),
+        )
+        .unwrap();
+
+        // Control: the link really does resolve, so a check that follows it
+        // sees a file and the assertions below are not vacuous.
+        assert!(
+            project.join(".agents/skills/local/SKILL.md").is_file(),
+            "the fixture link does not resolve, so nothing here exercises through-link staging"
+        );
+
+        stage_project_paths(&[]).unwrap();
+
+        let staged = git_output(&project, &["diff", "--cached", "--name-only"]);
+        assert!(
+            staged.contains("project-skills/local/SKILL.md\n"),
+            "{staged}"
+        );
+        assert!(
+            !staged.contains(".agents/skills/local/SKILL.md"),
+            "{staged}"
+        );
+    });
+}
+
 #[test]
 fn staging_is_scoped_to_nested_project_paths_from_git_top_level() {
     let repo = tmpdir("stage-nested-repo");

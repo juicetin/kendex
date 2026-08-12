@@ -1494,6 +1494,17 @@ fn push_project_skill_dirs_from(
         {
             continue;
         }
+        // A relocated skill reaches `.agents/skills/<name>` as a symlink to its
+        // home under `project-skills-dir`. Git refuses any pathspec that walks
+        // through a link ("is beyond a symbolic link"), and the tracked file is
+        // the target anyway — this same pass over the configured directory
+        // enumerates it at its real path.
+        let file_type = entry
+            .file_type()
+            .with_context(|| format!("reading {}", path.display()))?;
+        if file_type.is_symlink() {
+            continue;
+        }
         if path.join("SKILL.md").is_file() {
             push_abs_if_exists(paths, project_root, path.join("SKILL.md"), include_missing);
         }
