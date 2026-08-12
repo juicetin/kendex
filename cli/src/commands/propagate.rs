@@ -499,20 +499,7 @@ fn project_stage_paths(lock: &LockFile, include_missing: bool) -> Result<Vec<Pat
                 }
             }
             ItemKind::Skill => {
-                push_if_stageable(
-                    &mut paths,
-                    &project_root,
-                    &Path::new(".agents").join("skills").join(&entry.name),
-                    include_missing,
-                );
-                for harness in entry.harnesses.iter().filter_map(|id| Harness::from_id(id)) {
-                    push_abs_if_exists(
-                        &mut paths,
-                        &project_root,
-                        harness.skills_dir(false).join(&entry.name),
-                        include_missing,
-                    );
-                }
+                push_locked_skill_stage_paths(&mut paths, &project_root, entry, include_missing)?;
             }
             ItemKind::Hook => {
                 for harness in entry.harnesses.iter().filter_map(|id| Harness::from_id(id)) {
@@ -652,6 +639,107 @@ fn project_stage_paths(lock: &LockFile, include_missing: bool) -> Result<Vec<Pat
     }
 
     Ok(paths.into_iter().collect())
+}
+
+fn push_locked_skill_stage_paths(
+    paths: &mut BTreeSet<PathBuf>,
+    project_root: &Path,
+    entry: &config::LockEntry,
+    include_missing: bool,
+) -> Result<()> {
+    let Some(source_skill_dir) =
+        config::resolve_source_path(&entry.source).and_then(|source_root| {
+            crate::catalog::find_item_path(&source_root, entry.kind, &entry.name)
+        })
+    else {
+        return Ok(());
+    };
+    let canonical_dir = project_root
+        .join(".agents")
+        .join("skills")
+        .join(&entry.name);
+    for dest_dir in locked_skill_stage_dirs(project_root, entry) {
+        let dest_meta = std::fs::symlink_metadata(&dest_dir);
+        let dest_is_symlink = dest_meta
+            .as_ref()
+            .is_ok_and(|meta| meta.file_type().is_symlink());
+        let missing_symlink_dest = cfg!(unix)
+            && include_missing
+            && entry.method == config::InstallMethod::Symlink
+            && dest_dir != canonical_dir
+            && dest_meta.is_err();
+        if dest_is_symlink || missing_symlink_dest {
+            push_abs_if_exists(paths, project_root, dest_dir, include_missing);
+            continue;
+        }
+        push_installed_files_from_source(
+            paths,
+            project_root,
+            &dest_dir,
+            &source_skill_dir,
+            include_missing,
+        )?;
+    }
+    Ok(())
+}
+
+fn locked_skill_stage_dirs(project_root: &Path, entry: &config::LockEntry) -> BTreeSet<PathBuf> {
+    let mut dirs = BTreeSet::new();
+    dirs.insert(
+        project_root
+            .join(".agents")
+            .join("skills")
+            .join(&entry.name),
+    );
+    for harness in entry.harnesses.iter().filter_map(|id| Harness::from_id(id)) {
+        dirs.insert(harness.skills_dir(false).join(&entry.name));
+    }
+    dirs
+}
+
+fn push_installed_files_from_source(
+    paths: &mut BTreeSet<PathBuf>,
+    project_root: &Path,
+    install_dir: &Path,
+    source_dir: &Path,
+    include_missing: bool,
+) -> Result<()> {
+    if !source_dir.is_dir() {
+        return Ok(());
+    }
+    let mut stack = vec![source_dir.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in
+            std::fs::read_dir(&dir).with_context(|| format!("reading {}", dir.display()))?
+        {
+            let entry = entry.with_context(|| format!("reading {}", dir.display()))?;
+            let path = entry.path();
+            let file_name = entry.file_name();
+            if file_name == OsStr::new(".vstack-refreshed") {
+                continue;
+            }
+            let file_type = entry
+                .file_type()
+                .with_context(|| format!("reading file type for {}", path.display()))?;
+            if file_type.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if !file_type.is_file() && !file_type.is_symlink() {
+                continue;
+            }
+            let Ok(relative_to_skill) = path.strip_prefix(source_dir) else {
+                continue;
+            };
+            push_abs_if_exists(
+                paths,
+                project_root,
+                install_dir.join(relative_to_skill),
+                include_missing,
+            );
+        }
+    }
+    Ok(())
 }
 
 fn push_pi_package_stage_paths(
@@ -877,7 +965,10 @@ fn git_literal_command() -> Command {
 
 fn managed_paths_from_git_status(seed_paths: &BTreeSet<PathBuf>) -> Result<Vec<PathBuf>> {
     let git = git_project()?;
-    let committed_paths = committed_project_stage_paths(&git)?;
+    let committed_locked_skill_paths = committed_locked_skill_stage_paths(&git)?;
+    let mut committed_paths = committed_project_stage_paths(&git)?;
+    committed_paths.extend(committed_locked_skill_paths.iter().cloned());
+    let owned_exact_paths = owned_exact_status_paths(seed_paths);
     let committed_pi_bin_paths = committed_pi_bin_paths(&git)?;
     let owned_shared_paths = owned_shared_status_paths(seed_paths, &committed_paths);
     let owned_deleted_native_hooks = owned_deleted_native_hook_paths(seed_paths, &committed_paths);
@@ -888,6 +979,8 @@ fn managed_paths_from_git_status(seed_paths: &BTreeSet<PathBuf>) -> Result<Vec<P
         owned_pi_bin_paths(seed_paths, &committed_paths, &committed_pi_bin_paths);
     let status_pathspecs = managed_status_pathspecs(
         seed_paths,
+        &owned_exact_paths,
+        &committed_locked_skill_paths,
         &owned_shared_paths,
         &owned_cursor_safety_rules,
         &owned_opencode_hook_instructions,
@@ -940,6 +1033,8 @@ fn managed_paths_from_git_status(seed_paths: &BTreeSet<PathBuf>) -> Result<Vec<P
             && is_managed_status_path(
                 &path,
                 &pi_package_prefixes,
+                &owned_exact_paths,
+                &committed_locked_skill_paths,
                 &owned_shared_paths,
                 &owned_deleted_native_hooks,
                 &owned_cursor_safety_rules,
@@ -952,6 +1047,14 @@ fn managed_paths_from_git_status(seed_paths: &BTreeSet<PathBuf>) -> Result<Vec<P
         }
     }
     Ok(paths.into_iter().collect())
+}
+
+fn owned_exact_status_paths(seed_paths: &BTreeSet<PathBuf>) -> BTreeSet<PathBuf> {
+    seed_paths
+        .iter()
+        .filter(|path| is_safe_relative_path(path))
+        .cloned()
+        .collect()
 }
 
 fn owned_deleted_native_hook_paths(
@@ -1015,6 +1118,72 @@ fn committed_project_stage_paths(git: &GitProject) -> Result<BTreeSet<PathBuf>> 
         return Ok(BTreeSet::new());
     };
     Ok(project_stage_paths(&lock, true)?.into_iter().collect())
+}
+
+fn committed_locked_skill_stage_paths(git: &GitProject) -> Result<BTreeSet<PathBuf>> {
+    let Some(lock) = committed_project_lock(git)? else {
+        return Ok(BTreeSet::new());
+    };
+    committed_locked_skill_stage_paths_from_lock(git, &lock)
+}
+
+fn committed_locked_skill_stage_paths_from_lock(
+    git: &GitProject,
+    lock: &LockFile,
+) -> Result<BTreeSet<PathBuf>> {
+    let project_root = config::project_root();
+    let mut dirs = BTreeSet::new();
+    for entry in lock
+        .entries
+        .values()
+        .filter(|entry| entry.kind == ItemKind::Skill)
+    {
+        crate::path_safety::validate_item_name(&entry.name)
+            .with_context(|| format!("unsafe locked skill name {}", entry.name))?;
+        for dir in locked_skill_stage_dirs(&project_root, entry) {
+            if let Ok(relative) = dir.strip_prefix(&project_root) {
+                dirs.insert(relative.to_path_buf());
+            }
+        }
+    }
+    git_tracked_project_paths_under(git, &dirs)
+}
+
+fn git_tracked_project_paths_under(
+    git: &GitProject,
+    project_paths: &BTreeSet<PathBuf>,
+) -> Result<BTreeSet<PathBuf>> {
+    if project_paths.is_empty() {
+        return Ok(BTreeSet::new());
+    }
+    let top_level_pathspecs: Vec<PathBuf> = project_paths
+        .iter()
+        .map(|path| project_to_git_path(git, path))
+        .collect();
+    let output = git_literal_command()
+        .arg("-C")
+        .arg(&git.root)
+        .args(["ls-tree", "-r", "-z", "--name-only", "HEAD", "--"])
+        .args(&top_level_pathspecs)
+        .output()
+        .context("reading committed locked skill paths for managed ownership")?;
+    if !output.status.success() {
+        bail!("git ls-tree failed while reading committed locked skill paths");
+    }
+    let mut paths = BTreeSet::new();
+    for record in output.stdout.split(|byte| *byte == 0) {
+        if record.is_empty() {
+            continue;
+        }
+        let top_level_path = path_from_git_status_bytes(record);
+        let Some(path) = git_to_project_path(git, &top_level_path) else {
+            continue;
+        };
+        if is_safe_relative_path(&path) {
+            paths.insert(path);
+        }
+    }
+    Ok(paths)
 }
 
 fn committed_pi_bin_paths(git: &GitProject) -> Result<BTreeSet<PathBuf>> {
@@ -1203,6 +1372,8 @@ fn is_shared_status_path(path: &Path) -> bool {
 
 fn managed_status_pathspecs(
     seed_paths: &BTreeSet<PathBuf>,
+    owned_exact_paths: &BTreeSet<PathBuf>,
+    owned_deleted_locked_skill_paths: &BTreeSet<PathBuf>,
     owned_shared_paths: &BTreeSet<PathBuf>,
     owned_cursor_safety_rules: &BTreeSet<PathBuf>,
     owned_opencode_hook_instructions: &BTreeSet<PathBuf>,
@@ -1212,6 +1383,8 @@ fn managed_status_pathspecs(
     for prefix in pi_package_status_prefixes(seed_paths) {
         paths.insert(prefix);
     }
+    paths.extend(owned_exact_paths.iter().cloned());
+    paths.extend(owned_deleted_locked_skill_paths.iter().cloned());
     paths.extend(owned_shared_paths.iter().cloned());
     paths.extend(owned_cursor_safety_rules.iter().cloned());
     paths.extend(owned_opencode_hook_instructions.iter().cloned());
@@ -1270,6 +1443,8 @@ fn is_safe_relative_path(path: &Path) -> bool {
 fn is_managed_status_path(
     path: &Path,
     pi_package_prefixes: &BTreeSet<PathBuf>,
+    owned_exact_paths: &BTreeSet<PathBuf>,
+    owned_deleted_locked_skill_paths: &BTreeSet<PathBuf>,
     owned_shared_paths: &BTreeSet<PathBuf>,
     owned_deleted_native_hooks: &BTreeSet<PathBuf>,
     owned_cursor_safety_rules: &BTreeSet<PathBuf>,
@@ -1285,6 +1460,12 @@ fn is_managed_status_path(
         return true;
     }
     if owned_shared_paths.contains(&path) {
+        return true;
+    }
+    if owned_exact_paths.contains(&path) {
+        return true;
+    }
+    if status.contains(&b'D') && owned_deleted_locked_skill_paths.contains(&path) {
         return true;
     }
     if path.to_str().is_none() {

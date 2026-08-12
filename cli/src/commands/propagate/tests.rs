@@ -1131,6 +1131,191 @@ fn stage_mode_verifies_and_stages_when_hashes_are_current() {
 }
 
 #[test]
+fn stage_mode_scopes_locked_skill_staging_to_source_owned_files() {
+    let project = tmpdir("stage-locked-skill-owned-files");
+    let source = tmpdir("stage-locked-skill-source");
+    std::fs::create_dir_all(&project).unwrap();
+    init_git_project(&project);
+    write_skill_source(&source, "v1\n");
+    write_file(&source.join("skills/demo/owned.txt"), "owned\n");
+    write_file(
+        &source.join("skills/demo/new-upstream.md"),
+        "new upstream\n",
+    );
+
+    crate::test_util::with_project_root(&project, || {
+        let mut entry = demo_entry(&source);
+        entry.source_hash = config::compute_source_hash(&entry);
+        let mut lock = LockFile::default();
+        lock.add(entry);
+        lock.save(&config::lock_file_path(false)).unwrap();
+        write_file(
+            &project.join(".agents/skills/demo/SKILL.md"),
+            "---\nname: demo\ndescription: Demo skill\nlicense: MIT\n---\n\nv1\n",
+        );
+        write_file(&project.join(".agents/skills/demo/owned.txt"), "owned\n");
+        write_file(
+            &project.join(".claude/skills/demo/SKILL.md"),
+            "---\nname: demo\ndescription: Demo skill\nlicense: MIT\n---\n\nv1\n",
+        );
+        write_file(&project.join(".claude/skills/demo/owned.txt"), "owned\n");
+        git(&project, &["add", "-A"]);
+        git(&project, &["commit", "-m", "baseline"]);
+
+        write_file(
+            &project.join(".agents/skills/demo/SKILL.md"),
+            "---\nname: demo\ndescription: Demo skill\nlicense: MIT\n---\n\nmanaged edit\n",
+        );
+        write_file(
+            &project.join(".agents/skills/demo/new-upstream.md"),
+            "new upstream\n",
+        );
+        std::fs::remove_file(project.join(".claude/skills/demo/owned.txt")).unwrap();
+        write_file(
+            &project.join(".agents/skills/demo/consumer-secret.txt"),
+            "consumer secret\n",
+        );
+        write_file(
+            &project.join(".claude/skills/demo/consumer-note.md"),
+            "consumer note\n",
+        );
+
+        run(ScopeFilter::Project, false, false, true, true).unwrap();
+
+        let staged = git_output(&project, &["diff", "--cached", "--name-status"]);
+        assert!(
+            staged.contains("M\t.agents/skills/demo/SKILL.md"),
+            "{staged}"
+        );
+        assert!(
+            staged.contains("A\t.agents/skills/demo/new-upstream.md"),
+            "{staged}"
+        );
+        assert!(
+            staged.contains("D\t.claude/skills/demo/owned.txt"),
+            "{staged}"
+        );
+        assert!(
+            !staged.contains(".agents/skills/demo/consumer-secret.txt"),
+            "{staged}"
+        );
+        assert!(
+            !staged.contains(".claude/skills/demo/consumer-note.md"),
+            "{staged}"
+        );
+    });
+}
+
+#[test]
+fn retry_stage_records_locked_skill_deletions_from_committed_install() {
+    let project = tmpdir("stage-locked-skill-committed-delete");
+    let source = tmpdir("stage-locked-skill-committed-source");
+    std::fs::create_dir_all(&project).unwrap();
+    init_git_project(&project);
+    write_skill_source(&source, "v1\n");
+    write_file(&source.join("skills/demo/removed-upstream.md"), "removed\n");
+
+    crate::test_util::with_project_root(&project, || {
+        let mut entry = demo_entry(&source);
+        entry.source_hash = config::compute_source_hash(&entry);
+        let mut lock = LockFile::default();
+        lock.add(entry);
+        lock.save(&config::lock_file_path(false)).unwrap();
+        write_file(
+            &project.join(".agents/skills/demo/SKILL.md"),
+            "---\nname: demo\ndescription: Demo skill\nlicense: MIT\n---\n\nv1\n",
+        );
+        write_file(
+            &project.join(".agents/skills/demo/removed-upstream.md"),
+            "removed\n",
+        );
+        write_file(
+            &project.join(".claude/skills/demo/SKILL.md"),
+            "---\nname: demo\ndescription: Demo skill\nlicense: MIT\n---\n\nv1\n",
+        );
+        write_file(
+            &project.join(".claude/skills/demo/removed-upstream.md"),
+            "removed\n",
+        );
+        git(&project, &["add", "-A"]);
+        git(&project, &["commit", "-m", "baseline"]);
+
+        write_skill_source(&source, "v2\n");
+        let mut lock = LockFile::load(&config::lock_file_path(false)).unwrap();
+        let entry = lock.entries.get_mut("demo").unwrap();
+        entry.source_hash = config::compute_source_hash(entry);
+        lock.save(&config::lock_file_path(false)).unwrap();
+        write_file(
+            &project.join(".agents/skills/demo/SKILL.md"),
+            "---\nname: demo\ndescription: Demo skill\nlicense: MIT\n---\n\nv2\n",
+        );
+        write_file(
+            &project.join(".claude/skills/demo/SKILL.md"),
+            "---\nname: demo\ndescription: Demo skill\nlicense: MIT\n---\n\nv2\n",
+        );
+        std::fs::remove_file(project.join(".agents/skills/demo/removed-upstream.md")).unwrap();
+        std::fs::remove_file(project.join(".claude/skills/demo/removed-upstream.md")).unwrap();
+
+        run(ScopeFilter::Project, false, false, true, true).unwrap();
+
+        let staged = git_output(&project, &["diff", "--cached", "--name-status"]);
+        assert!(
+            staged.contains("D\t.agents/skills/demo/removed-upstream.md"),
+            "{staged}"
+        );
+        assert!(
+            staged.contains("D\t.claude/skills/demo/removed-upstream.md"),
+            "{staged}"
+        );
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn stage_mode_stages_locked_skill_symlink_root_without_absorbing_target_children() {
+    let project = tmpdir("stage-locked-skill-symlink-root");
+    let source = tmpdir("stage-locked-skill-symlink-source");
+    std::fs::create_dir_all(&project).unwrap();
+    init_git_project(&project);
+    write_skill_source(&source, "v1\n");
+
+    crate::test_util::with_project_root(&project, || {
+        let mut entry = demo_entry(&source);
+        entry.source_hash = config::compute_source_hash(&entry);
+        let mut lock = LockFile::default();
+        lock.add(entry);
+        lock.save(&config::lock_file_path(false)).unwrap();
+        write_file(
+            &project.join(".agents/skills/demo/SKILL.md"),
+            "---\nname: demo\ndescription: Demo skill\nlicense: MIT\n---\n\nv1\n",
+        );
+        write_file(
+            &project.join(".agents/skills/demo/consumer-secret.txt"),
+            "consumer secret\n",
+        );
+        std::fs::create_dir_all(project.join(".claude/skills")).unwrap();
+        std::os::unix::fs::symlink(
+            Path::new("../../.agents/skills/demo"),
+            project.join(".claude/skills/demo"),
+        )
+        .unwrap();
+
+        run(ScopeFilter::Project, false, false, true, true).unwrap();
+
+        let staged = git_output(&project, &["diff", "--cached", "--name-status"]);
+        assert!(
+            staged.contains("A\t.agents/skills/demo/SKILL.md"),
+            "{staged}"
+        );
+        assert!(staged.contains("A\t.claude/skills/demo"), "{staged}");
+        assert!(
+            !staged.contains(".agents/skills/demo/consumer-secret.txt"),
+            "{staged}"
+        );
+    });
+}
+
+#[test]
 fn stage_mode_fails_before_staging_when_no_drift_verify_fails() {
     let project = tmpdir("stage-no-drift-verify-fails");
     let source = tmpdir("stage-no-drift-pi-source");
