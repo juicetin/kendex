@@ -114,7 +114,7 @@ pub fn run(
         } else {
             eprintln!("No source drift; verifying current install...");
         }
-        crate::commands::verify::run(scope, &[])?;
+        crate::commands::verify::run_with_source_records(scope, &[], &source_records_by_scope)?;
         if stage {
             verify_project_auxiliary_installs_before_stage()?;
             stage_project_paths(&pre_refresh_stage_paths)?;
@@ -135,7 +135,7 @@ pub fn run(
     crate::commands::refresh::run_with_source_records(scope, verbose, &source_records_by_scope)?;
 
     eprintln!("\nVerifying refreshed install...");
-    crate::commands::verify::run(scope, &[])?;
+    crate::commands::verify::run_with_source_records(scope, &[], &source_records_by_scope)?;
 
     if stage {
         verify_project_auxiliary_installs_before_stage()?;
@@ -974,10 +974,13 @@ fn git_literal_command() -> Command {
 
 fn managed_paths_from_git_status(seed_paths: &BTreeSet<PathBuf>) -> Result<Vec<PathBuf>> {
     let git = git_project()?;
-    let committed_locked_skill_paths = committed_locked_skill_stage_paths(&git)?;
+    let mut owned_deleted_locked_skill_paths = committed_locked_skill_stage_paths(&git)?;
+    owned_deleted_locked_skill_paths.extend(
+        vendored_locked_skill_stage_paths_without_committed_lock(&git)?,
+    );
     let committed_pi_package_paths = committed_pi_package_stage_paths(&git)?;
     let mut committed_paths = committed_project_stage_paths(&git)?;
-    committed_paths.extend(committed_locked_skill_paths.iter().cloned());
+    committed_paths.extend(owned_deleted_locked_skill_paths.iter().cloned());
     committed_paths.extend(committed_pi_package_paths.iter().cloned());
     let owned_exact_paths = owned_exact_status_paths(seed_paths);
     let committed_pi_bin_paths = committed_pi_bin_paths(&git)?;
@@ -991,7 +994,7 @@ fn managed_paths_from_git_status(seed_paths: &BTreeSet<PathBuf>) -> Result<Vec<P
     let status_pathspecs = managed_status_pathspecs(
         seed_paths,
         &owned_exact_paths,
-        &committed_locked_skill_paths,
+        &owned_deleted_locked_skill_paths,
         &committed_pi_package_paths,
         &owned_shared_paths,
         &owned_cursor_safety_rules,
@@ -1044,7 +1047,7 @@ fn managed_paths_from_git_status(seed_paths: &BTreeSet<PathBuf>) -> Result<Vec<P
             && is_managed_status_path(
                 &path,
                 &owned_exact_paths,
-                &committed_locked_skill_paths,
+                &owned_deleted_locked_skill_paths,
                 &committed_pi_package_paths,
                 &owned_shared_paths,
                 &owned_deleted_native_hooks,
@@ -1138,6 +1141,66 @@ fn committed_locked_skill_stage_paths(git: &GitProject) -> Result<BTreeSet<PathB
     committed_locked_skill_stage_paths_from_lock(git, &lock)
 }
 
+fn vendored_locked_skill_stage_paths_without_committed_lock(
+    git: &GitProject,
+) -> Result<BTreeSet<PathBuf>> {
+    if committed_project_lock(git)?.is_some() {
+        return Ok(BTreeSet::new());
+    }
+    if !git_head_exists(git)? {
+        return Ok(BTreeSet::new());
+    }
+    let lock_path = config::lock_file_path(false);
+    if !lock_path.exists() {
+        return Ok(BTreeSet::new());
+    }
+    let lock = LockFile::load(&lock_path)?;
+    let project_root = config::project_root();
+    let mut dirs = BTreeSet::new();
+    for entry in lock
+        .entries
+        .values()
+        .filter(|entry| entry.kind == ItemKind::Skill)
+    {
+        crate::path_safety::validate_item_name(&entry.name)
+            .with_context(|| format!("unsafe locked skill name {}", entry.name))?;
+        for dir in locked_skill_stage_dirs(&project_root, entry) {
+            if !locked_skill_dir_has_managed_marker(git, &project_root, &dir)? {
+                continue;
+            }
+            if let Ok(relative) = dir.strip_prefix(&project_root) {
+                dirs.insert(relative.to_path_buf());
+            }
+        }
+    }
+    git_tracked_project_paths_under(git, &dirs)
+}
+
+fn git_head_exists(git: &GitProject) -> Result<bool> {
+    let output = git_literal_command()
+        .arg("-C")
+        .arg(&git.root)
+        .args(["rev-parse", "--verify", "HEAD"])
+        .output()
+        .context("checking git HEAD for managed ownership")?;
+    Ok(output.status.success())
+}
+
+fn locked_skill_dir_has_managed_marker(
+    git: &GitProject,
+    project_root: &Path,
+    dir: &Path,
+) -> Result<bool> {
+    let marker = dir.join(".vstack-refreshed");
+    if std::fs::symlink_metadata(&marker).is_ok() {
+        return Ok(true);
+    }
+    let Ok(relative) = marker.strip_prefix(project_root) else {
+        return Ok(false);
+    };
+    git_head_has_project_path(git, relative)
+}
+
 fn committed_locked_skill_stage_paths_from_lock(
     git: &GitProject,
     lock: &LockFile,
@@ -1214,6 +1277,18 @@ fn git_tracked_project_paths_under(
         }
     }
     Ok(paths)
+}
+
+fn git_head_has_project_path(git: &GitProject, project_path: &Path) -> Result<bool> {
+    let top_level_path = project_to_git_path(git, project_path);
+    let output = git_literal_command()
+        .arg("-C")
+        .arg(&git.root)
+        .args(["ls-tree", "-z", "--name-only", "HEAD", "--"])
+        .arg(&top_level_path)
+        .output()
+        .context("reading committed vstack-managed marker for ownership")?;
+    Ok(output.status.success() && !output.stdout.is_empty())
 }
 
 fn committed_pi_bin_paths(git: &GitProject) -> Result<BTreeSet<PathBuf>> {
@@ -1386,14 +1461,14 @@ fn managed_status_pathspecs(
     owned_opencode_hook_instructions: &BTreeSet<PathBuf>,
     owned_pi_bin_paths: &BTreeSet<PathBuf>,
 ) -> Result<Vec<PathBuf>> {
-    let mut paths = seed_paths.clone();
-    paths.extend(owned_exact_paths.iter().cloned());
-    paths.extend(owned_deleted_locked_skill_paths.iter().cloned());
-    paths.extend(owned_deleted_pi_package_paths.iter().cloned());
-    paths.extend(owned_shared_paths.iter().cloned());
-    paths.extend(owned_cursor_safety_rules.iter().cloned());
-    paths.extend(owned_opencode_hook_instructions.iter().cloned());
-    paths.extend(owned_pi_bin_paths.iter().cloned());
+    let mut owned_paths = seed_paths.clone();
+    owned_paths.extend(owned_exact_paths.iter().cloned());
+    owned_paths.extend(owned_deleted_locked_skill_paths.iter().cloned());
+    owned_paths.extend(owned_deleted_pi_package_paths.iter().cloned());
+    owned_paths.extend(owned_shared_paths.iter().cloned());
+    owned_paths.extend(owned_cursor_safety_rules.iter().cloned());
+    owned_paths.extend(owned_opencode_hook_instructions.iter().cloned());
+    owned_paths.extend(owned_pi_bin_paths.iter().cloned());
     for path in [
         ".vstack-lock.json",
         "vstack.toml",
@@ -1401,12 +1476,57 @@ fn managed_status_pathspecs(
         ".claude/hooks",
         ".codex/hooks",
     ] {
-        paths.insert(PathBuf::from(path));
+        owned_paths.insert(PathBuf::from(path));
     }
-    Ok(paths
+    let pathspecs: BTreeSet<PathBuf> = owned_paths
         .into_iter()
         .filter(|path| is_safe_relative_path(path))
-        .collect())
+        .map(|path| managed_status_scan_pathspec(&path))
+        .collect();
+    Ok(pathspecs.into_iter().collect())
+}
+
+fn managed_status_scan_pathspec(path: &Path) -> PathBuf {
+    let mut components = path.components();
+    let Some(first) = components.next().map(|component| component.as_os_str()) else {
+        return path.to_path_buf();
+    };
+    let Some(second) = components.next().map(|component| component.as_os_str()) else {
+        return path.to_path_buf();
+    };
+    match (first, second) {
+        (first, second) if first == OsStr::new(".agents") && second == OsStr::new("skills") => {
+            Path::new(".agents").join("skills")
+        }
+        (first, second)
+            if first == OsStr::new(".claude")
+                && matches!(second.to_str(), Some("agents" | "hooks" | "skills")) =>
+        {
+            Path::new(".claude").join(second)
+        }
+        (first, second) if first == OsStr::new(".cursor") && second == OsStr::new("rules") => {
+            Path::new(".cursor").join("rules")
+        }
+        (first, second)
+            if first == OsStr::new(".codex")
+                && matches!(second.to_str(), Some("agents" | "hooks")) =>
+        {
+            Path::new(".codex").join(second)
+        }
+        (first, second)
+            if first == OsStr::new(".opencode")
+                && matches!(second.to_str(), Some("agents" | "instructions")) =>
+        {
+            Path::new(".opencode").join(second)
+        }
+        (first, second)
+            if first == OsStr::new(".pi")
+                && matches!(second.to_str(), Some("agents" | "bin" | "packages")) =>
+        {
+            Path::new(".pi").join(second)
+        }
+        _ => path.to_path_buf(),
+    }
 }
 
 fn project_to_git_path(git: &GitProject, path: &Path) -> PathBuf {

@@ -1303,6 +1303,85 @@ fn stage_mode_scopes_locked_skill_staging_to_source_owned_files() {
 }
 
 #[test]
+fn managed_status_pathspecs_collapse_large_owned_file_sets_to_bounded_roots() {
+    let mut seed_paths = BTreeSet::new();
+    for idx in 0..2048 {
+        seed_paths.insert(PathBuf::from(format!(".agents/skills/demo/file-{idx}.md")));
+        seed_paths.insert(PathBuf::from(format!(".claude/skills/demo/file-{idx}.md")));
+    }
+    let owned_exact_paths = owned_exact_status_paths(&seed_paths);
+    let empty = BTreeSet::new();
+
+    let pathspecs = managed_status_pathspecs(
+        &seed_paths,
+        &owned_exact_paths,
+        &empty,
+        &empty,
+        &empty,
+        &empty,
+        &empty,
+        &empty,
+    )
+    .unwrap();
+
+    assert!(
+        pathspecs.len() <= 16,
+        "pathspecs should stay bounded, got {}",
+        pathspecs.len()
+    );
+    assert!(pathspecs.contains(&PathBuf::from(".agents/skills")));
+    assert!(pathspecs.contains(&PathBuf::from(".claude/skills")));
+    assert!(
+        !pathspecs.contains(&PathBuf::from(".agents/skills/demo/file-2047.md")),
+        "individual owned files must not be emitted as CLI pathspecs"
+    );
+}
+
+#[test]
+fn no_drift_stage_verifies_pi_from_resolved_source_when_sidecar_path_is_stale() {
+    let project = tmpdir("stage-no-drift-pi-stale-sidecar");
+    let source = tmpdir("stage-no-drift-pi-current-source");
+    std::fs::create_dir_all(&project).unwrap();
+    init_git_project(&project);
+    write_file(
+        &source.join("pi-extensions/demo-pkg/package.json"),
+        r#"{"name":"demo-pkg","pi":{"extensions":["extensions/demo.ts"]}}"#,
+    );
+    write_file(
+        &source.join("pi-extensions/demo-pkg/extensions/demo.ts"),
+        "export default {}\n",
+    );
+
+    crate::test_util::with_project_root(&project, || {
+        let mut entry = pi_entry("demo-pkg", &source);
+        entry.source_hash = config::compute_source_hash(&entry);
+        let mut lock = LockFile::default();
+        lock.add(entry);
+        lock.save(&config::lock_file_path(false)).unwrap();
+        write_file(
+            &project.join(".pi/.vstack-source.json"),
+            r#"{"demo-pkg":{"sourcePath":"/stale/machine/pi-extensions/demo-pkg"}}"#,
+        );
+        write_file(
+            &project.join(".pi/packages/demo-pkg/package.json"),
+            r#"{"name":"demo-pkg","pi":{"extensions":["extensions/demo.ts"]}}"#,
+        );
+        write_file(
+            &project.join(".pi/packages/demo-pkg/extensions/demo.ts"),
+            "export default {}\n",
+        );
+        write_file(
+            &project.join(".pi/settings.json"),
+            r#"{"packages":["./packages/demo-pkg"]}"#,
+        );
+        git(&project, &["add", "-A"]);
+        git(&project, &["commit", "-m", "baseline"]);
+
+        run(ScopeFilter::Project, false, false, true, true).unwrap();
+    });
+}
+
+#[test]
 fn retry_stage_records_locked_skill_deletions_from_committed_install() {
     let project = tmpdir("stage-locked-skill-committed-delete");
     let source = tmpdir("stage-locked-skill-committed-source");
@@ -1361,6 +1440,81 @@ fn retry_stage_records_locked_skill_deletions_from_committed_install() {
         );
         assert!(
             staged.contains("D\t.claude/skills/demo/removed-upstream.md"),
+            "{staged}"
+        );
+    });
+}
+
+#[test]
+fn retry_stage_records_vendored_skill_deletions_when_lock_is_ignored() {
+    let project = tmpdir("stage-locked-skill-ignored-lock-delete");
+    let source = tmpdir("stage-locked-skill-ignored-lock-source");
+    std::fs::create_dir_all(&project).unwrap();
+    init_git_project(&project);
+    write_skill_source(&source, "v2\n");
+
+    crate::test_util::with_project_root(&project, || {
+        let mut entry = demo_entry(&source);
+        entry.source_hash = config::compute_source_hash(&entry);
+        let mut lock = LockFile::default();
+        lock.add(entry);
+        lock.save(&config::lock_file_path(false)).unwrap();
+        write_file(&project.join(".gitignore"), ".vstack-lock.json\n");
+        write_file(
+            &project.join(".agents/skills/demo/SKILL.md"),
+            "---\nname: demo\ndescription: Demo skill\nlicense: MIT\n---\n\nv1\n",
+        );
+        write_file(
+            &project.join(".agents/skills/demo/removed-upstream.md"),
+            "removed\n",
+        );
+        write_file(
+            &project.join(".agents/skills/demo/.vstack-refreshed"),
+            "1\n",
+        );
+        write_file(
+            &project.join(".claude/skills/demo/SKILL.md"),
+            "---\nname: demo\ndescription: Demo skill\nlicense: MIT\n---\n\nv1\n",
+        );
+        write_file(
+            &project.join(".claude/skills/demo/removed-upstream.md"),
+            "removed\n",
+        );
+        write_file(
+            &project.join(".claude/skills/demo/.vstack-refreshed"),
+            "1\n",
+        );
+        git(&project, &["add", "-A"]);
+        git(&project, &["commit", "-m", "baseline"]);
+
+        write_file(
+            &project.join(".agents/skills/demo/SKILL.md"),
+            "---\nname: demo\ndescription: Demo skill\nlicense: MIT\n---\n\nv2\n",
+        );
+        write_file(
+            &project.join(".claude/skills/demo/SKILL.md"),
+            "---\nname: demo\ndescription: Demo skill\nlicense: MIT\n---\n\nv2\n",
+        );
+        std::fs::remove_file(project.join(".agents/skills/demo/removed-upstream.md")).unwrap();
+        std::fs::remove_file(project.join(".claude/skills/demo/removed-upstream.md")).unwrap();
+        write_file(
+            &project.join(".agents/skills/demo/consumer-secret.txt"),
+            "consumer secret\n",
+        );
+
+        stage_project_paths(&[]).unwrap();
+
+        let staged = git_output(&project, &["diff", "--cached", "--name-status"]);
+        assert!(
+            staged.contains("D\t.agents/skills/demo/removed-upstream.md"),
+            "{staged}"
+        );
+        assert!(
+            staged.contains("D\t.claude/skills/demo/removed-upstream.md"),
+            "{staged}"
+        );
+        assert!(
+            !staged.contains(".agents/skills/demo/consumer-secret.txt"),
             "{staged}"
         );
     });

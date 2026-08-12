@@ -22,6 +22,7 @@
 //! with shell pipelines (`vstack verify -g && pi`).
 
 use crate::config::{self, ItemKind, LockEntry};
+use crate::refresh_sources::ResolvedSource;
 use crate::scope::ScopeFilter;
 use anyhow::{Result, bail};
 use std::collections::BTreeSet;
@@ -40,6 +41,14 @@ struct VerifyRow {
 }
 
 pub fn run(scope: ScopeFilter, names: &[String]) -> Result<()> {
+    run_with_source_records(scope, names, &[])
+}
+
+pub(crate) fn run_with_source_records(
+    scope: ScopeFilter,
+    names: &[String],
+    resolved_records: &[(bool, Vec<ResolvedSource>)],
+) -> Result<()> {
     let mut total_failed = 0usize;
     let mut total_checked = 0usize;
     for &global in scope.globals() {
@@ -53,13 +62,17 @@ pub fn run(scope: ScopeFilter, names: &[String]) -> Result<()> {
         }
         let scope_label = if global { "GLOBAL" } else { "PROJECT" };
         eprintln!("\n─ verify ({scope_label}) ─");
+        let source_records = resolved_records
+            .iter()
+            .find(|(scope_global, _)| *scope_global == global)
+            .map(|(_, records)| records.as_slice());
 
         let mut rows: Vec<VerifyRow> = Vec::new();
         for (entry_name, entry) in &lock.entries {
             if !names.is_empty() && !names.iter().any(|n| n == entry_name) {
                 continue;
             }
-            rows.push(verify_entry(entry, global));
+            rows.push(verify_entry(entry, global, source_records));
         }
         rows.sort_by(|a, b| a.name.cmp(&b.name));
 
@@ -112,7 +125,11 @@ pub fn run(scope: ScopeFilter, names: &[String]) -> Result<()> {
     Ok(())
 }
 
-fn verify_entry(entry: &LockEntry, global: bool) -> VerifyRow {
+fn verify_entry(
+    entry: &LockEntry,
+    global: bool,
+    source_records: Option<&[ResolvedSource]>,
+) -> VerifyRow {
     let kind = entry.kind.label_short();
     let name = entry.name.clone();
 
@@ -128,7 +145,7 @@ fn verify_entry(entry: &LockEntry, global: bool) -> VerifyRow {
 
     // Per-kind install check.
     let (install_ok, note) = match entry.kind {
-        ItemKind::PiExtension => verify_pi_install(&entry.name, global),
+        ItemKind::PiExtension => verify_pi_install(entry, global, source_records),
         ItemKind::Skill => verify_skill_install(entry, global),
         ItemKind::Agent => verify_agent_install(&entry.name, &entry.harnesses, global),
         ItemKind::Hook => verify_hook_install(&entry.name, &entry.harnesses, global),
@@ -144,13 +161,17 @@ fn verify_entry(entry: &LockEntry, global: bool) -> VerifyRow {
     }
 }
 
-fn verify_pi_install(name: &str, global: bool) -> (Option<bool>, Option<String>) {
+fn verify_pi_install(
+    entry: &LockEntry,
+    global: bool,
+    source_records: Option<&[ResolvedSource]>,
+) -> (Option<bool>, Option<String>) {
+    let name = &entry.name;
     let install_dir = config::pi_packages_dir(global).join(name);
     if !install_dir.is_dir() {
         return (Some(false), Some("install path missing".into()));
     }
-    // Locate source dir for this package by reading the source-index sidecar.
-    let source_dir = match locate_pi_source(name, global) {
+    let source_dir = match locate_pi_source_for_entry(entry, global, source_records) {
         Some(p) => p,
         None => return (None, Some("source path unresolvable".into())),
     };
@@ -167,6 +188,26 @@ fn verify_pi_install(name: &str, global: bool) -> (Option<bool>, Option<String>)
         ))
     };
     (Some(ok), note)
+}
+
+fn locate_pi_source_for_entry(
+    entry: &LockEntry,
+    global: bool,
+    source_records: Option<&[ResolvedSource]>,
+) -> Option<PathBuf> {
+    if let Some(records) = source_records
+        && let Some(path) = locate_pi_source_from_records(entry, records)
+    {
+        return Some(path);
+    }
+    locate_pi_source(&entry.name, global)
+}
+
+fn locate_pi_source_from_records(entry: &LockEntry, records: &[ResolvedSource]) -> Option<PathBuf> {
+    let sources = crate::refresh_sources::load_refresh_sources(records);
+    let source = crate::refresh_sources::refresh_source_for_entry(&sources, entry)?;
+    crate::refresh_sources::source_pi_extension_for_lock_name(&source.pi_extensions, &entry.name)
+        .map(|ext| ext.source_dir.clone())
 }
 
 fn verify_skill_install(entry: &LockEntry, global: bool) -> (Option<bool>, Option<String>) {
