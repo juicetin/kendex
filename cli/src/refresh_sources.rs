@@ -398,7 +398,7 @@ pub(crate) fn looks_like_remote_source(source: &str) -> bool {
 
 pub(crate) fn clone_or_update_remote_source(source: &str) -> Result<Option<PathBuf>> {
     reject_plaintext_http_remote(source)?;
-    let Some(git_url) = remote_git_url_for_subprocess(source) else {
+    let Some(git_url) = remote_git_url_for_subprocess(source)? else {
         return Ok(None);
     };
     let display = remote_source_display(source);
@@ -408,7 +408,7 @@ pub(crate) fn clone_or_update_remote_source(source: &str) -> Result<Option<PathB
 
 pub(crate) fn clone_or_update_remote_source_best_effort(source: &str) -> Result<Option<PathBuf>> {
     reject_plaintext_http_remote(source)?;
-    let Some(git_url) = remote_git_url_for_subprocess(source) else {
+    let Some(git_url) = remote_git_url_for_subprocess(source)? else {
         return Ok(None);
     };
     let display = remote_source_display(source);
@@ -454,8 +454,13 @@ pub(crate) fn refresh_remote_cache_update_only_best_effort(source: &str) {
         }
         return;
     }
-    let Some(git_url) = remote_git_url_for_subprocess(source) else {
-        return;
+    let git_url = match remote_git_url_for_subprocess(source) {
+        Ok(Some(git_url)) => git_url,
+        Ok(None) => return,
+        Err(err) => {
+            eprintln!("  Warning: {err}");
+            return;
+        }
     };
     let display = remote_source_display(source);
     for legacy_dir in legacy_remote_cache_dirs(source, &cache_dir) {
@@ -534,8 +539,12 @@ fn remote_git_url(source: &str) -> Option<String> {
     Some(format!("https://github.com/{slug}.git"))
 }
 
-fn remote_git_url_for_subprocess(source: &str) -> Option<String> {
-    remote_git_url(source).map(|url| git_subprocess_url(&url))
+fn remote_git_url_for_subprocess(source: &str) -> Result<Option<String>> {
+    let Some(url) = remote_git_url(source) else {
+        return Ok(None);
+    };
+    reject_credential_bearing_git_url(&url)?;
+    Ok(Some(git_subprocess_url(&url)))
 }
 
 fn git_subprocess_url(url: &str) -> String {
@@ -568,7 +577,7 @@ pub(crate) fn remote_cache_dir(source: &str) -> Option<PathBuf> {
 
 fn existing_remote_cache_dir(source: &str) -> Option<PathBuf> {
     let cache_dir = remote_cache_dir(source)?;
-    let git_url = remote_git_url_for_subprocess(source)?;
+    let git_url = remote_git_url_for_subprocess(source).ok()??;
     let display = remote_source_display(source);
     if cache_dir.join(".git").exists() {
         if validate_cached_repo_origin(&display, &git_url, &cache_dir).is_ok() {
@@ -689,6 +698,24 @@ fn reject_plaintext_http_remote(source: &str) -> Result<()> {
     Ok(())
 }
 
+fn reject_credential_bearing_git_url(url: &str) -> Result<()> {
+    let Some(parts) = split_url_userinfo(url) else {
+        return Ok(());
+    };
+    if parts.userinfo.is_empty() {
+        return Ok(());
+    }
+    let secret_bearing =
+        !is_ssh_like_scheme(parts.scheme) || parts.userinfo.split_once(':').is_some();
+    if secret_bearing {
+        bail!(
+            "credential-bearing remote source URLs are not supported for managed-code refresh: {}. Use SSH keys, gh auth login, or a Git credential helper instead.",
+            remote_source_display(url)
+        );
+    }
+    Ok(())
+}
+
 fn is_plaintext_http_remote(source: &str) -> bool {
     source
         .get(..7)
@@ -752,7 +779,7 @@ fn validate_cached_repo_origin(display: &str, expected_url: &str, repo_dir: &Pat
 }
 
 fn update_existing_remote_cache(source: &str, repo_dir: &Path) -> Result<()> {
-    let git_url = remote_git_url_for_subprocess(source).context("not a remote source")?;
+    let git_url = remote_git_url_for_subprocess(source)?.context("not a remote source")?;
     let display = remote_source_display(source);
     validate_cached_repo_origin(&display, &git_url, repo_dir)?;
     update_cached_repo_strict(&display, repo_dir)

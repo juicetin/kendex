@@ -701,8 +701,8 @@ pub fn remove_pi_extension(name: &str, global: bool) -> Result<Vec<PathBuf>> {
 
 /// Create symlinks at `<scope>/bin/<cli-name>` for every entry in the
 /// package's `bin` field. Existing files at the link path are removed
-/// first (idempotent re-install). Absolute targets so the symlink keeps
-/// resolving even if relative pathing is fragile.
+/// first (idempotent re-install). Global links use absolute targets; project
+/// links use relative targets so they can be committed portably.
 fn install_bin_links(ext: &PiExtension, package_dest: &Path, global: bool) -> Result<()> {
     if ext.bin.is_empty() {
         return Ok(());
@@ -722,8 +722,20 @@ fn install_bin_links(ext: &PiExtension, package_dest: &Path, global: bool) -> Re
         let link = bin_dir.join(cli_name);
         let _ = std::fs::remove_file(&link);
         #[cfg(unix)]
-        std::os::unix::fs::symlink(&target, &link)
-            .with_context(|| format!("symlinking bin {} → {}", link.display(), target.display()))?;
+        {
+            let link_target = if global {
+                target.clone()
+            } else {
+                crate::installer::relative_path(link.parent().unwrap_or(&bin_dir), &target)?
+            };
+            std::os::unix::fs::symlink(&link_target, &link).with_context(|| {
+                format!(
+                    "symlinking bin {} → {}",
+                    link.display(),
+                    link_target.display()
+                )
+            })?;
+        }
     }
     Ok(())
 }
@@ -1532,7 +1544,7 @@ mod tests {
         ));
     }
 
-    use crate::test_util::with_pi_dir;
+    use crate::test_util::{with_pi_dir, with_project_root};
 
     fn write_mini_source(dir: &Path, name: &str) {
         std::fs::create_dir_all(dir.join("extensions")).unwrap();
@@ -1878,6 +1890,60 @@ printf 'module.exports = 1;\n' > node_modules/left-pad/index.js
                 link.display()
             );
             assert!(!link.exists(), "bin link should be gone");
+        });
+
+        let _ = std::fs::remove_dir_all(&sandbox);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn project_install_creates_relative_bin_symlinks() {
+        let sandbox = std::env::temp_dir().join(format!(
+            "vstack_pi_project_bin_links_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&sandbox);
+        let source = sandbox.join("src").join("pi-bridgey");
+        std::fs::create_dir_all(source.join("bin")).unwrap();
+        std::fs::create_dir_all(source.join("extensions")).unwrap();
+        std::fs::write(source.join("extensions").join("ext.ts"), "// noop\n").unwrap();
+        std::fs::write(
+            source.join("bin").join("pi-bridge.js"),
+            "#!/usr/bin/env node\n",
+        )
+        .unwrap();
+        std::fs::write(
+            source.join("package.json"),
+            r#"{
+                "name": "pi-bridgey",
+                "pi": { "extensions": ["./extensions/ext.ts"] },
+                "bin": { "pi-bridge": "./bin/pi-bridge.js" }
+            }"#,
+        )
+        .unwrap();
+        let project = sandbox.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+
+        with_project_root(&project, || {
+            let ext = PiExtension::from_dir(&source).unwrap();
+            install_pi_extension(&ext, false).unwrap().unwrap();
+
+            let link = project.join(".pi").join("bin").join("pi-bridge");
+            assert!(
+                link.is_symlink(),
+                "expected bin symlink at {}",
+                link.display()
+            );
+            let target = std::fs::read_link(&link).unwrap();
+            assert_eq!(
+                target,
+                PathBuf::from("../packages/pi-bridgey/bin/pi-bridge.js")
+            );
+            assert!(!target.is_absolute(), "project bin links must be portable");
+            assert!(
+                link.parent().unwrap().join(&target).exists(),
+                "relative target should resolve inside the project"
+            );
         });
 
         let _ = std::fs::remove_dir_all(&sandbox);

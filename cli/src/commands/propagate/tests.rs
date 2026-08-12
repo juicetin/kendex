@@ -826,12 +826,21 @@ fn staging_skips_ignored_managed_paths_and_stages_remaining_paths() {
 #[test]
 fn staging_records_tracked_pi_node_modules_deletions_without_untracked_dependencies() {
     let project = tmpdir("stage-pi-node-modules-delete");
+    let source = tmpdir("stage-pi-node-modules-delete-source");
     std::fs::create_dir_all(&project).unwrap();
     init_git_project(&project);
+    write_file(
+        &source.join("pi-extensions/dep-pkg/package.json"),
+        r#"{"name":"dep-pkg","pi":{"extensions":[]}}"#,
+    );
+    write_file(
+        &source.join("pi-extensions/dep-pkg/node_modules/old/index.js"),
+        "tracked dependency\n",
+    );
 
     crate::test_util::with_project_root(&project, || {
         let mut lock = LockFile::default();
-        lock.add(lock_entry("dep-pkg", ItemKind::PiExtension, &["pi"]));
+        lock.add(pi_entry("dep-pkg", &source));
         lock.save(&config::lock_file_path(false)).unwrap();
         write_file(
             &project.join(".pi/packages/dep-pkg/package.json"),
@@ -934,6 +943,62 @@ fn staging_scopes_pi_package_to_source_owned_files() {
 }
 
 #[test]
+fn project_stage_paths_fail_when_locked_pi_source_is_unavailable() {
+    let project = tmpdir("stage-pi-missing-source");
+    std::fs::create_dir_all(&project).unwrap();
+
+    crate::test_util::with_project_root(&project, || {
+        let mut lock = LockFile::default();
+        lock.add(lock_entry("demo-pkg", ItemKind::PiExtension, &["pi"]));
+        lock.save(&config::lock_file_path(false)).unwrap();
+
+        let err = project_stage_paths(&lock, false).unwrap_err().to_string();
+        assert!(err.contains("demo-pkg"), "{err}");
+        assert!(err.contains("source"), "{err}");
+    });
+}
+
+#[test]
+fn retry_staging_does_not_stage_consumer_pi_package_deletions() {
+    let project = tmpdir("stage-pi-consumer-delete");
+    let source = tmpdir("stage-pi-consumer-delete-source");
+    std::fs::create_dir_all(&project).unwrap();
+    init_git_project(&project);
+    write_file(
+        &source.join("pi-extensions/demo-pkg/package.json"),
+        r#"{"name":"demo-pkg","pi":{"extensions":[]}}"#,
+    );
+
+    crate::test_util::with_project_root(&project, || {
+        let mut entry = pi_entry("demo-pkg", &source);
+        entry.source_hash = config::compute_source_hash(&entry);
+        let mut lock = LockFile::default();
+        lock.add(entry);
+        lock.save(&config::lock_file_path(false)).unwrap();
+        write_file(
+            &project.join(".pi/packages/demo-pkg/package.json"),
+            r#"{"name":"demo-pkg","pi":{"extensions":[]}}"#,
+        );
+        write_file(
+            &project.join(".pi/packages/demo-pkg/consumer-data.txt"),
+            "consumer data\n",
+        );
+        git(&project, &["add", "-A"]);
+        git(&project, &["commit", "-m", "baseline"]);
+
+        std::fs::remove_file(project.join(".pi/packages/demo-pkg/consumer-data.txt")).unwrap();
+
+        stage_project_paths(&[]).unwrap();
+
+        let staged = git_output(&project, &["diff", "--cached", "--name-status"]);
+        assert!(
+            !staged.contains(".pi/packages/demo-pkg/consumer-data.txt"),
+            "{staged}"
+        );
+    });
+}
+
+#[test]
 fn retry_staging_records_deleted_pi_bin_from_committed_manifest_only() {
     let project = tmpdir("stage-deleted-pi-bin");
     let source = tmpdir("stage-deleted-pi-bin-source");
@@ -987,12 +1052,17 @@ fn retry_staging_records_deleted_pi_bin_from_committed_manifest_only() {
 #[test]
 fn retry_staging_accepts_pi_bin_names_valid_for_installer() {
     let project = tmpdir("stage-deleted-pi-bin-tilde");
+    let source = tmpdir("stage-deleted-pi-bin-tilde-source");
     std::fs::create_dir_all(&project).unwrap();
     init_git_project(&project);
+    write_file(
+        &source.join("pi-extensions/demo-pkg/package.json"),
+        r#"{"name":"demo-pkg","pi":{"extensions":[]},"bin":{}}"#,
+    );
 
     crate::test_util::with_project_root(&project, || {
         let mut lock = LockFile::default();
-        lock.add(lock_entry("demo-pkg", ItemKind::PiExtension, &["pi"]));
+        lock.add(pi_entry("demo-pkg", &source));
         lock.save(&config::lock_file_path(false)).unwrap();
         write_file(
             &project.join(".pi/packages/demo-pkg/package.json"),

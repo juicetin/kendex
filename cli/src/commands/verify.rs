@@ -25,7 +25,7 @@ use crate::config::{self, ItemKind, LockEntry};
 use crate::refresh_sources::ResolvedSource;
 use crate::scope::ScopeFilter;
 use anyhow::{Result, bail};
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// Per-item verification result.
@@ -211,24 +211,35 @@ fn locate_pi_source_from_records(entry: &LockEntry, records: &[ResolvedSource]) 
 }
 
 fn verify_skill_install(entry: &LockEntry, global: bool) -> (Option<bool>, Option<String>) {
-    let mut missing = Vec::new();
-    let mut seen_paths = BTreeSet::new();
+    let mut unknown = Vec::new();
+    let mut path_harnesses: BTreeMap<PathBuf, Vec<String>> = BTreeMap::new();
     for h in &entry.harnesses {
         let Some(harness) = crate::harness::Harness::from_id(h) else {
+            unknown.push(h.clone());
             continue;
         };
         let path = harness.skills_dir(global).join(&entry.name);
-        if seen_paths.insert(path.clone()) && !path.join("SKILL.md").is_file() {
-            missing.push(h.clone());
+        path_harnesses.entry(path).or_default().push(h.clone());
+    }
+
+    let mut missing = Vec::new();
+    for (path, harnesses) in path_harnesses {
+        if !path.join("SKILL.md").is_file() {
+            missing.extend(harnesses);
         }
     }
-    if missing.is_empty() {
+
+    if missing.is_empty() && unknown.is_empty() {
         (Some(true), None)
     } else {
-        (
-            Some(false),
-            Some(format!("install path missing for {}", missing.join(", "))),
-        )
+        let mut notes = Vec::new();
+        if !missing.is_empty() {
+            notes.push(format!("install path missing for {}", missing.join(", ")));
+        }
+        if !unknown.is_empty() {
+            notes.push(format!("unknown harness id(s): {}", unknown.join(", ")));
+        }
+        (Some(false), Some(notes.join("; ")))
     }
 }
 
@@ -238,8 +249,10 @@ fn verify_agent_install(
     global: bool,
 ) -> (Option<bool>, Option<String>) {
     let mut missing = Vec::new();
+    let mut unknown = Vec::new();
     for h in harnesses {
         let Some(harness) = crate::harness::Harness::from_id(h) else {
+            unknown.push(h.clone());
             continue;
         };
         let path = harness
@@ -249,13 +262,17 @@ fn verify_agent_install(
             missing.push(h.clone());
         }
     }
-    if missing.is_empty() {
+    if missing.is_empty() && unknown.is_empty() {
         (Some(true), None)
     } else {
-        (
-            Some(false),
-            Some(format!("missing in: {}", missing.join(", "))),
-        )
+        let mut notes = Vec::new();
+        if !missing.is_empty() {
+            notes.push(format!("missing in: {}", missing.join(", ")));
+        }
+        if !unknown.is_empty() {
+            notes.push(format!("unknown harness id(s): {}", unknown.join(", ")));
+        }
+        (Some(false), Some(notes.join("; ")))
     }
 }
 
@@ -265,8 +282,10 @@ fn verify_hook_install(
     global: bool,
 ) -> (Option<bool>, Option<String>) {
     let mut missing = Vec::new();
+    let mut unknown = Vec::new();
     for h in harnesses {
         let Some(harness) = crate::harness::Harness::from_id(h) else {
+            unknown.push(h.clone());
             continue;
         };
         match harness {
@@ -308,6 +327,9 @@ fn verify_hook_install(
                 // check here.
             }
         }
+    }
+    if !unknown.is_empty() {
+        missing.push(format!("unknown harness id(s): {}", unknown.join(", ")));
     }
     if missing.is_empty() {
         (Some(true), None)
@@ -460,6 +482,87 @@ mod tests {
             );
 
             run(ScopeFilter::Project, &[]).unwrap();
+        });
+    }
+
+    #[test]
+    fn verify_skill_fails_on_unknown_harness_id() {
+        let project = tmpdir("unknown-harness-skill");
+        let source = tmpdir("unknown-harness-source");
+        std::fs::create_dir_all(&project).unwrap();
+        write_file(
+            &source.join("skills/demo/SKILL.md"),
+            "---\nname: demo\ndescription: Demo skill\nlicense: MIT\n---\n\n# Demo\n",
+        );
+
+        crate::test_util::with_project_root(&project, || {
+            let mut entry = LockEntry {
+                name: "demo".to_string(),
+                kind: ItemKind::Skill,
+                source: source.display().to_string(),
+                source_repo: None,
+                harnesses: vec!["ghost".to_string()],
+                method: InstallMethod::Copy,
+                installed_at: "2026-08-11T00:00:00Z".to_string(),
+                source_hash: String::new(),
+            };
+            entry.source_hash = config::compute_source_hash(&entry);
+            let mut lock = LockFile::default();
+            lock.add(entry);
+            lock.save(&config::lock_file_path(false)).unwrap();
+
+            let (ok, note) = verify_skill_install(lock.entries.get("demo").unwrap(), false);
+            assert_eq!(ok, Some(false));
+            let note = note.unwrap();
+            assert!(note.contains("unknown harness"), "{note}");
+            assert!(note.contains("ghost"), "{note}");
+
+            let err = run(ScopeFilter::Project, &[]).unwrap_err().to_string();
+            assert!(err.contains("verification failed"), "{err}");
+        });
+    }
+
+    #[test]
+    fn verify_agent_and_hook_fail_on_unknown_harness_id() {
+        let project = tmpdir("unknown-harness-agent-hook");
+        std::fs::create_dir_all(&project).unwrap();
+
+        crate::test_util::with_project_root(&project, || {
+            let (ok, note) = verify_agent_install("demo", &["ghost".to_string()], false);
+            assert_eq!(ok, Some(false));
+            let note = note.unwrap();
+            assert!(note.contains("unknown harness"), "{note}");
+            assert!(note.contains("ghost"), "{note}");
+
+            let (ok, note) = verify_hook_install("demo", &["ghost".to_string()], false);
+            assert_eq!(ok, Some(false));
+            let note = note.unwrap();
+            assert!(note.contains("unknown harness"), "{note}");
+            assert!(note.contains("ghost"), "{note}");
+        });
+    }
+
+    #[test]
+    fn verify_skill_reports_all_harnesses_sharing_missing_path() {
+        let project = tmpdir("shared-missing-skill-path");
+        std::fs::create_dir_all(&project).unwrap();
+        crate::test_util::with_project_root(&project, || {
+            let entry = LockEntry {
+                name: "demo".to_string(),
+                kind: ItemKind::Skill,
+                source: "/unused/source".to_string(),
+                source_repo: None,
+                harnesses: vec!["codex".to_string(), "pi".to_string()],
+                method: InstallMethod::Copy,
+                installed_at: "2026-08-11T00:00:00Z".to_string(),
+                source_hash: "stored-hash".to_string(),
+            };
+
+            let (ok, note) = verify_skill_install(&entry, false);
+            assert_eq!(ok, Some(false));
+            let note = note.unwrap();
+            assert!(note.contains("codex"), "{note}");
+            assert!(note.contains("pi"), "{note}");
         });
     }
 }

@@ -755,13 +755,20 @@ fn push_pi_package_stage_paths(
     package_dir: &Path,
     include_missing: bool,
 ) -> Result<()> {
-    let Some(source_package_dir) =
-        config::resolve_source_path(&entry.source).and_then(|source_root| {
-            crate::catalog::find_item_path(&source_root, entry.kind, &entry.name)
-        })
-    else {
-        return Ok(());
-    };
+    let source_root = config::resolve_source_path(&entry.source).with_context(|| {
+        format!(
+            "unable to resolve source for locked Pi package {}",
+            entry.name
+        )
+    })?;
+    let source_package_dir = crate::catalog::find_item_path(&source_root, entry.kind, &entry.name)
+        .with_context(|| {
+            format!(
+                "unable to find source package {} in {}",
+                entry.name,
+                source_root.display()
+            )
+        })?;
     push_pi_package_files_from(
         paths,
         project_root,
@@ -778,8 +785,37 @@ fn push_pi_package_files_from(
     enumerate_root: &Path,
     include_missing: bool,
 ) -> Result<()> {
+    let files =
+        pi_package_files_from_source(project_root, package_dir, enumerate_root, include_missing)?;
+    paths.extend(files);
+    Ok(())
+}
+
+fn pi_package_files_from_source(
+    project_root: &Path,
+    package_dir: &Path,
+    enumerate_root: &Path,
+    include_missing: bool,
+) -> Result<BTreeSet<PathBuf>> {
+    pi_package_files_from_source_with_options(
+        project_root,
+        package_dir,
+        enumerate_root,
+        include_missing,
+        true,
+    )
+}
+
+fn pi_package_files_from_source_with_options(
+    project_root: &Path,
+    package_dir: &Path,
+    enumerate_root: &Path,
+    include_missing: bool,
+    skip_node_modules: bool,
+) -> Result<BTreeSet<PathBuf>> {
+    let mut paths = BTreeSet::new();
     if !enumerate_root.is_dir() {
-        return Ok(());
+        return Ok(paths);
     }
     let mut stack = vec![enumerate_root.to_path_buf()];
     while let Some(dir) = stack.pop() {
@@ -789,7 +825,7 @@ fn push_pi_package_files_from(
             let entry = entry.with_context(|| format!("reading {}", dir.display()))?;
             let path = entry.path();
             let file_name = entry.file_name();
-            if file_name == OsStr::new("node_modules") {
+            if skip_node_modules && file_name == OsStr::new("node_modules") {
                 continue;
             }
             let file_type = entry
@@ -806,14 +842,14 @@ fn push_pi_package_files_from(
                 continue;
             };
             push_abs_if_exists(
-                paths,
+                &mut paths,
                 project_root,
                 package_dir.join(relative_to_package),
                 include_missing,
             );
         }
     }
-    Ok(())
+    Ok(paths)
 }
 
 fn push_if_stageable(
@@ -1229,6 +1265,7 @@ fn committed_pi_package_stage_paths(git: &GitProject) -> Result<BTreeSet<PathBuf
     };
     let project_root = config::project_root();
     let mut dirs = BTreeSet::new();
+    let mut owned_paths = BTreeSet::new();
     for entry in lock
         .entries
         .values()
@@ -1238,8 +1275,112 @@ fn committed_pi_package_stage_paths(git: &GitProject) -> Result<BTreeSet<PathBuf
         if let Ok(relative) = package_dir.strip_prefix(&project_root) {
             dirs.insert(relative.to_path_buf());
         }
+        if let Some(source_root) = config::resolve_source_path(&entry.source)
+            && let Some(source_package_dir) =
+                crate::catalog::find_item_path(&source_root, entry.kind, &entry.name)
+        {
+            owned_paths.extend(pi_package_files_from_source_with_options(
+                &project_root,
+                &package_dir,
+                &source_package_dir,
+                true,
+                false,
+            )?);
+        }
+        owned_paths.extend(committed_pi_manifest_owned_package_paths(
+            git,
+            &project_root,
+            &package_dir,
+        )?);
     }
-    git_tracked_project_paths_under(git, &dirs)
+    Ok(git_tracked_project_paths_under(git, &dirs)?
+        .into_iter()
+        .filter(|path| owned_paths.contains(path))
+        .collect())
+}
+
+fn committed_pi_manifest_owned_package_paths(
+    git: &GitProject,
+    project_root: &Path,
+    package_dir: &Path,
+) -> Result<BTreeSet<PathBuf>> {
+    let package_json = package_dir.join("package.json");
+    let Ok(project_package_json) = package_json.strip_prefix(project_root) else {
+        return Ok(BTreeSet::new());
+    };
+    let git_path = project_to_git_path(git, project_package_json);
+    let Some(git_path) = git_path.to_str() else {
+        return Ok(BTreeSet::new());
+    };
+    let spec = format!("HEAD:{git_path}");
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(&git.root)
+        .args(["show", &spec])
+        .output()
+        .with_context(|| format!("reading committed Pi package manifest {}", git_path))?;
+    if !output.status.success() {
+        return Ok(BTreeSet::new());
+    }
+
+    let mut paths = BTreeSet::new();
+    paths.insert(project_package_json.to_path_buf());
+    for relative in pi_manifest_owned_relative_paths(&output.stdout)? {
+        let owned_path = safe_pi_package_manifest_path(&relative)
+            .with_context(|| format!("unsafe committed Pi package path {relative}"))?;
+        let abs_path = package_dir.join(owned_path);
+        if let Ok(project_path) = abs_path.strip_prefix(project_root) {
+            paths.insert(project_path.to_path_buf());
+        }
+    }
+    Ok(paths)
+}
+
+fn pi_manifest_owned_relative_paths(bytes: &[u8]) -> Result<BTreeSet<String>> {
+    let manifest: serde_json::Value =
+        serde_json::from_slice(bytes).context("parsing committed Pi package manifest")?;
+    let mut paths = BTreeSet::new();
+    if let Some(pi) = manifest.get("pi") {
+        if let Some(extensions) = pi.get("extensions").and_then(serde_json::Value::as_array) {
+            for value in extensions {
+                if let Some(path) = value.as_str() {
+                    paths.insert(path.to_string());
+                }
+            }
+        }
+        if let Some(path) = pi.get("appendSystem").and_then(serde_json::Value::as_str) {
+            paths.insert(path.to_string());
+        }
+    }
+    match manifest.get("bin") {
+        Some(serde_json::Value::String(path)) => {
+            paths.insert(path.to_string());
+        }
+        Some(serde_json::Value::Object(map)) => {
+            for value in map.values() {
+                if let Some(path) = value.as_str() {
+                    paths.insert(path.to_string());
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(paths)
+}
+
+fn safe_pi_package_manifest_path(relative: &str) -> Result<PathBuf> {
+    let path = relative.trim_start_matches("./");
+    let path = Path::new(path);
+    if path.is_absolute() {
+        bail!("path must be relative");
+    }
+    for component in path.components() {
+        match component {
+            std::path::Component::Normal(_) | std::path::Component::CurDir => {}
+            _ => bail!("path must stay inside the package"),
+        }
+    }
+    Ok(path.to_path_buf())
 }
 
 fn git_tracked_project_paths_under(

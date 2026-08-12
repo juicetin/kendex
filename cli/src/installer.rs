@@ -1249,7 +1249,7 @@ fn canonicalize_allowing_missing(path: &Path) -> Option<PathBuf> {
 /// relative for ordinary directories, absolute when `from` sits behind
 /// symlink indirection (see body).
 #[cfg(unix)]
-fn relative_path(from: &Path, to: &Path) -> Result<PathBuf> {
+pub(crate) fn relative_path(from: &Path, to: &Path) -> Result<PathBuf> {
     let from_lexical = normalize_absolute_path(from);
     let from_canonical = std::fs::canonicalize(from).unwrap_or_else(|_| from_lexical.clone());
     let to = std::fs::canonicalize(to).unwrap_or_else(|_| normalize_absolute_path(to));
