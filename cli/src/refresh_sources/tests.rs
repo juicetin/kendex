@@ -1055,3 +1055,49 @@ fn remote_urls_carrying_a_query_or_fragment_are_rejected_and_redacted() {
         "https://example.com/Owner/Repo.git"
     );
 }
+
+#[test]
+fn cached_repo_origin_with_matching_identity_is_still_rejected_when_it_carries_a_credential() {
+    let root = TempDir::new("cached-origin-credential");
+    let cache = root.path().join("cache").join("remote");
+    init_git_repo(&cache);
+    // Identity-equal to the clean expected URL: userinfo normalizes away, so the
+    // mismatch check alone would accept this and then fetch with the token.
+    git(
+        &cache,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://cache-token@github.com/Owner/Repo.git",
+        ],
+    );
+
+    let err = validate_cached_repo_origin(
+        &remote_source_display("Owner/Repo"),
+        "https://github.com/Owner/Repo.git",
+        &cache,
+    )
+    .unwrap_err()
+    .to_string();
+
+    assert!(err.contains("credential-bearing origin"), "{err}");
+    assert!(!err.contains("cache-token"), "{err}");
+
+    // A clean origin with the same identity still validates.
+    git(
+        &cache,
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            "https://github.com/Owner/Repo.git",
+        ],
+    );
+    validate_cached_repo_origin(
+        &remote_source_display("Owner/Repo"),
+        "https://github.com/Owner/Repo.git",
+        &cache,
+    )
+    .unwrap();
+}

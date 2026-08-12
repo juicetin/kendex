@@ -847,6 +847,15 @@ fn validate_cached_repo_origin(display: &str, expected_url: &str, repo_dir: &Pat
             remote_source_display(expected_url)
         );
     }
+    // A matching identity is not a clean origin: identity comparison normalizes
+    // userinfo and query away, so a cache whose own origin carries a token
+    // passes the check above and then hands that token to the very next
+    // `git fetch origin`. Hold it to the same bar as an input URL.
+    reject_credential_bearing_git_url(&git_subprocess_url(&actual)).with_context(|| {
+        format!(
+            "cached source {display} has a credential-bearing origin; remove the cache directory and retry"
+        )
+    })?;
     Ok(())
 }
 
