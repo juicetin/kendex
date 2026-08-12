@@ -497,9 +497,15 @@ pub fn refresh_items_in_scope(
             let mut remedies = Vec::new();
             for (skill_source, skills) in &by_source {
                 remedies.push(format!(
-                    "run `vstack add {} {scope_flag}--skill {}`",
-                    crate::shell::quote(skill_source),
-                    skills.join(",")
+                    "run {}",
+                    crate::shell::command(&[
+                        crate::shell::Part::Fixed("vstack add"),
+                        crate::shell::Part::Arg(skill_source),
+                        crate::shell::Part::Fixed(&format!(
+                            "{scope_flag}--skill {}",
+                            skills.join(",")
+                        )),
+                    ])
                 ));
             }
             if !absent.is_empty() {

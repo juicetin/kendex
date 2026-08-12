@@ -876,3 +876,226 @@ fn every_cache_git_invocation_carries_the_same_non_interactive_environment() {
         "the clone path does not match the update path's environment"
     );
 }
+
+/// A best-effort update must distinguish the two failures it can meet: a fetch
+/// that failed leaves a cache vstack owns, whose stale contents are still the
+/// requested source at an older revision, while an ownership refusal means the
+/// entry's contents belong to some other checkout.
+#[test]
+#[cfg(unix)]
+fn best_effort_cache_update_tolerates_a_failed_fetch_and_refuses_an_unowned_entry() {
+    let root = TempDir::new("best-effort-update-classes");
+
+    // Control: a cache vstack owns whose fetch cannot succeed stays usable, so
+    // the refusal asserted below is specific to ownership and not to failure.
+    let stale = root.path().join("cache").join("stale");
+    init_git_repo(&stale);
+    git(
+        &stale,
+        &[
+            "remote",
+            "add",
+            "origin",
+            root.path().join("missing.git").to_str().unwrap(),
+        ],
+    );
+    update_cached_repo_best_effort("owner/repo", &stale)
+        .expect("a cache vstack owns must stay usable when only its fetch failed");
+
+    let checkout = root.path().join("user-checkout");
+    init_git_repo(&checkout);
+    std::fs::write(checkout.join("uncommitted.txt"), "precious\n").unwrap();
+    let linked = root.path().join("cache").join("linked");
+    std::os::unix::fs::symlink(&checkout, &linked).unwrap();
+
+    let err = update_cached_repo_best_effort("owner/repo", &linked)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("refusing to update"), "{err}");
+    assert!(err.contains("symlink"), "{err}");
+    assert!(
+        checkout.join("uncommitted.txt").exists(),
+        "the linked checkout must be untouched"
+    );
+}
+
+/// Fixture: a cache entry that is a symlink to a user checkout carrying the
+/// expected `origin`, so every check except the ownership gate accepts it.
+#[cfg(unix)]
+fn link_cache_entry_at(cache: &Path, checkout: &Path) {
+    init_git_repo(checkout);
+    git(
+        checkout,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/owner/repo.git",
+        ],
+    );
+    std::fs::write(checkout.join("uncommitted.txt"), "precious\n").unwrap();
+    std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(checkout, cache).unwrap();
+}
+
+#[test]
+#[cfg(unix)]
+fn remote_source_best_effort_refuses_a_symlinked_cache_instead_of_returning_it() {
+    let root = TempDir::new("best-effort-symlinked-cache");
+    let home = root.path().join("home");
+    let config_home = root.path().join("config");
+    let checkout = root.path().join("user-checkout");
+
+    crate::test_util::with_home_and_config(&home, &config_home, || {
+        let cache = remote_cache_dir("owner/repo").unwrap();
+        link_cache_entry_at(&cache, &checkout);
+
+        // Control: the fixture passes the origin check, so the refusal below is
+        // the ownership gate and not a cache this source never matched.
+        validate_cached_repo_origin(
+            "owner/repo",
+            "https://github.com/owner/repo.git",
+            &cache,
+        )
+        .expect("fixture cache must validate as this source's cache");
+
+        let err = clone_or_update_remote_source_best_effort("owner/repo")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("refusing to update"), "{err}");
+        assert!(err.contains("symlink"), "{err}");
+        assert!(
+            checkout.join("uncommitted.txt").exists(),
+            "the linked checkout must be untouched"
+        );
+    });
+}
+
+#[test]
+#[cfg(unix)]
+fn remote_source_best_effort_refuses_a_symlinked_legacy_cache_instead_of_returning_it() {
+    let root = TempDir::new("best-effort-symlinked-legacy-cache");
+    let home = root.path().join("home");
+    let config_home = root.path().join("config");
+    let checkout = root.path().join("user-checkout");
+
+    crate::test_util::with_home_and_config(&home, &config_home, || {
+        let canonical = remote_cache_dir("owner/repo").unwrap();
+        let legacy = legacy_remote_cache_dirs("owner/repo", &canonical)
+            .into_iter()
+            .next()
+            .expect("owner/repo has a legacy cache key");
+        link_cache_entry_at(&legacy, &checkout);
+
+        // Control: the canonical cache is absent, so the legacy branch is the
+        // one under test, and the legacy entry passes the origin check.
+        assert!(
+            !canonical.join(".git").exists(),
+            "the canonical cache must be absent for the legacy branch to run"
+        );
+        validate_cached_repo_origin(
+            "owner/repo",
+            "https://github.com/owner/repo.git",
+            &legacy,
+        )
+        .expect("fixture legacy cache must validate as this source's cache");
+
+        let err = clone_or_update_remote_source_best_effort("owner/repo")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("refusing to update"), "{err}");
+        assert!(err.contains("symlink"), "{err}");
+        assert!(
+            checkout.join("uncommitted.txt").exists(),
+            "the linked checkout must be untouched"
+        );
+    });
+}
+
+/// A cache whose `core.worktree` points at a user checkout passes every check
+/// on the entry itself; only the work-tree gate inside the updater catches it.
+/// Resolution must drop such a source rather than hand back the checkout.
+#[test]
+#[cfg(unix)]
+fn resolving_a_remote_source_drops_a_cache_whose_work_tree_is_redirected() {
+    let root = TempDir::new("resolve-redirected-worktree-cache");
+    let home = root.path().join("home");
+    let config_home = root.path().join("config");
+    let checkout = root.path().join("user-checkout");
+    init_git_repo(&checkout);
+    std::fs::write(checkout.join("uncommitted.txt"), "precious\n").unwrap();
+
+    crate::test_util::with_home_and_config(&home, &config_home, || {
+        let cache = remote_cache_dir("owner/repo").unwrap();
+        init_git_repo(&cache);
+        git(
+            &cache,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/owner/repo.git",
+            ],
+        );
+        git(
+            &cache,
+            &["config", "core.worktree", checkout.to_str().unwrap()],
+        );
+
+        // Control: the entry itself is a plain owned directory that resolution
+        // finds and the origin check accepts, so the `None` below is the
+        // updater's refusal rather than a cache that was never a candidate.
+        assert_eq!(
+            existing_remote_cache_dir("owner/repo"),
+            Some(cache.clone()),
+            "the fixture must be a cache resolution otherwise accepts"
+        );
+
+        assert!(
+            resolve_single_source("owner/repo").is_none(),
+            "a cache the updater refuses must not be handed back as the source"
+        );
+        assert!(
+            checkout.join("uncommitted.txt").exists(),
+            "the redirected checkout must be untouched"
+        );
+    });
+}
+
+/// The same refusal on the read-only resolution path: a cache entry vstack does
+/// not own is some other checkout's working tree, and installing from it would
+/// treat that tree's uncommitted contents as the remote source.
+#[test]
+#[cfg(unix)]
+fn resolving_a_remote_source_drops_a_symlinked_cache_entry() {
+    let root = TempDir::new("resolve-symlinked-cache");
+    let home = root.path().join("home");
+    let config_home = root.path().join("config");
+    let checkout = root.path().join("user-checkout");
+
+    crate::test_util::with_home_and_config(&home, &config_home, || {
+        let cache = remote_cache_dir("owner/repo").unwrap();
+        link_cache_entry_at(&cache, &checkout);
+
+        assert!(
+            resolve_source_path("owner/repo").is_none(),
+            "a symlinked cache entry must not resolve as the remote source"
+        );
+
+        // Control: with a real cache directory at the same key, carrying the
+        // same origin, the source resolves — so the `None` above is the
+        // symlink and not a fixture that could never resolve.
+        std::fs::remove_file(&cache).unwrap();
+        init_git_repo(&cache);
+        git(
+            &cache,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/owner/repo.git",
+            ],
+        );
+        assert_eq!(resolve_source_path("owner/repo"), Some(cache));
+    });
+}

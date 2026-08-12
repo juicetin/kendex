@@ -343,8 +343,11 @@ fn resolve_single_source_with(
     // then use the cached clone without side effects from pure attribution/hash paths.
     let cached = existing_remote_cache_dir(source)?;
     if cached.join(".git").exists() {
-        if update_remote {
-            update_cached_repo_best_effort(source, &cached);
+        if update_remote
+            && let Err(err) = update_cached_repo_best_effort(source, &cached)
+        {
+            eprintln!("  Warning: {err}");
+            return None;
         }
         return Some(cached);
     }
@@ -425,7 +428,7 @@ pub(crate) fn clone_or_update_remote_source_best_effort(source: &str) -> Result<
 
     if cache_dir.join(".git").exists() {
         validate_cached_repo_origin(&display, &git_url, &cache_dir)?;
-        update_cached_repo_best_effort(source, &cache_dir);
+        update_cached_repo_best_effort(source, &cache_dir)?;
         return Ok(Some(cache_dir));
     }
 
@@ -435,7 +438,7 @@ pub(crate) fn clone_or_update_remote_source_best_effort(source: &str) -> Result<
         }
         match validate_cached_repo_origin(&display, &git_url, &legacy_dir) {
             Ok(()) => {
-                update_cached_repo_best_effort(source, &legacy_dir);
+                update_cached_repo_best_effort(source, &legacy_dir)?;
                 return Ok(Some(legacy_dir));
             }
             Err(err) => {
@@ -478,7 +481,9 @@ pub(crate) fn refresh_remote_cache_update_only_best_effort(source: &str) {
         }
         match validate_cached_repo_origin(&display, &git_url, &legacy_dir) {
             Ok(()) => {
-                update_cached_repo_best_effort(source, &legacy_dir);
+                if let Err(err) = update_cached_repo_best_effort(source, &legacy_dir) {
+                    eprintln!("  Warning: {err}");
+                }
                 return;
             }
             Err(err) => {
@@ -597,19 +602,35 @@ fn existing_remote_cache_dir(source: &str) -> Option<PathBuf> {
     let git_url = remote_git_url_for_subprocess(source).ok()??;
     let display = remote_source_display(source);
     if cache_dir.join(".git").exists() {
-        if validate_cached_repo_origin(&display, &git_url, &cache_dir).is_ok() {
+        if usable_cache_entry(&display, &git_url, &cache_dir) {
             return Some(cache_dir);
         }
         return None;
     }
     for legacy_dir in legacy_remote_cache_dirs(source, &cache_dir) {
-        if legacy_dir.join(".git").exists()
-            && validate_cached_repo_origin(&display, &git_url, &legacy_dir).is_ok()
-        {
+        if legacy_dir.join(".git").exists() && usable_cache_entry(&display, &git_url, &legacy_dir) {
             return Some(legacy_dir);
         }
     }
     None
+}
+
+/// Whether a cache entry may stand in for the remote source.
+///
+/// Ownership is checked here and not only before an update: an entry that is a
+/// symlink, or whose git metadata is redirected, is some other checkout's
+/// working tree, and reading it would install that tree's uncommitted state as
+/// the requested remote source. The refusal is reported rather than swallowed,
+/// because the caller can only say the source is missing.
+fn usable_cache_entry(display: &str, git_url: &str, repo_dir: &Path) -> bool {
+    if validate_cached_repo_origin(display, git_url, repo_dir).is_err() {
+        return false;
+    }
+    if let Err(err) = reject_unsafe_cache_dir(display, repo_dir) {
+        eprintln!("  Warning: {err}");
+        return false;
+    }
+    true
 }
 
 pub(crate) fn remote_cache_key(source: &str) -> String {
@@ -749,11 +770,28 @@ fn is_plaintext_http_remote(source: &str) -> bool {
         .is_some_and(|prefix| prefix.eq_ignore_ascii_case("http://"))
 }
 
-fn update_cached_repo_best_effort(source: &str, repo_dir: &Path) {
+/// Update a cache in place, tolerating a failed fetch but not a refusal.
+///
+/// The two failures are not the same news. A fetch that failed leaves a cache
+/// vstack owns, whose stale contents are still the requested source at an
+/// older revision, so callers may use it. A refusal from
+/// [`ensure_cache_entry_is_owned`] means the entry's contents are some other
+/// checkout's working tree, and returning it would install that tree's
+/// uncommitted state as the remote source; that error propagates.
+fn update_cached_repo_best_effort(source: &str, repo_dir: &Path) -> Result<()> {
     let display = remote_source_display(source);
+    ensure_cache_entry_is_owned(&display, repo_dir)?;
     if let Err(err) = update_cached_repo_strict(&display, repo_dir) {
         eprintln!("  Warning: {err}; using cached version");
     }
+    Ok(())
+}
+
+/// The checks that decide whether a cache entry is vstack's to update and to
+/// read from, rather than a link or a redirection onto a user checkout.
+fn ensure_cache_entry_is_owned(display: &str, repo_dir: &Path) -> Result<()> {
+    reject_unsafe_cache_dir(display, repo_dir)?;
+    require_cache_is_git_toplevel(display, repo_dir)
 }
 
 /// `update_cached_repo_strict` runs `reset --hard` and `clean -ffdx`, which
@@ -986,8 +1024,7 @@ fn require_cache_is_git_toplevel(display: &str, repo_dir: &Path) -> Result<()> {
 }
 
 fn update_cached_repo_strict(display: &str, repo_dir: &Path) -> Result<()> {
-    reject_unsafe_cache_dir(display, repo_dir)?;
-    require_cache_is_git_toplevel(display, repo_dir)?;
+    ensure_cache_entry_is_owned(display, repo_dir)?;
     eprintln!("Updating cached repo {display}...");
     let fetch = cache_git_command(repo_dir)
         .args([

@@ -1138,16 +1138,14 @@ fn package_declares_runtime_dependencies(package_dir: &Path) -> Result<bool> {
         || manifest_object_field_non_empty(&parsed, "optionalDependencies"))
 }
 
-fn shell_quote_path(path: &Path) -> String {
-    crate::shell::quote(&path.to_string_lossy())
-}
-
 fn npm_production_install_command(package_dir: &Path) -> String {
-    format!(
-        "cd {} && npm {}",
-        shell_quote_path(package_dir),
-        NPM_PRODUCTION_INSTALL_ARGS.join(" ")
-    )
+    let npm_args = NPM_PRODUCTION_INSTALL_ARGS.join(" ");
+    crate::shell::command(&[
+        crate::shell::Part::Fixed("cd"),
+        crate::shell::Part::Arg(&package_dir.to_string_lossy()),
+        crate::shell::Part::Fixed("&& npm"),
+        crate::shell::Part::Fixed(&npm_args),
+    ])
 }
 
 fn install_production_dependencies_if_needed(package_name: &str, package_dir: &Path) -> Result<()> {
@@ -1164,7 +1162,7 @@ fn install_production_dependencies_if_needed(package_name: &str, package_dir: &P
         .output()
         .with_context(|| {
             format!(
-                "pi-package {package_name} declares production dependencies, but npm could not run. Recovery: `{recovery}`"
+                "pi-package {package_name} declares production dependencies, but npm could not run. Recovery: {recovery}"
             )
         })?;
 
@@ -1177,7 +1175,7 @@ fn install_production_dependencies_if_needed(package_name: &str, package_dir: &P
             details = output.status.to_string();
         }
         anyhow::bail!(
-            "pi-package {package_name} declares production dependencies, but `npm install` failed in {}: {details}. Recovery: `{recovery}`",
+            "pi-package {package_name} declares production dependencies, but `npm install` failed in {}: {details}. Recovery: {recovery}",
             package_dir.display()
         );
     }
@@ -1757,7 +1755,7 @@ printf '\n' >> "$log"
 mkdir -p node_modules/left-pad
 printf 'module.exports = 1;\n' > node_modules/left-pad/index.js
 "#,
-                log = shell_quote_path(log_path)
+                log = crate::shell::posix_quote(&log_path.to_string_lossy())
             ),
         )
         .unwrap();
@@ -1825,7 +1823,7 @@ printf 'module.exports = 1;\n' > node_modules/left-pad/index.js
             "error should name package {package}, got: {message}"
         );
         assert!(
-            message.contains(&format!("Recovery: `{expected_recovery}`")),
+            message.contains(&format!("Recovery: {expected_recovery}")),
             "error should include exact recovery command, got: {message}"
         );
     }

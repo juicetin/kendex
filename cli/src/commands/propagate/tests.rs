@@ -1230,6 +1230,100 @@ fn staging_relocated_project_skills_names_the_real_tracked_path() {
     });
 }
 
+/// A `project-skills-dir` entry can itself be a link at another in-repo skill,
+/// a layout `refresh` accepts and updates through. Nothing else enumerates the
+/// target, so skipping every link left the modified file unstaged.
+#[cfg(unix)]
+#[test]
+fn staging_a_linked_project_skills_entry_names_its_in_repo_target() {
+    let project = tmpdir("stage-linked-project-skill-target");
+    std::fs::create_dir_all(&project).unwrap();
+    init_git_project(&project);
+
+    crate::test_util::with_project_root(&project, || {
+        LockFile::default()
+            .save(&config::lock_file_path(false))
+            .unwrap();
+        write_file(
+            &project.join("vstack.toml"),
+            "project-skills-dir = \"project-skills\"\n",
+        );
+        write_file(
+            &project.join("vendor-skills/shared/SKILL.md"),
+            "---\nname: shared\ndescription: Shared skill\n---\n\n# Shared\n",
+        );
+        std::fs::create_dir_all(project.join("project-skills")).unwrap();
+        std::os::unix::fs::symlink(
+            "../vendor-skills/shared",
+            project.join("project-skills/shared"),
+        )
+        .unwrap();
+
+        // Control: the link really does resolve, so the assertions below are
+        // about staging and not about a fixture that names nothing.
+        assert!(
+            project.join("project-skills/shared/SKILL.md").is_file(),
+            "the fixture link does not resolve, so nothing here exercises a linked entry"
+        );
+
+        stage_project_paths(&[]).unwrap();
+
+        let staged = git_output(&project, &["diff", "--cached", "--name-only"]);
+        assert!(staged.contains("vendor-skills/shared/SKILL.md\n"), "{staged}");
+        assert!(
+            !staged.contains("project-skills/shared/SKILL.md"),
+            "git refuses a pathspec that walks through the link: {staged}"
+        );
+    });
+}
+
+/// A link that leaves the project has no in-project path git could stage, and
+/// must not drag an outside file into the consumer's commit.
+#[cfg(unix)]
+#[test]
+fn staging_ignores_a_project_skills_entry_linked_outside_the_project() {
+    let outside = tmpdir("stage-linked-skill-outside");
+    let project = tmpdir("stage-linked-skill-project");
+    std::fs::create_dir_all(&project).unwrap();
+    init_git_project(&project);
+    write_file(
+        &outside.join("shared/SKILL.md"),
+        "---\nname: shared\ndescription: Shared skill\n---\n\n# Shared\n",
+    );
+
+    crate::test_util::with_project_root(&project, || {
+        LockFile::default()
+            .save(&config::lock_file_path(false))
+            .unwrap();
+        write_file(
+            &project.join("vstack.toml"),
+            "project-skills-dir = \"project-skills\"\n",
+        );
+        std::fs::create_dir_all(project.join("project-skills")).unwrap();
+        std::os::unix::fs::symlink(
+            outside.join("shared"),
+            project.join("project-skills/outside"),
+        )
+        .unwrap();
+
+        // Control: the link resolves, so the empty staging below is the
+        // containment check and not a broken fixture.
+        assert!(
+            project.join("project-skills/outside/SKILL.md").is_file(),
+            "the fixture link does not resolve"
+        );
+
+        stage_project_paths(&[]).unwrap();
+
+        let staged = git_output(&project, &["diff", "--cached", "--name-only"]);
+        assert!(
+            staged.contains(".vstack-lock.json"),
+            "staging did not run at all: {staged}"
+        );
+        assert!(!staged.contains("SKILL.md"), "{staged}");
+    });
+}
+
 #[test]
 fn staging_is_scoped_to_nested_project_paths_from_git_top_level() {
     let repo = tmpdir("stage-nested-repo");

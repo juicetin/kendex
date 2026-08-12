@@ -1494,22 +1494,43 @@ fn push_project_skill_dirs_from(
         {
             continue;
         }
-        // A relocated skill reaches `.agents/skills/<name>` as a symlink to its
-        // home under `project-skills-dir`. Git refuses any pathspec that walks
-        // through a link ("is beyond a symbolic link"), and the tracked file is
-        // the target anyway — this same pass over the configured directory
-        // enumerates it at its real path.
         let file_type = entry
             .file_type()
             .with_context(|| format!("reading {}", path.display()))?;
-        if file_type.is_symlink() {
-            continue;
-        }
-        if path.join("SKILL.md").is_file() {
-            push_abs_if_exists(paths, project_root, path.join("SKILL.md"), include_missing);
+        let skill_dir = if file_type.is_symlink() {
+            let Some(target) = in_project_link_target(project_root, &path) else {
+                continue;
+            };
+            target
+        } else {
+            path
+        };
+        if skill_dir.join("SKILL.md").is_file() {
+            push_abs_if_exists(
+                paths,
+                project_root,
+                skill_dir.join("SKILL.md"),
+                include_missing,
+            );
         }
     }
     Ok(())
+}
+
+/// The in-project directory a linked skill entry actually names.
+///
+/// A relocated skill reaches `.agents/skills/<name>` as a link to its home
+/// under `project-skills-dir`, and a `project-skills-dir` entry can itself link
+/// at another in-repo skill that no pass enumerates directly. Git refuses any
+/// pathspec that walks through a link ("is beyond a symbolic link"), so the
+/// path to stage is the target's own. A link that leaves the project has no
+/// such path, and staging what it points at would drag a file the consumer's
+/// repository does not track into their commit.
+fn in_project_link_target(project_root: &Path, link: &Path) -> Option<PathBuf> {
+    let target = std::fs::canonicalize(link).ok()?;
+    let root = std::fs::canonicalize(project_root).ok()?;
+    let relative = target.strip_prefix(&root).ok()?;
+    Some(project_root.join(relative))
 }
 
 fn safe_project_relative_path(relative: &str) -> Result<PathBuf> {
