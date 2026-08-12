@@ -1343,6 +1343,7 @@ fn refresh_refuses_to_replace_a_real_directory_with_a_project_skills_link() {
 /// The relaxation is scoped to the CONFIGURED directory. Without the opt-in a
 /// link pointing out of `.agents/skills` is still refused, which is the guard
 /// that keeps an arbitrary escape from being followed.
+#[cfg(unix)]
 #[test]
 fn refresh_still_refuses_an_unconfigured_link_out_of_the_skills_root() {
     let root = tmpdir("relocated-project-skills-unconfigured");
@@ -2099,6 +2100,7 @@ fn refresh_run_leaves_project_config_untouched_when_source_mapping_is_schema_inv
 /// source catalogs before that, so a caller-supplied record set that omits the
 /// hint leaves the recovered entry with no catalog to refresh from: the entry
 /// lands in the lock and the item on disk is silently left stale.
+#[cfg(unix)]
 #[test]
 fn refresh_refreshes_an_entry_reconciliation_recovers_from_disk() {
     let root = tmpdir("recovered-entry-refreshed");
@@ -2198,39 +2200,64 @@ fn snapshot_tree(root: &Path) -> Vec<(String, String)> {
     out
 }
 
+/// The panic message `snapshot_tree` produced for `root`, or a failure when it
+/// returned a snapshot instead.
+#[cfg(unix)]
+fn snapshot_tree_panic_message(root: &Path) -> String {
+    match std::panic::catch_unwind(|| snapshot_tree(root)) {
+        Ok(snapshot) => panic!("snapshot_tree hid the read failure and returned {snapshot:?}"),
+        Err(payload) => payload
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| payload.downcast_ref::<&str>().map(|msg| (*msg).to_string()))
+            .unwrap_or_else(|| panic!("snapshot_tree panicked with a non-string payload")),
+    }
+}
+
 /// `snapshot_tree` is the instrument the no-mutation assertions read through: a
 /// read failure it swallows makes two snapshots agree over a tree it never
-/// looked at, and every test built on it passes vacuously. Proving the read
-/// really fails first keeps this from passing for the wrong reason on a
-/// filesystem where the permission bits do not bite.
+/// looked at, and every test built on it passes vacuously.
+///
+/// Two unreadable directories are put to it. A directory that is not there is
+/// unreadable for every user, so that arm carries the claim unconditionally. A
+/// mode-`000` directory is the realistic case but root and ACL-bypassing
+/// filesystems read it anyway, so its arm asserts only once the fixture is
+/// proven unreadable.
+#[cfg(unix)]
 #[test]
-#[should_panic(expected = "read snapshot dir")]
 fn snapshot_tree_fails_loudly_when_a_directory_cannot_be_read() {
     use std::os::unix::fs::PermissionsExt;
 
     let root = tmpdir("snapshot-unreadable-dir");
+    std::fs::create_dir_all(&root).unwrap();
+
+    let absent = root.join("absent");
+    assert!(
+        std::fs::read_dir(&absent).is_err(),
+        "control failed: the absent fixture directory is readable"
+    );
+    let message = snapshot_tree_panic_message(&absent);
+    assert!(
+        message.contains("read snapshot dir"),
+        "wrong panic for an absent directory: {message}"
+    );
+
     let locked = root.join("locked");
     std::fs::create_dir_all(&locked).unwrap();
     std::fs::write(locked.join("inside"), "content").unwrap();
     std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
-
-    // Control: the panic below is worth nothing unless this really is a
-    // directory the walk cannot read.
-    let readable = std::fs::read_dir(&locked).is_ok();
-    if readable {
-        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let _ = std::fs::remove_dir_all(&root);
-        panic!("control failed: the unreadable fixture directory is readable");
-    }
-
-    // Restoring the mode is unreachable on the failing path, so the fixture is
-    // reopened before the call that must panic.
-    let result = std::panic::catch_unwind(|| snapshot_tree(&root));
+    // Restoring the mode is unreachable once an assertion fires, so the message
+    // is captured first and judged after the fixture is reopened.
+    let locked_message = std::fs::read_dir(&locked)
+        .is_err()
+        .then(|| snapshot_tree_panic_message(&root));
     std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
     let _ = std::fs::remove_dir_all(&root);
-    match result {
-        Ok(snapshot) => panic!("snapshot_tree hid the read failure and returned {snapshot:?}"),
-        Err(payload) => std::panic::resume_unwind(payload),
+    if let Some(message) = locked_message {
+        assert!(
+            message.contains("read snapshot dir"),
+            "wrong panic for an unreadable directory: {message}"
+        );
     }
 }
 
@@ -2239,6 +2266,7 @@ fn snapshot_tree_fails_loudly_when_a_directory_cannot_be_read() {
 /// saves the lock, so a check placed after it drops the lock entry of a skill
 /// whose artifact went missing and only then aborts: repairing the mapping and
 /// re-running can no longer reinstall that skill, because nothing records it.
+#[cfg(unix)]
 #[test]
 fn refresh_run_mutates_nothing_when_source_mapping_is_schema_invalid() {
     let root = tmpdir("invalid-mapping-no-mutation");

@@ -66,13 +66,6 @@ pub fn run(
         bail!("--stage is only supported with --scope project");
     }
 
-    let (pre_refresh_stage_paths, pre_refresh_dirty_shared) = if stage {
-        let stage_paths = pre_refresh_project_stage_paths()?;
-        let dirty = dirty_shared_config_paths(&stage_paths)?;
-        (stage_paths, dirty)
-    } else {
-        (Vec::new(), Vec::new())
-    };
     let mut checked_any = false;
     let mut drift_any = false;
     let mut unavailable_sources = false;
@@ -105,6 +98,22 @@ pub fn run(
     if unavailable_sources {
         bail!("cannot propagate while one or more locked sources are unavailable");
     }
+
+    // Collected here and not before the drift loop: `detect_drift_for_scope` is
+    // what clones or updates the locked remote caches, and the source manifests
+    // this set is built from are read out of them. Built earlier it reads a
+    // cache that is absent or a revision behind, so an upstream package that
+    // newly declares `pi.appendSystem` is invisible, `.pi/APPEND_SYSTEM.md`
+    // never enters the guarded set, and the staging pass absorbs the consumer's
+    // own edit to it. Still ahead of the refresh, which is what the guard is
+    // for.
+    let (pre_refresh_stage_paths, pre_refresh_dirty_shared) = if stage {
+        let stage_paths = pre_refresh_project_stage_paths()?;
+        let dirty = dirty_shared_config_paths(&stage_paths)?;
+        (stage_paths, dirty)
+    } else {
+        (Vec::new(), Vec::new())
+    };
 
     if !drift_any {
         if check {
@@ -882,18 +891,6 @@ fn short_hash(hash: &str) -> String {
     }
 }
 
-/// How a locked source that will not resolve should be treated while
-/// collecting stage paths.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum SourceStrictness {
-    /// Fail: the paths this pass returns are the authoritative staged set.
-    Required,
-    /// Skip the item: this pass runs before sources have been resolved, so a
-    /// remote cache may not exist yet on a clean runner. `stage_project_paths`
-    /// recollects with `Required` after the refresh, so nothing is lost.
-    BestEffort,
-}
-
 /// Whether a refresh rewrote the managed tree in this invocation. A Pi package
 /// directory is cleared and re-copied wholesale by install, so after a refresh
 /// every tracked path under it is vstack-driven; without one, a vanished
@@ -904,10 +901,12 @@ enum RefreshState {
     NotRefreshed,
 }
 
+/// The guarded, pre-refresh stage path set. Its caller runs it after strict
+/// source resolution, so every locked source is expected to resolve and one
+/// that does not fails the propagation rather than dropping its paths.
 fn pre_refresh_project_stage_paths() -> Result<Vec<PathBuf>> {
     let lock = LockFile::load(&config::lock_file_path(false))?;
-    // Runs before `detect_drift_for_scope` clones remote sources.
-    project_stage_paths_with(&lock, true, SourceStrictness::BestEffort)
+    project_stage_paths(&lock, true)
 }
 
 fn stage_project_paths(pre_refresh_paths: &[PathBuf]) -> Result<()> {
@@ -968,15 +967,31 @@ fn stage_paths(paths: &[PathBuf]) -> Result<()> {
     Ok(())
 }
 
-fn project_stage_paths(lock: &LockFile, include_missing: bool) -> Result<Vec<PathBuf>> {
-    project_stage_paths_with(lock, include_missing, SourceStrictness::Required)
+/// The Pi package manifest in `dir`, or `None` when there is no manifest there
+/// — a package that is not installed yet, or a source item that is not a Pi
+/// package.
+///
+/// Every other outcome is an error. A manifest that cannot be read or parsed
+/// says nothing about whether the package declares `pi.appendSystem`, and
+/// answering "it does not" from one drops `.pi/APPEND_SYSTEM.md` out of the
+/// guarded set: refresh then writes its managed block into a prompt whose
+/// uncommitted consumer edits the staging pass absorbs wholesale. `try_exists`
+/// rather than `exists`, because the latter reports a permission failure as
+/// absence and reopens the same hole.
+fn read_pi_package_manifest(dir: &Path) -> Result<Option<crate::pi_extension::PiExtension>> {
+    let manifest = dir.join("package.json");
+    if !manifest
+        .try_exists()
+        .with_context(|| format!("checking {}", manifest.display()))?
+    {
+        return Ok(None);
+    }
+    crate::pi_extension::PiExtension::from_dir(dir)
+        .map(Some)
+        .with_context(|| format!("reading Pi package manifest {}", manifest.display()))
 }
 
-fn project_stage_paths_with(
-    lock: &LockFile,
-    include_missing: bool,
-    strictness: SourceStrictness,
-) -> Result<Vec<PathBuf>> {
+fn project_stage_paths(lock: &LockFile, include_missing: bool) -> Result<Vec<PathBuf>> {
     let project_root = config::project_root();
     let mut paths = BTreeSet::new();
     push_if_stageable(
@@ -1088,7 +1103,6 @@ fn project_stage_paths_with(
                     entry,
                     &package_dir,
                     include_missing,
-                    strictness,
                 )?;
                 // The source is asked as well as the installed copy. An update
                 // that adds `pi.appendSystem` for the first time declares it
@@ -1097,13 +1111,12 @@ fn project_stage_paths_with(
                 // managed block into a consumer prompt whose uncommitted edits
                 // the post-refresh staging pass then absorbs wholesale.
                 if let Some(source_package_dir) = &source_package_dir
-                    && let Ok(source_ext) =
-                        crate::pi_extension::PiExtension::from_dir(source_package_dir)
+                    && let Some(source_ext) = read_pi_package_manifest(source_package_dir)?
                     && source_ext.append_system.is_some()
                 {
                     has_pi_append_system = true;
                 }
-                if let Ok(ext) = crate::pi_extension::PiExtension::from_dir(&package_dir) {
+                if let Some(ext) = read_pi_package_manifest(&package_dir)? {
                     if ext.append_system.is_some() {
                         has_pi_append_system = true;
                     }
@@ -1293,9 +1306,8 @@ fn push_installed_files_from_source(
     Ok(())
 }
 
-/// Returns the source package directory the paths were enumerated from, or
-/// `None` when a best-effort resolution could not find it. Callers read the
-/// SOURCE manifest through it: a pre-refresh path set built only from the
+/// Returns the source package directory the paths were enumerated from.
+/// Callers read the SOURCE manifest through it: a path set built only from the
 /// installed package cannot see what the update is about to add.
 fn push_pi_package_stage_paths(
     paths: &mut BTreeSet<PathBuf>,
@@ -1303,11 +1315,9 @@ fn push_pi_package_stage_paths(
     entry: &config::LockEntry,
     package_dir: &Path,
     include_missing: bool,
-    strictness: SourceStrictness,
 ) -> Result<Option<PathBuf>> {
     let source_root = match config::resolve_source_path(&entry.source) {
         Some(root) => root,
-        None if strictness == SourceStrictness::BestEffort => return Ok(None),
         None => bail!(
             "unable to resolve source for locked Pi package {}",
             entry.name
@@ -1316,7 +1326,6 @@ fn push_pi_package_stage_paths(
     let source_package_dir =
         match crate::catalog::find_item_path(&source_root, entry.kind, &entry.name) {
             Some(dir) => dir,
-            None if strictness == SourceStrictness::BestEffort => return Ok(None),
             None => bail!(
                 "unable to find source package {} in {}",
                 entry.name,

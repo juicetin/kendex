@@ -2363,28 +2363,117 @@ fn stage_mode_fails_before_staging_when_pi_bin_link_is_replaced() {
     });
 }
 
+/// The guarded set is collected after strict remote resolution, so a locked Pi
+/// source that still will not resolve is no longer a cache waiting to be cloned
+/// — it is a source whose manifest the guard cannot read. Skipping the item
+/// there drops `.pi/APPEND_SYSTEM.md` out of the guarded set and lets the
+/// staging pass absorb a consumer edit, so the collection fails closed instead.
 #[test]
-fn pre_refresh_stage_paths_tolerate_a_remote_pi_source_with_no_cache_yet() {
+fn pre_refresh_stage_paths_fail_closed_on_a_pi_source_that_will_not_resolve() {
     let project = tmpdir("stage-pi-remote-source-first-run");
     std::fs::create_dir_all(&project).unwrap();
 
     crate::test_util::with_project_root(&project, || {
         let mut entry = lock_entry("demo-pkg", ItemKind::PiExtension, &["pi"]);
-        // A remote shorthand whose cache has not been cloned yet, exactly as on
-        // a clean CI runner before `detect_drift_for_scope` resolves sources.
+        // A remote shorthand whose cache is not there: on a clean runner this is
+        // what a source that failed to clone leaves behind.
         entry.source = "owner/repo".to_string();
         let mut lock = LockFile::default();
         lock.add(entry);
         lock.save(&config::lock_file_path(false)).unwrap();
 
-        // Pre-refresh collection runs before resolution and must not abort.
-        pre_refresh_project_stage_paths().unwrap();
+        // Control: the source really is unresolvable, so the failures below are
+        // not some other error.
+        assert!(
+            config::resolve_source_path("owner/repo").is_none(),
+            "control failed: the uncached remote source resolves"
+        );
 
-        // Once sources are meant to be resolved, the same lock still fails closed.
+        let err = pre_refresh_project_stage_paths().unwrap_err().to_string();
+        assert!(err.contains("demo-pkg"), "{err}");
+        assert!(err.contains("source"), "{err}");
+
+        // The post-refresh collection over the same lock fails closed too.
         let err = project_stage_paths(&lock, true).unwrap_err().to_string();
         assert!(err.contains("demo-pkg"), "{err}");
         assert!(err.contains("source"), "{err}");
     });
+}
+
+/// A Pi manifest that cannot be parsed says nothing about whether the package
+/// declares `pi.appendSystem` or ships bins. Reading "it declares none" out of
+/// the failure leaves `.pi/APPEND_SYSTEM.md` and the bin links outside the
+/// guarded set, and the consumer's uncommitted edits to them are what the
+/// staging pass then absorbs.
+#[test]
+fn stage_path_collection_fails_on_an_unparsable_installed_pi_manifest() {
+    let project = tmpdir("stage-pi-unparsable-installed-manifest");
+    let source = tmpdir("stage-pi-unparsable-installed-manifest-source");
+    std::fs::create_dir_all(&project).unwrap();
+    init_git_project(&project);
+    write_file(
+        &source.join("pi-extensions/demo-pkg/package.json"),
+        r#"{"name":"demo-pkg","pi":{"extensions":[]}}"#,
+    );
+
+    crate::test_util::with_project_root(&project, || {
+        let mut lock = LockFile::default();
+        lock.add(pi_entry("demo-pkg", &source));
+        lock.save(&config::lock_file_path(false)).unwrap();
+
+        let installed = project.join(".pi/packages/demo-pkg/package.json");
+        // Control: a readable installed manifest collects without error, so the
+        // failure below is the parse failure and not the fixture.
+        write_file(&installed, r#"{"name":"demo-pkg","pi":{"extensions":[]}}"#);
+        project_stage_paths(&lock, true)
+            .expect("control failed: a readable installed manifest must collect");
+
+        write_file(&installed, "{ not json");
+        let err = project_stage_paths(&lock, true).unwrap_err().to_string();
+        assert!(
+            err.contains("package.json"),
+            "the unreadable installed manifest was not named: {err}"
+        );
+
+        // A package that is not installed yet has no manifest to read; that is
+        // an absence, not a read failure, and still collects.
+        std::fs::remove_file(&installed).unwrap();
+        project_stage_paths(&lock, true)
+            .expect("a package with no installed manifest must not be an error");
+    });
+}
+
+/// `--stage`'s guarded path set must be collected after the drift loop, because
+/// `detect_drift_for_scope` is what clones or updates the locked remote caches
+/// the source manifests are read from. Collected before it, the set reads an
+/// absent or revision-behind cache: an upstream package that newly declares
+/// `pi.appendSystem` is invisible there, `.pi/APPEND_SYSTEM.md` stays outside
+/// the guard, and the post-refresh staging pass absorbs the consumer's own edit
+/// to it wholesale. No local fixture can drive a remote cache through `run`, so
+/// the order is asserted over `run`'s own source; both markers are required to
+/// exist, so a rename fails the test rather than passing it vacuously.
+#[test]
+fn run_collects_the_stage_guard_set_after_the_drift_loop_resolves_sources() {
+    let source = include_str!("../propagate.rs");
+    let body = source
+        .split_once("pub fn run(")
+        .expect("propagate::run is no longer declared under that name")
+        .1
+        .split_once("\n}\n")
+        .expect("propagate::run has no recognizable end")
+        .0;
+
+    let resolve = body
+        .find("detect_drift_for_scope(global)")
+        .expect("run no longer resolves sources through detect_drift_for_scope");
+    let collect = body
+        .find("pre_refresh_project_stage_paths()")
+        .expect("run no longer collects the pre-refresh stage paths");
+    assert!(
+        collect > resolve,
+        "run collects the guarded stage paths at byte {collect}, ahead of the drift loop that \
+         resolves sources at byte {resolve}: the set reads a stale or absent remote cache"
+    );
 }
 
 #[test]
