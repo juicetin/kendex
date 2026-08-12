@@ -246,11 +246,19 @@ fn invalid_source_mapping(sources: &[RefreshSource]) -> Option<(PathBuf, anyhow:
                 ));
             }
         };
+        if let Err(err) = toml::from_str::<toml::Value>(&content) {
+            return Some((
+                config_path,
+                anyhow::anyhow!(
+                    "source mapping is not valid TOML ({err}); refusing to regenerate items without their [agent-skills]/[role-skills]/[hook-events] assignments"
+                ),
+            ));
+        }
         if let Err(err) = toml::from_str::<MappingConfig>(&content) {
             return Some((
                 config_path,
                 anyhow::anyhow!(
-                    "source mapping will not parse ({err}); refusing to regenerate items without their [agent-skills]/[role-skills]/[hook-events] assignments"
+                    "source mapping violates the mapping schema ({err}); refusing to regenerate items without their [agent-skills]/[role-skills]/[hook-events] assignments"
                 ),
             ));
         }
@@ -258,7 +266,7 @@ fn invalid_source_mapping(sources: &[RefreshSource]) -> Option<(PathBuf, anyhow:
             return Some((
                 config_path,
                 anyhow::anyhow!(
-                    "source mapping will not parse ({err}); refusing to regenerate agents without their [agent-frontmatter] overrides"
+                    "source mapping has an unusable [agent-frontmatter] entry ({err}); refusing to regenerate agents without their [agent-frontmatter] overrides"
                 ),
             ));
         }

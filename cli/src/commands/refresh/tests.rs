@@ -1734,7 +1734,7 @@ fn refresh_stops_when_a_source_mapping_will_not_parse() {
         "a malformed mapping must fail refresh"
     );
     assert!(
-        stats.failures[0].error.contains("will not parse"),
+        stats.failures[0].error.contains("is not valid TOML"),
         "{:?}",
         stats.failures
     );
@@ -1798,7 +1798,9 @@ fn refresh_stops_when_a_source_mapping_violates_the_schema_or_cannot_be_read() {
         "a schema-invalid mapping must fail refresh"
     );
     assert!(
-        stats.failures[0].error.contains("will not parse"),
+        stats.failures[0]
+            .error
+            .contains("violates the mapping schema"),
         "{:?}",
         stats.failures
     );
@@ -1916,7 +1918,9 @@ fn refresh_stops_when_a_source_mapping_carries_invalid_agent_frontmatter() {
             "{label}: schema-invalid agent frontmatter must fail refresh"
         );
         assert!(
-            stats.failures[0].error.contains("will not parse"),
+            stats.failures[0]
+                .error
+                .contains("unusable [agent-frontmatter] entry"),
             "{label}: {:?}",
             stats.failures
         );
@@ -1950,6 +1954,104 @@ fn refresh_stops_when_a_source_mapping_carries_invalid_agent_frontmatter() {
             "{label}: a valid override must still refresh"
         );
     }
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// Every way a source `vstack.toml` fails the preflight was reported as
+/// "will not parse", so an operator whose config parses fine — a schema
+/// violation, or an `[agent-frontmatter]` override the parse would drop — was
+/// sent looking for TOML syntax that was never wrong. Each cause must name
+/// itself and claim none of the others.
+#[test]
+fn refresh_source_mapping_failures_name_their_own_cause() {
+    let root = tmpdir("source-mapping-failure-causes");
+    let project = root.join("project");
+    let source = make_source(&root, "source");
+    std::fs::create_dir_all(&project).unwrap();
+    write_colliding_source(&source, "1", "PreToolUse", "source-model");
+
+    let mut lock = LockFile::default();
+    lock.add(lock_entry(
+        "rust",
+        ItemKind::Agent,
+        &source,
+        vec!["claude-code"],
+    ));
+    lock.add(lock_entry(
+        "shared",
+        ItemKind::Skill,
+        &source,
+        vec!["claude-code"],
+    ));
+    let run = || {
+        let sources = vec![RefreshSource::from_root(&source)];
+        crate::test_util::with_project_root(&project, || {
+            let mut project_config = ProjectConfig::default();
+            refresh_items_in_scope(false, &lock, &sources, &mut project_config, &project, None)
+        })
+    };
+
+    // Control: the mapping `write_colliding_source` writes refreshes cleanly,
+    // so every failure below is the injected cause and not the fixture.
+    let stats = run();
+    assert!(!stats.has_failures(), "{:?}", stats.failures);
+
+    // (cause, injected mapping, the phrase that names it)
+    let cases = [
+        (
+            "syntax error",
+            "[agent-skills\nrust = broken",
+            "is not valid TOML",
+        ),
+        (
+            "schema violation",
+            "[agent-skills]\nrust = \"github\"\n",
+            "violates the mapping schema",
+        ),
+        (
+            "dropped agent-frontmatter override",
+            "[agent-frontmatter]\nrust = { pane = \"yes\" }\n",
+            "unusable [agent-frontmatter] entry",
+        ),
+    ];
+    for (label, mapping, own_phrase) in cases {
+        std::fs::write(source.join("vstack.toml"), mapping).unwrap();
+        let stats = run();
+        assert!(stats.has_failures(), "{label}: must fail refresh");
+        let error = stats.failures[0].error.to_string();
+        assert!(
+            error.contains(own_phrase),
+            "{label}: message does not name its cause ({own_phrase:?}): {error}"
+        );
+        for (other_label, _, other_phrase) in cases {
+            if other_label == label {
+                continue;
+            }
+            assert!(
+                !error.contains(other_phrase),
+                "{label}: message also claims {other_label} ({other_phrase:?}): {error}"
+            );
+        }
+        assert!(
+            stats.successful_items.is_empty(),
+            "{label}: nothing may be recorded as refreshed"
+        );
+    }
+
+    // A config that parses as TOML and as a `MappingConfig` must not be
+    // reported as unparseable at all.
+    std::fs::write(
+        source.join("vstack.toml"),
+        "[agent-frontmatter]\nrust = { pane = \"yes\" }\n",
+    )
+    .unwrap();
+    let stats = run();
+    let error = stats.failures[0].error.to_string();
+    assert!(
+        !error.contains("parse"),
+        "a parseable config must not be blamed on parsing: {error}"
+    );
 
     let _ = std::fs::remove_dir_all(root);
 }
@@ -2088,7 +2190,8 @@ fn refresh_run_leaves_project_config_untouched_when_source_mapping_is_schema_inv
         "consumer vstack.toml was mutated before the source mapping was validated"
     );
     assert!(
-        err.to_string().contains("source mapping will not parse"),
+        err.to_string()
+            .contains("source mapping violates the mapping schema"),
         "wrong failure: {err}"
     );
 
@@ -2331,7 +2434,8 @@ fn refresh_run_mutates_nothing_when_source_mapping_is_schema_invalid() {
         "refresh rewrote the lock before validating the source mapping"
     );
     assert!(
-        err.to_string().contains("source mapping will not parse"),
+        err.to_string()
+            .contains("source mapping violates the mapping schema"),
         "wrong failure: {err}"
     );
 
