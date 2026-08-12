@@ -117,7 +117,16 @@ surface — `#[cfg(test)]` modules (found by brace-tracking the block the
 attribute opens), `tests/` dirs, or `*_tests.rs` files — emit the distinct
 informational `test_panic_path_added` flag instead: a test assertion is not a
 production panic path, so `refix-route` treats that flag as non-risk and the
-round falls through to blockers/size/small handling (vstack#944).
+round falls through to blockers/size/small handling.
+
+A file carrying no test marker of its own is still treated as a test surface
+when the gate lives at its declaration site — the shared-fixture shape
+`#[cfg(test)] #[path = "..."] mod x;` in the module that declares it — so
+panics added to such a file also emit `test_panic_path_added`. A file
+declared or `include!`d anywhere without the gate, one whose declaration is
+not found, and a crate root all keep their file-local classification, as does
+any file whose declaring module cannot be read. See
+[DEVELOPMENT.md](./DEVELOPMENT.md) for how declarations are resolved.
 
 ## Verification (pr-cross-check --verify)
 
