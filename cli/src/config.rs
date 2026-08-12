@@ -851,12 +851,18 @@ const SKILL_SHARED_TABLES: &[&str] = &["skill-instructions"];
 /// the real TOML parser handles multiline bodies and escaped quotes that a
 /// line scanner cannot. Returns empty bytes if the file is missing,
 /// unparsable, or the key absent.
+/// Folded when a config file exists but cannot be parsed. A missing file is
+/// genuinely "no configuration"; a broken one is a dependency failure, and
+/// contributing nothing would let the hash read "unchanged" while the values it
+/// is supposed to cover are unreadable.
+const UNPARSEABLE_CONFIG_HASH_SENTINEL: &[u8] = b"\0vstack-unparseable-config\0";
+
 fn extract_toml_section_for(path: &Path, name: &str) -> Vec<u8> {
     let Ok(content) = std::fs::read_to_string(path) else {
         return Vec::new();
     };
     let Ok(toml::Value::Table(table)) = content.parse::<toml::Value>() else {
-        return Vec::new();
+        return UNPARSEABLE_CONFIG_HASH_SENTINEL.to_vec();
     };
     let mut result = Vec::new();
     collect_key_values("", &table, name, &mut result);
@@ -872,7 +878,7 @@ fn extract_agent_skills_entry_for(path: &Path, name: &str) -> Vec<u8> {
         return Vec::new();
     };
     let Ok(toml::Value::Table(root)) = content.parse::<toml::Value>() else {
-        return Vec::new();
+        return UNPARSEABLE_CONFIG_HASH_SENTINEL.to_vec();
     };
     let Some(toml::Value::Table(agent_skills)) = root.get("agent-skills") else {
         return Vec::new();
@@ -897,7 +903,7 @@ fn extract_role_skill_section_for_agent(source_root: &Path, entry: &LockEntry) -
         return Vec::new();
     };
     let Ok(toml::Value::Table(root)) = content.parse::<toml::Value>() else {
-        return Vec::new();
+        return UNPARSEABLE_CONFIG_HASH_SENTINEL.to_vec();
     };
     let Some(toml::Value::Table(role_skills)) = root.get("role-skills") else {
         return Vec::new();
@@ -1098,15 +1104,14 @@ pub fn compute_source_hash(entry: &LockEntry) -> String {
             // `reviewer-foo` as well, so an edit there changes the generated
             // agent. Hashing only the full name left that edit invisible and
             // `propagate --check` reported no drift.
+            // Source only: `MappingConfig::skills_for_agent` applies the source's
+            // `[agent-skills] foo` to `reviewer-foo`, but `ProjectConfig`'s
+            // lookup is exact-name, so hashing a project alias entry would stale
+            // the agent over a value refresh never reads.
             if let Some(alias) = entry.name.strip_prefix("reviewer-") {
-                for config_path in [
-                    &source_config,
-                    &crate::project_config::project_config_path(&proj_root),
-                ] {
-                    let aliased = extract_agent_skills_entry_for(config_path, alias);
-                    if !aliased.is_empty() {
-                        state = fnv1a_chain(state, &aliased);
-                    }
+                let aliased = extract_agent_skills_entry_for(&source_config, alias);
+                if !aliased.is_empty() {
+                    state = fnv1a_chain(state, &aliased);
                 }
             }
             let role_skills = extract_role_skill_section_for_agent(&source_root, entry);
@@ -3561,6 +3566,48 @@ echo foreign
             lock.entries.get("foo-bar").unwrap().harnesses,
             vec!["codex".to_string()]
         );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn source_hash_moves_when_a_config_exists_but_will_not_parse() {
+        let dir = sandbox("hash_unparseable_config");
+        let source = dir.join("source");
+        fs::create_dir_all(source.join("agents")).unwrap();
+        fs::write(
+            source.join("agents").join("rust.md"),
+            "---\nname: rust\ndescription: Rust\nrole: engineer\n---\n# Rust\n",
+        )
+        .unwrap();
+        // Deliberately contributes nothing for this agent while it parses, so the
+        // only thing that can move the hash below is the parse failure itself.
+        fs::write(
+            source.join("vstack.toml"),
+            "[agent-skills]\nother = [\"one\"]\n",
+        )
+        .unwrap();
+
+        let entry = LockEntry {
+            name: "rust".to_string(),
+            kind: ItemKind::Agent,
+            source: source.to_string_lossy().into_owned(),
+            source_repo: None,
+            harnesses: vec!["claude-code".to_string()],
+            method: InstallMethod::Copy,
+            installed_at: "2026-08-11T00:00:00Z".to_string(),
+            source_hash: String::new(),
+        };
+
+        let project = dir.join("project");
+        fs::create_dir_all(&project).unwrap();
+        crate::test_util::with_project_root(&project, || {
+            let parseable = compute_source_hash(&entry);
+            // A file that exists but cannot be read as TOML is a dependency
+            // failure, not "no configuration": the hash must move.
+            fs::write(source.join("vstack.toml"), "[agent-skills\nrust = broken").unwrap();
+            assert_ne!(parseable, compute_source_hash(&entry));
+        });
+
         let _ = fs::remove_dir_all(&dir);
     }
 

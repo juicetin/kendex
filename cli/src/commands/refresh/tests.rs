@@ -1488,13 +1488,10 @@ fn refresh_withholds_agent_success_when_a_declared_skill_is_not_installed() {
     // The advertised recovery command has to be one `vstack add` can parse:
     // the positional argument is the source, skills come through `--skill`.
     let reason = stats.incomplete.get("rust").unwrap();
-    assert!(
-        reason.contains(&format!(
-            "vstack add {} --skill never-shipped",
-            source.display()
-        )),
-        "{reason}"
-    );
+    // `never-shipped` is not in the catalog, so `vstack add` against that source
+    // could not succeed — the remedy must say so rather than advertise it.
+    assert!(reason.contains("not present in source"), "{reason}");
+    assert!(!reason.contains("--skill never-shipped"), "{reason}");
 
     let _ = std::fs::remove_dir_all(root);
 }

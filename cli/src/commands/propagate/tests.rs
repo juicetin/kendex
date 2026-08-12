@@ -76,6 +76,17 @@ fn write_hook_source(root: &Path, name: &str) {
     );
 }
 
+/// A hook whose event Codex has no native equivalent for, so it installs as
+/// advisory prose in every agent TOML instead of a script.
+fn write_prose_fallback_hook_source(root: &Path, name: &str) {
+    write_file(
+        &root.join("hooks").join(format!("{name}.sh")),
+        &format!(
+            "# ---\n# name: {name}\n# event: TaskCompleted\n# description: Guard turn completion\n# safety: Keep turns safe\n# ---\n#!/bin/sh\nexit 0\n"
+        ),
+    );
+}
+
 fn demo_entry(source: &Path) -> LockEntry {
     LockEntry {
         name: "demo".to_string(),
@@ -3126,7 +3137,7 @@ fn stage_mode_rejects_a_replaced_codex_prose_safety_block() {
     let project = tmpdir("stage-codex-prose-replaced");
     let source = tmpdir("stage-codex-prose-replaced-source");
     std::fs::create_dir_all(&project).unwrap();
-    write_hook_source(&source, "guard");
+    write_prose_fallback_hook_source(&source, "guard");
 
     crate::test_util::with_project_root(&project, || {
         let entry = hook_entry("guard", &source, &["codex"]);
@@ -3154,8 +3165,19 @@ fn stage_mode_rejects_a_replaced_codex_prose_safety_block() {
             "{failures:?}"
         );
 
-        // The block deleted outright from one agent while a sibling still
-        // carries it: marker-bearing files alone would never see this.
+        // Deleted outright from every agent: marker presence would have read as
+        // "no prose fallback here" and passed.
+        write_file(&agent, "instructions = \"\"\"\nnothing here\n\"\"\"\n");
+        let mut failures = Vec::new();
+        verify_hook_auxiliary_install("guard", Harness::Codex, Some(&registration), &mut failures);
+        assert!(
+            failures
+                .iter()
+                .any(|f| f.contains("does not carry the locked safety prose")),
+            "{failures:?}"
+        );
+
+        // The block deleted from one agent while a sibling still carries it.
         write_file(&agent, &format!("instructions = \"\"\"\n{block}\n\"\"\"\n"));
         let sibling = project.join(".codex/agents/analyst.toml");
         write_file(&sibling, "instructions = \"\"\"\nno safety here\n\"\"\"\n");
@@ -3165,6 +3187,33 @@ fn stage_mode_rejects_a_replaced_codex_prose_safety_block() {
             failures
                 .iter()
                 .any(|f| f.contains("analyst.toml") && f.contains("locked safety prose")),
+            "{failures:?}"
+        );
+    });
+}
+
+#[test]
+fn stage_mode_rejects_a_native_codex_hook_downgraded_to_prose() {
+    let project = tmpdir("stage-codex-native-downgraded");
+    let source = tmpdir("stage-codex-native-downgraded-source");
+    std::fs::create_dir_all(&project).unwrap();
+    // PreToolUse maps natively, so prose is not a valid install shape for it.
+    write_hook_source(&source, "guard");
+
+    crate::test_util::with_project_root(&project, || {
+        let entry = hook_entry("guard", &source, &["codex"]);
+        let registration = locked_hook_registration(&entry).unwrap();
+        let block = crate::installer::codex_hook_safety_block(&registration.hook);
+        write_file(
+            &project.join(".codex/agents/rust.toml"),
+            &format!("instructions = \"\"\"\n{block}\n\"\"\"\n"),
+        );
+
+        // Script and registration removed, advisory prose left in their place.
+        let mut failures = Vec::new();
+        verify_hook_auxiliary_install("guard", Harness::Codex, Some(&registration), &mut failures);
+        assert!(
+            failures.iter().any(|f| f.contains("installs natively")),
             "{failures:?}"
         );
     });

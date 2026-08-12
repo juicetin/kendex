@@ -375,13 +375,34 @@ pub fn refresh_items_in_scope(
             // entry's own source so the command searches where the declaration
             // came from.
             let scope_flag = if global { "--global " } else { "" };
+            let (installable, absent): (Vec<String>, Vec<String>) = missing
+                .iter()
+                .cloned()
+                .partition(|skill| source.skills.iter().any(|s| &s.name == skill));
+            let mut remedies = Vec::new();
+            if !installable.is_empty() {
+                remedies.push(format!(
+                    "run `vstack add {} {scope_flag}--skill {}`",
+                    entry.source,
+                    installable.join(",")
+                ));
+            }
+            if !absent.is_empty() {
+                // Advertising `vstack add` against a catalog that does not ship
+                // the asset guarantees a command that cannot succeed; the fix is
+                // upstream, so say so rather than send the consumer in a loop.
+                remedies.push(format!(
+                    "{} not present in source {} — the declaration or the source needs fixing upstream",
+                    absent.join(", "),
+                    entry.source
+                ));
+            }
             stats.mark_incomplete(
                 name,
                 format!(
-                    "requires skill(s) not installed: {}; run `vstack add {} {scope_flag}--skill {}`",
+                    "requires skill(s) not installed: {}; {}",
                     missing.join(", "),
-                    entry.source,
-                    missing.join(",")
+                    remedies.join("; ")
                 ),
             );
         }

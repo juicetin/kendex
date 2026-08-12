@@ -249,45 +249,59 @@ fn verify_hook_auxiliary_install(
             }
         }
         Harness::Codex => {
-            let script = Path::new(".codex").join("hooks").join(format!("{name}.sh"));
-            if !config::project_root().join(&script).exists() {
-                // Prose fallback: an event Codex has no native hook for ships as
-                // a `## Safety: <name>` block inside each agent TOML. The marker
-                // alone proves nothing — a replaced body keeps it while the
-                // advisory it carries is gone — so the block must still be the
-                // one the installer renders.
-                require_codex_prose_block_matches_source(name, registration, failures);
+            // Which install shape is correct is decided by the locked event, not
+            // by what happens to be on disk: `install_hook_codex_native` is used
+            // whenever `codex_event_for` maps the event, and the prose fallback
+            // only otherwise. Reading the shape off script existence let a
+            // native hook be downgraded to advisory prose — deleting the script
+            // and its registration — and still pass.
+            let Some(registration) = registration else {
+                failures.push(format!(
+                    "cannot read the locked event for Codex hook {name} from its source; refusing to verify its install"
+                ));
                 return;
-            }
-            {
-                require_installed_hook_script_matches_source(
-                    &script,
-                    registration,
-                    &format!("Codex hook {name}"),
-                    failures,
-                );
-                require_hook_command_registration(
-                    Path::new(".codex").join("hooks.json").as_path(),
-                    &crate::installer::codex_project_hook_command(name),
-                    registration.and_then(|r| {
-                        crate::installer::codex_event_for(r.event())
-                            .map(|event| (event, r.matcher()))
-                    }),
-                    &format!("Codex hook {name}"),
-                    failures,
-                );
-                // Codex ignores hooks.json entirely unless the runtime feature
-                // is on, so a registered hook with the flag off or the config
-                // deleted is a broken install, not a stageable state.
-                let config_toml = Path::new(".codex").join("config.toml");
-                if !crate::installer::codex_hooks_feature_enabled(
-                    &config::project_root().join(&config_toml),
-                ) {
-                    failures.push(format!(
-                        "{} missing [features] hooks = true for Codex hook {name}",
-                        config_toml.display()
-                    ));
+            };
+            match crate::installer::codex_event_for(registration.event()) {
+                Some(event) => {
+                    let script = Path::new(".codex").join("hooks").join(format!("{name}.sh"));
+                    if !config::project_root().join(&script).exists() {
+                        failures.push(format!(
+                            "{} missing for Codex hook {name}, whose event {event} installs natively",
+                            script.display()
+                        ));
+                        return;
+                    }
+                    require_installed_hook_script_matches_source(
+                        &script,
+                        Some(registration),
+                        &format!("Codex hook {name}"),
+                        failures,
+                    );
+                    require_hook_command_registration(
+                        Path::new(".codex").join("hooks.json").as_path(),
+                        &crate::installer::codex_project_hook_command(name),
+                        Some((event, registration.matcher())),
+                        &format!("Codex hook {name}"),
+                        failures,
+                    );
+                    // Codex ignores hooks.json entirely unless the runtime
+                    // feature is on, so a registered hook with the flag off or
+                    // the config deleted is a broken install, not a stageable
+                    // state.
+                    let config_toml = Path::new(".codex").join("config.toml");
+                    if !crate::installer::codex_hooks_feature_enabled(
+                        &config::project_root().join(&config_toml),
+                    ) {
+                        failures.push(format!(
+                            "{} missing [features] hooks = true for Codex hook {name}",
+                            config_toml.display()
+                        ));
+                    }
                 }
+                // Prose fallback: the block must be present and byte-equal in
+                // every installed Codex agent. The marker alone proves nothing —
+                // a replaced body keeps it while the advisory it carries is gone.
+                None => require_codex_prose_block_matches_source(name, registration, failures),
             }
         }
         Harness::OpenCode => {
@@ -572,7 +586,10 @@ fn require_installed_hook_script_matches_source(
     }
     // Both installers create the script 0755 explicitly. Identical text with the
     // execute bit cleared still leaves the registered command unable to run the
-    // hook, so the mode is part of a correct install.
+    // hook, so the mode is part of a correct install. Unix only: the installers
+    // set no mode bits elsewhere, and `executable_hash_bit` reports 0 there for
+    // every file, which would reject correct installs.
+    #[cfg(unix)]
     if config::executable_hash_bit(&path) == 0 {
         failures.push(format!(
             "{} is not executable for {label}",
@@ -582,53 +599,49 @@ fn require_installed_hook_script_matches_source(
 }
 
 /// The Codex prose fallback lives inside every agent TOML under
-/// `.codex/agents`, so the check is per file: any agent carrying the marker
-/// must carry the installer's exact block, and at least one must carry it at
-/// all. A source definition that cannot be read fails closed like the rest.
+/// `.codex/agents`, so every one of them must carry the installer's exact
+/// block. Reading it off marker presence would miss a block deleted outright,
+/// and an unreadable agents directory is a dependency failure rather than
+/// evidence of a clean install — only its genuine absence (no Codex agents
+/// installed at all) leaves nothing to check.
 fn require_codex_prose_block_matches_source(
     name: &str,
-    registration: Option<&LockedHookRegistration>,
+    registration: &LockedHookRegistration,
     failures: &mut Vec<String>,
 ) {
     let agents_dir = config::project_root().join(".codex").join("agents");
-    let Ok(entries) = std::fs::read_dir(&agents_dir) else {
-        return;
+    let entries = match std::fs::read_dir(&agents_dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return,
+        Err(err) => {
+            failures.push(format!(
+                ".codex/agents is unreadable ({err}); refusing to verify the safety prose for Codex hook {name}"
+            ));
+            return;
+        }
     };
-    let marker = format!("## Safety: {name}");
     let mut agents = Vec::new();
-    let mut any_carrier = false;
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.extension().is_none_or(|ext| ext != "toml") {
-            continue;
+        if path.extension().is_some_and(|ext| ext == "toml") {
+            agents.push(path);
         }
-        any_carrier |= std::fs::read_to_string(&path).is_ok_and(|body| body.contains(&marker));
-        agents.push(path);
     }
-    // The fallback applies to every installed Codex agent, so a block deleted
-    // from one of them is a broken install even while its siblings still carry
-    // it. Checking only marker-bearing files would never see that deletion.
-    if agents.is_empty() || !any_carrier {
+    if agents.is_empty() {
         return;
     }
-    let Some(registration) = registration else {
-        failures.push(format!(
-            "cannot read the locked definition for Codex hook {name} from its source; refusing to verify its safety prose"
-        ));
-        return;
-    };
     let expected = crate::installer::codex_hook_safety_block(&registration.hook);
     for path in agents {
-        let carries_block =
-            std::fs::read_to_string(&path).is_ok_and(|body| body.contains(&expected));
-        if !carries_block {
-            let display = path
-                .strip_prefix(config::project_root())
-                .unwrap_or(path.as_path())
-                .display();
-            failures.push(format!(
+        let display = path
+            .strip_prefix(config::project_root())
+            .unwrap_or(path.as_path())
+            .display();
+        match std::fs::read_to_string(&path) {
+            Ok(body) if body.contains(&expected) => {}
+            Ok(_) => failures.push(format!(
                 "{display} does not carry the locked safety prose for Codex hook {name}"
-            ));
+            )),
+            Err(err) => failures.push(format!("{display} is unreadable: {err}")),
         }
     }
 }
