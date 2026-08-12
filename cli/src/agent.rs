@@ -647,9 +647,30 @@ pub(crate) fn failure_reference_scope(global: bool) -> bool {
 /// bypass `write_file_no_follow`'s rejection and leave the reference
 /// externally mutable after generation.
 fn reference_is_fresh(path: &std::path::Path) -> bool {
-    let is_symlink = std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink());
-    !is_symlink
-        && std::fs::read_to_string(path).is_ok_and(|existing| existing == FAILURE_REPORTING_DOC)
+    reference_drift(path).is_none()
+}
+
+/// Why the reference copy for `global` scope is not the one vstack installs,
+/// or `None` when it is. The same judgement `install_failure_reporting_reference`
+/// makes, exposed for a check that must not write the artifact it is checking.
+pub(crate) fn failure_reporting_reference_drift(global: bool) -> Option<String> {
+    reference_drift(&failure_reporting_reference_path(global))
+}
+
+fn reference_drift(path: &std::path::Path) -> Option<String> {
+    let display = crate::config::display_path(path);
+    match std::fs::symlink_metadata(path) {
+        Err(err) => return Some(format!("{display} cannot be inspected: {err}")),
+        Ok(meta) if meta.file_type().is_symlink() => {
+            return Some(format!("{display} is a symlink"));
+        }
+        Ok(_) => {}
+    }
+    match std::fs::read_to_string(path) {
+        Err(err) => Some(format!("{display} is unreadable: {err}")),
+        Ok(existing) if existing == FAILURE_REPORTING_DOC => None,
+        Ok(_) => Some(format!("{display} is not the reference vstack installs")),
+    }
 }
 
 /// Emit the load-skills preamble injected into every generated agent body.

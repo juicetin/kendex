@@ -4241,3 +4241,71 @@ fn shared_config_guard_ignores_the_managed_skill_link_but_not_the_skill() {
         );
     });
 }
+
+/// Every generated agent body points at `.agents/skill-failure-reporting.md`.
+/// Nothing regenerates it when there is no source drift, and staging owns the
+/// path, so a locally replaced or deleted copy is what the propagation commit
+/// records — with every agent still pointing at it.
+#[test]
+fn stage_mode_refuses_a_replaced_failure_reporting_reference() {
+    let project = tmpdir("stage-failure-reference");
+    let source = tmpdir("stage-failure-reference-source");
+    std::fs::create_dir_all(&project).unwrap();
+    init_git_project(&project);
+    write_agent_skill_source(&source, true);
+
+    crate::test_util::with_project_root(&project, || {
+        let mut lock = LockFile::default();
+        lock.add(agent_entry("rust", &source));
+        lock.add(demo_entry(&source));
+        lock.save(&config::lock_file_path(false)).unwrap();
+        write_installed_skill_md(&project.join(".agents/skills/demo/SKILL.md"), "# Demo\n");
+        std::fs::create_dir_all(project.join(".claude/skills")).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(
+            "../../.agents/skills/demo",
+            project.join(".claude/skills/demo"),
+        )
+        .unwrap();
+        git(&project, &["add", "-A"]);
+        git(&project, &["commit", "-m", "baseline"]);
+
+        run(ScopeFilter::Project, false, false, true, true).unwrap();
+        git(&project, &["commit", "-m", "propagated"]);
+
+        let reference = project.join(".agents/skill-failure-reporting.md");
+        assert!(
+            std::fs::read_to_string(&reference).unwrap() == crate::agent::FAILURE_REPORTING_DOC,
+            "fixture did not install the reference agents point at"
+        );
+
+        // Control: the untouched install passes the no-drift staging path.
+        run(ScopeFilter::Project, false, false, true, true).unwrap();
+
+        // Replaced in place, tracked and committed, so nothing reads as dirty
+        // and no source hash moved.
+        write_file(&reference, "# gutted\n");
+        git(&project, &["add", "-A"]);
+        git(&project, &["commit", "-m", "reference replaced"]);
+
+        let err = run(ScopeFilter::Project, false, false, true, true)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("auxiliary verification failed"), "{err}");
+        assert!(err.contains("skill-failure-reporting.md"), "{err}");
+        assert!(
+            git_output(&project, &["diff", "--cached", "--name-only"]).is_empty(),
+            "nothing may be staged"
+        );
+
+        // Deleted is the same shortfall: the agents point at a missing file.
+        std::fs::remove_file(&reference).unwrap();
+        git(&project, &["add", "-A"]);
+        git(&project, &["commit", "-m", "reference deleted"]);
+        let err = run(ScopeFilter::Project, false, false, true, true)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("auxiliary verification failed"), "{err}");
+        assert!(err.contains("skill-failure-reporting.md"), "{err}");
+    });
+}

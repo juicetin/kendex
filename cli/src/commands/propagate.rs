@@ -231,6 +231,26 @@ fn verify_project_auxiliary_installs_before_stage(
     let project_config =
         crate::project_config::ProjectConfig::load_strict(&config::project_root())?;
     let mut failures = Vec::new();
+    // Every generated agent body carries the resolved path of the canonical
+    // failure-reporting reference and nothing else re-checks it: `verify::run`
+    // and the per-agent content check both look only at the generated agent
+    // files. Staging owns the path (it is a shared-config path), so a replaced
+    // or deleted copy rides into the propagation commit while every agent still
+    // points at it. Only the scope an install actually resolved is asked — a
+    // project `.agents` that escapes the project root falls back to the global
+    // copy, and that is the file the bodies name.
+    if lock
+        .entries
+        .values()
+        .any(|entry| entry.kind == ItemKind::Agent)
+        && let Some(reason) = crate::agent::failure_reporting_reference_drift(
+            crate::agent::failure_reference_scope(false),
+        )
+    {
+        failures.push(format!(
+            "the failure-reporting reference every generated agent points at is not the one vstack installs: {reason}"
+        ));
+    }
     for entry in lock.entries.values() {
         match entry.kind {
             ItemKind::Hook => {
