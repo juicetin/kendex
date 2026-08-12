@@ -975,3 +975,24 @@ fn legacy_remote_cache_keys_never_carry_a_path_separator() {
         "ordinary slug sources keep their legacy key"
     );
 }
+
+#[test]
+fn legacy_remote_cache_dirs_reproduce_the_previous_add_cache_key() {
+    let cache_dir = Path::new("/home/u/.vstack/cache/hashed_key");
+
+    // `vstack add` minted keys by trimming `.git` and joining the last two
+    // slash segments; caches created that way must still be found.
+    let ssh = legacy_remote_cache_dirs("git@github.com:owner/repo.git", cache_dir);
+    assert!(
+        ssh.contains(&PathBuf::from(
+            "/home/u/.vstack/cache/git@github.com:owner_repo"
+        )),
+        "{ssh:?}"
+    );
+
+    let https = legacy_remote_cache_dirs("https://example.com/owner/repo.git", cache_dir);
+    assert!(
+        https.contains(&PathBuf::from("/home/u/.vstack/cache/owner_repo")),
+        "{https:?}"
+    );
+}

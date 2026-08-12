@@ -617,31 +617,16 @@ pub(crate) fn codex_hooks_feature_enabled(config_path: &Path) -> bool {
     let Ok(content) = std::fs::read_to_string(config_path) else {
         return false;
     };
-    let mut in_features = false;
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if trimmed == "[features]" {
-            in_features = true;
-            continue;
-        }
-        if in_features && is_toml_table_header(trimmed) {
-            in_features = false;
-        }
-        if !in_features {
-            continue;
-        }
-        if toml_assignment_key(line) == Some("hooks") {
-            return toml_assignment_value(line).is_some_and(|value| {
-                value
-                    .split_once('#')
-                    .map_or(value, |(head, _)| head)
-                    .trim()
-                    .trim_matches('"')
-                    == "true"
-            });
-        }
-    }
-    false
+    let Ok(doc) = content.parse::<toml::Value>() else {
+        return false;
+    };
+    // Codex requires a boolean here: `hooks = "true"` is a string and leaves
+    // the runtime off, so anything that is not a literal `true` reads as
+    // disabled rather than being coerced.
+    doc.get("features")
+        .and_then(|features| features.get("hooks"))
+        .and_then(toml::Value::as_bool)
+        == Some(true)
 }
 
 fn is_toml_table_header(trimmed_line: &str) -> bool {

@@ -1689,12 +1689,24 @@ fn hook_script_wire_path_matches_json_registration_slashes() {
     let windows_spelling = Path::new(r".claude\hooks\guard.sh");
     let raw_fragment = windows_spelling.to_string_lossy();
     assert!(
-        !json_contains_string_fragment(&registration, &raw_fragment),
+        !hook_command_registered(&registration, &raw_fragment, Some("PreToolUse")),
         "negative control: backslash spelling must not match slash JSON"
     );
     assert!(
-        json_contains_string_fragment(&registration, &hook_script_wire_path(windows_spelling)),
+        hook_command_registered(
+            &registration,
+            &hook_script_wire_path(windows_spelling),
+            Some("PreToolUse")
+        ),
         "wire-normalized hook path should match harness registration JSON"
+    );
+    assert!(
+        !hook_command_registered(
+            &registration,
+            &hook_script_wire_path(windows_spelling),
+            Some("Stop")
+        ),
+        "a registration under another event is not a registration for this one"
     );
 }
 
@@ -2139,7 +2151,10 @@ fn stage_mode_fails_before_staging_when_pi_bin_link_is_replaced() {
         let err = run(ScopeFilter::Project, false, false, true, true)
             .unwrap_err()
             .to_string();
-        assert!(err.contains("does not point into Pi package"), "{err}");
+        assert!(
+            err.contains("does not point at the target declared"),
+            "{err}"
+        );
         assert!(
             git_output(&project, &["diff", "--cached", "--name-only"]).is_empty(),
             "nothing may be staged"
@@ -2217,6 +2232,152 @@ fn refreshed_staging_records_deleted_supporting_pi_files_not_named_by_the_manife
         assert!(
             staged.contains("D\t.pi/packages/demo-pkg/lib/helper.ts"),
             "{staged}"
+        );
+    });
+}
+
+#[test]
+fn stage_mode_rejects_a_codex_hooks_feature_written_as_a_string() {
+    let project = tmpdir("stage-no-drift-codex-hooks-string");
+    let source = tmpdir("stage-no-drift-codex-hooks-string-source");
+    std::fs::create_dir_all(&project).unwrap();
+    init_git_project(&project);
+    write_hook_source(&source, "guard");
+
+    crate::test_util::with_project_root(&project, || {
+        let mut entry = hook_entry("guard", &source, &["codex"]);
+        entry.source_hash = config::compute_source_hash(&entry);
+        let mut lock = LockFile::default();
+        lock.add(entry);
+        lock.save(&config::lock_file_path(false)).unwrap();
+        write_file(
+            &project.join(".codex/hooks/guard.sh"),
+            "#!/bin/sh\nexit 0\n",
+        );
+        write_file(
+            &project.join(".codex/hooks.json"),
+            r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"bash \"$(git rev-parse --show-toplevel)/.codex/hooks/guard.sh\""}]}]}}"#,
+        );
+        write_file(
+            &project.join(".codex/config.toml"),
+            "[features]\nhooks = true\n",
+        );
+        git(&project, &["add", "-A"]);
+        git(&project, &["commit", "-m", "baseline"]);
+
+        // A TOML string, not a boolean: Codex leaves the runtime off.
+        write_file(
+            &project.join(".codex/config.toml"),
+            "[features]\nhooks = \"true\"\n",
+        );
+
+        let err = run(ScopeFilter::Project, false, false, true, true)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains(".codex/config.toml"), "{err}");
+        assert!(err.contains("hooks = true"), "{err}");
+        assert!(
+            git_output(&project, &["diff", "--cached", "--name-only"]).is_empty(),
+            "nothing may be staged"
+        );
+    });
+}
+
+#[test]
+fn stage_mode_rejects_a_hook_path_that_is_not_a_live_command_handler() {
+    let project = tmpdir("stage-no-drift-hook-not-a-handler");
+    let source = tmpdir("stage-no-drift-hook-not-a-handler-source");
+    std::fs::create_dir_all(&project).unwrap();
+    init_git_project(&project);
+    write_hook_source(&source, "guard");
+
+    crate::test_util::with_project_root(&project, || {
+        let mut entry = hook_entry("guard", &source, &["claude-code"]);
+        entry.source_hash = config::compute_source_hash(&entry);
+        let mut lock = LockFile::default();
+        lock.add(entry);
+        lock.save(&config::lock_file_path(false)).unwrap();
+        write_file(
+            &project.join(".claude/hooks/guard.sh"),
+            "#!/bin/sh\nexit 0\n",
+        );
+        // The script path appears only in an unrelated metadata string, so the
+        // harness will never invoke it.
+        write_file(
+            &project.join(".claude/settings.json"),
+            r#"{"note":"installed .claude/hooks/guard.sh","hooks":{}}"#,
+        );
+        git(&project, &["add", "-A"]);
+        git(&project, &["commit", "-m", "baseline"]);
+
+        let err = run(ScopeFilter::Project, false, false, true, true)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("auxiliary verification failed"), "{err}");
+        assert!(err.contains("missing command registration"), "{err}");
+        assert!(
+            git_output(&project, &["diff", "--cached", "--name-only"]).is_empty(),
+            "nothing may be staged"
+        );
+    });
+}
+
+#[test]
+#[cfg(unix)]
+fn stage_mode_rejects_a_pi_bin_link_redirected_inside_its_own_package() {
+    let project = tmpdir("stage-no-drift-pi-bin-in-package-redirect");
+    let source = tmpdir("stage-no-drift-pi-bin-in-package-redirect-source");
+    std::fs::create_dir_all(&project).unwrap();
+    init_git_project(&project);
+    write_file(
+        &source.join("pi-extensions/demo-pkg/package.json"),
+        r#"{"name":"demo-pkg","pi":{"extensions":[]},"bin":{"demo-tool":"bin/tool.js"}}"#,
+    );
+    write_file(&source.join("pi-extensions/demo-pkg/bin/tool.js"), "tool\n");
+    // Another source-owned file inside the same package.
+    write_file(
+        &source.join("pi-extensions/demo-pkg/bin/other.js"),
+        "other\n",
+    );
+
+    crate::test_util::with_project_root(&project, || {
+        let mut entry = pi_entry("demo-pkg", &source);
+        entry.source_hash = config::compute_source_hash(&entry);
+        let mut lock = LockFile::default();
+        lock.add(entry);
+        lock.save(&config::lock_file_path(false)).unwrap();
+        write_file(
+            &project.join(".pi/packages/demo-pkg/package.json"),
+            r#"{"name":"demo-pkg","pi":{"extensions":[]},"bin":{"demo-tool":"bin/tool.js"}}"#,
+        );
+        write_file(&project.join(".pi/packages/demo-pkg/bin/tool.js"), "tool\n");
+        write_file(
+            &project.join(".pi/packages/demo-pkg/bin/other.js"),
+            "other\n",
+        );
+        write_file(
+            &project.join(".pi/settings.json"),
+            r#"{"packages":[".pi/packages/demo-pkg"]}"#,
+        );
+        std::fs::create_dir_all(project.join(".pi/bin")).unwrap();
+        std::os::unix::fs::symlink(
+            "../packages/demo-pkg/bin/other.js",
+            project.join(".pi/bin/demo-tool"),
+        )
+        .unwrap();
+        git(&project, &["add", "-A"]);
+        git(&project, &["commit", "-m", "baseline"]);
+
+        let err = run(ScopeFilter::Project, false, false, true, true)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("does not point at the target declared"),
+            "{err}"
+        );
+        assert!(
+            git_output(&project, &["diff", "--cached", "--name-only"]).is_empty(),
+            "nothing may be staged"
         );
     });
 }

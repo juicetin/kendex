@@ -755,10 +755,32 @@ fn legacy_remote_cache_dirs(source: &str, cache_dir: &Path) -> Vec<PathBuf> {
     if source.contains('/') && !source.starts_with('.') && !source.starts_with('/') {
         push_key(source.replace(['/', '\\'], "_"));
     }
+    if let Some(key) = legacy_add_cache_key(source) {
+        push_key(key);
+    }
     if let Some(slug) = config::parse_github_slug(source) {
         push_key(sanitize_cache_component(&slug.replace('/', "_")));
     }
     paths
+}
+
+/// The cache key `vstack add` used to mint for full URL sources: trim a
+/// trailing slash and `.git`, then join the last two slash-separated segments
+/// with `_`. Caches created by that implementation are still on disk, and
+/// neither the raw-source key (which keeps `.git` and URL prefixes) nor the
+/// GitHub-slug key (absent for non-GitHub hosts) reproduces it, so probe it
+/// too before falling through to a fresh clone.
+fn legacy_add_cache_key(source: &str) -> Option<String> {
+    if !source.starts_with("https://") && !source.starts_with("git@") {
+        return None;
+    }
+    let trimmed = source.trim_end_matches('/').trim_end_matches(".git");
+    let mut tail: Vec<&str> = trimmed.rsplit('/').take(2).collect();
+    tail.reverse();
+    if tail.is_empty() {
+        return None;
+    }
+    Some(tail.join("_"))
 }
 
 fn validate_cached_repo_origin(display: &str, expected_url: &str, repo_dir: &Path) -> Result<()> {

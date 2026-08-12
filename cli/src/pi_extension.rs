@@ -370,7 +370,7 @@ pub(crate) fn checked_pi_package_path(name: &str, global: bool) -> Result<PathBu
     Ok(dest)
 }
 
-fn checked_package_child_path(base: &Path, rel: &str, kind: &str) -> Result<PathBuf> {
+pub(crate) fn checked_package_child_path(base: &Path, rel: &str, kind: &str) -> Result<PathBuf> {
     let rel_path = Path::new(rel);
     if rel_path.is_absolute() {
         anyhow::bail!("invalid {kind} path `{rel}`");
@@ -1122,11 +1122,14 @@ pub fn append_system_path(global: bool) -> PathBuf {
 const APPEND_SYSTEM_MARKER_PREFIX: &str = "<!-- vstack:append-system ";
 
 /// Whether `path` holds at least one vstack-managed append-system block.
-/// A missing or unreadable file reads as unmanaged.
-pub fn append_system_has_managed_block(path: &Path) -> bool {
-    std::fs::read_to_string(path)
-        .map(|content| content.contains(APPEND_SYSTEM_MARKER_PREFIX))
-        .unwrap_or(false)
+/// A missing file is genuinely unmanaged; any other read failure is a
+/// dependency failure and propagates rather than reading as "absent".
+pub fn append_system_has_managed_block(path: &Path) -> Result<bool> {
+    match std::fs::read_to_string(path) {
+        Ok(content) => Ok(content.contains(APPEND_SYSTEM_MARKER_PREFIX)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(err).with_context(|| format!("reading {}", path.display())),
+    }
 }
 
 fn append_system_block_markers(name: &str) -> (String, String) {
@@ -1996,6 +1999,34 @@ printf 'module.exports = 1;\n' > node_modules/left-pad/index.js
                 "relative target should resolve inside the project"
             );
         });
+
+        let _ = std::fs::remove_dir_all(&sandbox);
+    }
+
+    #[test]
+    fn append_system_managed_block_probe_distinguishes_absent_from_unreadable() {
+        let sandbox =
+            std::env::temp_dir().join(format!("vstack_append_system_probe_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&sandbox);
+        std::fs::create_dir_all(&sandbox).unwrap();
+
+        let absent = sandbox.join("APPEND_SYSTEM.md");
+        assert!(
+            !append_system_has_managed_block(&absent).unwrap(),
+            "a file that is not there is genuinely unmanaged"
+        );
+
+        std::fs::write(
+            &absent,
+            "<!-- vstack:append-system pkg begin -->\nrule\n<!-- vstack:append-system pkg end -->\n",
+        )
+        .unwrap();
+        assert!(append_system_has_managed_block(&absent).unwrap());
+
+        // An unreadable path is a dependency failure, not an "absent" answer.
+        let unreadable = sandbox.join("dir-in-the-way");
+        std::fs::create_dir_all(&unreadable).unwrap();
+        assert!(append_system_has_managed_block(&unreadable).is_err());
 
         let _ = std::fs::remove_dir_all(&sandbox);
     }

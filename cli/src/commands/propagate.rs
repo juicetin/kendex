@@ -151,8 +151,14 @@ fn verify_project_auxiliary_installs_before_stage() -> Result<()> {
     for entry in lock.entries.values() {
         match entry.kind {
             ItemKind::Hook => {
+                let event = locked_hook_event(entry);
                 for harness in entry.harnesses.iter().filter_map(|id| Harness::from_id(id)) {
-                    verify_hook_auxiliary_install(&entry.name, harness, &mut failures);
+                    verify_hook_auxiliary_install(
+                        &entry.name,
+                        harness,
+                        event.as_deref(),
+                        &mut failures,
+                    );
                 }
             }
             ItemKind::PiExtension => {
@@ -171,7 +177,12 @@ fn verify_project_auxiliary_installs_before_stage() -> Result<()> {
     }
 }
 
-fn verify_hook_auxiliary_install(name: &str, harness: Harness, failures: &mut Vec<String>) {
+fn verify_hook_auxiliary_install(
+    name: &str,
+    harness: Harness,
+    event: Option<&str>,
+    failures: &mut Vec<String>,
+) {
     match harness {
         Harness::ClaudeCode => {
             let script = Path::new(".claude")
@@ -179,9 +190,10 @@ fn verify_hook_auxiliary_install(name: &str, harness: Harness, failures: &mut Ve
                 .join(format!("{name}.sh"));
             if config::project_root().join(&script).exists() {
                 let wire_path = hook_script_wire_path(&script);
-                require_json_string_fragment(
+                require_hook_command_registration(
                     Path::new(".claude").join("settings.json").as_path(),
                     &wire_path,
+                    event,
                     &format!("Claude hook {name}"),
                     failures,
                 );
@@ -191,9 +203,10 @@ fn verify_hook_auxiliary_install(name: &str, harness: Harness, failures: &mut Ve
             let script = Path::new(".codex").join("hooks").join(format!("{name}.sh"));
             if config::project_root().join(&script).exists() {
                 let wire_path = hook_script_wire_path(&script);
-                require_json_string_fragment(
+                require_hook_command_registration(
                     Path::new(".codex").join("hooks.json").as_path(),
                     &wire_path,
+                    event.and_then(crate::installer::codex_event_for),
                     &format!("Codex hook {name}"),
                     failures,
                 );
@@ -213,6 +226,19 @@ fn verify_hook_auxiliary_install(name: &str, harness: Harness, failures: &mut Ve
         }
         _ => {}
     }
+}
+
+/// The event a locked hook is registered under, read from its source
+/// definition. Best effort: a source that will not resolve leaves the event
+/// unknown rather than failing the whole pre-stage verification, and the
+/// handler-shape check still applies.
+fn locked_hook_event(entry: &config::LockEntry) -> Option<String> {
+    let source_root = config::resolve_source_path(&entry.source)?;
+    crate::catalog::discover_hooks(&source_root)
+        .ok()?
+        .into_iter()
+        .find(|hook| hook.name == entry.name)
+        .map(|hook| hook.event)
 }
 
 fn hook_script_wire_path(path: &Path) -> String {
@@ -242,11 +268,17 @@ fn verify_pi_auxiliary_install(name: &str, failures: &mut Vec<String>) -> Result
 
     #[cfg(unix)]
     if let Ok(ext) = crate::pi_extension::PiExtension::from_dir(&package_dir) {
-        for bin_name in ext.bin.keys() {
+        for (bin_name, rel_target) in &ext.bin {
             crate::pi_extension::validate_pi_bin_name(bin_name)
                 .with_context(|| format!("unsafe Pi bin name {bin_name}"))?;
+            let declared = crate::pi_extension::checked_package_child_path(
+                &package_dir,
+                rel_target,
+                "Pi bin target",
+            )
+            .with_context(|| format!("unsafe Pi bin target {rel_target}"))?;
             let bin = config::pi_bin_dir(false).join(bin_name);
-            if let Some(failure) = pi_bin_link_failure(&bin, bin_name, &package_dir, name) {
+            if let Some(failure) = pi_bin_link_failure(&bin, bin_name, &declared, name) {
                 failures.push(failure);
             }
         }
@@ -256,14 +288,16 @@ fn verify_pi_auxiliary_install(name: &str, failures: &mut Vec<String>) -> Result
 }
 
 /// A locked `.pi/bin/<cmd>` is only a valid install when it is a symlink that
-/// resolves into its own package. An inode alone is not evidence: a
-/// consumer-owned regular file, or a link redirected elsewhere, is a
-/// replacement that staging must refuse rather than absorb into a PR.
+/// resolves to the exact file the package's `bin` entry declares. An inode
+/// alone is not evidence, and neither is package containment: a consumer-owned
+/// regular file, a link redirected elsewhere, and a link redirected to another
+/// file inside the same package all run something other than the locked
+/// entrypoint, so staging must refuse them rather than absorb them into a PR.
 #[cfg(unix)]
 fn pi_bin_link_failure(
     bin: &Path,
     bin_name: &str,
-    package_dir: &Path,
+    declared_target: &Path,
     package_name: &str,
 ) -> Option<String> {
     let Ok(meta) = std::fs::symlink_metadata(bin) else {
@@ -287,10 +321,10 @@ fn pi_bin_link_failure(
         bin.parent().unwrap_or(Path::new(".")).join(target)
     };
     let resolved = crate::installer::normalize_absolute_path(&resolved);
-    let package_dir = crate::installer::normalize_absolute_path(package_dir);
-    if !resolved.starts_with(&package_dir) {
+    let declared = crate::installer::normalize_absolute_path(declared_target);
+    if resolved != declared {
         return Some(format!(
-            ".pi/bin/{bin_name} does not point into Pi package {package_name}"
+            ".pi/bin/{bin_name} does not point at the target declared by Pi package {package_name}"
         ));
     }
     if !resolved.exists() {
@@ -301,20 +335,53 @@ fn pi_bin_link_failure(
     None
 }
 
-fn require_json_string_fragment(
+/// Require the locked script to appear as a live command handler, not merely
+/// somewhere in the document. The harness only runs
+/// `hooks.<event>[].hooks[]` entries whose `type` is `command`, so a path in an
+/// unrelated metadata string is not a registration. When the hook's event is
+/// known the handler must sit under that event; when it is not (the source
+/// definition could not be read), any event still proves the handler shape.
+fn require_hook_command_registration(
     relative: &Path,
     needle: &str,
+    event: Option<&str>,
     label: &str,
     failures: &mut Vec<String>,
 ) {
     match read_project_json(relative) {
-        Ok(json) if json_contains_string_fragment(&json, needle) => {}
-        Ok(_) => failures.push(format!(
-            "{} missing registration for {label}",
-            relative.display()
-        )),
+        Ok(json) if hook_command_registered(&json, needle, event) => {}
+        Ok(_) => {
+            let scope = match event {
+                Some(event) => format!(" under {event}"),
+                None => String::new(),
+            };
+            failures.push(format!(
+                "{} missing command registration{scope} for {label}",
+                relative.display()
+            ));
+        }
         Err(err) => failures.push(format!("{} {err}", relative.display())),
     }
+}
+
+fn hook_command_registered(json: &serde_json::Value, needle: &str, event: Option<&str>) -> bool {
+    let Some(hooks) = json.get("hooks").and_then(serde_json::Value::as_object) else {
+        return false;
+    };
+    hooks
+        .iter()
+        .filter(|(event_name, _)| event.is_none_or(|wanted| wanted == event_name.as_str()))
+        .filter_map(|(_, entries)| entries.as_array())
+        .flatten()
+        .filter_map(|entry| entry.get("hooks").and_then(serde_json::Value::as_array))
+        .flatten()
+        .any(|handler| {
+            handler.get("type").and_then(serde_json::Value::as_str) == Some("command")
+                && handler
+                    .get("command")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|command| command.contains(needle))
+        })
 }
 
 fn read_project_json(relative: &Path) -> Result<serde_json::Value> {
@@ -322,19 +389,6 @@ fn read_project_json(relative: &Path) -> Result<serde_json::Value> {
     let content =
         std::fs::read_to_string(&path).with_context(|| "missing or unreadable".to_string())?;
     serde_json::from_str(&content).with_context(|| "contains invalid JSON".to_string())
-}
-
-fn json_contains_string_fragment(value: &serde_json::Value, needle: &str) -> bool {
-    match value {
-        serde_json::Value::String(value) => value.contains(needle),
-        serde_json::Value::Array(values) => values
-            .iter()
-            .any(|value| json_contains_string_fragment(value, needle)),
-        serde_json::Value::Object(values) => values
-            .values()
-            .any(|value| json_contains_string_fragment(value, needle)),
-        _ => false,
-    }
 }
 
 fn pi_settings_references_package(
@@ -746,7 +800,7 @@ fn project_stage_paths_with(
     let append_system = crate::pi_extension::append_system_path(false);
     if has_pi_package
         && (has_pi_append_system
-            || crate::pi_extension::append_system_has_managed_block(&append_system))
+            || crate::pi_extension::append_system_has_managed_block(&append_system)?)
     {
         push_abs_if_exists(&mut paths, &project_root, append_system, include_missing);
     }
