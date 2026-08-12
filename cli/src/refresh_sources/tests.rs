@@ -54,6 +54,14 @@ fn lock_entry(name: &str, source: &str) -> LockEntry {
     }
 }
 
+fn assert_windows_safe_path_component(component: &str) {
+    let invalid = ['<', '>', ':', '"', '/', '\\', '|', '?', '*'];
+    assert!(
+        !component.chars().any(|ch| invalid.contains(&ch)),
+        "test fixture path component is not Windows-safe: {component}"
+    );
+}
+
 #[test]
 fn resolve_single_source_accepts_absolute_vstack_source() {
     let root = TempDir::new("absolute");
@@ -552,10 +560,9 @@ fn cached_repo_origin_validation_distinguishes_ssh_usernames() {
 #[test]
 fn cached_repo_origin_mismatch_does_not_leak_legacy_path_userinfo() {
     let root = TempDir::new("legacy-cache-redaction");
-    let cache = root
-        .path()
-        .join("cache")
-        .join("https:__token@example.com_owner_repo");
+    let legacy_cache_key = "https___token@example.com_owner_repo";
+    assert_windows_safe_path_component(legacy_cache_key);
+    let cache = root.path().join("cache").join(legacy_cache_key);
     init_git_repo(&cache);
     git(
         &cache,
