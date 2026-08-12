@@ -2223,6 +2223,74 @@ fn staging_leaves_consumer_owned_append_system_alone_and_stages_an_owned_one() {
     });
 }
 
+/// The guard runs BEFORE the refresh, so it must read the source the refresh is
+/// about to install from, not only the package already on disk. An updated
+/// package that adds `pi.appendSystem` for the first time leaves both
+/// on-disk signals clean — the installed manifest declares none and a
+/// consumer-authored prompt carries no managed marker — while refresh is about
+/// to write a managed block into that very file and stage the whole thing.
+#[test]
+fn pre_refresh_guard_covers_an_append_system_the_updated_source_newly_declares() {
+    let project = tmpdir("stage-pi-append-system-new-upstream");
+    let source = tmpdir("stage-pi-append-system-new-upstream-source");
+    std::fs::create_dir_all(&project).unwrap();
+    init_git_project(&project);
+    // The updated source declares an append-system block for the first time.
+    write_file(
+        &source.join("pi-extensions/demo-pkg/package.json"),
+        r#"{"name":"demo-pkg","pi":{"extensions":[],"appendSystem":"APPEND.md"}}"#,
+    );
+    write_file(&source.join("pi-extensions/demo-pkg/APPEND.md"), "rule\n");
+
+    crate::test_util::with_project_root(&project, || {
+        let mut lock = LockFile::default();
+        lock.add(pi_entry("demo-pkg", &source));
+        lock.save(&config::lock_file_path(false)).unwrap();
+        // The installed package is the older one, without appendSystem.
+        write_file(
+            &project.join(".pi/packages/demo-pkg/package.json"),
+            r#"{"name":"demo-pkg","pi":{"extensions":[]}}"#,
+        );
+        write_file(
+            &project.join(".pi/APPEND_SYSTEM.md"),
+            "consumer house rules\n",
+        );
+        git(&project, &["add", "-A"]);
+        git(&project, &["commit", "-m", "baseline"]);
+
+        // The consumer's own uncommitted prompt edit.
+        write_file(
+            &project.join(".pi/APPEND_SYSTEM.md"),
+            "consumer house rules, revised\n",
+        );
+
+        // Control: both signals the pre-refresh guard used to have read clean
+        // here, so a covered path below can only come from the source.
+        let append_system = crate::pi_extension::append_system_path(false);
+        assert!(
+            !crate::pi_extension::append_system_has_managed_block(&append_system).unwrap(),
+            "control failed: the consumer prompt already carries a managed block"
+        );
+        let installed =
+            std::fs::read_to_string(project.join(".pi/packages/demo-pkg/package.json")).unwrap();
+        assert!(
+            !installed.contains("appendSystem"),
+            "control failed: the installed package already declares appendSystem"
+        );
+
+        let stage_paths = pre_refresh_project_stage_paths().unwrap();
+        let dirty = dirty_shared_config_paths(&stage_paths).unwrap();
+        assert!(
+            dirty.contains(&PathBuf::from(".pi/APPEND_SYSTEM.md")),
+            "the pre-refresh guard does not cover the prompt file the refresh is about to write: {dirty:?}"
+        );
+        let err = refuse_pre_existing_shared_config_edits(&dirty)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains(".pi/APPEND_SYSTEM.md"), "{err}");
+    });
+}
+
 #[test]
 #[cfg(unix)]
 fn stage_mode_fails_before_staging_when_pi_bin_link_is_replaced() {

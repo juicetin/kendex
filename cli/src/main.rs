@@ -18,6 +18,7 @@ mod project_settings;
 mod refresh_sources;
 mod resolve;
 mod scope;
+mod shell;
 mod skill;
 #[cfg(test)]
 mod test_util;

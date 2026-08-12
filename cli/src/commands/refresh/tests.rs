@@ -1496,6 +1496,50 @@ fn refresh_withholds_agent_success_when_a_declared_skill_is_not_installed() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+/// The remedy is advertised as a command to paste. A local source path is
+/// accepted with spaces and shell metacharacters in it, so rendering it raw
+/// hands the consumer a command the shell splits — `vstack add` then searches a
+/// source that does not exist.
+#[test]
+fn refresh_quotes_a_local_source_in_the_advertised_recovery_command() {
+    let root = tmpdir("recovery-command-quoting");
+    let project = root.join("project");
+    let source = make_source(&root, "my source (v2)");
+    std::fs::create_dir_all(&project).unwrap();
+    write_colliding_source(&source, "1", "PreToolUse", "source-model");
+    // Control: the fixture only proves anything if the source spec really is a
+    // string the shell would not survive verbatim.
+    let spec = source.to_string_lossy().into_owned();
+    assert!(
+        spec.contains(' ') && spec.contains('('),
+        "control failed: the fixture source spec needs quoting to be interesting: {spec}"
+    );
+
+    let mut lock = LockFile::default();
+    lock.add(lock_entry(
+        "rust",
+        ItemKind::Agent,
+        &source,
+        vec!["claude-code"],
+    ));
+    let sources = vec![RefreshSource::from_root(&source)];
+    let stats = crate::test_util::with_project_root(&project, || {
+        let mut project_config = ProjectConfig::default();
+        refresh_items_in_scope(false, &lock, &sources, &mut project_config, &project, None)
+    });
+
+    let reason = stats
+        .incomplete
+        .get("rust")
+        .expect("an uninstalled declared skill must be recorded as incomplete");
+    assert!(
+        reason.contains(&format!("vstack add '{spec}' --skill shared")),
+        "the recovery command does not shell-quote the source: {reason}"
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
 /// The generated agent draws on the project's own `[agent-skills]` list as well
 /// as the source's, so a consumer entry naming an uninstalled skill is the same
 /// unmet dependency — and the agent hash is project-config-sensitive, so
@@ -1939,14 +1983,76 @@ fn refresh_run_leaves_project_config_untouched_when_source_mapping_is_schema_inv
     let _ = std::fs::remove_dir_all(root);
 }
 
+/// `reconcile_lock_with_disk` recovers an installed-but-unlocked skill and
+/// attributes it to the lock's own recovery hint. The refresh resolves its
+/// source catalogs before that, so a caller-supplied record set that omits the
+/// hint leaves the recovered entry with no catalog to refresh from: the entry
+/// lands in the lock and the item on disk is silently left stale.
+#[test]
+fn refresh_refreshes_an_entry_reconciliation_recovers_from_disk() {
+    let root = tmpdir("recovered-entry-refreshed");
+    let project = root.join("project");
+    let source = make_source(&root, "source");
+    write_colliding_source(&source, "2", "PreToolUse", "model-x");
+    std::fs::create_dir_all(project.join(".claude/skills")).unwrap();
+    std::fs::write(project.join("vstack.toml"), "# consumer config\n").unwrap();
+
+    // Installed and marked as vstack-managed, but absent from the lock: this is
+    // what reconciliation recovers.
+    let installed_skill = project.join(".agents/skills/shared");
+    std::fs::create_dir_all(&installed_skill).unwrap();
+    std::fs::write(
+        installed_skill.join("SKILL.md"),
+        "---\nname: shared\ndescription: Shared 1\nlicense: MIT\n---\n# Shared\n\nSkill body 1.\n",
+    )
+    .unwrap();
+    std::fs::write(installed_skill.join(".vstack-refreshed"), "").unwrap();
+    // The harness reference recovery reads to decide which harnesses hold it,
+    // so the recovered entry covers the agent that declares it.
+    std::os::unix::fs::symlink(&installed_skill, project.join(".claude/skills/shared")).unwrap();
+
+    let mut lock = LockFile::default();
+    lock.add(lock_entry(
+        "rust",
+        ItemKind::Agent,
+        &source,
+        vec!["claude-code"],
+    ));
+    lock.save(&project.join(".vstack-lock.json")).unwrap();
+
+    // Control: the stale body is what the source would replace, so a passing
+    // assertion below cannot be the fixture already matching.
+    let before = std::fs::read_to_string(installed_skill.join("SKILL.md")).unwrap();
+    assert!(
+        before.contains("Skill body 1.") && !before.contains("Skill body 2."),
+        "control failed: the installed skill already carries the source body"
+    );
+
+    crate::test_util::with_project_root(&project, || {
+        run_one_with_source_records(false, false, Some(&[]))
+    })
+    .expect("refresh must succeed");
+
+    let after = std::fs::read_to_string(installed_skill.join("SKILL.md")).unwrap();
+    assert!(
+        after.contains("Skill body 2."),
+        "the recovered entry was added to the lock but never refreshed: {after}"
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
 /// Every path under `root` paired with what it is — directory, symlink target,
-/// or file bytes — without following links.
+/// or file bytes — without following links. Every read failure panics: this is
+/// what the no-mutation assertions compare through, and a swallowed error would
+/// make two snapshots of an unreadable tree agree.
 fn snapshot_tree(root: &Path) -> Vec<(String, String)> {
     fn walk(dir: &Path, base: &Path, out: &mut Vec<(String, String)>) {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return;
-        };
-        for entry in entries.flatten() {
+        let entries = std::fs::read_dir(dir)
+            .unwrap_or_else(|err| panic!("read snapshot dir {}: {err}", dir.display()));
+        for entry in entries {
+            let entry = entry
+                .unwrap_or_else(|err| panic!("read snapshot dir {} entry: {err}", dir.display()));
             let path = entry.path();
             let rel = path
                 .strip_prefix(base)
@@ -1979,6 +2085,42 @@ fn snapshot_tree(root: &Path) -> Vec<(String, String)> {
     walk(root, root, &mut out);
     out.sort();
     out
+}
+
+/// `snapshot_tree` is the instrument the no-mutation assertions read through: a
+/// read failure it swallows makes two snapshots agree over a tree it never
+/// looked at, and every test built on it passes vacuously. Proving the read
+/// really fails first keeps this from passing for the wrong reason on a
+/// filesystem where the permission bits do not bite.
+#[test]
+#[should_panic(expected = "read snapshot dir")]
+fn snapshot_tree_fails_loudly_when_a_directory_cannot_be_read() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = tmpdir("snapshot-unreadable-dir");
+    let locked = root.join("locked");
+    std::fs::create_dir_all(&locked).unwrap();
+    std::fs::write(locked.join("inside"), "content").unwrap();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    // Control: the panic below is worth nothing unless this really is a
+    // directory the walk cannot read.
+    let readable = std::fs::read_dir(&locked).is_ok();
+    if readable {
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+        panic!("control failed: the unreadable fixture directory is readable");
+    }
+
+    // Restoring the mode is unreachable on the failing path, so the fixture is
+    // reopened before the call that must panic.
+    let result = std::panic::catch_unwind(|| snapshot_tree(&root));
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let _ = std::fs::remove_dir_all(&root);
+    match result {
+        Ok(snapshot) => panic!("snapshot_tree hid the read failure and returned {snapshot:?}"),
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
 }
 
 /// The mapping check must sit ahead of EVERY mutation, not merely ahead of the

@@ -454,7 +454,7 @@ pub fn refresh_items_in_scope(
             if !installable.is_empty() {
                 remedies.push(format!(
                     "run `vstack add {} {scope_flag}--skill {}`",
-                    entry.source,
+                    crate::shell::quote(&entry.source),
                     installable.join(",")
                 ));
             }
@@ -1330,9 +1330,29 @@ fn run_one_with_source_records(
     // symlinks and saves the lock, so a check behind it drops the lock entry of
     // a skill whose artifact went missing and only then aborts, leaving nothing
     // to reinstall from once the mapping is repaired.
-    let source_records = resolved_records
+    //
+    // `reconcile_lock_with_disk` below recovers installed-but-unlocked skills
+    // and attributes them to the lock's own recovery hint, so the hint's
+    // catalog has to be in this set or the recovered entry has nothing to
+    // refresh from. It is folded in HERE rather than after reconciliation so
+    // the mapping check still covers every source in play before any mutation.
+    let source_hint = lock
+        .entries
+        .values()
+        .next()
+        .map(|e| e.source.clone())
+        .unwrap_or_default();
+    let mut source_records = resolved_records
         .map(|records| records.to_vec())
         .unwrap_or_else(|| resolve_source_records(&lock));
+    if !source_hint.is_empty()
+        && !source_records
+            .iter()
+            .any(|record| record.aliases.iter().any(|alias| alias == &source_hint))
+        && let Some(record) = crate::refresh_sources::resolve_source_record(&source_hint)
+    {
+        source_records.push(record);
+    }
     let source_dirs: Vec<_> = source_records
         .iter()
         .map(|source| source.root.clone())
@@ -1343,12 +1363,6 @@ fn run_one_with_source_records(
     }
 
     // Reconcile lock with disk before refreshing (recovers orphaned entries)
-    let source_hint = lock
-        .entries
-        .values()
-        .next()
-        .map(|e| e.source.clone())
-        .unwrap_or_default();
     if config::reconcile_lock_with_disk(&mut lock, global, &source_hint) {
         lock.save(&lock_path)?;
     }

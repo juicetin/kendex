@@ -458,22 +458,24 @@ fn remove_same_scope_legacy_packages(name: &str, global: bool) -> Result<()> {
 /// Install a Pi package into the chosen scope.
 ///
 /// Steps:
-/// 1. Remove any same-scope vstack legacy package names for this package
-///    (for example `pi-subagents-tmux` → `pi-agents-tmux`). Renamed Pi
-///    packages can register the same tools, and Pi treats them as distinct
-///    packages, so leaving the legacy package installed crashes startup.
-/// 2. If the SAME extension (or one of its legacy names) is already installed
+/// 1. If the SAME extension (or one of its legacy names) is already installed
 ///    at the OTHER scope, SKIP the install with a notice. Pi loads packages
 ///    from BOTH global and project scopes; duplicate resources cause
 ///    "Tool X conflicts with Y" errors at Pi startup. The existing scope wins
 ///    — to switch scopes, the user explicitly runs
 ///    `vstack remove [--global] <name>` then re-installs at the desired scope.
-/// 3. Copy the package directory into `<scope>/packages/<name>/`.
-/// 4. If `package.json` declares production dependencies, run `npm install`
+/// 2. Preflight every `bin` name the package claims, while the install can
+///    still be abandoned without having touched anything.
+/// 3. Remove any same-scope vstack legacy package names for this package
+///    (for example `pi-subagents-tmux` → `pi-agents-tmux`). Renamed Pi
+///    packages can register the same tools, and Pi treats them as distinct
+///    packages, so leaving the legacy package installed crashes startup.
+/// 4. Copy the package directory into `<scope>/packages/<name>/`.
+/// 5. If `package.json` declares production dependencies, run `npm install`
 ///    in the deployed package directory so Pi can resolve runtime modules.
-/// 5. For every entry in the package.json `bin` field, create a symlink
+/// 6. For every entry in the package.json `bin` field, create a symlink
 ///    at `<scope>/bin/<cli-name>` pointing at the installed binary.
-/// 6. Add a relative path entry (`./packages/<name>`) to Pi's `settings.json`
+/// 7. Add a relative path entry (`./packages/<name>`) to Pi's `settings.json`
 ///    `packages` array, preserving any existing entries.
 ///
 /// Pi resolves relative path entries against the settings file directory:
@@ -502,12 +504,8 @@ fn install_pi_extension_inner(
     allow_opposite_scope_duplicate: bool,
 ) -> Result<Option<PathBuf>> {
     validate_pi_package_name(&ext.name)?;
-    // Step 1: same-scope legacy migration for package renames. This is safe to
-    // do automatically because these are vstack-owned package names and the new
-    // package supersedes the old one.
-    remove_same_scope_legacy_packages(&ext.name, global)?;
 
-    // Step 2a: cross-scope guard for the same current package name. Pi loads
+    // Step 1a: cross-scope guard for the same current package name. Pi loads
     // from both scopes — duplicate registration would crash startup. Existing
     // scope is authoritative.
     if !allow_opposite_scope_duplicate && is_pi_extension_installed(&ext.name, !global) {
@@ -522,7 +520,7 @@ fn install_pi_extension_inner(
         return Ok(None);
     }
 
-    // Step 2b: cross-scope guard for legacy package names. We migrate the
+    // Step 1b: cross-scope guard for legacy package names. We migrate the
     // selected scope automatically, but do not delete packages from the other
     // scope as a side effect of this install.
     for legacy in legacy_names_for(&ext.name) {
@@ -538,12 +536,21 @@ fn install_pi_extension_inner(
         }
     }
 
-    let dest_dir = crate::config::pi_packages_dir(global);
-    std::fs::create_dir_all(&dest_dir)?;
     let dest = checked_pi_package_path(&ext.name, global)?;
     let previous_bin_names = installed_bin_names(&dest);
 
+    // Step 2: preflight the bin names. Nothing above this line has written
+    // anything, and the legacy migration below deletes a working package — a
+    // collision found after it would leave the consumer with neither version.
     reject_bin_link_collisions(ext, &dest, global)?;
+
+    // Step 3: same-scope legacy migration for package renames. This is safe to
+    // do automatically because these are vstack-owned package names and the new
+    // package supersedes the old one. FIRST destructive step.
+    remove_same_scope_legacy_packages(&ext.name, global)?;
+
+    let dest_dir = crate::config::pi_packages_dir(global);
+    std::fs::create_dir_all(&dest_dir)?;
 
     // Idempotent reinstall: clear any prior copy. NotFound is fine; other
     // errors (EACCES etc.) propagate so we don't copy onto a broken state.
@@ -706,8 +713,18 @@ pub fn remove_pi_extension(name: &str, global: bool) -> Result<Vec<PathBuf>> {
 /// old package has been cleared, recopied and its earlier links replaced, with
 /// Pi able to load the new package through its existing settings entry — so
 /// this runs on every platform too, ahead of the replacement.
+///
+/// A link owned by a same-scope legacy package counts as replaceable: the
+/// migration this preflight now precedes removes that package, and the
+/// replacement inherits its command names.
 fn reject_bin_link_collisions(ext: &PiExtension, dest: &Path, global: bool) -> Result<()> {
     let bin_dir = crate::config::pi_bin_dir(global);
+    let mut owners = vec![dest.to_path_buf()];
+    for legacy in legacy_names_for(&ext.name) {
+        if is_pi_extension_installed(legacy, global) {
+            owners.push(checked_pi_package_path(legacy, global)?);
+        }
+    }
     for (cli_name, rel_target) in &ext.bin {
         validate_pi_bin_name(cli_name)?;
         // `install_bin_links` skips a bin whose manifest target does not exist,
@@ -722,7 +739,7 @@ fn reject_bin_link_collisions(ext: &PiExtension, dest: &Path, global: bool) -> R
         if !source_target.exists() {
             continue;
         }
-        reject_foreign_bin_link(&bin_dir.join(cli_name), cli_name, dest, &ext.name)?;
+        reject_foreign_bin_link(&bin_dir.join(cli_name), cli_name, &owners, &ext.name)?;
     }
     Ok(())
 }
@@ -748,7 +765,7 @@ fn install_bin_links(ext: &PiExtension, package_dest: &Path, global: bool) -> Re
             continue;
         }
         let link = bin_dir.join(cli_name);
-        reject_foreign_bin_link(&link, cli_name, package_dest, &ext.name)?;
+        reject_foreign_bin_link(&link, cli_name, &[package_dest.to_path_buf()], &ext.name)?;
         let _ = std::fs::remove_file(&link);
         #[cfg(unix)]
         {
@@ -773,11 +790,12 @@ fn install_bin_links(ext: &PiExtension, package_dest: &Path, global: bool) -> Re
 /// the path unconditionally silently replaced a consumer's own file or another
 /// package's command — and on a platform without symlink support it deleted the
 /// path with nothing put back. Only an absent path, or a link already resolving
-/// into this package, may be replaced.
+/// into one of `owners` — this package, or a legacy name of it the install is
+/// about to migrate away — may be replaced.
 fn reject_foreign_bin_link(
     link: &Path,
     cli_name: &str,
-    package_dest: &Path,
+    owners: &[PathBuf],
     package_name: &str,
 ) -> Result<()> {
     let Ok(meta) = std::fs::symlink_metadata(link) else {
@@ -790,8 +808,10 @@ fn reject_foreign_bin_link(
             } else {
                 link.parent().unwrap_or(Path::new(".")).join(target)
             };
-            crate::installer::normalize_absolute_path(&resolved)
-                .starts_with(crate::installer::normalize_absolute_path(package_dest))
+            let resolved = crate::installer::normalize_absolute_path(&resolved);
+            owners
+                .iter()
+                .any(|owner| resolved.starts_with(crate::installer::normalize_absolute_path(owner)))
         });
     if owned {
         return Ok(());
@@ -1119,8 +1139,7 @@ fn package_declares_runtime_dependencies(package_dir: &Path) -> Result<bool> {
 }
 
 fn shell_quote_path(path: &Path) -> String {
-    let raw = path.to_string_lossy();
-    format!("'{}'", raw.replace('\'', "'\\''"))
+    crate::shell::quote(&path.to_string_lossy())
 }
 
 fn npm_production_install_command(package_dir: &Path) -> String {
@@ -2484,6 +2503,119 @@ printf 'module.exports = 1;\n' > node_modules/left-pad/index.js
         let _ = std::fs::remove_dir_all(&sandbox);
     }
 
+    fn write_binned_source(dir: &Path, name: &str, bins: &[&str]) {
+        std::fs::create_dir_all(dir.join("extensions")).unwrap();
+        std::fs::create_dir_all(dir.join("bin")).unwrap();
+        std::fs::write(dir.join("extensions").join("mini.ts"), "// noop\n").unwrap();
+        let mut bin_field = Vec::new();
+        for bin in bins {
+            std::fs::write(dir.join("bin").join(format!("{bin}.js")), "// tool\n").unwrap();
+            bin_field.push(format!("\"{bin}\": \"./bin/{bin}.js\""));
+        }
+        std::fs::write(
+            dir.join("package.json"),
+            format!(
+                r#"{{ "name": "{name}", "pi": {{ "extensions": ["./extensions/mini.ts"] }}, "bin": {{ {} }} }}"#,
+                bin_field.join(", ")
+            ),
+        )
+        .unwrap();
+    }
+
+    /// Step 1 of the install deletes the same-scope legacy package outright.
+    /// A replacement whose bin names cannot be claimed must be refused BEFORE
+    /// that, or the consumer is left with neither version: the working legacy
+    /// package is gone and the replacement never installs.
+    #[test]
+    #[cfg(unix)]
+    fn install_preflights_bins_before_removing_a_legacy_package() {
+        let sandbox =
+            std::env::temp_dir().join(format!("vstack_pi_legacy_preflight_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&sandbox);
+        let legacy_src = sandbox.join("src").join("pi-agents-tmux");
+        let current_src = sandbox.join("src").join("vg-pi-agents-tmux");
+        write_binned_source(&legacy_src, "pi-agents-tmux", &["pi-tmux"]);
+        write_binned_source(
+            &current_src,
+            "@vanillagreen/pi-agents-tmux",
+            &["pi-tmux", "pi-extra"],
+        );
+
+        let project = sandbox.join("project");
+        // The cross-scope duplicate guard reads the GLOBAL Pi dir; without an
+        // override it would consult the developer's own install.
+        let global_pi_dir = sandbox.join("agent");
+        std::fs::create_dir_all(project.join(".pi").join("bin")).unwrap();
+        let legacy_dest = project.join(".pi").join("packages").join("pi-agents-tmux");
+        // A consumer's own file occupies a bin name only the replacement adds.
+        let occupied = project.join(".pi").join("bin").join("pi-extra");
+        std::fs::write(&occupied, "#!/bin/sh\necho mine\n").unwrap();
+
+        with_pi_dir(&global_pi_dir, || {
+            with_project_root(&project, || {
+                let legacy = PiExtension::from_dir(&legacy_src).unwrap();
+                install_pi_extension(&legacy, false).unwrap().unwrap();
+                // Control: the legacy package really is installed and registered,
+                // so its survival below is not a fixture that never existed.
+                assert!(
+                    legacy_dest.is_dir(),
+                    "control failed: legacy package absent"
+                );
+                assert!(
+                    is_pi_extension_installed("pi-agents-tmux", false),
+                    "control failed: legacy package not registered in settings"
+                );
+
+                let current = PiExtension::from_dir(&current_src).unwrap();
+                let err = install_pi_extension(&current, false)
+                    .unwrap_err()
+                    .to_string();
+                assert!(err.contains("already taken"), "{err}");
+            })
+        });
+        assert!(
+            legacy_dest.is_dir(),
+            "the working legacy package was deleted before the replacement was preflighted"
+        );
+        with_pi_dir(&global_pi_dir, || {
+            with_project_root(&project, || {
+                assert!(
+                    is_pi_extension_installed("pi-agents-tmux", false),
+                    "the legacy settings entry was dropped before the replacement was preflighted"
+                );
+            })
+        });
+        assert_eq!(
+            std::fs::read_to_string(&occupied).unwrap(),
+            "#!/bin/sh\necho mine\n",
+            "the consumer's file must survive the refusal"
+        );
+
+        // With the collision cleared, the migration still runs: a bin name the
+        // legacy package itself owns is the replacement's to take over.
+        std::fs::remove_file(&occupied).unwrap();
+        with_pi_dir(&global_pi_dir, || {
+            with_project_root(&project, || {
+                let current = PiExtension::from_dir(&current_src).unwrap();
+                let dest = install_pi_extension(&current, false).unwrap().unwrap();
+                assert!(dest.is_dir());
+                assert!(
+                    !legacy_dest.exists(),
+                    "the legacy package should be migrated away once the install can proceed"
+                );
+                let link = project.join(".pi").join("bin").join("pi-tmux");
+                let resolved = std::fs::canonicalize(&link).unwrap();
+                assert!(
+                    resolved.starts_with(std::fs::canonicalize(&dest).unwrap()),
+                    "the bin link should point into the replacement: {}",
+                    resolved.display()
+                );
+            })
+        });
+
+        let _ = std::fs::remove_dir_all(&sandbox);
+    }
+
     #[test]
     fn install_pi_agents_tmux_migrates_legacy_subagent_packages() {
         let sandbox =
@@ -3582,6 +3714,16 @@ printf 'module.exports = 1;\n' > node_modules/left-pad/index.js
         assert!(
             preflight < replace,
             "the bin-collision preflight does not run before the package is replaced"
+        );
+        // The legacy migration deletes a WORKING package. A collision found
+        // after it leaves the consumer with neither version, so the preflight
+        // has to precede it too.
+        let migrate = install
+            .find("remove_same_scope_legacy_packages(")
+            .expect("the install path does not migrate same-scope legacy packages");
+        assert!(
+            preflight < migrate,
+            "the bin-collision preflight does not run before the legacy package is removed"
         );
     }
 }

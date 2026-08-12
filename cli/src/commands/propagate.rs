@@ -1082,7 +1082,7 @@ fn project_stage_paths_with(
             ItemKind::PiExtension => {
                 has_pi_package = true;
                 let package_dir = crate::pi_extension::checked_pi_package_path(&entry.name, false)?;
-                push_pi_package_stage_paths(
+                let source_package_dir = push_pi_package_stage_paths(
                     &mut paths,
                     &project_root,
                     entry,
@@ -1090,6 +1090,19 @@ fn project_stage_paths_with(
                     include_missing,
                     strictness,
                 )?;
+                // The source is asked as well as the installed copy. An update
+                // that adds `pi.appendSystem` for the first time declares it
+                // only there, and a path set built before the refresh is what
+                // the dirty-config guard reads: miss it and refresh writes its
+                // managed block into a consumer prompt whose uncommitted edits
+                // the post-refresh staging pass then absorbs wholesale.
+                if let Some(source_package_dir) = &source_package_dir
+                    && let Ok(source_ext) =
+                        crate::pi_extension::PiExtension::from_dir(source_package_dir)
+                    && source_ext.append_system.is_some()
+                {
+                    has_pi_append_system = true;
+                }
                 if let Ok(ext) = crate::pi_extension::PiExtension::from_dir(&package_dir) {
                     if ext.append_system.is_some() {
                         has_pi_append_system = true;
@@ -1280,6 +1293,10 @@ fn push_installed_files_from_source(
     Ok(())
 }
 
+/// Returns the source package directory the paths were enumerated from, or
+/// `None` when a best-effort resolution could not find it. Callers read the
+/// SOURCE manifest through it: a pre-refresh path set built only from the
+/// installed package cannot see what the update is about to add.
 fn push_pi_package_stage_paths(
     paths: &mut BTreeSet<PathBuf>,
     project_root: &Path,
@@ -1287,10 +1304,10 @@ fn push_pi_package_stage_paths(
     package_dir: &Path,
     include_missing: bool,
     strictness: SourceStrictness,
-) -> Result<()> {
+) -> Result<Option<PathBuf>> {
     let source_root = match config::resolve_source_path(&entry.source) {
         Some(root) => root,
-        None if strictness == SourceStrictness::BestEffort => return Ok(()),
+        None if strictness == SourceStrictness::BestEffort => return Ok(None),
         None => bail!(
             "unable to resolve source for locked Pi package {}",
             entry.name
@@ -1299,7 +1316,7 @@ fn push_pi_package_stage_paths(
     let source_package_dir =
         match crate::catalog::find_item_path(&source_root, entry.kind, &entry.name) {
             Some(dir) => dir,
-            None if strictness == SourceStrictness::BestEffort => return Ok(()),
+            None if strictness == SourceStrictness::BestEffort => return Ok(None),
             None => bail!(
                 "unable to find source package {} in {}",
                 entry.name,
@@ -1312,7 +1329,8 @@ fn push_pi_package_stage_paths(
         package_dir,
         &source_package_dir,
         include_missing,
-    )
+    )?;
+    Ok(Some(source_package_dir))
 }
 
 fn push_pi_package_files_from(

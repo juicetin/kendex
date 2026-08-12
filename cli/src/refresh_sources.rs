@@ -78,6 +78,15 @@ pub(crate) fn resolve_source_records_strict_remote(
     ))
 }
 
+/// Resolve one recorded source spec on its own, with the alias and repo
+/// identity a lock-wide resolution would have given it.
+pub(crate) fn resolve_source_record(source: &str) -> Option<ResolvedSource> {
+    let dir = resolve_recorded_source(source)?;
+    let mut sources = Vec::new();
+    push_resolved_source(&mut sources, dir, source.to_string());
+    sources.pop()
+}
+
 fn resolve_source_records_with(
     lock: &config::LockFile,
     mut resolver: impl FnMut(&str) -> Option<PathBuf>,
