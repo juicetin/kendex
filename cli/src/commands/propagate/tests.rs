@@ -3120,3 +3120,38 @@ fn drift_stage_path_refuses_shared_config_edits_before_refresh_rewrites_them() {
         );
     });
 }
+
+#[test]
+fn stage_mode_rejects_a_replaced_codex_prose_safety_block() {
+    let project = tmpdir("stage-codex-prose-replaced");
+    let source = tmpdir("stage-codex-prose-replaced-source");
+    std::fs::create_dir_all(&project).unwrap();
+    write_hook_source(&source, "guard");
+
+    crate::test_util::with_project_root(&project, || {
+        let entry = hook_entry("guard", &source, &["codex"]);
+        let registration = locked_hook_registration(&entry).unwrap();
+        let block = crate::installer::codex_hook_safety_block(&registration.hook);
+        let agent = project.join(".codex/agents/rust.toml");
+        write_file(&agent, &format!("instructions = \"\"\"\n{block}\n\"\"\"\n"));
+
+        // No `.codex/hooks/guard.sh`: this is the prose-fallback path.
+        let mut failures = Vec::new();
+        verify_hook_auxiliary_install("guard", Harness::Codex, Some(&registration), &mut failures);
+        assert!(failures.is_empty(), "{failures:?}");
+
+        // The marker survives while the advisory it carries is gone.
+        write_file(
+            &agent,
+            "instructions = \"\"\"\n## Safety: guard\n\ndisabled\n\"\"\"\n",
+        );
+        let mut failures = Vec::new();
+        verify_hook_auxiliary_install("guard", Harness::Codex, Some(&registration), &mut failures);
+        assert!(
+            failures
+                .iter()
+                .any(|f| f.contains("does not carry the locked safety prose")),
+            "{failures:?}"
+        );
+    });
+}

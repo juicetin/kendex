@@ -250,7 +250,16 @@ fn verify_hook_auxiliary_install(
         }
         Harness::Codex => {
             let script = Path::new(".codex").join("hooks").join(format!("{name}.sh"));
-            if config::project_root().join(&script).exists() {
+            if !config::project_root().join(&script).exists() {
+                // Prose fallback: an event Codex has no native hook for ships as
+                // a `## Safety: <name>` block inside each agent TOML. The marker
+                // alone proves nothing — a replaced body keeps it while the
+                // advisory it carries is gone — so the block must still be the
+                // one the installer renders.
+                require_codex_prose_block_matches_source(name, registration, failures);
+                return;
+            }
+            {
                 require_installed_hook_script_matches_source(
                     &script,
                     registration,
@@ -569,6 +578,55 @@ fn require_installed_hook_script_matches_source(
             "{} is not executable for {label}",
             relative.display()
         ));
+    }
+}
+
+/// The Codex prose fallback lives inside every agent TOML under
+/// `.codex/agents`, so the check is per file: any agent carrying the marker
+/// must carry the installer's exact block, and at least one must carry it at
+/// all. A source definition that cannot be read fails closed like the rest.
+fn require_codex_prose_block_matches_source(
+    name: &str,
+    registration: Option<&LockedHookRegistration>,
+    failures: &mut Vec<String>,
+) {
+    let agents_dir = config::project_root().join(".codex").join("agents");
+    let Ok(entries) = std::fs::read_dir(&agents_dir) else {
+        return;
+    };
+    let marker = format!("## Safety: {name}");
+    let mut carriers = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().is_none_or(|ext| ext != "toml") {
+            continue;
+        }
+        if std::fs::read_to_string(&path).is_ok_and(|body| body.contains(&marker)) {
+            carriers.push(path);
+        }
+    }
+    if carriers.is_empty() {
+        return;
+    }
+    let Some(registration) = registration else {
+        failures.push(format!(
+            "cannot read the locked definition for Codex hook {name} from its source; refusing to verify its safety prose"
+        ));
+        return;
+    };
+    let expected = crate::installer::codex_hook_safety_block(&registration.hook);
+    for path in carriers {
+        let carries_block =
+            std::fs::read_to_string(&path).is_ok_and(|body| body.contains(&expected));
+        if !carries_block {
+            let display = path
+                .strip_prefix(config::project_root())
+                .unwrap_or(path.as_path())
+                .display();
+            failures.push(format!(
+                "{display} does not carry the locked safety prose for Codex hook {name}"
+            ));
+        }
     }
 }
 

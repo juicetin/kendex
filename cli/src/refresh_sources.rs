@@ -768,6 +768,17 @@ fn reject_unsafe_cache_dir(display: &str, repo_dir: &Path) -> Result<()> {
     if !meta.is_dir() {
         bail!("refusing to update cached source {display}: its cache entry is not a directory");
     }
+    // `git clone` always leaves a real `.git` directory. A symlink or a
+    // `gitdir:` file there redirects the repository metadata elsewhere, so
+    // `reset --hard`/`clean -ffdx` would act on a worktree vstack does not own
+    // even though the entry itself is a plain directory.
+    let git_meta = std::fs::symlink_metadata(repo_dir.join(".git"))
+        .with_context(|| format!("inspecting git metadata for cached source {display}"))?;
+    if !git_meta.is_dir() || git_meta.file_type().is_symlink() {
+        bail!(
+            "refusing to update cached source {display}: its cache entry does not own its git metadata"
+        );
+    }
     Ok(())
 }
 

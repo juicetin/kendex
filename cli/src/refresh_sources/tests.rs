@@ -1101,3 +1101,39 @@ fn cached_repo_origin_with_matching_identity_is_still_rejected_when_it_carries_a
     )
     .unwrap();
 }
+
+#[test]
+#[cfg(unix)]
+fn cached_repo_update_refuses_a_cache_whose_git_metadata_is_redirected() {
+    let root = TempDir::new("cache-redirected-gitdir");
+    let checkout = root.path().join("user-checkout");
+    init_git_repo(&checkout);
+    std::fs::write(checkout.join("uncommitted.txt"), "precious\n").unwrap();
+
+    // A plain directory, so the entry check passes, whose `.git` points at the
+    // user's real repository.
+    let cache = root.path().join("cache").join("owner_repo");
+    std::fs::create_dir_all(&cache).unwrap();
+    std::os::unix::fs::symlink(checkout.join(".git"), cache.join(".git")).unwrap();
+
+    let err = update_cached_repo_strict("owner/repo", &cache)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("does not own its git metadata"), "{err}");
+    assert!(
+        checkout.join("uncommitted.txt").exists(),
+        "the linked checkout must be untouched"
+    );
+
+    // A `gitdir:` file is the same redirection by another spelling.
+    std::fs::remove_file(cache.join(".git")).unwrap();
+    std::fs::write(
+        cache.join(".git"),
+        format!("gitdir: {}\n", checkout.join(".git").display()),
+    )
+    .unwrap();
+    let err = update_cached_repo_strict("owner/repo", &cache)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("does not own its git metadata"), "{err}");
+}
