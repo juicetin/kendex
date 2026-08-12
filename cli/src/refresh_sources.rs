@@ -623,14 +623,20 @@ fn existing_remote_cache_dir(source: &str) -> Option<PathBuf> {
 /// the requested remote source. The refusal is reported rather than swallowed,
 /// because the caller can only say the source is missing.
 fn usable_cache_entry(display: &str, git_url: &str, repo_dir: &Path) -> bool {
-    if validate_cached_repo_origin(display, git_url, repo_dir).is_err() {
-        return false;
+    match check_cache_entry(display, git_url, repo_dir) {
+        Ok(()) => true,
+        Err(err) => {
+            eprintln!("  Warning: {err:#}");
+            false
+        }
     }
-    if let Err(err) = reject_unsafe_cache_dir(display, repo_dir) {
-        eprintln!("  Warning: {err}");
-        return false;
-    }
-    true
+}
+
+/// The refusals themselves, kept apart from the reporting so every one of them
+/// reaches the operator with its own cause.
+fn check_cache_entry(display: &str, git_url: &str, repo_dir: &Path) -> Result<()> {
+    validate_cached_repo_origin(display, git_url, repo_dir)?;
+    reject_unsafe_cache_dir(display, repo_dir)
 }
 
 pub(crate) fn remote_cache_key(source: &str) -> String {

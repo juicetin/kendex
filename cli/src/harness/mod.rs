@@ -263,13 +263,7 @@ impl Harness {
         hooks: &[crate::hook::Hook],
         extras: &crate::agent::AgentExtras,
     ) -> Result<PathBuf> {
-        if global && !self.supports_global_scope() {
-            bail!(
-                "{}",
-                self.global_support_reason()
-                    .unwrap_or("Global scope is unsupported")
-            );
-        }
+        self.require_scope_supported(global)?;
         // Every generated agent body points at the canonical failure-reporting
         // reference; make sure a copy exists and is current, then substitute
         // its scope-resolved path for the source body's placeholder. The
@@ -286,6 +280,46 @@ impl Harness {
             Harness::Codex => codex::generate_agent(agent, global, &dir, skills, hooks, extras),
             Harness::Pi => pi::generate_agent(agent, &dir, skills, hooks, extras),
         }
+    }
+
+    /// The bytes `generate_agent` would write, without writing them or
+    /// installing anything: what a check holding an installed agent to its
+    /// source needs, so the expectation is the generator's own output rather
+    /// than a second description of it.
+    ///
+    /// The failure-reporting reference is not installed here — the scope an
+    /// install already resolved is read instead, because a check must not
+    /// create the artifact it is checking against.
+    pub fn render_agent(
+        &self,
+        agent: &Agent,
+        global: bool,
+        skills: &[(String, String)],
+        hooks: &[crate::hook::Hook],
+        extras: &crate::agent::AgentExtras,
+    ) -> Result<String> {
+        self.require_scope_supported(global)?;
+        let reference_global = crate::agent::failure_reference_scope(global);
+        let agent = crate::agent::resolve_failure_reference(agent, reference_global);
+        let agent = &agent;
+        Ok(match self {
+            Harness::ClaudeCode => claude::render_agent(agent, skills, hooks, extras),
+            Harness::Cursor => cursor::render_agent(agent, skills, hooks, extras),
+            Harness::OpenCode => opencode::render_agent(agent, skills, hooks, extras),
+            Harness::Codex => codex::render_agent(agent, global, skills, hooks, extras),
+            Harness::Pi => pi::render_agent(agent, skills, hooks, extras),
+        })
+    }
+
+    fn require_scope_supported(&self, global: bool) -> Result<()> {
+        if global && !self.supports_global_scope() {
+            bail!(
+                "{}",
+                self.global_support_reason()
+                    .unwrap_or("Global scope is unsupported")
+            );
+        }
+        Ok(())
     }
 
     /// Install a skill directory to the harness-specific location

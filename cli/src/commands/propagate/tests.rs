@@ -3595,7 +3595,7 @@ fn stage_mode_rejects_a_hook_entry_with_no_harnesses() {
         git(&project, &["commit", "-m", "baseline"]);
 
         // Nothing was checked, because there is nothing recorded to check.
-        let err = verify_project_auxiliary_installs_before_stage()
+        let err = verify_project_auxiliary_installs_before_stage(&[])
             .unwrap_err()
             .to_string();
         assert!(err.contains("records no harnesses"), "{err}");
@@ -4010,6 +4010,234 @@ fn stage_guard_refuses_a_shared_config_renamed_to_an_unowned_path() {
                 .unwrap_err()
                 .to_string()
                 .contains(".claude/settings.json")
+        );
+    });
+}
+
+/// Refresh creates and retargets `.agents/skills/<name>` as a link into
+/// `project-skills-dir`. That link is a vstack-managed artifact like every
+/// other managed link staging records, so a commit that omits it leaves the
+/// relocated skill unwired for anyone who checks the tree out.
+#[cfg(unix)]
+#[test]
+fn staging_records_the_managed_relocated_project_skill_link() {
+    let project = tmpdir("stage-relocated-link-itself");
+    std::fs::create_dir_all(&project).unwrap();
+    init_git_project(&project);
+
+    crate::test_util::with_project_root(&project, || {
+        LockFile::default()
+            .save(&config::lock_file_path(false))
+            .unwrap();
+        write_file(
+            &project.join("vstack.toml"),
+            "project-skills-dir = \"project-skills\"\n",
+        );
+        write_file(
+            &project.join("project-skills/local/SKILL.md"),
+            "---\nname: local\ndescription: Local skill\n---\n\n# Local\n",
+        );
+        std::fs::create_dir_all(project.join(".agents/skills")).unwrap();
+        std::os::unix::fs::symlink(
+            "../../project-skills/local",
+            project.join(".agents/skills/local"),
+        )
+        .unwrap();
+
+        stage_project_paths(&[]).unwrap();
+
+        let staged = git_output(&project, &["diff", "--cached", "--name-only"]);
+        // Control: the target is staged, so a run that staged nothing at all
+        // could not pass the assertion below.
+        assert!(
+            staged.contains("project-skills/local/SKILL.md\n"),
+            "{staged}"
+        );
+        assert!(staged.contains(".agents/skills/local\n"), "{staged}");
+    });
+}
+
+/// A link a consumer wrote inside `project-skills-dir` is their own file, not
+/// something refresh maintains, so staging must leave it to them.
+#[cfg(unix)]
+#[test]
+fn staging_leaves_a_consumer_written_project_skills_link_alone() {
+    let project = tmpdir("stage-consumer-skill-link");
+    std::fs::create_dir_all(&project).unwrap();
+    init_git_project(&project);
+
+    crate::test_util::with_project_root(&project, || {
+        LockFile::default()
+            .save(&config::lock_file_path(false))
+            .unwrap();
+        write_file(
+            &project.join("vstack.toml"),
+            "project-skills-dir = \"project-skills\"\n",
+        );
+        write_file(
+            &project.join("vendor-skills/shared/SKILL.md"),
+            "---\nname: shared\ndescription: Shared skill\n---\n\n# Shared\n",
+        );
+        std::fs::create_dir_all(project.join("project-skills")).unwrap();
+        std::os::unix::fs::symlink(
+            "../vendor-skills/shared",
+            project.join("project-skills/shared"),
+        )
+        .unwrap();
+
+        stage_project_paths(&[]).unwrap();
+
+        let staged = git_output(&project, &["diff", "--cached", "--name-only"]);
+        assert!(
+            staged.contains("vendor-skills/shared/SKILL.md\n"),
+            "{staged}"
+        );
+        assert!(!staged.contains("project-skills/shared\n"), "{staged}");
+    });
+}
+
+/// A managed skill link vstack cannot resolve hides whatever it names. Treating
+/// that as "nothing to stage" is the fail-open shape: the commit silently
+/// misses a managed path. Only a link with no target at all is not an error —
+/// there is no file behind it to omit.
+#[cfg(unix)]
+#[test]
+fn staging_refuses_a_project_skill_link_it_cannot_resolve() {
+    let project = tmpdir("stage-unresolvable-skill-link");
+    std::fs::create_dir_all(&project).unwrap();
+    init_git_project(&project);
+
+    crate::test_util::with_project_root(&project, || {
+        LockFile::default()
+            .save(&config::lock_file_path(false))
+            .unwrap();
+        write_file(
+            &project.join("vstack.toml"),
+            "project-skills-dir = \"project-skills\"\n",
+        );
+        std::fs::create_dir_all(project.join("project-skills")).unwrap();
+
+        // Control: a link with no target names no file, and staging carries on.
+        std::os::unix::fs::symlink("nowhere", project.join("project-skills/absent")).unwrap();
+        stage_project_paths(&[]).unwrap();
+
+        // A self-referential link is a resolution FAILURE, not an absence.
+        std::os::unix::fs::symlink("loop", project.join("project-skills/loop")).unwrap();
+        let err = stage_project_paths(&[])
+            .expect_err("a link that cannot be resolved must not be passed over")
+            .to_string();
+        assert!(err.contains("project-skills/loop"), "{err}");
+    });
+}
+
+/// A generated agent whose body or frontmatter was replaced locally still
+/// exists, so `verify::run` passes it, and a no-source-drift `--stage` then
+/// commits the neutered file as though propagation produced it.
+#[test]
+fn stage_mode_refuses_a_generated_agent_that_no_longer_matches_its_source() {
+    let project = tmpdir("stage-agent-content");
+    let source = tmpdir("stage-agent-content-source");
+    std::fs::create_dir_all(&project).unwrap();
+    init_git_project(&project);
+    write_agent_skill_source(&source, true);
+
+    crate::test_util::with_project_root(&project, || {
+        let mut lock = LockFile::default();
+        lock.add(agent_entry("rust", &source));
+        lock.add(demo_entry(&source));
+        lock.save(&config::lock_file_path(false)).unwrap();
+        write_installed_skill_md(&project.join(".agents/skills/demo/SKILL.md"), "# Demo\n");
+        std::fs::create_dir_all(project.join(".claude/skills")).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(
+            "../../.agents/skills/demo",
+            project.join(".claude/skills/demo"),
+        )
+        .unwrap();
+        git(&project, &["add", "-A"]);
+        git(&project, &["commit", "-m", "baseline"]);
+
+        // The drift branch: refresh generates the agent, then staging records it.
+        run(ScopeFilter::Project, false, false, true, true).unwrap();
+        git(&project, &["commit", "-m", "propagated"]);
+
+        let agent_path = project.join(".claude/agents/rust.md");
+        let generated = std::fs::read_to_string(&agent_path).unwrap();
+        assert!(
+            generated.contains("skills: demo"),
+            "fixture did not generate a skill requirement: {generated}"
+        );
+
+        // Control: the untouched install passes the no-drift staging path.
+        run(ScopeFilter::Project, false, false, true, true).unwrap();
+
+        // The declared skill requirement is stripped while the source, the lock
+        // hash and the file's existence are all unchanged.
+        write_file(&agent_path, &generated.replace("skills: demo\n", ""));
+        let err = run(ScopeFilter::Project, false, false, true, true)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("auxiliary verification failed"), "{err}");
+        assert!(err.contains(".claude/agents/rust.md"), "{err}");
+        assert!(
+            git_output(&project, &["diff", "--cached", "--name-only"]).is_empty(),
+            "nothing may be staged"
+        );
+    });
+}
+
+/// The pre-refresh guard exists for files whose content is partly the
+/// consumer's. A managed skill link holds none of it, and refresh creates it
+/// untracked — counting it as a consumer edit refused staging over vstack's
+/// own work.
+#[cfg(unix)]
+#[test]
+fn shared_config_guard_ignores_the_managed_skill_link_but_not_the_skill() {
+    let project = tmpdir("guard-managed-skill-link");
+    std::fs::create_dir_all(&project).unwrap();
+    init_git_project(&project);
+
+    crate::test_util::with_project_root(&project, || {
+        LockFile::default()
+            .save(&config::lock_file_path(false))
+            .unwrap();
+        write_file(
+            &project.join("vstack.toml"),
+            "project-skills-dir = \"project-skills\"\n",
+        );
+        write_file(
+            &project.join("project-skills/local/SKILL.md"),
+            "---\nname: local\ndescription: Local skill\n---\n\n# Local\n",
+        );
+        git(&project, &["add", "-A"]);
+        git(&project, &["commit", "-m", "baseline"]);
+
+        // What refresh does: link the tracked skill into `.agents/skills`.
+        std::fs::create_dir_all(project.join(".agents/skills")).unwrap();
+        std::os::unix::fs::symlink(
+            "../../project-skills/local",
+            project.join(".agents/skills/local"),
+        )
+        .unwrap();
+
+        let stage_paths = pre_refresh_project_stage_paths().unwrap();
+        assert!(
+            stage_paths.contains(&PathBuf::from(".agents/skills/local")),
+            "the link must be in the staged set for this test to constrain the guard: {stage_paths:?}"
+        );
+        assert!(
+            dirty_shared_config_paths(&stage_paths).unwrap().is_empty(),
+            "a link refresh just created is not a consumer edit"
+        );
+
+        // Control: the consumer's own edit to the skill is still refused.
+        write_file(
+            &project.join("project-skills/local/SKILL.md"),
+            "---\nname: local\ndescription: Local skill\n---\n\n# Local\n\nMine.\n",
+        );
+        assert_eq!(
+            dirty_shared_config_paths(&stage_paths).unwrap(),
+            vec![PathBuf::from("project-skills/local/SKILL.md")]
         );
     });
 }

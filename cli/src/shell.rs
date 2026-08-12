@@ -5,6 +5,13 @@
 pub(crate) enum Part<'a> {
     Fixed(&'a str),
     Arg(&'a str),
+    /// Run everything after this only if everything before it succeeded.
+    ///
+    /// Written as a part rather than as `Fixed("&&")` because `&&` is not a
+    /// Windows PowerShell 5.1 operator — the build that ships with Windows
+    /// fails to parse the line before the second command ever runs — so each
+    /// shell has to render the sequencing its own way.
+    AndThen,
 }
 
 /// Render a command for the operator to paste, already wrapped in the backticks
@@ -25,7 +32,7 @@ pub(crate) fn command(parts: &[Part<'_>]) -> String {
     {
         format!(
             "`{}`",
-            render(parts, |arg| Some(posix_quote(arg)))
+            render(parts, |arg| Some(posix_quote(arg)), &AND_THEN_OPERATOR)
                 .expect("POSIX quoting renders every argument")
         )
     }
@@ -35,18 +42,63 @@ pub(crate) fn command(parts: &[Part<'_>]) -> String {
     }
 }
 
-fn render(parts: &[Part<'_>], quote_arg: impl Fn(&str) -> Option<String>) -> Option<String> {
+/// How one shell writes [`Part::AndThen`]: the text that opens the guarded
+/// sequence, and the text that closes it once every later part is rendered.
+struct Sequencing {
+    open: &'static str,
+    close: &'static str,
+}
+
+/// `&&` reads the same to a POSIX shell and to `cmd.exe`, and neither needs
+/// anything closed afterwards.
+const AND_THEN_OPERATOR: Sequencing = Sequencing {
+    open: " &&",
+    close: "",
+};
+
+/// PowerShell 5.1 has no `&&`. `;` alone would run the rest regardless of what
+/// came before — a `cd` that failed would leave npm installing into the wrong
+/// directory — so the rest is guarded on `$?` and closed at the end.
+#[cfg(any(not(unix), test))]
+const AND_THEN_POWERSHELL: Sequencing = Sequencing {
+    open: "; if ($?) {",
+    close: " }",
+};
+
+fn render(
+    parts: &[Part<'_>],
+    quote_arg: impl Fn(&str) -> Option<String>,
+    sequencing: &Sequencing,
+) -> Option<String> {
     let mut rendered = String::new();
+    let mut open_sequences = 0usize;
     for part in parts {
-        if !rendered.is_empty() {
-            rendered.push(' ');
-        }
         match part {
-            Part::Fixed(text) => rendered.push_str(text),
-            Part::Arg(arg) => rendered.push_str(&quote_arg(arg)?),
+            // Its own spacing: the opener has to hug what precedes it, because
+            // PowerShell's `;` does.
+            Part::AndThen => {
+                rendered.push_str(sequencing.open);
+                open_sequences += 1;
+            }
+            Part::Fixed(text) => {
+                push_separated(&mut rendered, text);
+            }
+            Part::Arg(arg) => {
+                push_separated(&mut rendered, &quote_arg(arg)?);
+            }
         }
     }
+    for _ in 0..open_sequences {
+        rendered.push_str(sequencing.close);
+    }
     Some(rendered)
+}
+
+fn push_separated(rendered: &mut String, text: &str) {
+    if !rendered.is_empty() {
+        rendered.push(' ');
+    }
+    rendered.push_str(text);
 }
 
 /// POSIX single-quoting: everything inside is literal, and an embedded quote
@@ -66,9 +118,13 @@ pub(crate) fn posix_quote(arg: &str) -> String {
 /// operator a command that silently names a different path.
 #[cfg(any(not(unix), test))]
 pub(crate) fn windows_command(parts: &[Part<'_>]) -> String {
-    let powershell = render(parts, |arg| Some(powershell_quote(arg)))
-        .expect("PowerShell single-quoting renders every argument");
-    match render(parts, cmd_quote) {
+    let powershell = render(
+        parts,
+        |arg| Some(powershell_quote(arg)),
+        &AND_THEN_POWERSHELL,
+    )
+    .expect("PowerShell single-quoting renders every argument");
+    match render(parts, cmd_quote, &AND_THEN_OPERATOR) {
         Some(cmd) => format!("`{cmd}` (cmd.exe) or `{powershell}` (PowerShell)"),
         None => format!(
             "`{powershell}` (PowerShell); cmd.exe expands %NAME% inside quotes, so it cannot be given this argument verbatim"
@@ -493,6 +549,49 @@ mod tests {
                 "rendering {arg:?} as {rendered} does not parse back to it"
             );
         }
+    }
+
+    /// `&&` is a POSIX and `cmd.exe` operator but not a Windows PowerShell 5.1
+    /// one, so the sequencing part must render differently per shell — and the
+    /// PowerShell form must still refuse to run the tail when the head failed.
+    #[test]
+    fn and_then_renders_per_shell_and_still_guards_the_tail() {
+        let parts = [
+            Part::Fixed("cd"),
+            Part::Arg("/my dir"),
+            Part::AndThen,
+            Part::Fixed("npm ci"),
+        ];
+
+        // Control: written as fixed text instead, the operator reaches every
+        // shell verbatim — which is the bug this part exists to prevent.
+        let as_fixed = windows_command(&[
+            Part::Fixed("cd"),
+            Part::Arg("/my dir"),
+            Part::Fixed("&& npm ci"),
+        ]);
+        assert!(
+            as_fixed.matches("&&").count() == 2,
+            "fixed `&&` should reach both shells: {as_fixed}"
+        );
+
+        #[cfg(unix)]
+        assert_eq!(command(&parts), "`cd '/my dir' && npm ci`");
+
+        let advertised = windows_command(&parts);
+        assert!(
+            advertised.contains(r#"`cd "/my dir" && npm ci` (cmd.exe)"#),
+            "{advertised}"
+        );
+        assert!(
+            advertised.contains("`cd '/my dir'; if ($?) { npm ci }` (PowerShell)"),
+            "{advertised}"
+        );
+        assert_eq!(
+            advertised.matches("&&").count(),
+            1,
+            "only the cmd.exe line may carry `&&`: {advertised}"
+        );
     }
 
     #[test]

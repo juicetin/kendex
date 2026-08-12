@@ -601,21 +601,12 @@ pub fn resolve_failure_reference(agent: &Agent, global: bool) -> Agent {
 /// back to the global copy — the global config dir cannot be redirected by a
 /// project symlink — so the substituted path never dangles.
 pub fn install_failure_reporting_reference(global: bool) -> Result<bool> {
-    // The project-scope reference lands under `.agents`; a symlinked `.agents`
-    // ancestor must not let the write (or the freshness read) escape the
-    // project, no matter which command path triggered generation. Fall back
-    // rather than fail: installs that never write through `.agents` (e.g.
-    // claude-code copy-method) stay allowed with an escaped `.agents`, and
-    // only the `.agents`-routed write is withheld.
-    if !global
-        && let Err(err) =
-            crate::path_safety::ensure_agents_dir_within_project(&crate::config::project_root())
-    {
+    let (global, withheld) = resolve_failure_reference_scope(global);
+    if let Some(err) = withheld {
         eprintln!(
             "Warning: skipping project skill-failure reference install ({err}); \
              generated agents will point at the global copy instead"
         );
-        return install_failure_reporting_reference(true);
     }
     let path = failure_reporting_reference_path(global);
     if reference_is_fresh(&path) {
@@ -624,6 +615,31 @@ pub fn install_failure_reporting_reference(global: bool) -> Result<bool> {
     crate::path_safety::write_file_no_follow(&path, FAILURE_REPORTING_DOC)
         .with_context(|| format!("installing {}", path.display()))?;
     Ok(global)
+}
+
+/// The scope a generated agent's failure-reporting reference resolves to.
+///
+/// The project-scope reference lands under `.agents`; a symlinked `.agents`
+/// ancestor must not let the write (or the freshness read) escape the project,
+/// no matter which command path triggered generation. Fall back rather than
+/// fail: installs that never write through `.agents` (e.g. claude-code
+/// copy-method) stay allowed with an escaped `.agents`, and only the
+/// `.agents`-routed write is withheld — which is what the returned error says.
+fn resolve_failure_reference_scope(global: bool) -> (bool, Option<anyhow::Error>) {
+    if global {
+        return (true, None);
+    }
+    match crate::path_safety::ensure_agents_dir_within_project(&crate::config::project_root()) {
+        Ok(()) => (false, None),
+        Err(err) => (true, Some(err)),
+    }
+}
+
+/// The same decision without installing anything: what a check that has to
+/// reproduce a generated agent's bytes needs, since it must read the scope an
+/// install resolved rather than resolve one of its own.
+pub(crate) fn failure_reference_scope(global: bool) -> bool {
+    resolve_failure_reference_scope(global).0
 }
 
 /// Freshness fast path for the on-disk reference copy. Never follows a

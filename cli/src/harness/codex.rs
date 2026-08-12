@@ -18,13 +18,31 @@ pub fn generate_agent(
     global: bool,
     dir: &Path,
     skills: &[(String, String)],
-    _hooks: &[Hook],
+    hooks: &[Hook],
     extras: &agent::AgentExtras,
 ) -> Result<PathBuf> {
     std::fs::create_dir_all(dir)?;
-
     let path = super::checked_agent_path(dir, &agent.name, "toml")?;
+    crate::path_safety::write_file_no_follow(
+        &path,
+        render_agent(agent, global, skills, hooks, extras),
+    )?;
+    Ok(path)
+}
 
+/// The exact bytes an install writes for this agent.
+///
+/// Split from the write so the pre-stage check that holds an installed agent
+/// to its source renders through this same function: an expectation written
+/// twice drifts, and a check that drifts either passes a neutered agent or
+/// refuses a correct one.
+pub fn render_agent(
+    agent: &Agent,
+    global: bool,
+    skills: &[(String, String)],
+    _hooks: &[Hook],
+    extras: &agent::AgentExtras,
+) -> String {
     let frontmatter = extras.frontmatter_for("codex");
 
     // Map role to sandbox_mode unless project config supplies an exact value.
@@ -100,8 +118,7 @@ pub fn generate_agent(
     }
     output.push_str("'''\n");
 
-    crate::path_safety::write_file_no_follow(&path, &output)?;
-    Ok(path)
+    output
 }
 
 fn required_skills_section(skills: &[(String, String)], global: bool) -> String {

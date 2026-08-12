@@ -686,21 +686,32 @@ fn install_hook_codex_prose(hook: &Hook, global: bool, agents: &[Agent]) -> Resu
         }
 
         let content = std::fs::read_to_string(&toml_path)?;
-        if content.contains(&hook.name) {
-            continue;
-        }
-
-        if let Some(close_pos) = content.rfind("'''") {
-            let mut new_content = content[..close_pos].to_string();
-            new_content.push('\n');
-            new_content.push_str(&codex_hook_safety_block(hook));
-            new_content.push('\n');
-            new_content.push_str(&content[close_pos..]);
-            std::fs::write(&toml_path, new_content)?;
+        if let Some(spliced) = splice_codex_hook_prose(&content, hook) {
+            std::fs::write(&toml_path, spliced)?;
         }
     }
 
     Ok(())
+}
+
+/// Splice one unmapped hook's safety block into a generated Codex agent TOML,
+/// or `None` when the agent already carries it or has no developer-instruction
+/// block to splice into.
+///
+/// A generated Codex agent is `render_agent`'s output plus these blocks, so the
+/// pre-stage check that reproduces an installed agent replays them through this
+/// same function rather than describing the result a second time.
+pub(crate) fn splice_codex_hook_prose(content: &str, hook: &Hook) -> Option<String> {
+    if content.contains(&hook.name) {
+        return None;
+    }
+    let close_pos = content.rfind("'''")?;
+    let mut spliced = content[..close_pos].to_string();
+    spliced.push('\n');
+    spliced.push_str(&codex_hook_safety_block(hook));
+    spliced.push('\n');
+    spliced.push_str(&content[close_pos..]);
+    Some(spliced)
 }
 
 pub fn install_codex_fallback_hooks_for_agents(

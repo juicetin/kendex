@@ -1138,14 +1138,27 @@ fn package_declares_runtime_dependencies(package_dir: &Path) -> Result<bool> {
         || manifest_object_field_non_empty(&parsed, "optionalDependencies"))
 }
 
+/// The advertised recovery for a failed production install, as shell parts so
+/// every shell the renderer serves gets its own correct sequencing.
+fn npm_production_install_parts<'a>(
+    package_dir: &'a str,
+    npm_args: &'a str,
+) -> [crate::shell::Part<'a>; 5] {
+    [
+        crate::shell::Part::Fixed("cd"),
+        crate::shell::Part::Arg(package_dir),
+        crate::shell::Part::AndThen,
+        crate::shell::Part::Fixed("npm"),
+        crate::shell::Part::Fixed(npm_args),
+    ]
+}
+
 fn npm_production_install_command(package_dir: &Path) -> String {
     let npm_args = NPM_PRODUCTION_INSTALL_ARGS.join(" ");
-    crate::shell::command(&[
-        crate::shell::Part::Fixed("cd"),
-        crate::shell::Part::Arg(&package_dir.to_string_lossy()),
-        crate::shell::Part::Fixed("&& npm"),
-        crate::shell::Part::Fixed(&npm_args),
-    ])
+    crate::shell::command(&npm_production_install_parts(
+        &package_dir.to_string_lossy(),
+        &npm_args,
+    ))
 }
 
 fn install_production_dependencies_if_needed(package_name: &str, package_dir: &Path) -> Result<()> {
@@ -1812,6 +1825,52 @@ printf 'module.exports = 1;\n' > node_modules/left-pad/index.js
             ),
         )
         .unwrap();
+    }
+
+    /// The PowerShell line of an advertised Windows command.
+    fn powershell_line(advertised: &str) -> &str {
+        let (head, _) = advertised
+            .rsplit_once("` (PowerShell)")
+            .expect("the advertised command names its PowerShell line");
+        head.rsplit_once('`').map(|(_, line)| line).unwrap_or(head)
+    }
+
+    /// Windows PowerShell 5.1 — the build shipped with Windows — has no `&&`
+    /// operator, so a recovery line rendered for it must sequence its own way
+    /// or the operator's paste fails before npm ever runs.
+    #[test]
+    fn windows_recovery_command_sequences_without_a_powershell_and_operator() {
+        let package_dir = r"C:\Users\op\.pi\packages\demo";
+        let npm_args = "ci --omit=dev";
+
+        // Control: the reader really can see `&&` in a PowerShell line, so the
+        // assertion below is not vacuous.
+        let with_operator = crate::shell::windows_command(&[
+            crate::shell::Part::Fixed("cd"),
+            crate::shell::Part::Arg(package_dir),
+            crate::shell::Part::Fixed("&& npm"),
+            crate::shell::Part::Fixed(npm_args),
+        ]);
+        assert!(
+            powershell_line(&with_operator).contains("&&"),
+            "the reader cannot witness the bug: {with_operator}"
+        );
+
+        let advertised =
+            crate::shell::windows_command(&npm_production_install_parts(package_dir, npm_args));
+        let powershell = powershell_line(&advertised);
+        assert!(
+            !powershell.contains("&&"),
+            "PowerShell 5.1 cannot parse `&&`: {advertised}"
+        );
+        assert!(
+            powershell.contains("npm ci --omit=dev"),
+            "the recovery must still run npm: {advertised}"
+        );
+        assert!(
+            advertised.contains(r#""C:\Users\op\.pi\packages\demo" && npm ci --omit=dev"#),
+            "cmd.exe does have `&&` and must keep it: {advertised}"
+        );
     }
 
     fn assert_dependency_install_recovery_message(message: &str, package: &str, dest: &Path) {

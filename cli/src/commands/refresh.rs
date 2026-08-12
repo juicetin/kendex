@@ -185,7 +185,7 @@ fn sync_lock_entry_source_repo(source_records: &[ResolvedSource], entry: &mut co
 /// Generic upstream-merge: starts with `project_list` if present, else
 /// `source_list`; appends source items not already present, returning
 /// (merged, names_added).
-fn merge_upstream<T: Clone>(
+pub(crate) fn merge_upstream<T: Clone>(
     project_list: Option<&[T]>,
     source_list: &[T],
     key: impl Fn(&T) -> String,

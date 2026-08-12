@@ -1099,3 +1099,60 @@ fn resolving_a_remote_source_drops_a_symlinked_cache_entry() {
         assert_eq!(resolve_source_path("owner/repo"), Some(cache));
     });
 }
+
+/// `existing_remote_cache_dir` can only report "no cache" to its caller, so a
+/// cache refused for its origin has to name the refusal itself or an operator
+/// sees a previously working source resolve to nothing with no diagnostic.
+#[test]
+fn refused_cache_entry_carries_the_origin_cause_to_its_caller() {
+    let root = TempDir::new("cache-entry-refusal-cause");
+    let cache = root.path().join("cache").join("remote");
+    init_git_repo(&cache);
+    git(
+        &cache,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://example.com/Other/Repo.git",
+        ],
+    );
+
+    // Control: the same entry with the expected origin is accepted, so the
+    // refusal below is about the origin and not about a broken fixture.
+    git(
+        &cache,
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            "https://example.com/Owner/Repo.git",
+        ],
+    );
+    check_cache_entry(
+        &remote_source_display("https://example.com/Owner/Repo.git"),
+        "https://example.com/Owner/Repo.git",
+        &cache,
+    )
+    .expect("a cache whose origin matches is usable");
+
+    git(
+        &cache,
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            "https://example.com/Other/Repo.git",
+        ],
+    );
+    let err = check_cache_entry(
+        &remote_source_display("https://example.com/Owner/Repo.git"),
+        "https://example.com/Owner/Repo.git",
+        &cache,
+    )
+    .expect_err("a cache pointing at another repository must be refused")
+    .to_string();
+
+    assert!(err.contains("Other/Repo"), "{err}");
+    assert!(err.contains("Owner/Repo"), "{err}");
+}

@@ -129,7 +129,7 @@ pub fn run(
         if stage {
             // Install breakage first: it is the more actionable diagnostic, and
             // the shared-config guard below still runs before anything stages.
-            verify_project_auxiliary_installs_before_stage()?;
+            verify_project_auxiliary_installs_before_stage(&source_records_by_scope)?;
             refuse_pre_existing_shared_config_edits(&pre_refresh_dirty_shared)?;
             stage_project_paths(&pre_refresh_stage_paths)?;
         } else {
@@ -161,7 +161,7 @@ pub fn run(
     crate::commands::verify::run_with_source_records(scope, &[], &source_records_by_scope)?;
 
     if stage {
-        verify_project_auxiliary_installs_before_stage()?;
+        verify_project_auxiliary_installs_before_stage(&source_records_by_scope)?;
         stage_project_paths_after_refresh(&pre_refresh_stage_paths)?;
     }
 
@@ -202,9 +202,28 @@ fn codex_prose_carrier_paths(lock: &LockFile) -> Vec<PathBuf> {
         .collect()
 }
 
-fn verify_project_auxiliary_installs_before_stage() -> Result<()> {
+fn verify_project_auxiliary_installs_before_stage(
+    source_records_by_scope: &[(bool, Vec<crate::refresh_sources::ResolvedSource>)],
+) -> Result<()> {
     let lock = LockFile::load(&config::lock_file_path(false))?;
     let codex_prose_carriers = codex_prose_carrier_paths(&lock);
+    // The catalogs the refresh that wrote these files read, resolved once by
+    // the drift pass. Re-resolving here would refetch every remote cache; only
+    // a scope this run never checked needs its own resolution.
+    let project_records = source_records_by_scope
+        .iter()
+        .find(|(global, _)| !*global)
+        .map(|(_, records)| records.clone())
+        .unwrap_or_else(|| crate::refresh_sources::resolve_source_records(&lock));
+    let sources = crate::refresh_sources::load_refresh_sources(&project_records);
+    let all_hooks = crate::refresh_sources::all_source_hooks(&sources);
+    let codex_fallback_hooks = crate::resolve::installed_codex_fallback_hooks(&lock, &all_hooks);
+    let installed_skills: Vec<String> = lock
+        .entries
+        .iter()
+        .filter(|(_, entry)| entry.kind == ItemKind::Skill)
+        .map(|(name, _)| name.clone())
+        .collect();
     // Strict, the same way the project refresh that produced these installs
     // loads it: a config that cannot be parsed is not an empty one, and reading
     // it as empty would render every skill's expected SKILL.md without the
@@ -238,10 +257,24 @@ fn verify_project_auxiliary_installs_before_stage() -> Result<()> {
             ItemKind::Skill => {
                 verify_skill_content_before_stage(entry, &project_config, &mut failures);
             }
-            // Agents and extras have no auxiliary registration to check: they
-            // are files, verified by `verify::run`. Listed rather than
-            // wildcarded so a new kind has to be considered here.
-            ItemKind::Agent | ItemKind::Extra => {}
+            ItemKind::Agent => {
+                verify_agent_content_before_stage(
+                    entry,
+                    &AgentRenderContext {
+                        lock: &lock,
+                        sources: &sources,
+                        all_hooks: &all_hooks,
+                        codex_fallback_hooks: &codex_fallback_hooks,
+                        installed_skills: &installed_skills,
+                        project_config: &project_config,
+                    },
+                    &mut failures,
+                );
+            }
+            // Extras have no auxiliary registration and no generated form to
+            // check: they are files, verified by `verify::run`. Listed rather
+            // than wildcarded so a new kind has to be considered here.
+            ItemKind::Extra => {}
         }
     }
     if failures.is_empty() {
@@ -251,6 +284,139 @@ fn verify_project_auxiliary_installs_before_stage() -> Result<()> {
             "auxiliary verification failed before staging: {}",
             failures.join("; ")
         )
+    }
+}
+
+/// Everything a generated agent's bytes are a function of, resolved once for
+/// the whole pass the way the refresh that wrote those bytes resolved it.
+struct AgentRenderContext<'a> {
+    lock: &'a LockFile,
+    sources: &'a [crate::refresh_sources::RefreshSource],
+    all_hooks: &'a [crate::hook::Hook],
+    codex_fallback_hooks: &'a [crate::hook::Hook],
+    installed_skills: &'a [String],
+    project_config: &'a crate::project_config::ProjectConfig,
+}
+
+/// Hold each generated agent to the bytes an install writes for it.
+///
+/// `verify::run` proves the file exists and reads nothing inside it. An agent
+/// whose skill requirements, tool restrictions or instruction sections were
+/// replaced locally therefore passes it, and is exactly what the staging pass
+/// then commits as though propagation produced it. The source never moved, so
+/// every later run reports no drift and the neutered agent stays committed.
+///
+/// The expectation is the generator's own output — `Harness::render_agent` is
+/// the function `generate_agent` writes from — fed the inputs refresh feeds it,
+/// so the check cannot describe a rendering the installer no longer produces.
+fn verify_agent_content_before_stage(
+    entry: &config::LockEntry,
+    context: &AgentRenderContext<'_>,
+    failures: &mut Vec<String>,
+) {
+    let project_root = config::project_root();
+    let Some(source) = crate::refresh_sources::refresh_source_for_entry(context.sources, entry)
+    else {
+        failures.push(format!(
+            "cannot read the locked source for agent {}; refusing to verify its install",
+            entry.name
+        ));
+        return;
+    };
+    let Some(agent) = source.agents.iter().find(|a| a.name == entry.name) else {
+        failures.push(format!(
+            "agent {} is not in its locked source; refusing to verify its install",
+            entry.name
+        ));
+        return;
+    };
+
+    // The same merge refresh performs: the project's own list is
+    // authoritative, with the source's role/agent mapping added on top.
+    let source_skills =
+        source
+            .mapping
+            .skills_for_agent(&agent.name, &agent.role, context.installed_skills);
+    let project_required = context.project_config.agent_skills_for(&agent.name);
+    let (skill_names, _) = crate::commands::refresh::merge_upstream(
+        project_required.map(|names| &names[..]),
+        &source_skills,
+        |name: &String| name.clone(),
+    );
+    let skill_pairs = crate::refresh_sources::resolve_skill_pairs_from_sources(
+        &skill_names,
+        context.lock,
+        context.sources,
+    );
+    // Frontmatter overrides the source declares apply the same way here; the
+    // consumer's own sections are read from `vstack.toml`, which is where
+    // refresh persists whatever it extracted from the file it last generated.
+    let mut effective_project_config = context.project_config.clone();
+    effective_project_config.overlay_source_frontmatter(&source.mapping);
+    let extras = crate::resolve::build_agent_extras(
+        &effective_project_config,
+        &agent.name,
+        &agent.role,
+        None,
+    );
+
+    for harness in entry.harnesses.iter().filter_map(|id| Harness::from_id(id)) {
+        let path = harness
+            .agents_dir(false)
+            .join(harness.agent_filename(&entry.name));
+        let display = path
+            .strip_prefix(&project_root)
+            .unwrap_or(path.as_path())
+            .display()
+            .to_string();
+        let installed = match std::fs::read(&path) {
+            Ok(installed) => installed,
+            // A missing install is `verify::run`'s finding, and staging takes
+            // nothing from a file that is not there.
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) => {
+                failures.push(format!("{display} is unreadable: {err}"));
+                continue;
+            }
+        };
+        let matched_hooks = crate::resolve::matched_installed_hooks_for_agent_harness(
+            context.lock,
+            context.all_hooks,
+            &source.mapping,
+            &agent.role,
+            harness.id(),
+        );
+        let expected =
+            match harness.render_agent(agent, false, &skill_pairs, &matched_hooks, &extras) {
+                Ok(expected) => expected,
+                Err(err) => {
+                    failures.push(format!(
+                        "cannot render agent {} for {}: {err:#}; refusing to verify {display}",
+                        entry.name,
+                        harness.name()
+                    ));
+                    continue;
+                }
+            };
+        // A Codex agent is that rendering plus the safety prose of every
+        // unmapped hook, spliced in after generation by the installer. Replayed
+        // through the installer's own splice so the expectation stays whatever
+        // it writes.
+        let expected = if harness == Harness::Codex {
+            context
+                .codex_fallback_hooks
+                .iter()
+                .fold(expected, |carried, hook| {
+                    crate::installer::splice_codex_hook_prose(&carried, hook).unwrap_or(carried)
+                })
+        } else {
+            expected
+        };
+        if installed != expected.as_bytes() {
+            failures.push(format!(
+                "{display} does not match the agent its locked source generates"
+            ));
+        }
     }
 }
 
@@ -1681,6 +1847,7 @@ fn push_project_owned_skill_paths(
         project_root,
         &project_root.join(".agents").join("skills"),
         lock,
+        SkillLinkOwner::Vstack,
         include_missing,
     )?;
 
@@ -1699,8 +1866,22 @@ fn push_project_owned_skill_paths(
         project_root,
         &project_root.join(configured_path),
         lock,
+        SkillLinkOwner::Consumer,
         include_missing,
     )
+}
+
+/// Who wrote a link found directly under the scanned skills root.
+///
+/// Refresh creates and retargets `.agents/skills/<name>` as a link into
+/// `project-skills-dir`, so that link is a managed artifact staging owns the
+/// same way it owns every other managed link. A link a consumer wrote inside
+/// `project-skills-dir` itself is their own file — staging it would absorb
+/// work propagation did not do.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SkillLinkOwner {
+    Vstack,
+    Consumer,
 }
 
 fn push_project_skill_dirs_from(
@@ -1708,6 +1889,7 @@ fn push_project_skill_dirs_from(
     project_root: &Path,
     skills_root: &Path,
     lock: &LockFile,
+    link_owner: SkillLinkOwner,
     include_missing: bool,
 ) -> Result<()> {
     let Ok(entries) = std::fs::read_dir(skills_root) else {
@@ -1727,15 +1909,18 @@ fn push_project_skill_dirs_from(
         let file_type = entry
             .file_type()
             .with_context(|| format!("reading {}", path.display()))?;
-        let skill_dir = if file_type.is_symlink() {
-            let Some(target) = in_project_link_target(project_root, &path) else {
+        let (skill_dir, managed_link) = if file_type.is_symlink() {
+            let Some(target) = in_project_link_target(project_root, &path)? else {
                 continue;
             };
-            target
+            (target, link_owner == SkillLinkOwner::Vstack)
         } else {
-            path
+            (path, false)
         };
         if skill_dir.join("SKILL.md").is_file() {
+            if managed_link {
+                push_abs_if_exists(paths, project_root, entry.path(), include_missing);
+            }
             push_abs_if_exists(
                 paths,
                 project_root,
@@ -1756,11 +1941,28 @@ fn push_project_skill_dirs_from(
 /// path to stage is the target's own. A link that leaves the project has no
 /// such path, and staging what it points at would drag a file the consumer's
 /// repository does not track into their commit.
-fn in_project_link_target(project_root: &Path, link: &Path) -> Option<PathBuf> {
-    let target = std::fs::canonicalize(link).ok()?;
-    let root = std::fs::canonicalize(project_root).ok()?;
-    let relative = target.strip_prefix(&root).ok()?;
-    Some(project_root.join(relative))
+///
+/// `Ok(None)` is reserved for the two answers that really are "no in-project
+/// path": a link that names nothing at all, and one that names something
+/// outside the project. Every other resolution failure hides a path that may
+/// exist, and reporting it as absence drops a managed file out of the commit
+/// with nothing said.
+fn in_project_link_target(project_root: &Path, link: &Path) -> Result<Option<PathBuf>> {
+    let target = match std::fs::canonicalize(link) {
+        Ok(target) => target,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => {
+            return Err(err).with_context(|| {
+                format!("resolving vstack-managed skill link {}", link.display())
+            });
+        }
+    };
+    let root = std::fs::canonicalize(project_root)
+        .with_context(|| format!("resolving project root {}", project_root.display()))?;
+    Ok(target
+        .strip_prefix(&root)
+        .ok()
+        .map(|relative| project_root.join(relative)))
 }
 
 fn safe_project_relative_path(relative: &str) -> Result<PathBuf> {
@@ -2462,7 +2664,17 @@ fn project_owned_skill_paths() -> Result<Vec<PathBuf>> {
     let project_root = config::project_root();
     let mut paths = BTreeSet::new();
     push_project_owned_skill_paths(&mut paths, &project_root, &lock, false)?;
-    Ok(paths.into_iter().collect())
+    // Only the files whose content is partly the consumer's belong to this
+    // guard. A managed skill link holds none of it — refresh creates and
+    // retargets it wholesale — and one refresh has just created is untracked,
+    // so leaving it in refused every staging run over vstack's own work.
+    Ok(paths
+        .into_iter()
+        .filter(|path| {
+            !std::fs::symlink_metadata(project_root.join(path))
+                .is_ok_and(|meta| meta.file_type().is_symlink())
+        })
+        .collect())
 }
 
 fn is_shared_status_path(path: &Path) -> bool {

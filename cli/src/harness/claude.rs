@@ -16,9 +16,23 @@ pub fn generate_agent(
     extras: &agent::AgentExtras,
 ) -> Result<PathBuf> {
     std::fs::create_dir_all(dir)?;
-
     let path = super::checked_agent_path(dir, &agent.name, "md")?;
+    crate::path_safety::write_file_no_follow(&path, render_agent(agent, skills, hooks, extras))?;
+    Ok(path)
+}
 
+/// The exact bytes an install writes for this agent.
+///
+/// Split from the write so the pre-stage check that holds an installed agent
+/// to its source renders through this same function: an expectation written
+/// twice drifts, and a check that drifts either passes a neutered agent or
+/// refuses a correct one.
+pub fn render_agent(
+    agent: &Agent,
+    skills: &[(String, String)],
+    hooks: &[Hook],
+    extras: &agent::AgentExtras,
+) -> String {
     let mut output = String::new();
     output.push_str("---\n");
     output.push_str(&format!("name: {}\n", agent.name));
@@ -99,8 +113,7 @@ pub fn generate_agent(
         output.push('\n');
     }
 
-    crate::path_safety::write_file_no_follow(&path, &output)?;
-    Ok(path)
+    output
 }
 
 fn claude_effort_for(
