@@ -3079,3 +3079,44 @@ fn stage_mode_rejects_a_hook_entry_with_no_harnesses() {
         assert!(err.contains("records no harnesses"), "{err}");
     });
 }
+
+#[test]
+fn drift_stage_path_refuses_shared_config_edits_before_refresh_rewrites_them() {
+    let project = tmpdir("stage-drift-shared-config-guard");
+    let source = tmpdir("stage-drift-shared-config-guard-source");
+    std::fs::create_dir_all(&project).unwrap();
+    init_git_project(&project);
+    write_hook_source(&source, "guard");
+
+    crate::test_util::with_project_root(&project, || {
+        let mut lock = LockFile::default();
+        // No recorded hash: the entry reads as drifted, so this takes the
+        // refresh branch rather than the no-drift one.
+        lock.add(hook_entry("guard", &source, &["claude-code"]));
+        lock.save(&config::lock_file_path(false)).unwrap();
+        write_installed_hook_script(&project.join(".claude/hooks/guard.sh"), "guard");
+        write_file(&project.join(".claude/settings.json"), r#"{"hooks":{}}"#);
+        git(&project, &["add", "-A"]);
+        git(&project, &["commit", "-m", "baseline"]);
+
+        let consumer = r#"{"consumerSecret":"do-not-publish","hooks":{}}"#;
+        write_file(&project.join(".claude/settings.json"), consumer);
+
+        let err = run(ScopeFilter::Project, false, false, true, true)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("refusing to stage"), "{err}");
+        assert!(err.contains(".claude/settings.json"), "{err}");
+        // The refusal must land before refresh rewrote the file the consumer is
+        // being told to stash.
+        assert_eq!(
+            std::fs::read_to_string(project.join(".claude/settings.json")).unwrap(),
+            consumer,
+            "the consumer edit must still be there to stash"
+        );
+        assert!(
+            git_output(&project, &["diff", "--cached", "--name-only"]).is_empty(),
+            "nothing may be staged"
+        );
+    });
+}

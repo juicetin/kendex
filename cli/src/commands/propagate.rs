@@ -137,6 +137,15 @@ pub fn run(
         );
     }
 
+    if stage {
+        // Before the refresh, not after: refresh rewrites the very shared files
+        // this guards — a managed hook entry in `.claude/settings.json`, say —
+        // so refusing afterwards would tell the consumer to stash an edit that
+        // has already been overwritten. The no-drift branch mutates nothing, so
+        // its guard stays after the more actionable install diagnostics.
+        refuse_pre_existing_shared_config_edits(&pre_refresh_dirty_shared)?;
+    }
+
     eprintln!("\nRunning refresh for {} scope...", scope.label());
     crate::commands::refresh::run_with_source_records(scope, verbose, &source_records_by_scope)?;
 
@@ -145,7 +154,6 @@ pub fn run(
 
     if stage {
         verify_project_auxiliary_installs_before_stage()?;
-        refuse_pre_existing_shared_config_edits(&pre_refresh_dirty_shared)?;
         stage_project_paths_after_refresh(&pre_refresh_stage_paths)?;
     }
 
