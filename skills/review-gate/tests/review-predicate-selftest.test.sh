@@ -387,6 +387,134 @@ fi
 grep -q "evidence mode: tracked" "$work/symlinkdash.out" \
   || note "dash-leading symlinked override did not anchor tracked evidence at the target's repository (readlink option-parse regression)"
 
+# A BROKEN readlink must refuse, never resolve partially: continuing from
+# the unresolved link's directory is the same silent hermetic demotion the
+# anchor exists to prevent.
+mkdir -p "$work/brokenreadlink/bin"
+cat >"$work/brokenreadlink/bin/readlink" <<'BROKENREADLINK'
+#!/usr/bin/env bash
+echo "readlink: planted failure" >&2
+exit 1
+BROKENREADLINK
+chmod +x "$work/brokenreadlink/bin/readlink"
+if (cd "$work/symlinked/outside" && PATH="$work/brokenreadlink/bin:$PATH" REVIEW_GATE_SETTINGS_FILE="$work/symlinked/outside/settings.toml" "$SELFTEST") \
+  >"$work/brokenreadlink.out" 2>&1; then
+  note "selftest passed with a failing readlink on a symlinked override — the unresolved anchor no longer refuses"
+else
+  grep -q "could not resolve the symlinked settings override" "$work/brokenreadlink.out" \
+    || note "broken-readlink failure does not carry the unresolved-override diagnostic"
+fi
+
+# A CYCLIC symlink override fails -f (which dereferences the whole chain)
+# while very much existing — and because rg_setting also gates on -f, an
+# unguarded run would silently resolve EVERY key to built-in defaults and
+# test the wrong settings. The startup guard must refuse before any layer
+# runs; same contract for a dangling link.
+mkdir -p "$work/cyclic"
+ln -s cycle-b.settings.toml "$work/cyclic/cycle-a.settings.toml"
+ln -s cycle-a.settings.toml "$work/cyclic/cycle-b.settings.toml"
+ln -s does-not-exist.toml "$work/cyclic/dangling.settings.toml"
+if (cd "$work/rooted/repo" && REVIEW_GATE_SETTINGS_FILE="$work/cyclic/cycle-a.settings.toml" "$SELFTEST") \
+  >"$work/cyclic.out" 2>&1; then
+  note "selftest passed with a CYCLIC symlinked override — the unresolvable-override guard no longer refuses"
+else
+  grep -q "names a symlink that does not resolve to a readable file" "$work/cyclic.out" \
+    || note "cyclic-override failure does not carry the unresolvable-override diagnostic"
+fi
+if (cd "$work/rooted/repo" && REVIEW_GATE_SETTINGS_FILE="$work/cyclic/dangling.settings.toml" "$SELFTEST") \
+  >"$work/dangling.out" 2>&1; then
+  note "selftest passed with a DANGLING symlinked override — the unresolvable-override guard no longer refuses"
+else
+  grep -q "names a symlink that does not resolve to a readable file" "$work/dangling.out" \
+    || note "dangling-override failure does not carry the unresolvable-override diagnostic"
+fi
+
+# An EXISTING but UNREADABLE override must refuse up front too: rg_setting's
+# grep presence probe fails on it and every key silently resolves to its
+# built-in default. Skipped when the runner can read mode-000 files anyway
+# (privileged CI) — the guard is [ -r ]-based and cannot fire there.
+cp "$work/rooted/repo/vstack.settings.toml" "$work/cyclic/unreadable.settings.toml"
+chmod 000 "$work/cyclic/unreadable.settings.toml"
+if [ -r "$work/cyclic/unreadable.settings.toml" ]; then
+  echo "skip: unreadable-override fixture (runner reads mode-000 files)"
+else
+  if (cd "$work/rooted/repo" && REVIEW_GATE_SETTINGS_FILE="$work/cyclic/unreadable.settings.toml" "$SELFTEST") \
+    >"$work/unreadable.out" 2>&1; then
+    note "selftest passed with an UNREADABLE settings override — the silent-defaults guard no longer refuses"
+  else
+    grep -q "exists but is not readable" "$work/unreadable.out" \
+      || note "unreadable-override failure does not carry the not-readable diagnostic"
+  fi
+fi
+chmod 644 "$work/cyclic/unreadable.settings.toml"
+
+# A BROKEN WORKTREE (a .git file naming a missing gitdir) earns git's
+# standard 'not a git repository' text while repository metadata is
+# plainly present — that is an unusable evidence base, not a hermetic
+# ticket.
+mkdir -p "$work/brokengitfile"
+printf 'gitdir: /nonexistent/pruned-away/.git/worktrees/gone\n' >"$work/brokengitfile/.git"
+cp "$work/excludes/vstack.settings.toml" "$work/brokengitfile/vstack.settings.toml"
+if (cd "$work/brokengitfile" && "$SELFTEST") >"$work/brokengitfile.out" 2>&1; then
+  note "selftest passed inside a broken worktree (gitfile to a missing gitdir) — the .git-marker guard no longer fires"
+else
+  grep -q "a .git marker exists" "$work/brokengitfile.out" \
+    || note "broken-gitfile failure does not carry the marker diagnostic"
+fi
+
+# A repository-probe failure inside a REAL repository must refuse, never
+# read as "not a repository": a git shim failing --is-inside-work-tree
+# used to silently demote the run to hermetic synthetic probing.
+mkdir -p "$work/brokenprobe/bin" "$work/brokenprobe/repo"
+cat >"$work/brokenprobe/bin/git" <<BROKENPROBE
+#!/usr/bin/env bash
+for _a in "\$@"; do
+  if [ "\$_a" = "--is-inside-work-tree" ]; then
+    echo "fatal: planted probe failure" >&2
+    exit 1
+  fi
+done
+exec "$real_git" "\$@"
+BROKENPROBE
+chmod +x "$work/brokenprobe/bin/git"
+(cd "$work/brokenprobe/repo" && "$real_git" init -q .)
+cp "$work/excludes/vstack.settings.toml" "$work/brokenprobe/repo/vstack.settings.toml"
+if (cd "$work/brokenprobe/repo" && PATH="$work/brokenprobe/bin:$PATH" "$SELFTEST") \
+  >"$work/brokenprobe.out" 2>&1; then
+  note "selftest passed with a failing repository probe inside a real repo — broken git reads as not-a-repository again"
+else
+  grep -q "repository probe failed" "$work/brokenprobe.out" \
+    || note "broken-probe failure does not carry the repository-probe diagnostic"
+fi
+
+# The prophylactic ledger validates BOTH directions. (a) A declaration
+# with no matching active exclusion is stale config and FAILs. (b) A
+# declaration whose glob has since gained a tracked match FAILs — the
+# no-tracked-match assertion no longer holds.
+printf 'REVIEW_GATE_CARRY_FORWARD = "docs"\nREVIEW_GATE_CARRY_FORWARD_EXCLUDE = "guides/*"\nREVIEW_GATE_CARRY_FORWARD_EXCLUDE_PROPHYLACTIC = "gudies/*"\n' \
+  >"$work/rooted/repo/orphan.settings.toml"
+grep -v '^REVIEW_GATE_CARRY_FORWARD = ' "$work/configured/vstack.settings.toml" \
+  >>"$work/rooted/repo/orphan.settings.toml"
+if (cd "$work/rooted/repo" && REVIEW_GATE_SETTINGS_FILE="$work/rooted/repo/orphan.settings.toml" "$SELFTEST") \
+  >"$work/rootedorphan.out" 2>&1; then
+  note "selftest passed with a prophylactic declaration naming no active exclusion — the orphan-waiver gate no longer fires"
+else
+  grep -q "is not an active REVIEW_GATE_CARRY_FORWARD_EXCLUDE entry" "$work/rootedorphan.out" \
+    || note "orphan prophylactic declaration does not carry the stale-waiver diagnostic"
+fi
+
+printf 'REVIEW_GATE_CARRY_FORWARD = "docs"\nREVIEW_GATE_CARRY_FORWARD_EXCLUDE = "guides/*"\nREVIEW_GATE_CARRY_FORWARD_EXCLUDE_PROPHYLACTIC = "guides/*"\n' \
+  >"$work/rooted/repo/falsified.settings.toml"
+grep -v '^REVIEW_GATE_CARRY_FORWARD = ' "$work/configured/vstack.settings.toml" \
+  >>"$work/rooted/repo/falsified.settings.toml"
+if (cd "$work/rooted/repo" && REVIEW_GATE_SETTINGS_FILE="$work/rooted/repo/falsified.settings.toml" "$SELFTEST") \
+  >"$work/rootedfalsified.out" 2>&1; then
+  note "selftest passed with a prophylactic declaration whose glob matches tracked paths — the falsified-declaration gate no longer fires"
+else
+  grep -q "no longer holds" "$work/rootedfalsified.out" \
+    || note "falsified prophylactic declaration does not carry the no-longer-holds diagnostic"
+fi
+
 # A repository with ZERO tracked files is still tracked mode — payload
 # emptiness must not demote the run to hermetic synthetic probing, where a
 # manufactured path would let a dead glob pass. The banner must say tracked
