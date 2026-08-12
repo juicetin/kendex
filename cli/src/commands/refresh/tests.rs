@@ -1496,6 +1496,64 @@ fn refresh_withholds_agent_success_when_a_declared_skill_is_not_installed() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+/// The generated agent draws on the project's own `[agent-skills]` list as well
+/// as the source's, so a consumer entry naming an uninstalled skill is the same
+/// unmet dependency — and the agent hash is project-config-sensitive, so
+/// recording it as satisfied would make every later run read clean.
+#[test]
+fn refresh_withholds_agent_success_for_an_uninstalled_project_declared_skill() {
+    let root = tmpdir("declared-skill-project-config");
+    let project = root.join("project");
+    let source = make_source(&root, "source");
+    std::fs::create_dir_all(&project).unwrap();
+    write_colliding_source(&source, "1", "PreToolUse", "source-model");
+
+    let sources = vec![RefreshSource::from_root(&source)];
+    let mut lock = LockFile::default();
+    lock.add(lock_entry(
+        "rust",
+        ItemKind::Agent,
+        &source,
+        vec!["claude-code"],
+    ));
+    lock.add(lock_entry(
+        "shared",
+        ItemKind::Skill,
+        &source,
+        vec!["claude-code"],
+    ));
+
+    // Control: with only the source's declaration, the agent is satisfied.
+    let stats = crate::test_util::with_project_root(&project, || {
+        let mut project_config = ProjectConfig::default();
+        refresh_items_in_scope(false, &lock, &sources, &mut project_config, &project, None)
+    });
+    assert!(stats.successful_items.contains("rust"));
+
+    // The project adds a skill of its own that was never installed.
+    let stats = crate::test_util::with_project_root(&project, || {
+        let mut project_config = ProjectConfig::default();
+        project_config
+            .agent_skills
+            .insert("rust".to_string(), vec!["house-rules".to_string()]);
+        refresh_items_in_scope(false, &lock, &sources, &mut project_config, &project, None)
+    });
+    assert!(
+        !stats.successful_items.contains("rust"),
+        "a project-declared skill that is not installed is still an unmet dependency"
+    );
+    assert!(
+        stats
+            .incomplete
+            .get("rust")
+            .is_some_and(|reason| reason.contains("house-rules")),
+        "{:?}",
+        stats.incomplete
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
 /// A skill installed only for another harness does not satisfy the agent: it is
 /// absent from the agent's own skills directory, so the agent is regenerated
 /// referencing a skill it cannot load.

@@ -326,9 +326,22 @@ pub fn refresh_items_in_scope(
         // out here while the mapping hash that forced this refresh got recorded
         // as satisfied. Fail the agent instead — its hash is only written for
         // successful items, so the next run still reports the work as pending.
-        let declared = source
+        let mut declared = source
             .mapping
             .declared_skills_for_agent(&agent.name, &agent.role);
+        // The generated agent draws on the project's own `[agent-skills]` list
+        // too (merged with the source's below), so a consumer entry naming an
+        // uninstalled skill is the same unmet dependency — and the agent hash is
+        // project-config-sensitive, so leaving it out would record the edit as
+        // satisfied.
+        if let Some(project_required) = project_config.agent_skills_for(&agent.name) {
+            for skill in project_required {
+                if !declared.contains(skill) {
+                    declared.push(skill.clone());
+                }
+            }
+            declared.sort();
+        }
         // A declaration whose asset is absent from the source catalog counts
         // too: filtering it out here would leave the agent permanently short of
         // a skill the mapping calls required while every later run read clean.
