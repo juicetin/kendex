@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 
 /// One entry in `<scope>/.vstack-source.json`. Records where a package was
@@ -772,7 +772,28 @@ fn is_package_bin_symlink(link: &Path, package_dest: &Path) -> Result<bool> {
 }
 
 fn normalize_path(path: &Path) -> PathBuf {
-    path.components().collect()
+    // Collapse lexical parent components without following symlinks.
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::Normal(part) => normalized.push(part),
+            Component::ParentDir => {
+                if normalized
+                    .components()
+                    .next_back()
+                    .is_some_and(|last| matches!(last, Component::Normal(_)))
+                {
+                    normalized.pop();
+                } else if !normalized.has_root() {
+                    normalized.push(component.as_os_str());
+                }
+            }
+        }
+    }
+    normalized
 }
 
 /// The canonical `packages` entry vstack writes for a given package name.
@@ -1909,6 +1930,73 @@ printf 'module.exports = 1;\n' > node_modules/left-pad/index.js
             );
             assert_eq!(
                 std::fs::read_to_string(&user_path).unwrap(),
+                "consumer-owned\n"
+            );
+            assert!(pi_dir.join("bin").join("new-cmd").is_symlink());
+        });
+
+        let _ = std::fs::remove_dir_all(&sandbox);
+    }
+
+    #[test]
+    fn reinstall_preserves_stale_bin_symlink_that_escapes_package_with_parent_components() {
+        let sandbox = std::env::temp_dir().join(format!(
+            "vstack_pi_stale_bin_parent_escape_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&sandbox);
+        let source = sandbox.join("src").join("pi-bridgey");
+        std::fs::create_dir_all(source.join("bin")).unwrap();
+        std::fs::create_dir_all(source.join("extensions")).unwrap();
+        std::fs::write(source.join("extensions").join("ext.ts"), "// noop\n").unwrap();
+        std::fs::write(source.join("bin").join("old.js"), "#!/usr/bin/env node\n").unwrap();
+        std::fs::write(
+            source.join("package.json"),
+            r#"{
+                "name": "pi-bridgey",
+                "pi": { "extensions": ["./extensions/ext.ts"] },
+                "bin": { "old-cmd": "./bin/old.js" }
+            }"#,
+        )
+        .unwrap();
+        let pi_dir = sandbox.join("agent");
+
+        with_pi_dir(&pi_dir, || {
+            let old_ext = PiExtension::from_dir(&source).unwrap();
+            let dest = install_pi_extension(&old_ext, true).unwrap().unwrap();
+            let old_link = pi_dir.join("bin").join("old-cmd");
+            let consumer_target = pi_dir.join("packages").join("consumer-owned.js");
+            std::fs::write(&consumer_target, "consumer-owned\n").unwrap();
+
+            std::fs::remove_file(&old_link).unwrap();
+            let escaping_target = dest.join("..").join("consumer-owned.js");
+            std::os::unix::fs::symlink(&escaping_target, &old_link).unwrap();
+            assert!(
+                escaping_target.starts_with(&dest),
+                "negative control: raw target looks package-owned before parent normalization"
+            );
+
+            std::fs::write(source.join("bin").join("new.js"), "#!/usr/bin/env node\n").unwrap();
+            std::fs::write(
+                source.join("package.json"),
+                r#"{
+                    "name": "pi-bridgey",
+                    "pi": { "extensions": ["./extensions/ext.ts"] },
+                    "bin": { "new-cmd": "./bin/new.js" }
+                }"#,
+            )
+            .unwrap();
+
+            let new_ext = PiExtension::from_dir(&source).unwrap();
+            install_pi_extension(&new_ext, true).unwrap().unwrap();
+
+            assert!(
+                old_link.is_symlink(),
+                "consumer-owned stale bin symlink must be preserved"
+            );
+            assert_eq!(std::fs::read_link(&old_link).unwrap(), escaping_target);
+            assert_eq!(
+                std::fs::read_to_string(&consumer_target).unwrap(),
                 "consumer-owned\n"
             );
             assert!(pi_dir.join("bin").join("new-cmd").is_symlink());
