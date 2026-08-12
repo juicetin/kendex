@@ -773,3 +773,44 @@ fn remove_hook_from_opencode_preserves_unrelated_permissions() {
 
     let _ = std::fs::remove_dir_all(&base);
 }
+
+/// The duplicate check must key on the safety block this splice writes, not on
+/// the hook's bare name. A hook named after a word an agent's own prose uses
+/// read as "already installed", so the advisory was never spliced in — and the
+/// pre-stage verifier, which replays this same function, expected exactly that
+/// missing block and called the unsafe agent correct.
+#[test]
+fn codex_prose_splice_keys_on_the_safety_block_not_the_bare_name() {
+    let hook = hook_fixture("dev", "TaskCompleted", None);
+    let agent = "name = \"demo\"\ndeveloper_instructions = '''\nRun the dev server first.\n'''\n";
+
+    // Control: the hook's name really does occur in the agent's own prose, so a
+    // bare-name check cannot tell that apart from an installed block.
+    assert!(
+        agent.contains(&hook.name),
+        "the fixture does not mention the hook name, so it cannot witness the bug"
+    );
+
+    let spliced = splice_codex_hook_prose(agent, &hook).expect("the advisory is not installed yet");
+    assert!(
+        spliced.contains("\n## Safety: dev\n"),
+        "the advisory must be spliced in: {spliced}"
+    );
+
+    // Still idempotent: the block it just wrote is what makes a second call a
+    // no-op, and it is the same marker `remove_hook_install` strips.
+    assert!(
+        splice_codex_hook_prose(&spliced, &hook).is_none(),
+        "a second splice must not duplicate the block"
+    );
+
+    // Name-exact: another hook's block is not this hook's, even when one name
+    // is a prefix of the other.
+    let sibling = hook_fixture("dev-server", "TaskCompleted", None);
+    let with_sibling =
+        splice_codex_hook_prose(agent, &sibling).expect("the sibling advisory is not installed");
+    assert!(
+        splice_codex_hook_prose(&with_sibling, &hook).is_some(),
+        "`## Safety: dev-server` is not `## Safety: dev`: {with_sibling}"
+    );
+}

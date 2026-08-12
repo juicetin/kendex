@@ -280,6 +280,19 @@ pub(crate) fn codex_hook_safety_block(hook: &Hook) -> String {
     format!("## Safety: {}\n\n{}", hook.name, hook.safety_prose())
 }
 
+/// The heading line that identifies one hook's spliced safety block inside a
+/// generated Codex agent, with the newlines that make it name-exact: a hook
+/// called `dev` must not match `## Safety: dev-server`, and neither may match a
+/// mention of either name in the agent's own prose.
+///
+/// Shared by the splice and the removal so "already installed" and "installed
+/// by us" are the same question — the pre-stage verifier replays the splice, so
+/// a check that answered it differently made an agent missing its advisory the
+/// expected output.
+fn codex_hook_prose_marker(name: &str) -> String {
+    format!("\n## Safety: {name}\n")
+}
+
 /// Map a canonical (Claude-style) hook event to its codex equivalent.
 ///
 /// Codex supports these events natively (per
@@ -702,7 +715,7 @@ fn install_hook_codex_prose(hook: &Hook, global: bool, agents: &[Agent]) -> Resu
 /// pre-stage check that reproduces an installed agent replays them through this
 /// same function rather than describing the result a second time.
 pub(crate) fn splice_codex_hook_prose(content: &str, hook: &Hook) -> Option<String> {
-    if content.contains(&hook.name) {
+    if content.contains(&codex_hook_prose_marker(&hook.name)) {
         return None;
     }
     let close_pos = content.rfind("'''")?;
@@ -874,7 +887,7 @@ fn strip_hook_prose_from_codex_agents(global: bool, name: &str) -> Result<()> {
     if !agents_dir.exists() {
         return Ok(());
     }
-    let marker = format!("\n## Safety: {name}\n");
+    let marker = codex_hook_prose_marker(name);
     let entries = std::fs::read_dir(&agents_dir)
         .with_context(|| format!("reading Codex agents dir {}", agents_dir.display()))?;
     for entry in entries {

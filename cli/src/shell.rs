@@ -24,9 +24,9 @@ pub(crate) enum Part<'a> {
 ///
 /// unix gets one POSIX line. Windows gets one line per native shell, because no
 /// single string reaches both: `cmd.exe` reads a backslash run against a quote
-/// as escapes and expands `%NAME%` even inside double quotes, while PowerShell
-/// does neither and instead expands `$name` and `$(...)` and reads a backtick
-/// as an escape inside its own double quotes.
+/// as escapes and rewrites `%NAME%` and `!NAME!` even inside double quotes,
+/// while PowerShell does neither and instead expands `$name` and `$(...)` and
+/// reads a backtick as an escape inside its own double quotes.
 pub(crate) fn command(parts: &[Part<'_>]) -> String {
     #[cfg(unix)]
     {
@@ -111,10 +111,9 @@ pub(crate) fn posix_quote(arg: &str) -> String {
 /// The Windows pair. Both shells are offered because vstack cannot know which
 /// one the operator pasted into, and neither rendering is safe in the other.
 ///
-/// The `cmd.exe` line is dropped entirely when an argument carries a `%`:
-/// percent expansion runs before quoting is considered, so a quoted `%NAME%` is
-/// still substituted when `NAME` is set, and `cmd.exe` has no escape for it
-/// inside a quoted argument. Advertising the line anyway would hand the
+/// The `cmd.exe` line is dropped entirely when an argument carries an expansion
+/// trigger `cmd.exe` acts on before quoting is considered — see
+/// [`cmd_expansion_hazard`]. Advertising the line anyway would hand the
 /// operator a command that silently names a different path.
 #[cfg(any(not(unix), test))]
 pub(crate) fn windows_command(parts: &[Part<'_>]) -> String {
@@ -126,10 +125,49 @@ pub(crate) fn windows_command(parts: &[Part<'_>]) -> String {
     .expect("PowerShell single-quoting renders every argument");
     match render(parts, cmd_quote, &AND_THEN_OPERATOR) {
         Some(cmd) => format!("`{cmd}` (cmd.exe) or `{powershell}` (PowerShell)"),
-        None => format!(
-            "`{powershell}` (PowerShell); cmd.exe expands %NAME% inside quotes, so it cannot be given this argument verbatim"
-        ),
+        None => {
+            // The refusal names the trigger the operator has to work around,
+            // so the first argument carrying one decides the wording.
+            let hazard = parts
+                .iter()
+                .filter_map(|part| match part {
+                    Part::Arg(arg) => cmd_expansion_hazard(arg),
+                    _ => None,
+                })
+                .next()
+                .expect("a refused rendering carries a hazardous argument");
+            format!(
+                "`{powershell}` (PowerShell); cmd.exe {hazard}, so it cannot be given this argument verbatim"
+            )
+        }
     }
+}
+
+/// What `cmd.exe` would do to an argument that no quoting there can prevent,
+/// or `None` when it would carry it verbatim.
+///
+/// Percent expansion runs over the whole line before any quote is considered,
+/// so a quoted `%NAME%` is still substituted when `NAME` is set and no escape
+/// suppresses it inside a quoted argument.
+///
+/// Delayed expansion is the same hazard one pass later, and vstack cannot see
+/// whether it is on: `cmd /V:ON` and the `DelayedExpansion` registry default
+/// both enable it, and there is no way to ask from here. With it on, a quoted
+/// `!NAME!` is substituted and a lone `!` is deleted; with it off, the `^!` that
+/// would have escaped either is itself literal. One line cannot be right on
+/// both machines, so the `cmd.exe` line is refused for any `!` rather than
+/// rendered wrong on half of them. The refusal is per line, not per argument:
+/// a single `!` anywhere on the line also turns `^` into an escape in every
+/// other argument on it.
+#[cfg(any(not(unix), test))]
+fn cmd_expansion_hazard(arg: &str) -> Option<&'static str> {
+    if arg.contains('%') {
+        return Some("expands %NAME% inside quotes");
+    }
+    if arg.contains('!') {
+        return Some("rewrites ! inside quotes when delayed expansion is enabled");
+    }
+    None
 }
 
 /// `cmd.exe` quoting. Double quotes group the argument and a doubled `""` is
@@ -142,10 +180,11 @@ pub(crate) fn windows_command(parts: &[Part<'_>]) -> String {
 /// ending in `\` (`C:\`) would eat its own closing quote and swallow the next
 /// argument.
 ///
-/// `None` when the argument carries a `%`, which no quoting here can protect.
+/// `None` when the argument carries an expansion trigger no quoting here can
+/// protect — see [`cmd_expansion_hazard`].
 #[cfg(any(not(unix), test))]
 fn cmd_quote(arg: &str) -> Option<String> {
-    if arg.contains('%') {
+    if cmd_expansion_hazard(arg).is_some() {
         return None;
     }
     let mut quoted = String::with_capacity(arg.len() + 2);
@@ -179,7 +218,7 @@ fn cmd_quote(arg: &str) -> Option<String> {
 
 /// PowerShell single-quoting: the only PowerShell string form that is wholly
 /// literal. Nothing inside is expanded — not `$name`, not `$(...)`, not a
-/// backtick, not a `%` — and a doubled `''` is an embedded quote.
+/// backtick, not a `%`, not a `!` — and a doubled `''` is an embedded quote.
 #[cfg(any(not(unix), test))]
 fn powershell_quote(arg: &str) -> String {
     format!("'{}'", arg.replace('\'', "''"))
@@ -330,6 +369,32 @@ mod tests {
         expanded
     }
 
+    /// `cmd.exe`'s delayed expansion, which runs after percent expansion whenever
+    /// the shell was started with `/V:ON` or the machine sets the registry
+    /// default. Quotes do not suppress it either: a `!NAME!` pair is replaced by
+    /// the variable's value — empty when the name is unset — and an unpaired `!`
+    /// is dropped outright.
+    fn expand_cmd_delayed(command_line: &str, env: &HashMap<&str, &str>) -> String {
+        let mut expanded = String::new();
+        let mut rest = command_line;
+        while let Some(open) = rest.find('!') {
+            let (before, after) = rest.split_at(open);
+            expanded.push_str(before);
+            let body = &after[1..];
+            match body.find('!') {
+                Some(close) => {
+                    expanded.push_str(env.get(&body[..close]).copied().unwrap_or(""));
+                    rest = &body[close + 1..];
+                }
+                // No closing `!`: the bang itself is consumed and the rest of
+                // the line is carried through.
+                None => rest = body,
+            }
+        }
+        expanded.push_str(rest);
+        expanded
+    }
+
     /// PowerShell's own argument parsing: a single-quoted string is wholly
     /// literal with `''` for an embedded quote, while a double-quoted string
     /// expands `$name` and `$(...)` and reads a backtick as an escape.
@@ -449,10 +514,15 @@ mod tests {
             "a$b",                // ordinary to cmd.exe, active in PowerShell
             "a`b",
         ] {
-            let rendered = cmd_quote(arg).expect("no percent, so cmd.exe can carry it");
+            let rendered = cmd_quote(arg).expect("no expansion trigger, so cmd.exe can carry it");
             let line = format!("--skill {rendered} --force");
+            // Both expansion passes, in the order `cmd.exe` runs them: an
+            // argument the rendering accepts has to survive a shell started
+            // with `/V:ON` as well as the default one.
+            let expanded =
+                expand_cmd_delayed(&expand_cmd_percent(&line, &windows_env()), &windows_env());
             assert_eq!(
-                parse_windows_argv(&expand_cmd_percent(&line, &windows_env())),
+                parse_windows_argv(&expanded),
                 vec![
                     "--skill".to_string(),
                     arg.to_string(),
@@ -503,6 +573,58 @@ mod tests {
         );
     }
 
+    /// `cmd.exe` with delayed expansion enabled rewrites `!` inside double
+    /// quotes just as it rewrites `%NAME%`, and the escape that would suppress
+    /// it (`^!`) is itself literal when delayed expansion is off — so no single
+    /// line is correct on both machines. The rendering must refuse rather than
+    /// advertise one that is wrong on half of them.
+    #[test]
+    fn cmd_rendering_refuses_arguments_delayed_expansion_would_rewrite() {
+        let env = windows_env();
+
+        // Control: the hazard is real and this model witnesses both shapes of
+        // it — a name pair substituted, and a lone bang deleted.
+        for path in [r"C:\work\!TEMP!\pkg", r"C:\work\rev!\pkg"] {
+            let naive = format!("vstack add \"{path}\"");
+            assert_ne!(
+                parse_windows_argv(&expand_cmd_delayed(&expand_cmd_percent(&naive, &env), &env)),
+                vec!["vstack".to_string(), "add".to_string(), path.to_string()],
+                "the model leaves {path} alone, so it cannot witness the bug"
+            );
+            assert!(
+                cmd_quote(path).is_none(),
+                "cmd.exe cannot carry {path} verbatim"
+            );
+
+            let advertised = windows_command(&[Part::Fixed("vstack add"), Part::Arg(path)]);
+            assert!(
+                !advertised.contains("(cmd.exe)"),
+                "no cmd.exe line may be advertised for {path}: {advertised}"
+            );
+            assert!(
+                advertised.contains("delayed expansion"),
+                "the refusal must name its cause: {advertised}"
+            );
+            // The operator still needs a command that works, and it must carry
+            // the path verbatim.
+            let powershell = advertised
+                .split('`')
+                .nth(1)
+                .expect("the advertised line is backticked");
+            assert_eq!(
+                parse_powershell_argv(powershell, &env),
+                vec!["vstack".to_string(), "add".to_string(), path.to_string()]
+            );
+        }
+
+        // The two refusals are told apart: a percent argument still names
+        // percent expansion, not delayed expansion.
+        let percent =
+            windows_command(&[Part::Fixed("vstack add"), Part::Arg(r"C:\work\%TEMP%\pkg")]);
+        assert!(percent.contains("%NAME%"), "{percent}");
+        assert!(!percent.contains("delayed expansion"), "{percent}");
+    }
+
     /// PowerShell expands `$name` and `$(...)` and reads a backtick as an
     /// escape inside double quotes, so the `cmd.exe` line is not a PowerShell
     /// line. The PowerShell rendering must survive its own parser.
@@ -536,6 +658,8 @@ mod tests {
             "a'b",
             "a\"b",
             "100%",
+            "C:\\work\\!TEMP!\\pkg",
+            "rev!",
         ] {
             let rendered = powershell_quote(arg);
             assert_eq!(

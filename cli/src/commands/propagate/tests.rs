@@ -4309,3 +4309,125 @@ fn stage_mode_refuses_a_replaced_failure_reporting_reference() {
         assert!(err.contains("skill-failure-reporting.md"), "{err}");
     });
 }
+
+/// Refresh lifts a generated agent's launch/additional-instructions section
+/// into `vstack.toml` whenever the config does not already record it. That is
+/// the migration path for an edit the consumer made and committed on purpose —
+/// but an *uncommitted* one would be persisted, regenerated back into the
+/// agent, and then pass the post-refresh content check, because the config it
+/// is checked against is the one the edit just wrote. Both files would ride
+/// into the automated propagation commit as vstack's own work.
+#[cfg(unix)]
+#[test]
+fn drift_stage_path_refuses_uncommitted_agent_edits_refresh_would_absorb() {
+    let project = tmpdir("stage-agent-extract-guard");
+    let source = tmpdir("stage-agent-extract-guard-source");
+    std::fs::create_dir_all(&project).unwrap();
+    init_git_project(&project);
+    write_agent_skill_source(&source, true);
+
+    let redrift = |body: &str| {
+        std::fs::write(
+            source.join("agents/rust.md"),
+            format!("---\nname: rust\ndescription: Rust\nmodel: sonnet\nrole: engineer\n---\n\n# Rust\n\n{body}\n"),
+        )
+        .unwrap();
+    };
+
+    crate::test_util::with_project_root(&project, || {
+        let mut lock = LockFile::default();
+        lock.add(agent_entry("rust", &source));
+        lock.add(demo_entry(&source));
+        lock.save(&config::lock_file_path(false)).unwrap();
+        write_installed_skill_md(&project.join(".agents/skills/demo/SKILL.md"), "# Demo\n");
+        std::fs::create_dir_all(project.join(".claude/skills")).unwrap();
+        std::os::unix::fs::symlink(
+            "../../.agents/skills/demo",
+            project.join(".claude/skills/demo"),
+        )
+        .unwrap();
+        // A consumer config that records the agent somewhere other than the
+        // instruction tables. `ensure_project_config` seeds a placeholder key
+        // only for an agent the file does not mention at all, so this is the
+        // ordinary state in which `[agent-additional-instructions]` has no
+        // entry for `rust` and refresh's extraction is live.
+        write_file(
+            &project.join("vstack.toml"),
+            "[agent-frontmatter.claude-code]\nrust = { model = \"sonnet\" }\n",
+        );
+        git(&project, &["add", "-A"]);
+        git(&project, &["commit", "-m", "baseline"]);
+
+        // The drift branch: refresh generates the agent, then staging records it.
+        run(ScopeFilter::Project, false, false, true, true).unwrap();
+        git(&project, &["commit", "-m", "propagated"]);
+
+        let agent_path = project.join(".claude/agents/rust.md");
+        let generated = std::fs::read_to_string(&agent_path).unwrap();
+        assert!(
+            !generated.contains("## Additional Instructions"),
+            "the fixture already carries the section it is about to smuggle: {generated}"
+        );
+
+        // Control: an agent dirtied in a way refresh simply overwrites carries
+        // nothing into the config, and must still propagate. Without this the
+        // guard below could be refusing on dirt alone.
+        write_file(&agent_path, &format!("{generated}\nLOCAL SCRATCH\n"));
+        redrift("Revision two.");
+        run(ScopeFilter::Project, false, false, true, true).unwrap();
+        git(&project, &["commit", "-m", "propagated again"]);
+        assert!(
+            !std::fs::read_to_string(&agent_path)
+                .unwrap()
+                .contains("LOCAL SCRATCH"),
+            "refresh must have overwritten the scratch edit"
+        );
+
+        // The same file, edited where refresh extracts from instead.
+        let regenerated = std::fs::read_to_string(&agent_path).unwrap();
+        write_file(
+            &agent_path,
+            &format!("{regenerated}\n## Additional Instructions\n\nSMUGGLED\n"),
+        );
+        redrift("Revision three.");
+
+        let err = run(ScopeFilter::Project, false, false, true, true)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("refusing to stage"), "{err}");
+        assert!(err.contains(".claude/agents/rust.md"), "{err}");
+        assert!(err.contains("agent-additional-instructions"), "{err}");
+        // The refusal must land before refresh rewrote the file the consumer is
+        // being told to stash, and before the config absorbed the edit.
+        assert!(
+            std::fs::read_to_string(&agent_path)
+                .unwrap()
+                .contains("SMUGGLED"),
+            "the consumer edit must still be there to stash"
+        );
+        assert!(
+            !std::fs::read_to_string(project.join("vstack.toml"))
+                .unwrap_or_default()
+                .contains("SMUGGLED"),
+            "vstack.toml must not have absorbed the edit"
+        );
+        assert!(
+            git_output(&project, &["diff", "--cached", "--name-only"]).is_empty(),
+            "nothing may be staged"
+        );
+
+        // The no-drift branch runs no refresh, so nothing extracts there — and
+        // the same edit is caught by the pre-stage content check instead, with
+        // its own cause. Undoing the drift leaves the edit in place.
+        redrift("Revision two.");
+        let err = run(ScopeFilter::Project, false, false, true, true)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("auxiliary verification failed"), "{err}");
+        assert!(err.contains(".claude/agents/rust.md"), "{err}");
+        assert!(
+            git_output(&project, &["diff", "--cached", "--name-only"]).is_empty(),
+            "nothing may be staged"
+        );
+    });
+}

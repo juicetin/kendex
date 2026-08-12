@@ -2,7 +2,7 @@ use crate::config::{self, ItemKind, LockFile};
 use crate::harness::Harness;
 use crate::scope::ScopeFilter;
 use anyhow::{Context, Result, bail};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::io::Write;
 #[cfg(unix)]
@@ -107,13 +107,15 @@ pub fn run(
     // never enters the guarded set, and the staging pass absorbs the consumer's
     // own edit to it. Still ahead of the refresh, which is what the guard is
     // for.
-    let (pre_refresh_stage_paths, pre_refresh_dirty_shared) = if stage {
-        let stage_paths = pre_refresh_project_stage_paths()?;
-        let dirty = dirty_shared_config_paths(&stage_paths)?;
-        (stage_paths, dirty)
-    } else {
-        (Vec::new(), Vec::new())
-    };
+    let (pre_refresh_stage_paths, pre_refresh_dirty_shared, pre_refresh_absorbable_agent_edits) =
+        if stage {
+            let stage_paths = pre_refresh_project_stage_paths()?;
+            let dirty = dirty_shared_config_paths(&stage_paths)?;
+            let absorbable = absorbable_agent_edits_before_refresh()?;
+            (stage_paths, dirty, absorbable)
+        } else {
+            (Vec::new(), Vec::new(), Vec::new())
+        };
 
     if !drift_any {
         if check {
@@ -152,6 +154,10 @@ pub fn run(
         // has already been overwritten. The no-drift branch mutates nothing, so
         // its guard stays after the more actionable install diagnostics.
         refuse_pre_existing_shared_config_edits(&pre_refresh_dirty_shared)?;
+        // Only this branch runs a refresh, and only a refresh extracts. The
+        // no-drift branch regenerates nothing, so the same edit is caught there
+        // by the content check with its own accurate cause.
+        refuse_absorbable_agent_edits(&pre_refresh_absorbable_agent_edits)?;
     }
 
     eprintln!("\nRunning refresh for {} scope...", scope.label());
@@ -186,6 +192,103 @@ fn refuse_pre_existing_shared_config_edits(dirty: &[PathBuf]) -> Result<()> {
         "refusing to stage: shared vstack-managed config file(s) already had uncommitted changes before propagation ran: {}. Commit them (or stash, including untracked) first so the automated commit carries only propagated changes.",
         display.join(", ")
     )
+}
+
+/// A generated agent file carrying an uncommitted edit that refresh would lift
+/// into `vstack.toml`, with the tables it would land in.
+struct AbsorbableAgentEdit {
+    path: PathBuf,
+    section_headers: Vec<&'static str>,
+}
+
+/// Refuse to propagate over a consumer edit the refresh would launder into the
+/// config as vstack's own.
+///
+/// Refresh reads every generated agent before rewriting it and records any
+/// launch/additional-instructions section `vstack.toml` has no entry for
+/// (`read_existing_extras` then `save_extracted`). For an edit the consumer
+/// committed on purpose that is the migration path. For an uncommitted one it
+/// is a laundering path: the section is written into `vstack.toml`, the agent
+/// is regenerated from it, and the post-refresh content check then passes
+/// because the config it renders the expectation from is the one the edit just
+/// wrote. `git add` stages both files and the edit ships inside the automated
+/// propagation commit.
+fn refuse_absorbable_agent_edits(edits: &[AbsorbableAgentEdit]) -> Result<()> {
+    if edits.is_empty() {
+        return Ok(());
+    }
+    let display: Vec<String> = edits
+        .iter()
+        .map(|edit| {
+            format!(
+                "{} (would be recorded in {})",
+                edit.path.display(),
+                edit.section_headers.join(" and ")
+            )
+        })
+        .collect();
+    bail!(
+        "refusing to stage: generated agent file(s) had uncommitted section edits before propagation ran, and the refresh would record them in vstack.toml as project configuration: {}. Commit them (or revert them) first so the automated commit carries only propagated changes.",
+        display.join(", ")
+    )
+}
+
+/// Generated agent files whose uncommitted state carries a section the refresh
+/// would record in `vstack.toml` — the input to [`refuse_absorbable_agent_edits`].
+///
+/// Deliberately narrower than "every dirty generated agent". Refresh rewrites
+/// these files wholesale, so an agent dirtied any other way loses the edit and
+/// carries nothing into the config; refusing over that would block propagation
+/// on changes propagation itself discards.
+fn absorbable_agent_edits_before_refresh() -> Result<Vec<AbsorbableAgentEdit>> {
+    let lock = LockFile::load(&config::lock_file_path(false))?;
+    let project_root = config::project_root();
+    // Keyed by the path refresh reads back, carrying the agent and harness
+    // whose extraction that read feeds.
+    let mut carriers: BTreeMap<PathBuf, (String, Harness)> = BTreeMap::new();
+    for entry in lock
+        .entries
+        .values()
+        .filter(|entry| entry.kind == ItemKind::Agent)
+    {
+        crate::path_safety::validate_item_name(&entry.name)
+            .with_context(|| format!("unsafe locked item name {}", entry.name))?;
+        for harness in entry.harnesses.iter().filter_map(|id| Harness::from_id(id)) {
+            let path = harness
+                .agents_dir(false)
+                .join(harness.agent_filename(&entry.name));
+            let Ok(relative) = path.strip_prefix(&project_root) else {
+                continue;
+            };
+            carriers.insert(relative.to_path_buf(), (entry.name.clone(), harness));
+        }
+    }
+    let dirty = dirty_paths_among(
+        &carriers.keys().cloned().collect(),
+        "vstack-generated agent files",
+    )?;
+    if dirty.is_empty() {
+        return Ok(Vec::new());
+    }
+    // Strict for the same reason the pre-stage content check is: refresh reads
+    // the project config strictly too, and treating an unparseable one as empty
+    // would report every recorded section as a pending extraction.
+    let project_config = crate::project_config::ProjectConfig::load_strict(&project_root)?;
+    let mut edits = Vec::new();
+    for path in dirty {
+        let Some((name, harness)) = carriers.get(&path) else {
+            continue;
+        };
+        let extracted = crate::resolve::read_existing_extras(&project_root.join(&path), *harness);
+        let pending = project_config.pending_extraction(name, &extracted);
+        if !pending.is_empty() {
+            edits.push(AbsorbableAgentEdit {
+                path,
+                section_headers: pending.section_headers(),
+            });
+        }
+    }
+    Ok(edits)
 }
 
 /// The agent TOMLs `install_hook_codex_prose` actually writes to: the Codex
@@ -2714,8 +2817,7 @@ fn is_shared_status_path(path: &Path) -> bool {
 /// config no locked asset owns — a consumer's own `.pi/settings.json` when the
 /// lock holds only Claude assets — which propagation would never have written.
 fn dirty_shared_config_paths(stage_paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
-    let git = git_project()?;
-    let owned_shared: BTreeSet<PathBuf> = stage_paths
+    let mut candidates: BTreeSet<PathBuf> = stage_paths
         .iter()
         .filter(|path| is_shared_status_path(path))
         .cloned()
@@ -2724,11 +2826,21 @@ fn dirty_shared_config_paths(stage_paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
     // marker-delimited instruction block inside a file whose other content is
     // the consumer's. They are discovered rather than fixed, so they are
     // collected here instead of listed in SHARED_CONFIG_PATHS.
-    let project_owned = project_owned_skill_paths()?;
-    let pathspecs: Vec<PathBuf> = owned_shared
+    candidates.extend(project_owned_skill_paths()?);
+    dirty_paths_among(&candidates, "shared vstack-managed config files")
+}
+
+/// The subset of `candidates` git reports as modified against HEAD or
+/// untracked. Both sides are project-relative; the query runs from the
+/// repository top level, so paths are translated in and back out.
+///
+/// `label` names the set in the two failure messages, so a guard that cannot
+/// read git says which question went unanswered rather than borrowing another
+/// caller's wording.
+fn dirty_paths_among(candidates: &BTreeSet<PathBuf>, label: &str) -> Result<Vec<PathBuf>> {
+    let git = git_project()?;
+    let pathspecs: Vec<PathBuf> = candidates
         .iter()
-        .map(PathBuf::as_path)
-        .chain(project_owned.iter().map(PathBuf::as_path))
         .map(|path| project_to_git_path(&git, path))
         .collect();
     if pathspecs.is_empty() {
@@ -2746,9 +2858,9 @@ fn dirty_shared_config_paths(stage_paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
         ])
         .args(&pathspecs)
         .output()
-        .context("running git status for shared vstack-managed config files")?;
+        .with_context(|| format!("running git status for {label}"))?;
     if !output.status.success() {
-        bail!("git status failed while inspecting shared vstack-managed config files");
+        bail!("git status failed while inspecting {label}");
     }
     let mut dirty = Vec::new();
     let mut pending_rename_source = false;
@@ -2779,8 +2891,7 @@ fn dirty_shared_config_paths(stage_paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
         let Some(path) = git_to_project_path(&git, &top_level_path) else {
             continue;
         };
-        if (owned_shared.contains(&path) || project_owned.contains(&path)) && !dirty.contains(&path)
-        {
+        if candidates.contains(&path) && !dirty.contains(&path) {
             dirty.push(path);
         }
     }

@@ -540,6 +540,38 @@ impl ProjectConfig {
             .collect()
     }
 
+    /// What [`Self::save_extracted`] would lift out of a generated agent file
+    /// and record in `vstack.toml`: the sections the file carries beyond the
+    /// shared block that this config does not already have an entry for.
+    ///
+    /// Split out so a caller can ask the question without performing the
+    /// write. `propagate --stage` has to: extraction is the migration path for
+    /// an edit the consumer made on purpose, but it would also lift an
+    /// uncommitted one into the config and regenerate the agent from it, after
+    /// which nothing downstream can tell the edit from vstack's own output.
+    pub fn pending_extraction(
+        &self,
+        agent_name: &str,
+        extracted: &crate::agent::AgentExtras,
+    ) -> PendingExtraction {
+        // A generated file renders the merged shared+specific value; only the
+        // specific remainder may be persisted as this agent's own entry.
+        let guidance = extracted
+            .guidance
+            .as_deref()
+            .and_then(|text| Self::strip_shared_block(self.shared_guidance(), text))
+            .filter(|_| self.guidance_for(agent_name).is_none());
+        let instructions = extracted
+            .instructions
+            .as_deref()
+            .and_then(|text| Self::strip_shared_block(self.shared_instructions(), text))
+            .filter(|_| self.instructions_for(agent_name).is_none());
+        PendingExtraction {
+            guidance,
+            instructions,
+        }
+    }
+
     /// Merge extracted agent sections into vstack.toml, preserving existing entries.
     /// Only writes new entries — never overwrites user-set values.
     pub fn save_extracted(
@@ -548,21 +580,13 @@ impl ProjectConfig {
         agent_name: &str,
         extracted: &crate::agent::AgentExtras,
     ) {
-        // A generated file renders the merged shared+specific value; only the
-        // specific remainder may be persisted as this agent's own entry.
-        let extracted_guidance = extracted
-            .guidance
-            .as_deref()
-            .and_then(|text| Self::strip_shared_block(self.shared_guidance(), text));
-        let extracted_instructions = extracted
-            .instructions
-            .as_deref()
-            .and_then(|text| Self::strip_shared_block(self.shared_instructions(), text));
+        let PendingExtraction {
+            guidance: extracted_guidance,
+            instructions: extracted_instructions,
+        } = self.pending_extraction(agent_name, extracted);
 
-        let needs_guidance =
-            extracted_guidance.is_some() && self.guidance_for(agent_name).is_none();
-        let needs_instructions =
-            extracted_instructions.is_some() && self.instructions_for(agent_name).is_none();
+        let needs_guidance = extracted_guidance.is_some();
+        let needs_instructions = extracted_instructions.is_some();
         if !needs_guidance && !needs_instructions {
             return;
         }
@@ -608,6 +632,33 @@ impl ProjectConfig {
         if !same_ignoring_trailing_newline(&out, &existing) {
             let _ = std::fs::write(&path, out);
         }
+    }
+}
+
+/// The sections one `save_extracted` call would newly record for an agent,
+/// keyed by the `vstack.toml` table each is written to.
+#[derive(Debug, Default)]
+pub struct PendingExtraction {
+    pub guidance: Option<String>,
+    pub instructions: Option<String>,
+}
+
+impl PendingExtraction {
+    pub fn is_empty(&self) -> bool {
+        self.guidance.is_none() && self.instructions.is_none()
+    }
+
+    /// The `vstack.toml` tables the pending sections would be written to, named
+    /// so a refusal can tell the consumer where the edit was about to land.
+    pub fn section_headers(&self) -> Vec<&'static str> {
+        let mut headers = Vec::new();
+        if self.guidance.is_some() {
+            headers.push("[agent-launch-instructions]");
+        }
+        if self.instructions.is_some() {
+            headers.push("[agent-additional-instructions]");
+        }
+        headers
     }
 }
 
