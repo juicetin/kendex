@@ -546,6 +546,100 @@ fn staging_skips_ignored_managed_paths_and_stages_remaining_paths() {
 }
 
 #[test]
+fn staging_records_tracked_pi_node_modules_deletions_without_untracked_dependencies() {
+    let project = tmpdir("stage-pi-node-modules-delete");
+    std::fs::create_dir_all(&project).unwrap();
+    init_git_project(&project);
+
+    crate::test_util::with_project_root(&project, || {
+        let mut lock = LockFile::default();
+        lock.add(lock_entry("dep-pkg", ItemKind::PiExtension, &["pi"]));
+        lock.save(&config::lock_file_path(false)).unwrap();
+        write_file(
+            &project.join(".pi/packages/dep-pkg/package.json"),
+            r#"{"name":"dep-pkg","pi":{"extensions":[]}}"#,
+        );
+        write_file(
+            &project.join(".pi/packages/dep-pkg/node_modules/old/index.js"),
+            "tracked dependency\n",
+        );
+        git(&project, &["add", "-A"]);
+        git(&project, &["commit", "-m", "baseline"]);
+
+        std::fs::remove_file(project.join(".pi/packages/dep-pkg/node_modules/old/index.js"))
+            .unwrap();
+        write_file(
+            &project.join(".pi/packages/dep-pkg/node_modules/new/index.js"),
+            "untracked dependency\n",
+        );
+
+        stage_project_paths(&[]).unwrap();
+        let staged = git_output(&project, &["diff", "--cached", "--name-status"]);
+        assert!(
+            staged.contains("D\t.pi/packages/dep-pkg/node_modules/old/index.js"),
+            "{staged}"
+        );
+        assert!(
+            !staged.contains(".pi/packages/dep-pkg/node_modules/new/index.js"),
+            "{staged}"
+        );
+    });
+}
+
+#[test]
+fn staging_project_owned_skills_keeps_unmanaged_descendants_unstaged() {
+    let project = tmpdir("stage-project-owned-skill");
+    std::fs::create_dir_all(&project).unwrap();
+    init_git_project(&project);
+
+    crate::test_util::with_project_root(&project, || {
+        LockFile::default()
+            .save(&config::lock_file_path(false))
+            .unwrap();
+        write_file(
+            &project.join("vstack.toml"),
+            "project-skills-dir = \"project-skills\"\n",
+        );
+        write_file(
+            &project.join("project-skills/local/SKILL.md"),
+            "---\nname: local\ndescription: Local skill\n---\n\n# Local\n",
+        );
+        write_file(
+            &project.join("project-skills/local/notes.md"),
+            "consumer notes\n",
+        );
+        write_file(
+            &project.join(".agents/skills/default-local/SKILL.md"),
+            "---\nname: default-local\ndescription: Local skill\n---\n\n# Local\n",
+        );
+        write_file(
+            &project.join(".agents/skills/default-local/notes.md"),
+            "consumer notes\n",
+        );
+
+        stage_project_paths(&[]).unwrap();
+
+        let staged = git_output(&project, &["diff", "--cached", "--name-only"]);
+        assert!(
+            staged.contains("project-skills/local/SKILL.md\n"),
+            "{staged}"
+        );
+        assert!(
+            !staged.contains("project-skills/local/notes.md"),
+            "{staged}"
+        );
+        assert!(
+            staged.contains(".agents/skills/default-local/SKILL.md\n"),
+            "{staged}"
+        );
+        assert!(
+            !staged.contains(".agents/skills/default-local/notes.md"),
+            "{staged}"
+        );
+    });
+}
+
+#[test]
 fn staging_is_scoped_to_nested_project_paths_from_git_top_level() {
     let repo = tmpdir("stage-nested-repo");
     let project = repo.join("apps").join("consumer");

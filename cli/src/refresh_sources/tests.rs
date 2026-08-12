@@ -274,6 +274,50 @@ fn resolve_source_path_uses_validated_legacy_remote_cache_when_canonical_is_abse
     });
 }
 
+#[test]
+fn resolve_source_path_uses_validated_git_at_legacy_remote_cache() {
+    let root = TempDir::new("legacy-git-at-cache-resolution");
+    let home = root.path().join("home");
+    let config_home = root.path().join("config");
+    let source = "git@github.com:owner/repo";
+    let legacy_cache = home
+        .join(".vstack")
+        .join("cache")
+        .join("git@github.com:owner_repo");
+    init_git_repo(&legacy_cache);
+    git(&legacy_cache, &["remote", "add", "origin", source]);
+
+    crate::test_util::with_home_and_config(&home, &config_home, || {
+        assert!(
+            remote_cache_dir(source).is_some_and(|canonical| !canonical.exists()),
+            "negative control: canonical hashed cache is absent"
+        );
+        assert_eq!(resolve_source_path(source), Some(legacy_cache));
+    });
+}
+
+#[test]
+fn resolve_source_path_uses_validated_non_github_legacy_remote_cache() {
+    let root = TempDir::new("legacy-non-github-cache-resolution");
+    let home = root.path().join("home");
+    let config_home = root.path().join("config");
+    let source = "ssh://git@example.com/owner/repo.git";
+    let legacy_cache = home
+        .join(".vstack")
+        .join("cache")
+        .join("ssh:__git@example.com_owner_repo.git");
+    init_git_repo(&legacy_cache);
+    git(&legacy_cache, &["remote", "add", "origin", source]);
+
+    crate::test_util::with_home_and_config(&home, &config_home, || {
+        assert!(
+            remote_cache_dir(source).is_some_and(|canonical| !canonical.exists()),
+            "negative control: canonical hashed cache is absent"
+        );
+        assert_eq!(resolve_source_path(source), Some(legacy_cache));
+    });
+}
+
 /// An entry whose own source still exists must never be silently rebound to
 /// the sole other loaded source; that reinstalled it from the wrong repo.
 /// The fallback stays available for a source that has genuinely gone away.

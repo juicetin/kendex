@@ -420,19 +420,17 @@ pub(crate) fn clone_or_update_remote_source_best_effort(source: &str) -> Result<
         return Ok(Some(cache_dir));
     }
 
-    if let Some(legacy_dir) = legacy_remote_cache_dir(source, &cache_dir)
-        && legacy_dir.join(".git").exists()
-    {
+    for legacy_dir in legacy_remote_cache_dirs(source, &cache_dir) {
+        if !legacy_dir.join(".git").exists() {
+            continue;
+        }
         match validate_cached_repo_origin(&display, &git_url, &legacy_dir) {
             Ok(()) => {
                 update_cached_repo_best_effort(source, &legacy_dir);
                 return Ok(Some(legacy_dir));
             }
             Err(err) => {
-                eprintln!(
-                    "  Warning: ignoring legacy vstack source cache {}: {err}",
-                    legacy_dir.display()
-                );
+                eprintln!("  Warning: ignoring legacy vstack source cache for {display}: {err}");
             }
         }
     }
@@ -456,11 +454,23 @@ pub(crate) fn refresh_remote_cache_update_only_best_effort(source: &str) {
         }
         return;
     }
-    if let Some(legacy_dir) = legacy_remote_cache_dir(source, &cache_dir)
-        && legacy_dir.join(".git").exists()
-        && let Err(err) = update_existing_remote_cache(source, &legacy_dir)
-    {
-        eprintln!("  Warning: {err}; using cached version");
+    let Some(git_url) = remote_git_url(source) else {
+        return;
+    };
+    let display = remote_source_display(source);
+    for legacy_dir in legacy_remote_cache_dirs(source, &cache_dir) {
+        if !legacy_dir.join(".git").exists() {
+            continue;
+        }
+        match validate_cached_repo_origin(&display, &git_url, &legacy_dir) {
+            Ok(()) => {
+                update_cached_repo_best_effort(source, &legacy_dir);
+                return;
+            }
+            Err(err) => {
+                eprintln!("  Warning: ignoring legacy vstack source cache for {display}: {err}");
+            }
+        }
     }
 }
 
@@ -481,19 +491,17 @@ fn clone_or_update_remote_source_at(
         return Ok(cache_dir.to_path_buf());
     }
 
-    if let Some(legacy_dir) = legacy_remote_cache_dir(source, cache_dir)
-        && legacy_dir.join(".git").exists()
-    {
+    for legacy_dir in legacy_remote_cache_dirs(source, cache_dir) {
+        if !legacy_dir.join(".git").exists() {
+            continue;
+        }
         match validate_cached_repo_origin(display, git_url, &legacy_dir) {
             Ok(()) => {
                 update_cached_repo_strict(display, &legacy_dir)?;
                 return Ok(legacy_dir);
             }
             Err(err) => {
-                eprintln!(
-                    "  Warning: ignoring legacy vstack source cache {}: {err}",
-                    legacy_dir.display()
-                );
+                eprintln!("  Warning: ignoring legacy vstack source cache for {display}: {err}");
             }
         }
     }
@@ -558,14 +566,14 @@ fn existing_remote_cache_dir(source: &str) -> Option<PathBuf> {
         }
         return None;
     }
-    let legacy_dir = legacy_remote_cache_dir(source, &cache_dir)?;
-    if legacy_dir.join(".git").exists()
-        && validate_cached_repo_origin(&display, &git_url, &legacy_dir).is_ok()
-    {
-        Some(legacy_dir)
-    } else {
-        None
+    for legacy_dir in legacy_remote_cache_dirs(source, &cache_dir) {
+        if legacy_dir.join(".git").exists()
+            && validate_cached_repo_origin(&display, &git_url, &legacy_dir).is_ok()
+        {
+            return Some(legacy_dir);
+        }
     }
+    None
 }
 
 pub(crate) fn remote_cache_key(source: &str) -> String {
@@ -683,13 +691,28 @@ fn update_cached_repo_best_effort(source: &str, repo_dir: &Path) {
     }
 }
 
-fn legacy_remote_cache_dir(source: &str, cache_dir: &Path) -> Option<PathBuf> {
-    let slug = config::parse_github_slug(source)?;
-    let legacy_key = sanitize_cache_component(&slug.replace('/', "_"));
-    if legacy_key == remote_cache_key(source) {
-        return None;
+fn legacy_remote_cache_dirs(source: &str, cache_dir: &Path) -> Vec<PathBuf> {
+    let Some(parent) = cache_dir.parent() else {
+        return Vec::new();
+    };
+    let mut paths = Vec::new();
+    let mut push_key = |key: String| {
+        if key.is_empty() {
+            return;
+        }
+        let path = parent.join(key);
+        if path != cache_dir && !paths.contains(&path) {
+            paths.push(path);
+        }
+    };
+
+    if source.contains('/') && !source.starts_with('.') && !source.starts_with('/') {
+        push_key(source.replace('/', "_"));
     }
-    Some(cache_dir.parent()?.join(legacy_key))
+    if let Some(slug) = config::parse_github_slug(source) {
+        push_key(sanitize_cache_component(&slug.replace('/', "_")));
+    }
+    paths
 }
 
 fn validate_cached_repo_origin(display: &str, expected_url: &str, repo_dir: &Path) -> Result<()> {

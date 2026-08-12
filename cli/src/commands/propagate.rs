@@ -643,7 +643,7 @@ fn push_project_skill_dirs_from(
             continue;
         }
         if path.join("SKILL.md").is_file() {
-            push_abs_if_exists(paths, project_root, path, include_missing);
+            push_abs_if_exists(paths, project_root, path.join("SKILL.md"), include_missing);
         }
     }
     Ok(())
@@ -721,7 +721,6 @@ fn git_literal_command() -> Command {
 }
 
 fn managed_paths_from_git_status(seed_paths: &BTreeSet<PathBuf>) -> Result<Vec<PathBuf>> {
-    let project_root = config::project_root();
     let git = git_project()?;
     let committed_paths = committed_project_stage_paths(&git)?;
     let owned_shared_paths = owned_shared_status_paths(seed_paths, &committed_paths);
@@ -749,7 +748,6 @@ fn managed_paths_from_git_status(seed_paths: &BTreeSet<PathBuf>) -> Result<Vec<P
         bail!("git status failed while inspecting vstack-managed paths");
     }
 
-    let project_skill_prefixes = project_skill_status_prefixes(&project_root)?;
     let mut paths = BTreeSet::new();
     let mut skip_next = false;
     for record in output.stdout.split(|byte| *byte == 0) {
@@ -774,7 +772,6 @@ fn managed_paths_from_git_status(seed_paths: &BTreeSet<PathBuf>) -> Result<Vec<P
         if is_safe_relative_path(&path)
             && is_managed_status_path(
                 &path,
-                &project_skill_prefixes,
                 &pi_package_prefixes,
                 &owned_shared_paths,
                 &owned_deleted_native_hooks,
@@ -888,7 +885,6 @@ fn managed_status_pathspecs(
     seed_paths: &BTreeSet<PathBuf>,
     owned_shared_paths: &BTreeSet<PathBuf>,
 ) -> Result<Vec<PathBuf>> {
-    let project_root = config::project_root();
     let mut paths = seed_paths.clone();
     for prefix in pi_package_status_prefixes(seed_paths) {
         paths.insert(prefix);
@@ -904,9 +900,6 @@ fn managed_status_pathspecs(
         ".opencode/instructions",
     ] {
         paths.insert(PathBuf::from(path));
-    }
-    for prefix in project_skill_status_prefixes(&project_root)? {
-        paths.insert(prefix);
     }
     Ok(paths
         .into_iter()
@@ -927,21 +920,6 @@ fn git_to_project_path(git: &GitProject, path: &Path) -> Option<PathBuf> {
         return Some(path.to_path_buf());
     }
     path.strip_prefix(&git.prefix).ok().map(Path::to_path_buf)
-}
-
-fn project_skill_status_prefixes(project_root: &Path) -> Result<Vec<PathBuf>> {
-    let mut prefixes = vec![PathBuf::from(".agents").join("skills")];
-    let project_config = crate::project_config::ProjectConfig::load(project_root);
-    if let Some(configured) = project_config.project_skills_dir.as_deref() {
-        let relative = configured.trim().trim_end_matches('/');
-        if !relative.is_empty() {
-            prefixes.push(
-                safe_project_relative_path(relative)
-                    .with_context(|| format!("invalid project-skills-dir `{relative}`"))?,
-            );
-        }
-    }
-    Ok(prefixes)
 }
 
 fn path_from_git_status_bytes(bytes: &[u8]) -> PathBuf {
@@ -967,7 +945,6 @@ fn is_safe_relative_path(path: &Path) -> bool {
 
 fn is_managed_status_path(
     path: &Path,
-    project_skill_prefixes: &[PathBuf],
     pi_package_prefixes: &BTreeSet<PathBuf>,
     owned_shared_paths: &BTreeSet<PathBuf>,
     owned_deleted_native_hooks: &BTreeSet<PathBuf>,
@@ -986,15 +963,13 @@ fn is_managed_status_path(
     let Some(path_str) = path.to_str() else {
         return false;
     };
-    project_skill_prefixes
+    let is_pi_package_path = pi_package_prefixes
         .iter()
-        .any(|prefix| path == *prefix || path.starts_with(prefix))
-        || (pi_package_prefixes
-            .iter()
-            .any(|prefix| path.starts_with(prefix))
-            && !path
-                .components()
-                .any(|component| component.as_os_str() == OsStr::new("node_modules")))
+        .any(|prefix| path.starts_with(prefix));
+    let is_node_modules_path = path
+        .components()
+        .any(|component| component.as_os_str() == OsStr::new("node_modules"));
+    (is_pi_package_path && (!is_node_modules_path || status.contains(&b'D')))
         || path_str.starts_with(".cursor/rules/safety-")
         || path_str.starts_with(".opencode/instructions/vstack-hook-")
         || (status.contains(&b'D')
