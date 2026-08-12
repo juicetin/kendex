@@ -332,7 +332,7 @@ fn resolve_single_source_with(
 
     // Remote shorthand/URL: update once during top-level source resolution,
     // then use the cached clone without side effects from pure attribution/hash paths.
-    let cached = remote_cache_dir(source)?;
+    let cached = existing_remote_cache_dir(source)?;
     if cached.join(".git").exists() {
         if update_remote {
             update_cached_repo_best_effort(source, &cached);
@@ -352,6 +352,8 @@ fn is_bare_local_source(source: &str, looks_like_remote: bool) -> bool {
         && !source.starts_with('~')
         && !Path::new(source).is_absolute()
         && !looks_like_remote
+        && !source.contains('/')
+        && !source.contains('\\')
 }
 
 fn resolve_recorded_local_source(source: &str) -> Option<PathBuf> {
@@ -410,6 +412,24 @@ pub(crate) fn refresh_remote_cache_best_effort(source: &str) {
     }
 }
 
+pub(crate) fn refresh_remote_cache_update_only_best_effort(source: &str) {
+    let Some(cache_dir) = remote_cache_dir(source) else {
+        return;
+    };
+    if cache_dir.join(".git").exists() {
+        if let Err(err) = update_existing_remote_cache(source, &cache_dir) {
+            eprintln!("  Warning: {err}; using cached version");
+        }
+        return;
+    }
+    if let Some(legacy_dir) = legacy_remote_cache_dir(source, &cache_dir)
+        && legacy_dir.join(".git").exists()
+        && let Err(err) = update_existing_remote_cache(source, &legacy_dir)
+    {
+        eprintln!("  Warning: {err}; using cached version");
+    }
+}
+
 fn clone_or_update_remote_source_at(
     source: &str,
     display: &str,
@@ -427,9 +447,21 @@ fn clone_or_update_remote_source_at(
         return Ok(cache_dir.to_path_buf());
     }
 
-    if migrate_legacy_remote_cache(source, display, git_url, cache_dir)? {
-        update_cached_repo_strict(display, cache_dir)?;
-        return Ok(cache_dir.to_path_buf());
+    if let Some(legacy_dir) = legacy_remote_cache_dir(source, cache_dir)
+        && legacy_dir.join(".git").exists()
+    {
+        match validate_cached_repo_origin(display, git_url, &legacy_dir) {
+            Ok(()) => {
+                update_cached_repo_strict(display, &legacy_dir)?;
+                return Ok(legacy_dir);
+            }
+            Err(err) => {
+                eprintln!(
+                    "  Warning: ignoring legacy vstack source cache {}: {err}",
+                    legacy_dir.display()
+                );
+            }
+        }
     }
 
     eprintln!("Cloning {display} into vstack source cache...");
@@ -480,6 +512,26 @@ pub(crate) fn remote_cache_dir(source: &str) -> Option<PathBuf> {
             .join("cache")
             .join(remote_cache_key(source)),
     )
+}
+
+fn existing_remote_cache_dir(source: &str) -> Option<PathBuf> {
+    let cache_dir = remote_cache_dir(source)?;
+    let git_url = remote_git_url(source)?;
+    let display = remote_source_display(source);
+    if cache_dir.join(".git").exists() {
+        if validate_cached_repo_origin(&display, &git_url, &cache_dir).is_ok() {
+            return Some(cache_dir);
+        }
+        return None;
+    }
+    let legacy_dir = legacy_remote_cache_dir(source, &cache_dir)?;
+    if legacy_dir.join(".git").exists()
+        && validate_cached_repo_origin(&display, &git_url, &legacy_dir).is_ok()
+    {
+        Some(legacy_dir)
+    } else {
+        None
+    }
 }
 
 pub(crate) fn remote_cache_key(source: &str) -> String {
@@ -597,38 +649,6 @@ fn update_cached_repo_best_effort(source: &str, repo_dir: &Path) {
     }
 }
 
-fn migrate_legacy_remote_cache(
-    source: &str,
-    display: &str,
-    expected_url: &str,
-    cache_dir: &Path,
-) -> Result<bool> {
-    let Some(legacy_dir) = legacy_remote_cache_dir(source, cache_dir) else {
-        return Ok(false);
-    };
-    if same_path(&legacy_dir, cache_dir) || !legacy_dir.join(".git").exists() {
-        return Ok(false);
-    }
-    validate_cached_repo_origin(display, expected_url, &legacy_dir)?;
-    eprintln!(
-        "Migrating legacy vstack source cache {} to {}...",
-        legacy_dir.display(),
-        cache_dir.display()
-    );
-    if let Some(parent) = cache_dir.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating source cache {}", parent.display()))?;
-    }
-    std::fs::rename(&legacy_dir, cache_dir).with_context(|| {
-        format!(
-            "migrating legacy source cache {} to {}",
-            legacy_dir.display(),
-            cache_dir.display()
-        )
-    })?;
-    Ok(true)
-}
-
 fn legacy_remote_cache_dir(source: &str, cache_dir: &Path) -> Option<PathBuf> {
     let slug = config::parse_github_slug(source)?;
     let legacy_key = sanitize_cache_component(&slug.replace('/', "_"));
@@ -660,6 +680,13 @@ fn validate_cached_repo_origin(display: &str, expected_url: &str, repo_dir: &Pat
         );
     }
     Ok(())
+}
+
+fn update_existing_remote_cache(source: &str, repo_dir: &Path) -> Result<()> {
+    let git_url = remote_git_url(source).context("not a remote source")?;
+    let display = remote_source_display(source);
+    validate_cached_repo_origin(&display, &git_url, repo_dir)?;
+    update_cached_repo_strict(&display, repo_dir)
 }
 
 fn update_cached_repo_strict(display: &str, repo_dir: &Path) -> Result<()> {

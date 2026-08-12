@@ -314,14 +314,23 @@ fn stage_paths_are_scoped_to_lock_outputs_and_opencode_config() {
         assert!(paths.contains(&PathBuf::from(
             ".opencode/instructions/vstack-hook-protect.md"
         )));
-        assert!(paths.contains(&PathBuf::from(".pi/packages/@scope/pkg")));
+        assert!(paths.contains(&PathBuf::from(".pi/packages/@scope/pkg/package.json")));
+        assert!(paths.contains(&PathBuf::from(".pi/packages/@scope/pkg/instructions.md")));
+        assert!(paths.contains(&PathBuf::from(".pi/packages/@scope/pkg/bin/tool.js")));
         assert!(paths.contains(&PathBuf::from(".pi/bin/pi-tool")));
         assert!(paths.contains(&PathBuf::from(".pi/settings.json")));
         assert!(paths.contains(&PathBuf::from(".pi/.vstack-source.json")));
         assert!(paths.contains(&PathBuf::from(".pi/APPEND_SYSTEM.md")));
+        assert!(!paths.contains(&PathBuf::from(
+            ".pi/packages/@scope/pkg/node_modules/dep/index.js"
+        )));
         assert!(!paths.contains(&PathBuf::from(".opencode/secret.txt")));
         assert!(!paths.contains(&PathBuf::from(".opencode/agents/unrelated.md")));
 
+        write_file(
+            &project.join(".pi/packages/@scope/pkg/node_modules/dep/index.js"),
+            "generated dependency\n",
+        );
         stage_paths(&paths).unwrap();
         let staged = git_output(&project, &["diff", "--cached", "--name-only"]);
         assert!(staged.contains(".vstack-lock.json\n"));
@@ -330,6 +339,9 @@ fn stage_paths_are_scoped_to_lock_outputs_and_opencode_config() {
         assert!(staged.contains("opencode.json\n"));
         assert!(staged.contains(".opencode/instructions/vstack-hook-protect.md\n"));
         assert!(staged.contains(".pi/packages/@scope/pkg/package.json\n"));
+        assert!(staged.contains(".pi/packages/@scope/pkg/instructions.md\n"));
+        assert!(staged.contains(".pi/packages/@scope/pkg/bin/tool.js\n"));
+        assert!(!staged.contains(".pi/packages/@scope/pkg/node_modules/dep/index.js"));
         assert!(staged.contains(".pi/bin/pi-tool\n"));
         assert!(staged.contains(".pi/APPEND_SYSTEM.md\n"));
         assert!(!staged.contains(".opencode/secret.txt"));
@@ -378,9 +390,13 @@ fn retry_staging_records_deleted_claude_and_codex_hook_scripts() {
     init_git_project(&project);
 
     crate::test_util::with_project_root(&project, || {
-        LockFile::default()
-            .save(&config::lock_file_path(false))
-            .unwrap();
+        let mut lock = LockFile::default();
+        lock.add(lock_entry(
+            "guard",
+            ItemKind::Hook,
+            &["claude-code", "codex"],
+        ));
+        lock.save(&config::lock_file_path(false)).unwrap();
         write_file(
             &project.join(".claude/hooks/guard.sh"),
             "managed claude hook\n",
@@ -403,6 +419,37 @@ fn retry_staging_records_deleted_claude_and_codex_hook_scripts() {
 }
 
 #[test]
+fn retry_staging_does_not_stage_consumer_owned_deleted_native_hooks() {
+    let project = tmpdir("stage-consumer-owned-native-hooks");
+    std::fs::create_dir_all(&project).unwrap();
+    init_git_project(&project);
+
+    crate::test_util::with_project_root(&project, || {
+        LockFile::default()
+            .save(&config::lock_file_path(false))
+            .unwrap();
+        write_file(
+            &project.join(".claude/hooks/consumer.sh"),
+            "consumer claude hook\n",
+        );
+        write_file(
+            &project.join(".codex/hooks/consumer.sh"),
+            "consumer codex hook\n",
+        );
+        git(&project, &["add", "-A"]);
+        git(&project, &["commit", "-m", "baseline"]);
+
+        std::fs::remove_file(project.join(".claude/hooks/consumer.sh")).unwrap();
+        std::fs::remove_file(project.join(".codex/hooks/consumer.sh")).unwrap();
+
+        stage_project_paths(&[]).unwrap();
+        let staged = git_output(&project, &["diff", "--cached", "--name-status"]);
+        assert!(!staged.contains(".claude/hooks/consumer.sh"), "{staged}");
+        assert!(!staged.contains(".codex/hooks/consumer.sh"), "{staged}");
+    });
+}
+
+#[test]
 fn staging_skips_ignored_managed_paths_and_stages_remaining_paths() {
     let project = tmpdir("stage-ignored-project");
     std::fs::create_dir_all(&project).unwrap();
@@ -419,7 +466,7 @@ fn staging_skips_ignored_managed_paths_and_stages_remaining_paths() {
         );
 
         let paths = project_stage_paths(&lock, false).unwrap();
-        assert!(paths.contains(&PathBuf::from(".pi/packages/ignored-pkg")));
+        assert!(paths.contains(&PathBuf::from(".pi/packages/ignored-pkg/package.json")));
         stage_paths(&paths).unwrap();
 
         let staged = git_output(&project, &["diff", "--cached", "--name-only"]);
@@ -462,6 +509,27 @@ fn staging_is_scoped_to_nested_project_paths_from_git_top_level() {
     });
 }
 
+#[test]
+fn git_project_preserves_trailing_whitespace_in_repo_root() {
+    let root = tmpdir("git-root-space");
+    let project = root.join("repo ");
+    std::fs::create_dir_all(&project).unwrap();
+    init_git_project(&project);
+
+    crate::test_util::with_project_root(&project, || {
+        let git = git_project().unwrap();
+        assert_eq!(git.root, std::fs::canonicalize(&project).unwrap());
+        assert!(
+            git.root
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .ends_with(' '),
+            "negative control: repo root must end in whitespace"
+        );
+    });
+}
+
 #[cfg(unix)]
 #[test]
 fn staging_ignores_unrelated_non_utf8_paths() {
@@ -483,6 +551,42 @@ fn staging_ignores_unrelated_non_utf8_paths() {
         stage_project_paths(&[]).unwrap();
         let staged = git_output(&project, &["diff", "--cached", "--name-only"]);
         assert!(staged.contains(".opencode/instructions/vstack-hook-protect.md\n"));
+    });
+}
+
+#[test]
+fn no_drift_without_stage_fails_when_verify_fails() {
+    let project = tmpdir("no-stage-no-drift-verify-fails");
+    let source = tmpdir("no-stage-no-drift-pi-source");
+    std::fs::create_dir_all(&project).unwrap();
+    init_git_project(&project);
+    write_file(
+        &source.join("pi-extensions/demo-pkg/package.json"),
+        r#"{"name":"demo-pkg","pi":{"extensions":[]}}"#,
+    );
+
+    crate::test_util::with_project_root(&project, || {
+        let mut entry = pi_entry("demo-pkg", &source);
+        entry.source_hash = config::compute_source_hash(&entry);
+        let mut lock = LockFile::default();
+        lock.add(entry);
+        lock.save(&config::lock_file_path(false)).unwrap();
+        write_file(
+            &project.join(".pi/.vstack-source.json"),
+            &format!(
+                r#"{{"demo-pkg":{{"sourcePath":"{}"}}}}"#,
+                source.join("pi-extensions/demo-pkg").display()
+            ),
+        );
+        write_file(
+            &project.join(".pi/packages/demo-pkg/package.json"),
+            r#"{"name":"demo-pkg","pi":{"extensions":["corrupt"]}}"#,
+        );
+
+        let err = run(ScopeFilter::Project, false, false, false, true)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("verification failed"), "{err}");
     });
 }
 

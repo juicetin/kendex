@@ -148,6 +148,29 @@ fn resolve_source_records_records_remote_shorthand_repo_identity() {
 }
 
 #[test]
+fn resolve_source_records_preserves_git_ssh_repo_identity() {
+    let root = TempDir::new("remote-git-ssh-identity");
+    let source = make_vstack_source(root.path(), "source");
+    let recorded = "git+ssh://git@github.com/VanillaGreenCom/VStack.git";
+    let mut lock = config::LockFile::default();
+    lock.add(lock_entry("demo", recorded));
+
+    let records = resolve_source_records_with(&lock, |source_name| {
+        if source_name == recorded {
+            Some(source.clone())
+        } else {
+            None
+        }
+    });
+
+    assert_eq!(records.len(), 1);
+    assert_eq!(
+        records[0].source_repo.as_deref(),
+        Some("vanillagreencom/vstack")
+    );
+}
+
+#[test]
 fn resolve_source_records_does_not_infer_identity_from_local_layout() {
     let root = TempDir::new("local-layout-identity");
     let source = make_vstack_source(root.path(), "source");
@@ -208,6 +231,46 @@ fn recorded_remote_shorthand_does_not_bind_to_project_local_shadow_dir() {
     crate::test_util::with_project_root(&project, || {
         assert!(resolve_recorded_local_source("owner/repo").is_none());
         assert!(!recorded_source_exists("owner/repo"));
+    });
+}
+
+#[test]
+fn multi_segment_remote_like_source_does_not_bind_to_project_local_shadow_dir() {
+    let root = TempDir::new("remote-shadow-three-segment");
+    let project = root.path().join("project");
+    let shadow = project.join("owner").join("repo").join("extra");
+    std::fs::create_dir_all(&shadow).unwrap();
+
+    crate::test_util::with_project_root(&project, || {
+        assert!(resolve_recorded_local_source("owner/repo/extra").is_none());
+        assert!(!recorded_source_exists("owner/repo/extra"));
+        assert!(resolve_source_path("owner/repo/extra").is_none());
+    });
+}
+
+#[test]
+fn resolve_source_path_uses_validated_legacy_remote_cache_when_canonical_is_absent() {
+    let root = TempDir::new("legacy-cache-resolution");
+    let home = root.path().join("home");
+    let config_home = root.path().join("config");
+    let legacy_cache = home.join(".vstack").join("cache").join("owner_repo");
+    init_git_repo(&legacy_cache);
+    git(
+        &legacy_cache,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/owner/repo.git",
+        ],
+    );
+
+    crate::test_util::with_home_and_config(&home, &config_home, || {
+        assert!(
+            remote_cache_dir("owner/repo").is_some_and(|canonical| !canonical.exists()),
+            "negative control: canonical hashed cache is absent"
+        );
+        assert_eq!(resolve_source_path("owner/repo"), Some(legacy_cache));
     });
 }
 
@@ -464,7 +527,7 @@ fn clone_or_update_remote_source_at_clones_updates_and_fails_closed() {
 }
 
 #[test]
-fn legacy_remote_cache_migrates_after_origin_validation() {
+fn legacy_remote_cache_is_used_without_moving_after_origin_validation() {
     let root = TempDir::new("remote-cache-migration");
     let remote = root.path().join("remote.git");
     let source = root.path().join("source");
@@ -496,13 +559,107 @@ fn legacy_remote_cache_migrates_after_origin_validation() {
     );
 
     let remote_url = remote.to_string_lossy().to_string();
-    let migrated =
+    let resolved =
         clone_or_update_remote_source_at("owner/repo", "owner/repo", &remote_url, &canonical_cache)
             .unwrap();
 
-    assert_eq!(migrated, canonical_cache);
+    assert_eq!(resolved, legacy_cache);
+    assert!(legacy_cache.join(".git").is_dir());
+    assert!(!canonical_cache.exists());
+}
+
+#[test]
+fn mismatched_legacy_remote_cache_does_not_block_canonical_clone() {
+    let root = TempDir::new("remote-cache-mismatch");
+    let remote = root.path().join("remote.git");
+    let other_remote = root.path().join("other.git");
+    let source = root.path().join("source");
+    let other_source = root.path().join("other-source");
+    let cache_root = root.path().join("cache");
+    let legacy_cache = cache_root.join("owner_repo");
+    let canonical_cache = cache_root.join(remote_cache_key("owner/repo"));
+    std::fs::create_dir_all(root.path()).unwrap();
+    git(root.path(), &["init", "--bare", remote.to_str().unwrap()]);
+    git(
+        root.path(),
+        &["init", "--bare", other_remote.to_str().unwrap()],
+    );
+
+    init_git_repo(&source);
+    write_skill(&source, "v1\n");
+    git(&source, &["add", "."]);
+    git(&source, &["commit", "-m", "initial"]);
+    git(
+        &source,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    git(&source, &["push", "origin", "main"]);
+    git(&remote, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+
+    init_git_repo(&other_source);
+    write_skill(&other_source, "wrong\n");
+    git(&other_source, &["add", "."]);
+    git(&other_source, &["commit", "-m", "initial"]);
+    git(
+        &other_source,
+        &["remote", "add", "origin", other_remote.to_str().unwrap()],
+    );
+    git(&other_source, &["push", "origin", "main"]);
+    git(&other_remote, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+    git(
+        root.path(),
+        &[
+            "clone",
+            "--depth",
+            "1",
+            other_remote.to_str().unwrap(),
+            legacy_cache.to_str().unwrap(),
+        ],
+    );
+
+    let remote_url = remote.to_string_lossy().to_string();
+    let resolved =
+        clone_or_update_remote_source_at("owner/repo", "owner/repo", &remote_url, &canonical_cache)
+            .unwrap();
+
+    assert_eq!(resolved, canonical_cache);
+    assert!(legacy_cache.join(".git").is_dir());
     assert!(canonical_cache.join(".git").is_dir());
-    assert!(!legacy_cache.exists());
+    assert!(
+        std::fs::read_to_string(canonical_cache.join("skills/demo/SKILL.md"))
+            .unwrap()
+            .contains("v1")
+    );
+}
+
+#[test]
+fn update_only_remote_refresh_skips_missing_cache_clone() {
+    let root = TempDir::new("remote-cache-update-only");
+    let remote = root.path().join("remote.git");
+    let source = root.path().join("source");
+    let home = root.path().join("home");
+    let config_home = root.path().join("config");
+    std::fs::create_dir_all(root.path()).unwrap();
+    git(root.path(), &["init", "--bare", remote.to_str().unwrap()]);
+
+    init_git_repo(&source);
+    write_skill(&source, "v1\n");
+    git(&source, &["add", "."]);
+    git(&source, &["commit", "-m", "initial"]);
+    git(
+        &source,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    git(&source, &["push", "origin", "main"]);
+    git(&remote, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+
+    crate::test_util::with_home_and_config(&home, &config_home, || {
+        refresh_remote_cache_update_only_best_effort("owner/repo");
+        assert!(
+            remote_cache_dir("owner/repo").is_some_and(|path| !path.exists()),
+            "update-only refresh must not clone a missing cache"
+        );
+    });
 }
 
 #[test]

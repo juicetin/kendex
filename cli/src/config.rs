@@ -823,7 +823,7 @@ pub fn refresh_remote_caches(lock: &LockFile) {
         if !seen.insert(src.clone()) {
             continue;
         }
-        crate::refresh_sources::refresh_remote_cache_best_effort(src);
+        crate::refresh_sources::refresh_remote_cache_update_only_best_effort(src);
     }
 }
 
@@ -880,6 +880,8 @@ pub fn parse_github_slug(url: &str) -> Option<String> {
             return None;
         }
         path
+    } else if let Some(after) = url.strip_prefix("git+ssh://git@github.com/") {
+        after
     } else {
         url.strip_prefix("ssh://git@github.com/")?
     };
@@ -2134,12 +2136,47 @@ mod source_registry_tests {
             parse_github_slug("https://user:token@github.com/owner/repo").as_deref(),
             Some("owner/repo")
         );
+        assert_eq!(
+            parse_github_slug("git+ssh://git@github.com/Owner/Repo.git").as_deref(),
+            Some("owner/repo")
+        );
         assert_eq!(parse_github_slug("a/b/c"), None);
         assert_eq!(parse_github_slug("./source"), None);
         assert_eq!(parse_github_slug("../source"), None);
         assert_eq!(parse_github_slug("C:/source"), None);
         assert_eq!(parse_github_slug(".\\source"), None);
         assert_eq!(parse_github_slug("/home/me/dev/vstack"), None);
+    }
+
+    #[test]
+    fn refresh_remote_caches_skips_missing_remote_cache_clone() {
+        let dir = sandbox("refresh_remote_caches_update_only");
+        let home = dir.join("home");
+        let config_home = dir.join("config");
+        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(&config_home).unwrap();
+        let mut lock = LockFile::default();
+        lock.add(LockEntry {
+            name: "demo".to_string(),
+            kind: ItemKind::Skill,
+            source: "owner/repo".to_string(),
+            source_repo: Some("owner/repo".to_string()),
+            harnesses: vec!["claude-code".to_string()],
+            method: InstallMethod::Copy,
+            installed_at: "2026-08-11T00:00:00Z".to_string(),
+            source_hash: "stored".to_string(),
+        });
+
+        crate::test_util::with_home_and_config(&home, &config_home, || {
+            let cache = crate::refresh_sources::remote_cache_dir("owner/repo").unwrap();
+            assert!(!cache.exists(), "negative control: cache starts missing");
+            refresh_remote_caches(&lock);
+            assert!(
+                !cache.exists(),
+                "TUI startup refresh must not clone missing remote caches"
+            );
+        });
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

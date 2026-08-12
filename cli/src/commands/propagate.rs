@@ -3,7 +3,7 @@ use crate::harness::Harness;
 use crate::scope::ScopeFilter;
 use anyhow::{Context, Result, bail};
 use std::collections::BTreeSet;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
@@ -105,9 +105,17 @@ pub fn run(
     }
 
     if !drift_any {
+        if check {
+            eprintln!("No propagation needed.");
+            return Ok(());
+        }
         if stage {
             eprintln!("No source drift; verifying and staging current managed changes...");
-            crate::commands::verify::run(scope, &[])?;
+        } else {
+            eprintln!("No source drift; verifying current install...");
+        }
+        crate::commands::verify::run(scope, &[])?;
+        if stage {
             stage_project_paths(&pre_refresh_stage_paths)?;
         } else {
             eprintln!("No propagation needed.");
@@ -403,12 +411,13 @@ fn project_stage_paths(lock: &LockFile, include_missing: bool) -> Result<Vec<Pat
             ItemKind::PiExtension => {
                 has_pi_package = true;
                 let package_dir = crate::pi_extension::checked_pi_package_path(&entry.name, false)?;
-                push_abs_if_exists(
+                push_pi_package_stage_paths(
                     &mut paths,
                     &project_root,
-                    package_dir.clone(),
+                    entry,
+                    &package_dir,
                     include_missing,
-                );
+                )?;
                 if let Ok(ext) = crate::pi_extension::PiExtension::from_dir(&package_dir) {
                     for bin_name in ext.bin.keys() {
                         crate::path_safety::validate_item_name(bin_name)
@@ -488,6 +497,71 @@ fn project_stage_paths(lock: &LockFile, include_missing: bool) -> Result<Vec<Pat
     }
 
     Ok(paths.into_iter().collect())
+}
+
+fn push_pi_package_stage_paths(
+    paths: &mut BTreeSet<PathBuf>,
+    project_root: &Path,
+    entry: &config::LockEntry,
+    package_dir: &Path,
+    include_missing: bool,
+) -> Result<()> {
+    let source_package_dir = config::resolve_source_path(&entry.source).and_then(|source_root| {
+        crate::catalog::find_item_path(&source_root, entry.kind, &entry.name)
+    });
+    let enumerate_root = source_package_dir.as_deref().unwrap_or(package_dir);
+    push_pi_package_files_from(
+        paths,
+        project_root,
+        package_dir,
+        enumerate_root,
+        include_missing,
+    )
+}
+
+fn push_pi_package_files_from(
+    paths: &mut BTreeSet<PathBuf>,
+    project_root: &Path,
+    package_dir: &Path,
+    enumerate_root: &Path,
+    include_missing: bool,
+) -> Result<()> {
+    if !enumerate_root.is_dir() {
+        return Ok(());
+    }
+    let mut stack = vec![enumerate_root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in
+            std::fs::read_dir(&dir).with_context(|| format!("reading {}", dir.display()))?
+        {
+            let entry = entry.with_context(|| format!("reading {}", dir.display()))?;
+            let path = entry.path();
+            let file_name = entry.file_name();
+            if file_name == OsStr::new("node_modules") {
+                continue;
+            }
+            let file_type = entry
+                .file_type()
+                .with_context(|| format!("reading file type for {}", path.display()))?;
+            if file_type.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if !file_type.is_file() && !file_type.is_symlink() {
+                continue;
+            }
+            let Ok(relative_to_package) = path.strip_prefix(enumerate_root) else {
+                continue;
+            };
+            push_abs_if_exists(
+                paths,
+                project_root,
+                package_dir.join(relative_to_package),
+                include_missing,
+            );
+        }
+    }
+    Ok(())
 }
 
 fn push_if_stageable(
@@ -597,23 +671,23 @@ struct GitProject {
 
 fn git_project() -> Result<GitProject> {
     let project_root = config::project_root();
-    let root = git_stdout(
+    let root = git_stdout_os(
         &project_root,
         &["rev-parse", "--show-toplevel"],
         "resolving git top level for vstack-managed paths",
     )?;
-    let prefix = git_stdout(
+    let prefix = git_stdout_os(
         &project_root,
         &["rev-parse", "--show-prefix"],
         "resolving git project prefix for vstack-managed paths",
     )?;
     Ok(GitProject {
-        root: PathBuf::from(root.trim_end()),
-        prefix: PathBuf::from(prefix.trim_end_matches(['\n', '\r'])),
+        root: PathBuf::from(root),
+        prefix: PathBuf::from(prefix),
     })
 }
 
-fn git_stdout(project_root: &Path, args: &[&str], context: &str) -> Result<String> {
+fn git_stdout_os(project_root: &Path, args: &[&str], context: &str) -> Result<OsString> {
     let output = Command::new("git")
         .arg("-C")
         .arg(project_root)
@@ -623,7 +697,21 @@ fn git_stdout(project_root: &Path, args: &[&str], context: &str) -> Result<Strin
     if !output.status.success() {
         bail!("{context}");
     }
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    Ok(os_string_without_line_ending(output.stdout))
+}
+
+fn os_string_without_line_ending(mut bytes: Vec<u8>) -> OsString {
+    while matches!(bytes.last(), Some(b'\n' | b'\r')) {
+        bytes.pop();
+    }
+    #[cfg(unix)]
+    {
+        OsString::from_vec(bytes)
+    }
+    #[cfg(not(unix))]
+    {
+        OsString::from(String::from_utf8_lossy(&bytes).into_owned())
+    }
 }
 
 fn git_literal_command() -> Command {
@@ -636,6 +724,8 @@ fn managed_paths_from_git_status(seed_paths: &BTreeSet<PathBuf>) -> Result<Vec<P
     let project_root = config::project_root();
     let git = git_project()?;
     let status_pathspecs = managed_status_pathspecs(seed_paths)?;
+    let owned_deleted_native_hooks = owned_deleted_native_hook_paths(seed_paths, &git)?;
+    let pi_package_prefixes = pi_package_status_prefixes(seed_paths);
     let top_level_pathspecs: Vec<PathBuf> = status_pathspecs
         .iter()
         .map(|path| project_to_git_path(&git, path))
@@ -680,7 +770,13 @@ fn managed_paths_from_git_status(seed_paths: &BTreeSet<PathBuf>) -> Result<Vec<P
             continue;
         };
         if is_safe_relative_path(&path)
-            && is_managed_status_path(&path, &project_skill_prefixes, status)
+            && is_managed_status_path(
+                &path,
+                &project_skill_prefixes,
+                &pi_package_prefixes,
+                &owned_deleted_native_hooks,
+                status,
+            )
         {
             paths.insert(path);
         }
@@ -688,9 +784,82 @@ fn managed_paths_from_git_status(seed_paths: &BTreeSet<PathBuf>) -> Result<Vec<P
     Ok(paths.into_iter().collect())
 }
 
+fn owned_deleted_native_hook_paths(
+    seed_paths: &BTreeSet<PathBuf>,
+    git: &GitProject,
+) -> Result<BTreeSet<PathBuf>> {
+    let mut owned = native_hook_paths_from(seed_paths);
+    owned.extend(native_hook_paths_from(&committed_project_stage_paths(git)?));
+    Ok(owned)
+}
+
+fn committed_project_stage_paths(git: &GitProject) -> Result<BTreeSet<PathBuf>> {
+    let project_lock_path = project_to_git_path(git, Path::new(".vstack-lock.json"));
+    let Some(project_lock_path) = project_lock_path.to_str() else {
+        return Ok(BTreeSet::new());
+    };
+    let spec = format!("HEAD:{project_lock_path}");
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(&git.root)
+        .args(["show", &spec])
+        .output()
+        .context("reading committed vstack lock for managed hook ownership")?;
+    if !output.status.success() {
+        return Ok(BTreeSet::new());
+    }
+    let Ok(lock) = serde_json::from_slice::<LockFile>(&output.stdout) else {
+        return Ok(BTreeSet::new());
+    };
+    Ok(project_stage_paths(&lock, true)?.into_iter().collect())
+}
+
+fn native_hook_paths_from(paths: &BTreeSet<PathBuf>) -> BTreeSet<PathBuf> {
+    paths
+        .iter()
+        .filter(|path| is_native_hook_script_path(path))
+        .cloned()
+        .collect()
+}
+
+fn is_native_hook_script_path(path: &Path) -> bool {
+    let Some(path_str) = path.to_str() else {
+        return false;
+    };
+    path.extension().is_some_and(|extension| extension == "sh")
+        && (path_str.starts_with(".claude/hooks/") || path_str.starts_with(".codex/hooks/"))
+}
+
+fn pi_package_status_prefixes(seed_paths: &BTreeSet<PathBuf>) -> BTreeSet<PathBuf> {
+    seed_paths
+        .iter()
+        .filter_map(|path| pi_package_prefix_from_path(path))
+        .collect()
+}
+
+fn pi_package_prefix_from_path(path: &Path) -> Option<PathBuf> {
+    let mut components = path.components();
+    if components.next()?.as_os_str() != ".pi" {
+        return None;
+    }
+    if components.next()?.as_os_str() != "packages" {
+        return None;
+    }
+    let first = components.next()?.as_os_str();
+    if first.to_string_lossy().starts_with('@') {
+        let second = components.next()?.as_os_str();
+        Some(Path::new(".pi").join("packages").join(first).join(second))
+    } else {
+        Some(Path::new(".pi").join("packages").join(first))
+    }
+}
+
 fn managed_status_pathspecs(seed_paths: &BTreeSet<PathBuf>) -> Result<Vec<PathBuf>> {
     let project_root = config::project_root();
     let mut paths = seed_paths.clone();
+    for prefix in pi_package_status_prefixes(seed_paths) {
+        paths.insert(prefix);
+    }
     for path in [
         ".vstack-lock.json",
         "vstack.toml",
@@ -771,7 +940,13 @@ fn is_safe_relative_path(path: &Path) -> bool {
         })
 }
 
-fn is_managed_status_path(path: &Path, project_skill_prefixes: &[PathBuf], status: &[u8]) -> bool {
+fn is_managed_status_path(
+    path: &Path,
+    project_skill_prefixes: &[PathBuf],
+    pi_package_prefixes: &BTreeSet<PathBuf>,
+    owned_deleted_native_hooks: &BTreeSet<PathBuf>,
+    status: &[u8],
+) -> bool {
     let path = path.components().collect::<PathBuf>();
     if matches!(
         path.to_str(),
@@ -796,11 +971,17 @@ fn is_managed_status_path(path: &Path, project_skill_prefixes: &[PathBuf], statu
     project_skill_prefixes
         .iter()
         .any(|prefix| path == *prefix || path.starts_with(prefix))
+        || (pi_package_prefixes
+            .iter()
+            .any(|prefix| path.starts_with(prefix))
+            && !path
+                .components()
+                .any(|component| component.as_os_str() == OsStr::new("node_modules")))
         || path_str.starts_with(".cursor/rules/safety-")
         || path_str.starts_with(".opencode/instructions/vstack-hook-")
         || (status.contains(&b'D')
-            && path.extension().is_some_and(|extension| extension == "sh")
-            && (path_str.starts_with(".claude/hooks/") || path_str.starts_with(".codex/hooks/")))
+            && is_native_hook_script_path(&path)
+            && owned_deleted_native_hooks.contains(&path))
 }
 
 fn filter_stageable_paths(paths: &[PathBuf]) -> Result<(Vec<PathBuf>, Vec<PathBuf>)> {
