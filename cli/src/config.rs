@@ -803,6 +803,32 @@ fn extract_toml_section_for(path: &Path, name: &str) -> Vec<u8> {
     result
 }
 
+fn extract_role_skill_section_for_agent(source_root: &Path, entry: &LockEntry) -> Vec<u8> {
+    let Some(agent_file) =
+        crate::catalog::find_item_path(source_root, ItemKind::Agent, &entry.name)
+    else {
+        return Vec::new();
+    };
+    let Ok(agent) = crate::agent::Agent::from_file(&agent_file) else {
+        return Vec::new();
+    };
+    let config_path = source_root.join("vstack.toml");
+    let Ok(content) = std::fs::read_to_string(config_path) else {
+        return Vec::new();
+    };
+    let Ok(toml::Value::Table(root)) = content.parse::<toml::Value>() else {
+        return Vec::new();
+    };
+    let Some(toml::Value::Table(role_skills)) = root.get("role-skills") else {
+        return Vec::new();
+    };
+    let role_key = agent.role.as_str();
+    let Some(value) = role_skills.get(role_key) else {
+        return Vec::new();
+    };
+    format!("role-skills.{role_key} = {value}\n").into_bytes()
+}
+
 fn collect_key_values(prefix: &str, table: &toml::value::Table, name: &str, out: &mut Vec<u8>) {
     for (key, value) in table {
         if key == name {
@@ -987,6 +1013,10 @@ pub fn compute_source_hash(entry: &LockEntry) -> String {
                 if !shared.is_empty() {
                     state = fnv1a_chain(state, &shared);
                 }
+            }
+            let role_skills = extract_role_skill_section_for_agent(&source_root, entry);
+            if !role_skills.is_empty() {
+                state = fnv1a_chain(state, &role_skills);
             }
             // The failure-reporting reference renders into every agent (and
             // is installed alongside them); a release that changes only the

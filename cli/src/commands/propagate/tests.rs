@@ -29,6 +29,27 @@ fn write_skill_source(root: &Path, body: &str) {
     .unwrap();
 }
 
+fn write_agent_skill_source(root: &Path, role_skills: bool) {
+    std::fs::create_dir_all(root.join("agents")).unwrap();
+    std::fs::create_dir_all(root.join("skills/demo")).unwrap();
+    std::fs::write(
+        root.join("agents/rust.md"),
+        "---\nname: rust\ndescription: Rust\nmodel: sonnet\nrole: engineer\n---\n\n# Rust\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("skills/demo/SKILL.md"),
+        "---\nname: demo\ndescription: Demo skill\nlicense: MIT\n---\n\n# Demo\n",
+    )
+    .unwrap();
+    let mapping = if role_skills {
+        "[role-skills]\nengineer = [\"demo\"]\n"
+    } else {
+        "[role-skills]\n"
+    };
+    std::fs::write(root.join("vstack.toml"), mapping).unwrap();
+}
+
 fn demo_entry(source: &Path) -> LockEntry {
     LockEntry {
         name: "demo".to_string(),
@@ -37,6 +58,19 @@ fn demo_entry(source: &Path) -> LockEntry {
         source_repo: None,
         harnesses: vec!["claude-code".to_string()],
         method: InstallMethod::Symlink,
+        installed_at: "2026-08-11T00:00:00Z".to_string(),
+        source_hash: String::new(),
+    }
+}
+
+fn agent_entry(name: &str, source: &Path) -> LockEntry {
+    LockEntry {
+        name: name.to_string(),
+        kind: ItemKind::Agent,
+        source: source.display().to_string(),
+        source_repo: None,
+        harnesses: vec!["claude-code".to_string()],
+        method: InstallMethod::Copy,
         installed_at: "2026-08-11T00:00:00Z".to_string(),
         source_hash: String::new(),
     }
@@ -133,6 +167,62 @@ fn detect_drift_distinguishes_clean_and_changed_source() {
         assert_eq!(changed.rows.len(), 1);
         assert_eq!(changed.rows[0].name, "demo");
         assert_eq!(changed.rows[0].status, DriftStatus::Changed);
+    });
+}
+
+#[test]
+fn detects_and_refreshes_mapping_only_role_skill_drift() {
+    let project = tmpdir("role-skill-drift-project");
+    let source = tmpdir("role-skill-drift-source");
+    std::fs::create_dir_all(&project).unwrap();
+    write_agent_skill_source(&source, false);
+
+    crate::test_util::with_project_root(&project, || {
+        write_file(&project.join("vstack.toml"), "[agent-skills]\nrust = []\n");
+        let mut rust = agent_entry("rust", &source);
+        rust.source_hash = config::compute_source_hash(&rust);
+        let mut demo = demo_entry(&source);
+        demo.source_hash = config::compute_source_hash(&demo);
+        let mut lock = LockFile::default();
+        lock.add(rust);
+        lock.add(demo);
+        lock.save(&config::lock_file_path(false)).unwrap();
+        write_file(
+            &project.join(".agents/skills/demo/SKILL.md"),
+            "---\nname: demo\ndescription: Demo skill\nlicense: MIT\n---\n\n# Demo\n",
+        );
+        write_file(&project.join(".claude/agents/rust.md"), "# Rust\n");
+
+        let lock = LockFile::load(&config::lock_file_path(false)).unwrap();
+        let rust_hash = lock.entries["rust"].source_hash.clone();
+        let demo_hash = lock.entries["demo"].source_hash.clone();
+        assert!(!rust_hash.is_empty());
+        assert!(!demo_hash.is_empty());
+
+        write_agent_skill_source(&source, true);
+        assert_ne!(
+            config::compute_source_hash(&lock.entries["rust"]),
+            rust_hash,
+            "role-skills changes must affect the agent drift hash"
+        );
+        assert_eq!(
+            config::compute_source_hash(&lock.entries["demo"]),
+            demo_hash,
+            "negative control: skill bytes are unchanged"
+        );
+
+        let err = run(ScopeFilter::Project, true, false, false, true)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("propagation needed"), "{err}");
+
+        run(ScopeFilter::Project, false, false, false, true).unwrap();
+
+        let project_config = std::fs::read_to_string(project.join("vstack.toml")).unwrap();
+        assert!(project_config.contains("rust = ["), "{project_config}");
+        assert!(project_config.contains("\"demo\""), "{project_config}");
+        let agent = std::fs::read_to_string(project.join(".claude/agents/rust.md")).unwrap();
+        assert!(agent.contains("demo"), "{agent}");
     });
 }
 
