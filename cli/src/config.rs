@@ -654,6 +654,11 @@ pub(crate) fn hash_file_bytes(path: &Path) -> u64 {
 }
 
 /// Compute a content hash for a directory (all files, sorted by relative path).
+/// Separator folded between a symlink's path and its target so a link can
+/// never hash the same as a regular file whose content happens to be the
+/// target string. Must match verify::SYMLINK_HASH_TAG.
+pub(crate) const SYMLINK_HASH_TAG: &[u8] = b"\0vstack-symlink\0";
+
 fn hash_dir_bytes(dir: &Path) -> u64 {
     hash_dir_bytes_excluding(dir, &[])
 }
@@ -676,13 +681,26 @@ pub(crate) fn hash_dir_bytes_excluding(dir: &Path, exclude_files: &[&str]) -> u6
             walker.skip_current_dir();
             continue;
         }
-        if !entry.file_type().is_file() {
-            continue;
-        }
         if exclude_files
             .iter()
             .any(|name| entry.file_name().to_str() == Some(*name))
         {
+            continue;
+        }
+        // A symlink's identity is its target, and `copy_dir` recreates links
+        // rather than dereferencing them, so a retargeted link is a real source
+        // change. Skipping them let a target-only edit read as no drift.
+        if entry.file_type().is_symlink() {
+            let Ok(target) = std::fs::read_link(entry.path()) else {
+                continue;
+            };
+            let rel = entry.path().strip_prefix(dir).unwrap_or(entry.path());
+            state = fnv1a_chain(state, rel.to_string_lossy().as_bytes());
+            state = fnv1a_chain(state, SYMLINK_HASH_TAG);
+            state = fnv1a_chain(state, target.to_string_lossy().as_bytes());
+            continue;
+        }
+        if !entry.file_type().is_file() {
             continue;
         }
         // Read content first; if unreadable, skip the entire entry. Folding
@@ -3465,6 +3483,30 @@ echo foreign
         assert_eq!(
             lock.entries.get("foo-bar").unwrap().harnesses,
             vec!["codex".to_string()]
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn hash_dir_bytes_tracks_symlink_targets() {
+        let dir = sandbox("hash_dir_symlink_target");
+        let tree = dir.join("pkg");
+        fs::create_dir_all(tree.join("real")).unwrap();
+        fs::write(tree.join("real").join("a.js"), b"a").unwrap();
+        fs::write(tree.join("real").join("b.js"), b"b").unwrap();
+        std::os::unix::fs::symlink("real/a.js", tree.join("entry.js")).unwrap();
+
+        let before = hash_dir_bytes(&tree);
+
+        // Only the link target changes; every regular file is untouched.
+        fs::remove_file(tree.join("entry.js")).unwrap();
+        std::os::unix::fs::symlink("real/b.js", tree.join("entry.js")).unwrap();
+        let after = hash_dir_bytes(&tree);
+
+        assert_ne!(
+            before, after,
+            "a retargeted symlink must read as a source change"
         );
         let _ = fs::remove_dir_all(&dir);
     }

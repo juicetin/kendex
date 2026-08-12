@@ -111,6 +111,18 @@ fn claude_hook_command(global: bool, hook_name: &str, script_path: &Path) -> Str
     }
 }
 
+/// The exact command the project-scope Claude install writes for `hook_name`.
+/// Verification compares against this rather than searching for the script
+/// path, so a disabled or wrapped command cannot pass as a registration.
+pub(crate) fn claude_project_hook_command(hook_name: &str) -> String {
+    claude_hook_command(false, hook_name, Path::new(""))
+}
+
+/// The exact command the project-scope Codex install writes for `hook_name`.
+pub(crate) fn codex_project_hook_command(hook_name: &str) -> String {
+    codex_hook_command(false, hook_name, Path::new(""))
+}
+
 fn claude_owned_hook_commands(global: bool, hook_name: &str, script_path: &Path) -> Vec<String> {
     let mut commands = vec![claude_hook_command(global, hook_name, script_path)];
     if global {

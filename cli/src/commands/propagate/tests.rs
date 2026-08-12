@@ -1674,39 +1674,59 @@ fn stage_mode_fails_before_staging_when_no_drift_verify_fails() {
 }
 
 #[test]
-fn hook_script_wire_path_matches_json_registration_slashes() {
-    let registration = serde_json::json!({
-        "hooks": {
-            "PreToolUse": [{
-                "matcher": "Bash",
-                "hooks": [{
-                    "type": "command",
-                    "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/guard.sh\""
+fn hook_registration_requires_the_exact_installer_command_under_its_event() {
+    let expected = crate::installer::claude_project_hook_command("guard");
+    let registration = |command: &str| {
+        serde_json::json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "Bash",
+                    "hooks": [{ "type": "command", "command": command }]
                 }]
-            }]
-        }
-    });
-    let windows_spelling = Path::new(r".claude\hooks\guard.sh");
-    let raw_fragment = windows_spelling.to_string_lossy();
+            }
+        })
+    };
+
+    assert!(hook_command_registered(
+        &registration(&expected),
+        &expected,
+        Some("PreToolUse")
+    ));
     assert!(
-        !hook_command_registered(&registration, &raw_fragment, Some("PreToolUse")),
-        "negative control: backslash spelling must not match slash JSON"
-    );
-    assert!(
-        hook_command_registered(
-            &registration,
-            &hook_script_wire_path(windows_spelling),
-            Some("PreToolUse")
-        ),
-        "wire-normalized hook path should match harness registration JSON"
+        !hook_command_registered(&registration(&expected), &expected, Some("Stop")),
+        "a registration under another event is not a registration for this one"
     );
     assert!(
         !hook_command_registered(
-            &registration,
-            &hook_script_wire_path(windows_spelling),
-            Some("Stop")
+            &registration(".claude/hooks/guard.sh"),
+            &expected,
+            Some("PreToolUse")
         ),
-        "a registration under another event is not a registration for this one"
+        "a bare path is not the installer-generated command"
+    );
+    assert!(
+        !hook_command_registered(
+            &registration(&format!("echo {expected}")),
+            &expected,
+            Some("PreToolUse")
+        ),
+        "a command that merely mentions the script must not pass"
+    );
+    assert!(
+        !hook_command_registered(
+            &registration(&expected.replace(".sh", ".sh.disabled")),
+            &expected,
+            Some("PreToolUse")
+        ),
+        "a disabled script path must not pass"
+    );
+    assert!(
+        !hook_command_registered(
+            &serde_json::json!({ "note": expected.clone(), "hooks": {} }),
+            &expected,
+            Some("PreToolUse")
+        ),
+        "a path in unrelated metadata is not a registration"
     );
 }
 

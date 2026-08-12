@@ -211,10 +211,9 @@ fn verify_hook_auxiliary_install(
                 .join("hooks")
                 .join(format!("{name}.sh"));
             if config::project_root().join(&script).exists() {
-                let wire_path = hook_script_wire_path(&script);
                 require_hook_command_registration(
                     Path::new(".claude").join("settings.json").as_path(),
-                    &wire_path,
+                    &crate::installer::claude_project_hook_command(name),
                     event,
                     &format!("Claude hook {name}"),
                     failures,
@@ -224,10 +223,9 @@ fn verify_hook_auxiliary_install(
         Harness::Codex => {
             let script = Path::new(".codex").join("hooks").join(format!("{name}.sh"));
             if config::project_root().join(&script).exists() {
-                let wire_path = hook_script_wire_path(&script);
                 require_hook_command_registration(
                     Path::new(".codex").join("hooks.json").as_path(),
-                    &wire_path,
+                    &crate::installer::codex_project_hook_command(name),
                     event.and_then(crate::installer::codex_event_for),
                     &format!("Codex hook {name}"),
                     failures,
@@ -261,10 +259,6 @@ fn locked_hook_event(entry: &config::LockEntry) -> Option<String> {
         .into_iter()
         .find(|hook| hook.name == entry.name)
         .map(|hook| hook.event)
-}
-
-fn hook_script_wire_path(path: &Path) -> String {
-    path.to_string_lossy().replace('\\', "/")
 }
 
 fn verify_pi_auxiliary_install(name: &str, failures: &mut Vec<String>) -> Result<()> {
@@ -357,21 +351,23 @@ fn pi_bin_link_failure(
     None
 }
 
-/// Require the locked script to appear as a live command handler, not merely
-/// somewhere in the document. The harness only runs
-/// `hooks.<event>[].hooks[]` entries whose `type` is `command`, so a path in an
-/// unrelated metadata string is not a registration. When the hook's event is
+/// Require the exact command the installer writes to be live in the harness
+/// config. The harness only runs `hooks.<event>[].hooks[]` entries whose
+/// `type` is `command`, so a path in an unrelated metadata string is not a
+/// registration — and neither is a command that merely mentions the script
+/// (`echo <script>`, `bash <script>.disabled`), which is why this compares the
+/// whole command rather than searching within it. When the hook's event is
 /// known the handler must sit under that event; when it is not (the source
 /// definition could not be read), any event still proves the handler shape.
 fn require_hook_command_registration(
     relative: &Path,
-    needle: &str,
+    expected_command: &str,
     event: Option<&str>,
     label: &str,
     failures: &mut Vec<String>,
 ) {
     match read_project_json(relative) {
-        Ok(json) if hook_command_registered(&json, needle, event) => {}
+        Ok(json) if hook_command_registered(&json, expected_command, event) => {}
         Ok(_) => {
             let scope = match event {
                 Some(event) => format!(" under {event}"),
@@ -386,7 +382,11 @@ fn require_hook_command_registration(
     }
 }
 
-fn hook_command_registered(json: &serde_json::Value, needle: &str, event: Option<&str>) -> bool {
+fn hook_command_registered(
+    json: &serde_json::Value,
+    expected_command: &str,
+    event: Option<&str>,
+) -> bool {
     let Some(hooks) = json.get("hooks").and_then(serde_json::Value::as_object) else {
         return false;
     };
@@ -399,10 +399,8 @@ fn hook_command_registered(json: &serde_json::Value, needle: &str, event: Option
         .flatten()
         .any(|handler| {
             handler.get("type").and_then(serde_json::Value::as_str) == Some("command")
-                && handler
-                    .get("command")
-                    .and_then(serde_json::Value::as_str)
-                    .is_some_and(|command| command.contains(needle))
+                && handler.get("command").and_then(serde_json::Value::as_str)
+                    == Some(expected_command)
         })
 }
 

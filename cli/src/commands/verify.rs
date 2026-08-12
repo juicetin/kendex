@@ -224,24 +224,52 @@ fn verify_skill_install(entry: &LockEntry, global: bool) -> (Option<bool>, Optio
     }
 
     let mut missing = Vec::new();
+    let mut retargeted = Vec::new();
     for (path, harnesses) in path_harnesses {
         if !path.join("SKILL.md").is_file() {
             missing.extend(harnesses);
+        } else if !skill_link_resolves_to_canonical_install(&path, &entry.name) {
+            retargeted.extend(harnesses);
         }
     }
 
-    if missing.is_empty() && unknown.is_empty() {
+    if missing.is_empty() && unknown.is_empty() && retargeted.is_empty() {
         (Some(true), None)
     } else {
         let mut notes = Vec::new();
         if !missing.is_empty() {
             notes.push(format!("install path missing for {}", missing.join(", ")));
         }
+        if !retargeted.is_empty() {
+            notes.push(format!(
+                "install path is a symlink outside the canonical skill tree for {}",
+                retargeted.join(", ")
+            ));
+        }
         if !unknown.is_empty() {
             notes.push(format!("unknown harness id(s): {}", unknown.join(", ")));
         }
         (Some(false), Some(notes.join("; ")))
     }
+}
+
+/// A skill install that is a symlink must land on a canonical skill tree entry:
+/// every checkout spells that `<root>/.agents/skills/<name>`, and the installer
+/// only ever points these links at one. Following the link and finding *a*
+/// `SKILL.md` is not enough — a redirected link would otherwise pass
+/// verification and let `propagate --stage` commit a pointer to unrelated
+/// instructions. A non-symlink install (copy method) is not constrained here.
+fn skill_link_resolves_to_canonical_install(path: &Path, name: &str) -> bool {
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        return false;
+    };
+    if !meta.file_type().is_symlink() {
+        return true;
+    }
+    let Ok(resolved) = std::fs::canonicalize(path) else {
+        return false;
+    };
+    resolved.ends_with(Path::new(".agents").join("skills").join(name))
 }
 
 fn verify_agent_install(
@@ -373,6 +401,25 @@ fn hash_dir_walk(dir: &Path) -> u64 {
             && should_skip_hash_dir(entry.file_name().to_string_lossy().as_ref())
         {
             walker.skip_current_dir();
+            continue;
+        }
+        // Mirrors config::hash_dir_bytes_excluding: a symlink contributes its
+        // path and its target, so a retargeted link reads as drift.
+        if entry.file_type().is_symlink() {
+            let Ok(target) = std::fs::read_link(entry.path()) else {
+                continue;
+            };
+            let rel = entry.path().strip_prefix(dir).unwrap_or(entry.path());
+            for bytes in [
+                rel.to_string_lossy().as_bytes(),
+                config::SYMLINK_HASH_TAG,
+                target.to_string_lossy().as_bytes(),
+            ] {
+                for &b in bytes {
+                    state ^= b as u64;
+                    state = state.wrapping_mul(FNV_PRIME);
+                }
+            }
             continue;
         }
         if !entry.file_type().is_file() {
@@ -524,6 +571,66 @@ mod tests {
             let err = run(ScopeFilter::Project, &[]).unwrap_err().to_string();
             assert!(err.contains("verification failed"), "{err}");
         });
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn verify_skill_rejects_a_symlink_retargeted_outside_the_canonical_tree() {
+        let project = tmpdir("retargeted-skill-symlink");
+        std::fs::create_dir_all(&project).unwrap();
+        let canonical = project.join(".agents").join("skills").join("demo");
+        write_file(&canonical.join("SKILL.md"), "---\nname: demo\n---\n");
+        // Unrelated instructions that also happen to carry a SKILL.md.
+        let elsewhere = project.join("elsewhere").join("demo");
+        write_file(&elsewhere.join("SKILL.md"), "---\nname: other\n---\n");
+
+        crate::test_util::with_project_root(&project, || {
+            let entry = LockEntry {
+                name: "demo".to_string(),
+                kind: ItemKind::Skill,
+                source: "/unused/source".to_string(),
+                source_repo: None,
+                harnesses: vec!["claude-code".to_string()],
+                method: InstallMethod::Symlink,
+                installed_at: "2026-08-11T00:00:00Z".to_string(),
+                source_hash: "stored-hash".to_string(),
+            };
+
+            let link = project.join(".claude").join("skills").join("demo");
+            std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+            std::os::unix::fs::symlink(&canonical, &link).unwrap();
+            let (ok, note) = verify_skill_install(&entry, false);
+            assert_eq!(ok, Some(true), "canonical link must pass: {note:?}");
+
+            std::fs::remove_file(&link).unwrap();
+            std::os::unix::fs::symlink(&elsewhere, &link).unwrap();
+            let (ok, note) = verify_skill_install(&entry, false);
+            assert_eq!(ok, Some(false));
+            let note = note.unwrap();
+            assert!(note.contains("outside the canonical skill tree"), "{note}");
+            assert!(note.contains("claude-code"), "{note}");
+        });
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn verify_hash_walk_tracks_symlink_targets_like_the_source_hash() {
+        let root = tmpdir("verify-hash-symlink-target");
+        let tree = root.join("pkg");
+        std::fs::create_dir_all(tree.join("real")).unwrap();
+        std::fs::write(tree.join("real").join("a.js"), b"a").unwrap();
+        std::fs::write(tree.join("real").join("b.js"), b"b").unwrap();
+        std::os::unix::fs::symlink("real/a.js", tree.join("entry.js")).unwrap();
+
+        let before = hash_dir_walk(&tree);
+        std::fs::remove_file(tree.join("entry.js")).unwrap();
+        std::os::unix::fs::symlink("real/b.js", tree.join("entry.js")).unwrap();
+
+        assert_ne!(
+            before,
+            hash_dir_walk(&tree),
+            "install drift must see a retargeted symlink"
+        );
     }
 
     #[test]
