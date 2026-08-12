@@ -410,6 +410,45 @@ fn verify_project_auxiliary_installs_before_stage(
     }
 }
 
+/// The bytes of an installed vstack-owned artifact, read only when the path is
+/// a regular file.
+///
+/// Every check below reads a path the staging pass then hands to `git add`,
+/// and `git add` records a symlink as the link rather than the bytes it
+/// resolves to. Reading through the link would accept an artifact whose bytes
+/// live outside the install — a file the consumer can rewrite after the check,
+/// or one that does not exist in another checkout at all — and commit the link
+/// in its place. `symlink_metadata` therefore decides what may be compared:
+/// anything that is not a regular file is a finding, not a comparison. A
+/// dangling link is one of those findings rather than a missing install,
+/// because staging stats the path without following it and records it.
+enum InstalledArtifact {
+    Bytes(Vec<u8>),
+    Missing,
+    NotRegular,
+    Unreadable(String),
+}
+
+fn read_installed_artifact(path: &Path) -> InstalledArtifact {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_file() => match std::fs::read(path) {
+            Ok(bytes) => InstalledArtifact::Bytes(bytes),
+            Err(err) => InstalledArtifact::Unreadable(err.to_string()),
+        },
+        Ok(_) => InstalledArtifact::NotRegular,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => InstalledArtifact::Missing,
+        Err(err) => InstalledArtifact::Unreadable(err.to_string()),
+    }
+}
+
+/// Whether an installed artifact is present at all, without following a link.
+/// The gate on every content check: `Path::exists` resolves the link, so a
+/// dangling one reads as absent and skips the check over a path staging still
+/// records.
+fn installed_artifact_present(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok()
+}
+
 /// Everything a generated agent's bytes are a function of, resolved once for
 /// the whole pass the way the refresh that wrote those bytes resolved it.
 struct AgentRenderContext<'a> {
@@ -492,12 +531,18 @@ fn verify_agent_content_before_stage(
             .unwrap_or(path.as_path())
             .display()
             .to_string();
-        let installed = match std::fs::read(&path) {
-            Ok(installed) => installed,
+        let installed = match read_installed_artifact(&path) {
+            InstalledArtifact::Bytes(installed) => installed,
             // A missing install is `verify::run`'s finding, and staging takes
             // nothing from a file that is not there.
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(err) => {
+            InstalledArtifact::Missing => continue,
+            InstalledArtifact::NotRegular => {
+                failures.push(format!(
+                    "{display} is not a regular file; staging would record it in place of the agent its locked source generates"
+                ));
+                continue;
+            }
+            InstalledArtifact::Unreadable(err) => {
                 failures.push(format!("{display} is unreadable: {err}"));
                 continue;
             }
@@ -776,7 +821,7 @@ fn verify_hook_auxiliary_install(
             let script = Path::new(".claude")
                 .join("hooks")
                 .join(format!("{name}.sh"));
-            if config::project_root().join(&script).exists() {
+            if installed_artifact_present(&config::project_root().join(&script)) {
                 require_installed_hook_script_matches_source(
                     &script,
                     registration,
@@ -808,7 +853,7 @@ fn verify_hook_auxiliary_install(
             match crate::installer::codex_event_for(registration.event()) {
                 Some(event) => {
                     let script = Path::new(".codex").join("hooks").join(format!("{name}.sh"));
-                    if !config::project_root().join(&script).exists() {
+                    if !installed_artifact_present(&config::project_root().join(&script)) {
                         failures.push(format!(
                             "{} missing for Codex hook {name}, whose event {event} installs natively",
                             script.display()
@@ -855,7 +900,7 @@ fn verify_hook_auxiliary_install(
         }
         Harness::OpenCode => {
             let instruction = crate::installer::opencode_hook_instruction_path(false, name);
-            if instruction.exists() {
+            if installed_artifact_present(&instruction) {
                 require_translated_hook_artifact_matches_source(
                     &instruction,
                     registration
@@ -868,7 +913,7 @@ fn verify_hook_auxiliary_install(
         }
         Harness::Cursor => {
             let rule = crate::installer::cursor_hook_rule_path(false, name);
-            if rule.exists() {
+            if installed_artifact_present(&rule) {
                 require_translated_hook_artifact_matches_source(
                     &rule,
                     registration.map(|r| crate::installer::cursor_hook_rule_contents(&r.hook)),
@@ -1125,19 +1170,39 @@ fn require_installed_hook_script_matches_source(
         return;
     };
     let path = config::project_root().join(relative);
-    match std::fs::read_to_string(&path) {
-        Ok(installed) if installed == registration.script() => {}
-        Ok(_) => failures.push(format!(
-            "{} does not match the locked script for {label}",
-            relative.display()
-        )),
-        Err(err) => failures.push(format!("{} is unreadable: {err}", relative.display())),
+    match read_installed_artifact(&path) {
+        InstalledArtifact::Bytes(installed) if installed == registration.script().as_bytes() => {}
+        InstalledArtifact::Bytes(_) => {
+            failures.push(format!(
+                "{} does not match the locked script for {label}",
+                relative.display()
+            ));
+            return;
+        }
+        // Only reachable through the caller's own presence gate losing a race
+        // with a deletion; the gate itself reports a missing install.
+        InstalledArtifact::Missing => {
+            failures.push(format!("{} is missing for {label}", relative.display()));
+            return;
+        }
+        InstalledArtifact::NotRegular => {
+            failures.push(format!(
+                "{} is not a regular file; staging would record it in place of the locked script for {label}",
+                relative.display()
+            ));
+            return;
+        }
+        InstalledArtifact::Unreadable(err) => {
+            failures.push(format!("{} is unreadable: {err}", relative.display()));
+            return;
+        }
     }
     // Both installers create the script 0755 explicitly. Identical text with the
     // execute bit cleared still leaves the registered command unable to run the
     // hook, so the mode is part of a correct install. Unix only: the installers
     // set no mode bits elsewhere, and `executable_hash_bit` reports 0 there for
-    // every file, which would reject correct installs.
+    // every file, which would reject correct installs. Reached only for a
+    // regular file, so it never reports the mode of a link's target.
     #[cfg(unix)]
     if config::executable_hash_bit(&path) == 0 {
         failures.push(format!(
@@ -1161,7 +1226,10 @@ fn require_codex_prose_block_matches_source(
     carriers: &[PathBuf],
     failures: &mut Vec<String>,
 ) {
-    let agents: Vec<&PathBuf> = carriers.iter().filter(|path| path.exists()).collect();
+    let agents: Vec<&PathBuf> = carriers
+        .iter()
+        .filter(|path| installed_artifact_present(path))
+        .collect();
     if agents.is_empty() {
         return;
     }
@@ -1171,12 +1239,25 @@ fn require_codex_prose_block_matches_source(
             .strip_prefix(config::project_root())
             .unwrap_or(path.as_path())
             .display();
-        match std::fs::read_to_string(path) {
-            Ok(body) if codex_instructions_body(&body).is_some_and(|b| b.contains(&expected)) => {}
-            Ok(_) => failures.push(format!(
-                "{display} does not carry the locked safety prose for Codex hook {name}"
+        match read_installed_artifact(path) {
+            // A TOML that is not UTF-8 is not one Codex reads the block out
+            // of either, so it fails the same way a replaced body does.
+            InstalledArtifact::Bytes(body) => match String::from_utf8(body) {
+                Ok(body)
+                    if codex_instructions_body(&body).is_some_and(|b| b.contains(&expected)) => {}
+                _ => failures.push(format!(
+                    "{display} does not carry the locked safety prose for Codex hook {name}"
+                )),
+            },
+            // Only reachable through the presence filter above losing a race
+            // with a deletion; an absent carrier is `verify::run`'s finding.
+            InstalledArtifact::Missing => {}
+            InstalledArtifact::NotRegular => failures.push(format!(
+                "{display} is not a regular file; staging would record it in place of the agent carrying the locked safety prose for Codex hook {name}"
             )),
-            Err(err) => failures.push(format!("{display} is unreadable: {err}")),
+            InstalledArtifact::Unreadable(err) => {
+                failures.push(format!("{display} is unreadable: {err}"))
+            }
         }
     }
 }
@@ -1212,12 +1293,20 @@ fn require_translated_hook_artifact_matches_source(
         ));
         return;
     };
-    match std::fs::read_to_string(path) {
-        Ok(installed) if installed == expected => {}
-        Ok(_) => failures.push(format!(
+    match read_installed_artifact(path) {
+        InstalledArtifact::Bytes(installed) if installed == expected.as_bytes() => {}
+        InstalledArtifact::Bytes(_) => failures.push(format!(
             "{display} does not match the locked {label} content"
         )),
-        Err(err) => failures.push(format!("{display} is unreadable: {err}")),
+        // Only reachable through the caller's own presence gate losing a race
+        // with a deletion; an absent artifact is `verify::run`'s finding.
+        InstalledArtifact::Missing => {}
+        InstalledArtifact::NotRegular => failures.push(format!(
+            "{display} is not a regular file; staging would record it in place of the locked {label} content"
+        )),
+        InstalledArtifact::Unreadable(err) => {
+            failures.push(format!("{display} is unreadable: {err}"))
+        }
     }
 }
 

@@ -665,8 +665,10 @@ pub(crate) const UNREADABLE_SYMLINK_HASH_SENTINEL: &str = "\0vstack-unreadable-s
 
 /// Raw bytes of a path for hashing. Unix paths are arbitrary bytes, and
 /// `to_string_lossy` collapses every invalid sequence to the same replacement
-/// character — two distinct link targets would hash identically and a retarget
-/// between them would read as no change.
+/// character — two distinct link targets, or two distinct file names, would
+/// hash identically and a retarget or rename between them would read as no
+/// change. Used for every path folded into a directory hash, so the source
+/// hash and its `verify` mirror agree on what a path is.
 pub(crate) fn os_str_hash_bytes(value: &std::ffi::OsStr) -> Vec<u8> {
     #[cfg(unix)]
     {
@@ -733,7 +735,7 @@ pub(crate) fn hash_dir_bytes_excluding(dir: &Path, exclude_files: &[&str]) -> u6
             continue;
         };
         let rel = entry.path().strip_prefix(dir).unwrap_or(entry.path());
-        state = fnv1a_chain(state, rel.to_string_lossy().as_bytes());
+        state = fnv1a_chain(state, &os_str_hash_bytes(rel.as_os_str()));
         state = fnv1a_chain(state, &content);
         state = fnv1a_chain(state, &[executable_hash_bit(entry.path())]);
     }
@@ -3715,6 +3717,41 @@ echo foreign
         assert_ne!(
             first, second,
             "distinct non-UTF-8 link targets must not hash alike"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The regular-file counterpart of the link-target case above. Renaming a
+    /// file between two non-UTF-8 names is a real source change — the file the
+    /// skill or package ships is reached under a different name — and lossy
+    /// path encoding collapsed both to the same replacement character, so the
+    /// rename read as no drift at all.
+    #[test]
+    #[cfg(unix)]
+    fn hash_dir_bytes_distinguishes_non_utf8_file_names() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let dir = sandbox("hash_dir_file_non_utf8");
+        let tree = dir.join("pkg");
+        fs::create_dir_all(&tree).unwrap();
+
+        let first_name = OsStr::from_bytes(b"script-\xff.sh");
+        let second_name = OsStr::from_bytes(b"script-\xfe.sh");
+        assert_eq!(
+            first_name.to_string_lossy(),
+            second_name.to_string_lossy(),
+            "the fixture must be two names lossy encoding cannot tell apart"
+        );
+
+        fs::write(tree.join(first_name), b"same body").unwrap();
+        let first = hash_dir_bytes(&tree);
+        fs::rename(tree.join(first_name), tree.join(second_name)).unwrap();
+        let second = hash_dir_bytes(&tree);
+
+        assert_ne!(
+            first, second,
+            "distinct non-UTF-8 file names must not hash alike"
         );
         let _ = fs::remove_dir_all(&dir);
     }

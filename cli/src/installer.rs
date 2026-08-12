@@ -72,7 +72,15 @@ pub fn install_agent(
 /// `copy_dir` recreates a symlink the source ships, so `SKILL.md` in a fresh
 /// install can itself be a link, and a plain write would follow it out of the
 /// install directory.
+///
+/// That refusal is taken before the content is read rather than only on the
+/// write: a link whose target already holds the exact rendered bytes makes the
+/// rewrite a no-op, and returning success there left the install carrying a
+/// `SKILL.md` that is a link out of the install directory — bytes whoever owns
+/// the target can change afterwards.
 fn render_installed_skill_md(skill_md: &Path, instructions: Option<&str>) -> Result<()> {
+    crate::path_safety::ensure_file_write_target_safe(skill_md)
+        .with_context(|| format!("rendering installed {}", skill_md.display()))?;
     let content = std::fs::read_to_string(skill_md)
         .with_context(|| format!("reading installed {}", skill_md.display()))?;
     let rendered = crate::skill::render_installed_skill_md(&content, instructions);
@@ -1536,6 +1544,74 @@ mod tests {
         assert!(
             result.is_err(),
             "a symlinked SKILL.md must refuse, not be written through"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The sibling of the case above, and the one the refusal used to miss: a
+    /// link whose target is ALREADY the exact bytes the render would produce
+    /// makes the rewrite a no-op, so the write — and with it the no-follow
+    /// refusal — never ran. The install reported success over a `SKILL.md`
+    /// that is a link out of the install directory, mutable by whoever owns
+    /// the target.
+    #[cfg(unix)]
+    #[test]
+    fn install_skill_refuses_a_symlinked_skill_md_that_needs_no_rendering() {
+        let root = std::env::temp_dir().join(format!(
+            "vstack_skill_md_symlink_norender_{}_{}",
+            std::process::id(),
+            crate::config::now_iso().replace([':', '-'], "")
+        ));
+        let project = root.join("project");
+        let outside = root.join("outside.md");
+        let source = root.join("source").join("demo");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&source).unwrap();
+        let body = "---\nname: demo\ndescription: Demo\n---\n\n# Demo\n";
+        let rendered = crate::skill::render_installed_skill_md(body, None);
+        std::fs::write(&outside, &rendered).unwrap();
+        // The link target is absolute, so it resolves the same from the source
+        // and from the install `copy_dir` recreates it in.
+        std::os::unix::fs::symlink(&outside, source.join("SKILL.md")).unwrap();
+        assert_eq!(
+            crate::skill::render_installed_skill_md(&rendered, None),
+            rendered,
+            "the fixture must make the render a no-op for this test to constrain anything"
+        );
+
+        let skill = Skill {
+            name: "demo".into(),
+            description: "Demo".into(),
+            license: None,
+            user_invocable: None,
+            dependencies: None,
+            body: String::new(),
+            source_dir: source.clone(),
+            resolved_deps: Vec::new(),
+        };
+
+        let result = crate::test_util::with_project_root(&project, || {
+            install_skill(
+                &skill,
+                Harness::ClaudeCode,
+                false,
+                InstallMethod::Copy,
+                None,
+            )
+        });
+        let err = result
+            .err()
+            .map(|err| format!("{err:#}"))
+            .unwrap_or_default();
+        assert!(
+            err.contains("refusing to write through symlink"),
+            "a symlinked SKILL.md must refuse whether or not the render changes it: {err}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&outside).unwrap(),
+            rendered,
+            "the refusal must land before anything is written through the link"
         );
 
         let _ = std::fs::remove_dir_all(&root);

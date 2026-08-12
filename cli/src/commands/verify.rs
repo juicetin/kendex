@@ -512,8 +512,17 @@ fn hash_dir_walk(dir: &Path) -> u64 {
         if !entry.file_type().is_file() {
             continue;
         }
-        let rel = entry.path().strip_prefix(dir).unwrap_or(entry.path());
-        for &b in rel.to_string_lossy().as_bytes() {
+        // Mirrors config::hash_dir_bytes_excluding: raw OS bytes, so two file
+        // names that differ only in invalid UTF-8 sequences do not collapse
+        // into the same hash.
+        let rel = config::os_str_hash_bytes(
+            entry
+                .path()
+                .strip_prefix(dir)
+                .unwrap_or(entry.path())
+                .as_os_str(),
+        );
+        for &b in &rel {
             state ^= b as u64;
             state = state.wrapping_mul(FNV_PRIME);
         }
@@ -979,6 +988,39 @@ mod tests {
             before,
             hash_dir_walk(&tree),
             "install drift must see a retargeted symlink"
+        );
+    }
+
+    /// The install-side mirror of `hash_dir_bytes_distinguishes_non_utf8_file_names`:
+    /// the two hashes are compared against each other, so a rename this one
+    /// cannot see is an installed file the source hash moved for and
+    /// verification still accepted under its old name.
+    #[test]
+    #[cfg(unix)]
+    fn verify_hash_walk_distinguishes_non_utf8_file_names_like_the_source_hash() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let root = tmpdir("verify-hash-file-non-utf8");
+        let tree = root.join("pkg");
+        std::fs::create_dir_all(&tree).unwrap();
+
+        let first_name = OsStr::from_bytes(b"script-\xff.sh");
+        let second_name = OsStr::from_bytes(b"script-\xfe.sh");
+        assert_eq!(
+            first_name.to_string_lossy(),
+            second_name.to_string_lossy(),
+            "the fixture must be two names lossy encoding cannot tell apart"
+        );
+
+        std::fs::write(tree.join(first_name), b"same body").unwrap();
+        let before = hash_dir_walk(&tree);
+        std::fs::rename(tree.join(first_name), tree.join(second_name)).unwrap();
+
+        assert_ne!(
+            before,
+            hash_dir_walk(&tree),
+            "install drift must see a rename between distinct non-UTF-8 names"
         );
     }
 
