@@ -1442,6 +1442,108 @@ fn refresh_still_refuses_an_unconfigured_link_out_of_the_skills_root() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+/// A lock entry is a record of an install, not proof one is still on disk. A
+/// filtered refresh (what the TUI runs when only an agent is selected) never
+/// visits the skill pass, so a deleted skill install is not repaired — and the
+/// agent must not be recorded as satisfied on the strength of the lock alone.
+#[test]
+fn refresh_withholds_agent_success_when_a_declared_skill_install_is_gone() {
+    let root = tmpdir("declared-skill-install-deleted");
+    let project = root.join("project");
+    let source = make_source(&root, "source");
+    std::fs::create_dir_all(&project).unwrap();
+    write_colliding_source(&source, "1", "PreToolUse", "source-model");
+
+    let mut lock = LockFile::default();
+    lock.add(lock_entry(
+        "rust",
+        ItemKind::Agent,
+        &source,
+        vec!["claude-code"],
+    ));
+    lock.add(lock_entry(
+        "shared",
+        ItemKind::Skill,
+        &source,
+        vec!["claude-code"],
+    ));
+    let sources = vec![RefreshSource::from_root(&source)];
+
+    // Install everything, then re-run filtered to the agent alone. Control:
+    // with the skill on disk the filtered refresh succeeds, so the assertion
+    // below is constrained by the deletion and not by the filter.
+    crate::test_util::with_project_root(&project, || {
+        let mut project_config = ProjectConfig::default();
+        refresh_items_in_scope(false, &lock, &sources, &mut project_config, &project, None)
+    });
+    let installed = project.join(".claude/skills/shared/SKILL.md");
+    assert!(installed.is_file(), "fixture did not install the skill");
+
+    let only_agent = vec!["rust".to_string()];
+    let stats = crate::test_util::with_project_root(&project, || {
+        let mut project_config = ProjectConfig::default();
+        refresh_items_in_scope(
+            false,
+            &lock,
+            &sources,
+            &mut project_config,
+            &project,
+            Some(&only_agent),
+        )
+    });
+    assert!(
+        stats.successful_items.contains("rust"),
+        "control: a filtered agent refresh with its skill installed must succeed: {:?} {:?}",
+        stats.failures,
+        stats.incomplete
+    );
+
+    std::fs::remove_dir_all(project.join(".claude/skills/shared")).unwrap();
+    let stats = crate::test_util::with_project_root(&project, || {
+        let mut project_config = ProjectConfig::default();
+        refresh_items_in_scope(
+            false,
+            &lock,
+            &sources,
+            &mut project_config,
+            &project,
+            Some(&only_agent),
+        )
+    });
+    assert!(
+        !stats.successful_items.contains("rust"),
+        "a lock entry alone must not satisfy a declared dependency whose install is gone"
+    );
+    assert!(
+        stats.has_incomplete(),
+        "and the shortfall must be recorded, not just printed"
+    );
+
+    // The bar is repair, not mere presence: the same deleted install inside a
+    // filter that also covers the skill is about to be rewritten by this run's
+    // skill pass, which runs after the agent pass.
+    let both = vec!["rust".to_string(), "shared".to_string()];
+    let stats = crate::test_util::with_project_root(&project, || {
+        let mut project_config = ProjectConfig::default();
+        refresh_items_in_scope(
+            false,
+            &lock,
+            &sources,
+            &mut project_config,
+            &project,
+            Some(&both),
+        )
+    });
+    assert!(
+        stats.successful_items.contains("rust"),
+        "a skill this run reinstalls still satisfies the declaration: {:?} {:?}",
+        stats.failures,
+        stats.incomplete
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
 /// `project-skills-dir` must stay inside the project and outside `.agents`.
 #[test]
 fn refresh_rejects_project_skills_dir_inside_agents() {

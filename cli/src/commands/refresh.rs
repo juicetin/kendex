@@ -353,11 +353,14 @@ pub fn refresh_items_in_scope(
         .filter(|(_, e)| e.kind == ItemKind::Skill)
         .map(|(name, _)| name.clone())
         .collect();
-    // Where each installed skill actually lands. Satisfaction is per install
-    // directory rather than per harness id, so the harnesses that share one
-    // (project Codex and Pi both use `.agents/skills`) count for each other,
-    // while a skill installed only for OpenCode does not satisfy a Claude agent.
-    let installed_skill_dirs: BTreeMap<String, BTreeSet<PathBuf>> = lock
+    // Where the lock says each installed skill lands. Used only to tell a skill
+    // this run's own skill pass is about to (re)write from one it will not
+    // touch — the agent pass runs first, so a fresh install is legitimately not
+    // on disk yet. Satisfaction is per install directory rather than per
+    // harness id, so the harnesses that share one (project Codex and Pi both
+    // use `.agents/skills`) count for each other, while a skill installed only
+    // for OpenCode does not satisfy a Claude agent.
+    let locked_skill_dirs: BTreeMap<String, BTreeSet<PathBuf>> = lock
         .entries
         .iter()
         .filter(|(_, e)| e.kind == ItemKind::Skill)
@@ -433,24 +436,35 @@ pub fn refresh_items_in_scope(
         let missing: Vec<String> = if agent_skill_dirs.is_empty() {
             declared
         } else {
+            // Disk first, and the lock only for what this run is about to
+            // write. The bar disk is held to is the one the rest of vstack
+            // applies (`vstack check`, the installer): a directory carrying a
+            // `SKILL.md` is a skill the agent can load, a bare directory of the
+            // same name is not. Links into `project-skills-dir` resolve
+            // through, and refresh creates them above, before this pass runs;
+            // project-owned skills assigned to a Codex or Pi agent live in the
+            // shared `.agents/skills/<name>` directory and intentionally have
+            // no lock entry, so disk is the only thing that can answer for
+            // them at all.
+            //
+            // A lock entry on its own is not proof of an install: it records
+            // that one once happened. The skill pass runs after this one, so a
+            // skill this run will (re)install is legitimately absent right now —
+            // but a skill the run's name filter excludes is never repaired, and
+            // taking its entry as proof marked the agent successful, with its
+            // new hash, while it had nothing to load (the TUI refreshing one
+            // agent is exactly that shape).
             declared
                 .into_iter()
-                .filter(|skill| match installed_skill_dirs.get(skill) {
-                    Some(dirs) => !agent_skill_dirs.iter().all(|dir| dirs.contains(dir)),
-                    // A project-owned skill assigned to a Codex or Pi agent
-                    // lives in the shared `.agents/skills/<name>` directory and
-                    // intentionally has no lock entry, so the lock cannot answer
-                    // for it and a lock-only lookup called every one of them
-                    // absent. Ask the agent's own skills directory instead — and
-                    // hold the entry there to the bar the rest of vstack applies
-                    // (`vstack check`, the installer): a directory carrying a
-                    // `SKILL.md` is a skill the agent can load, a bare directory
-                    // of the same name is not. Links into `project-skills-dir`
-                    // resolve through, and refresh creates them above, before
-                    // this pass runs.
-                    None => !agent_skill_dirs
+                .filter(|skill| {
+                    let installed = agent_skill_dirs
                         .iter()
-                        .all(|dir| dir.join(skill).join("SKILL.md").is_file()),
+                        .all(|dir| dir.join(skill).join("SKILL.md").is_file());
+                    let will_be_installed = pass(skill)
+                        && locked_skill_dirs
+                            .get(skill)
+                            .is_some_and(|dirs| agent_skill_dirs.iter().all(|d| dirs.contains(d)));
+                    !installed && !will_be_installed
                 })
                 .collect()
         };
@@ -1305,6 +1319,17 @@ pub fn regenerate_agents_after_hook_removal(
         anyhow::bail!(
             "failed to regenerate agents after hook removal: {} failure(s)",
             stats.failures.len()
+        );
+    }
+    // Same bar the CLI refresh applies: an agent regenerated without a skill it
+    // declares installed everything it attempted, so `failures` is empty, but
+    // its lock hash is deliberately withheld and no later run converges. The
+    // reason names the remedy; it was printed by the pass that recorded it.
+    if stats.has_incomplete() {
+        anyhow::bail!(
+            "{} agent(s) regenerated after hook removal are missing a declared dependency; \
+             install the skill(s) named above and re-run",
+            stats.incomplete.len()
         );
     }
 

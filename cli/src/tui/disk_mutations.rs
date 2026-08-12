@@ -657,6 +657,15 @@ pub(super) fn perform_inline_update(
                 format!("refresh failed{harness}: {}", failure.error),
             );
         }
+        // An item refreshed without a dependency it declares installed
+        // everything it attempted, so `stats.failures` is empty — but the
+        // artifact is short, and refresh deliberately withholds its lock hash,
+        // so no later run converges on its own. The CLI stops there; reporting
+        // it as a plain success here would present the shortfall as a finished
+        // mutation and let the follow-up actions run on it.
+        for (item, reason) in &stats.incomplete {
+            report.fail(item, format!("refreshed but incomplete: {reason}"));
+        }
 
         let now = config::now_iso();
         for (name, entry) in lock.entries.iter_mut() {

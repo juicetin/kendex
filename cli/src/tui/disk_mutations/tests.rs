@@ -1067,3 +1067,80 @@ fn tui_hook_removal_keeps_state_on_malformed_project_config() {
 fn tui_hook_removal_keeps_state_on_unreadable_project_config() {
     assert_tui_hook_removal_rejects_broken_config(BrokenRemovalConfig::Unreadable);
 }
+
+/// A refresh can complete every install it attempted and still be short of a
+/// skill the agent declares. The CLI stops on that; the TUI reported only
+/// `stats.failures`, so the same shortfall arrived as a clean mutation — and
+/// the follow-up source-forget / update actions ran on it.
+#[test]
+fn inline_update_reports_an_agent_left_short_of_a_declared_skill() {
+    let root = tmpdir("inline-update-incomplete");
+    let project = root.join("project");
+    let source = root.join("source");
+    std::fs::create_dir_all(source.join("agents")).unwrap();
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        source.join("agents/rust.md"),
+        "---\nname: rust\ndescription: Rust\nmodel: sonnet\nrole: engineer\n---\n# Rust\n",
+    )
+    .unwrap();
+
+    let mut agent = agent_fixture("rust");
+    agent.source_path = source.join("agents/rust.md");
+
+    let mut lock = LockFile::default();
+    lock.add(LockEntry {
+        name: "rust".into(),
+        kind: ItemKind::Agent,
+        source: source.to_string_lossy().into_owned(),
+        source_repo: None,
+        harnesses: vec!["claude-code".into()],
+        method: InstallMethod::Copy,
+        installed_at: "2026-07-03T00:00:00Z".into(),
+        source_hash: String::new(),
+    });
+    lock.save(&project.join(".vstack-lock.json")).unwrap();
+
+    let items = DiscoveredItems {
+        agents: vec![agent],
+        skills: Vec::new(),
+        hooks: Vec::new(),
+        pi_extensions: Vec::new(),
+        extras: Vec::new(),
+    };
+
+    // Control: with no declaration the same update is a clean, completed one.
+    let report = crate::test_util::with_project_root(&project, || {
+        perform_inline_update(&["rust".to_string()], &items)
+    });
+    assert_eq!(report.completed, 1, "control report: {report:?}");
+    assert!(report.failed.is_empty(), "control report: {report:?}");
+
+    // The source now requires a skill the project has never installed.
+    std::fs::write(
+        source.join("vstack.toml"),
+        "[agent-skills]\nrust = [\"shared\"]\n",
+    )
+    .unwrap();
+
+    let report = crate::test_util::with_project_root(&project, || {
+        perform_inline_update(&["rust".to_string()], &items)
+    });
+    assert!(
+        report.failed.iter().any(|failure| failure.contains("rust")),
+        "an unmet declared dependency must reach the report: {report:?}"
+    );
+    assert!(
+        report
+            .failed
+            .iter()
+            .any(|failure| failure.contains("shared")),
+        "and must name the skill it is short of: {report:?}"
+    );
+    assert_eq!(
+        report.completed, 0,
+        "an incomplete refresh is not a completed mutation: {report:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
