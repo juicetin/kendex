@@ -2533,3 +2533,88 @@ fn refresh_rejects_a_skill_shaped_directory_without_a_skill_manifest() {
 
     let _ = std::fs::remove_dir_all(root);
 }
+
+/// A project `[agent-skills]` entry naming a skill that is installed from a
+/// different source than the agent's, and is missing from the agent's own
+/// harness skills directory. The skill has a recorded source, so the remedy is
+/// a reinstall from it — not the upstream-fix wording reserved for a
+/// declaration nothing can resolve.
+#[test]
+fn refresh_recovers_a_missing_skill_from_its_own_locked_source() {
+    let root = tmpdir("missing-skill-foreign-source");
+    let project = root.join("project");
+    let source = make_source(&root, "source");
+    // Spaces and parens: the emitted command has to survive a paste, and the
+    // foreign source is rendered by the same path the agent's source uses.
+    let other = make_source(&root, "other source (v2)");
+    std::fs::create_dir_all(&project).unwrap();
+    write_colliding_source(&source, "1", "PreToolUse", "source-model");
+    std::fs::create_dir_all(other.join("skills/house-rules")).unwrap();
+    std::fs::write(
+        other.join("skills/house-rules/SKILL.md"),
+        "---\nname: house-rules\ndescription: House rules\nlicense: MIT\n---\n# House\n",
+    )
+    .unwrap();
+
+    let mut lock = LockFile::default();
+    lock.add(lock_entry(
+        "rust",
+        ItemKind::Agent,
+        &source,
+        vec!["claude-code"],
+    ));
+    lock.add(lock_entry(
+        "shared",
+        ItemKind::Skill,
+        &source,
+        vec!["claude-code"],
+    ));
+    let sources = vec![
+        RefreshSource::from_root(&source),
+        RefreshSource::from_root(&other),
+    ];
+
+    // Control: with only the source's own declaration the agent is satisfied,
+    // so anything recorded below is the foreign-source skill and not fixture
+    // noise.
+    let stats = crate::test_util::with_project_root(&project, || {
+        let mut project_config = ProjectConfig::default();
+        refresh_items_in_scope(false, &lock, &sources, &mut project_config, &project, None)
+    });
+    assert!(
+        stats.successful_items.contains("rust"),
+        "{:?}",
+        stats.incomplete
+    );
+
+    // Installed, but only into OpenCode's skills directory — the Claude agent
+    // has nowhere to load it from.
+    lock.add(lock_entry(
+        "house-rules",
+        ItemKind::Skill,
+        &other,
+        vec!["opencode"],
+    ));
+    let stats = crate::test_util::with_project_root(&project, || {
+        let mut project_config = ProjectConfig::default();
+        project_config
+            .agent_skills
+            .insert("rust".to_string(), vec!["house-rules".to_string()]);
+        refresh_items_in_scope(false, &lock, &sources, &mut project_config, &project, None)
+    });
+    let reason = stats
+        .incomplete
+        .get("rust")
+        .expect("a skill missing from the agent's harness is an unmet dependency");
+    let spec = other.to_string_lossy().into_owned();
+    assert!(
+        reason.contains(&format!("vstack add '{spec}' --skill house-rules")),
+        "the remedy must reinstall from the skill's own locked source: {reason}"
+    );
+    assert!(
+        !reason.contains("needs fixing upstream"),
+        "a skill with a recorded source is recoverable, not absent: {reason}"
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}

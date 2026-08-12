@@ -2268,23 +2268,31 @@ fn dirty_shared_config_paths(stage_paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
         bail!("git status failed while inspecting shared vstack-managed config files");
     }
     let mut dirty = Vec::new();
-    let mut skip_next = false;
+    let mut pending_rename_source = false;
     for record in output.stdout.split(|byte| *byte == 0) {
         if record.is_empty() {
             continue;
         }
-        if skip_next {
-            skip_next = false;
-            continue;
-        }
-        if record.len() < 4 {
-            continue;
-        }
-        let status = &record[..2];
-        if status[0] == b'R' || status[0] == b'C' {
-            skip_next = true;
-        }
-        let top_level_path = path_from_git_status_bytes(&record[3..]);
+        // The source half of a rename/copy. Under `-z` git frames the pair as
+        // two records — destination first, then the bare original path with no
+        // status prefix and none of the `->` separator the non-`-z` form uses.
+        // Discarding it dropped the very path at risk: the original is what
+        // exists in HEAD, so it is its deletion that `git add -A` would stage.
+        let path_bytes = if std::mem::take(&mut pending_rename_source) {
+            record
+        } else {
+            if record.len() < 4 {
+                continue;
+            }
+            let status = &record[..2];
+            // Either column can carry the rename: `R ` is renamed in the index,
+            // ` R` renamed in the work tree, and both forms emit the pair.
+            if status.iter().any(|code| *code == b'R' || *code == b'C') {
+                pending_rename_source = true;
+            }
+            &record[3..]
+        };
+        let top_level_path = path_from_git_status_bytes(path_bytes);
         let Some(path) = git_to_project_path(&git, &top_level_path) else {
             continue;
         };

@@ -3651,3 +3651,112 @@ fn stage_mode_ignores_a_codex_agent_no_lock_entry_claims() {
         );
     });
 }
+
+/// `git status -z` frames a rename as destination-then-source, and the guard
+/// read only the destination. A rename between two owned shared paths therefore
+/// named the destination while staying silent about the original file whose
+/// deletion `git add -A` would stage — the operator is pointed at the wrong
+/// file. Renaming an owned path to an *unowned* one cannot slip past at all:
+/// rename detection needs both endpoints inside the pathspec, so the scoped
+/// query reports the plain deletion of the owned source (pinned below).
+#[test]
+fn stage_guard_reports_both_sides_of_a_rename_between_owned_shared_configs() {
+    let project = tmpdir("stage-shared-config-renamed");
+    let source = tmpdir("stage-shared-config-renamed-source");
+    std::fs::create_dir_all(&project).unwrap();
+    init_git_project(&project);
+    write_hook_source(&source, "guard");
+
+    crate::test_util::with_project_root(&project, || {
+        let mut entry = hook_entry("guard", &source, &["claude-code"]);
+        entry.source_hash = config::compute_source_hash(&entry);
+        let mut lock = LockFile::default();
+        lock.add(entry);
+        lock.save(&config::lock_file_path(false)).unwrap();
+        write_installed_hook_script(&project.join(".claude/hooks/guard.sh"), "guard");
+        write_file(
+            &project.join(".claude/settings.json"),
+            r#"{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/guard.sh\""}]}]}}"#,
+        );
+        git(&project, &["add", "-A"]);
+        git(&project, &["commit", "-m", "baseline"]);
+
+        // Control: with no rename in the tree the guard reads clean, so a
+        // non-empty result below is the rename and not fixture noise.
+        let stage_paths = pre_refresh_project_stage_paths().unwrap();
+        for owned in [".claude/settings.json", "vstack.settings.toml"] {
+            assert!(
+                stage_paths.contains(&PathBuf::from(owned)),
+                "the guard must own both endpoints of the probed rename: {stage_paths:?}"
+            );
+        }
+        assert!(
+            dirty_shared_config_paths(&stage_paths).unwrap().is_empty(),
+            "clean control"
+        );
+
+        // Both endpoints are owned, so rename detection pairs them and git
+        // emits the two-record rename form.
+        git(
+            &project,
+            &["mv", ".claude/settings.json", "vstack.settings.toml"],
+        );
+        let dirty = dirty_shared_config_paths(&pre_refresh_project_stage_paths().unwrap()).unwrap();
+        assert_eq!(
+            dirty,
+            vec![
+                PathBuf::from(".claude/settings.json"),
+                PathBuf::from("vstack.settings.toml"),
+            ],
+            "the renamed-away original is the file at risk and must be named"
+        );
+    });
+}
+
+/// The rename form only appears when both endpoints match the scoped
+/// pathspecs; a rename to an unowned path leaves the owned source as a plain
+/// deletion, which the guard already refuses. Pinned so a future widening of
+/// the pathspecs (a directory rather than an exact file) cannot quietly turn
+/// this into a way around the guard.
+#[test]
+fn stage_guard_refuses_a_shared_config_renamed_to_an_unowned_path() {
+    let project = tmpdir("stage-shared-config-renamed-away");
+    let source = tmpdir("stage-shared-config-renamed-away-source");
+    std::fs::create_dir_all(&project).unwrap();
+    init_git_project(&project);
+    write_hook_source(&source, "guard");
+
+    crate::test_util::with_project_root(&project, || {
+        let mut entry = hook_entry("guard", &source, &["claude-code"]);
+        entry.source_hash = config::compute_source_hash(&entry);
+        let mut lock = LockFile::default();
+        lock.add(entry);
+        lock.save(&config::lock_file_path(false)).unwrap();
+        write_installed_hook_script(&project.join(".claude/hooks/guard.sh"), "guard");
+        write_file(
+            &project.join(".claude/settings.json"),
+            r#"{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/guard.sh\""}]}]}}"#,
+        );
+        git(&project, &["add", "-A"]);
+        git(&project, &["commit", "-m", "baseline"]);
+        assert!(
+            dirty_shared_config_paths(&pre_refresh_project_stage_paths().unwrap())
+                .unwrap()
+                .is_empty(),
+            "clean control"
+        );
+
+        git(
+            &project,
+            &["mv", ".claude/settings.json", "consumer-settings.json"],
+        );
+        let dirty = dirty_shared_config_paths(&pre_refresh_project_stage_paths().unwrap()).unwrap();
+        assert_eq!(dirty, vec![PathBuf::from(".claude/settings.json")]);
+        assert!(
+            refuse_pre_existing_shared_config_edits(&dirty)
+                .unwrap_err()
+                .to_string()
+                .contains(".claude/settings.json")
+        );
+    });
+}

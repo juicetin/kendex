@@ -465,20 +465,41 @@ pub fn refresh_items_in_scope(
             // `vstack add` resolves its catalog from the positional source, and
             // without one it prefers the project's selected source (global
             // recovery does not consult the global lock at all) — which can be a
-            // different catalog than the one that declared the skill. Name the
-            // entry's own source so the command searches where the declaration
-            // came from.
+            // different catalog than the one that carries the skill. So every
+            // skill is named with its own source: the lock's, when the skill is
+            // installed and only missing from this agent's harness directory,
+            // and otherwise the agent's own catalog. Partitioning them all
+            // against the agent's catalog called a skill installed from a
+            // different source absent and sent the operator upstream over an
+            // asset that is installed and resolvable.
             let scope_flag = if global { "--global " } else { "" };
-            let (installable, absent): (Vec<String>, Vec<String>) = missing
-                .iter()
-                .cloned()
-                .partition(|skill| source.skills.iter().any(|s| &s.name == skill));
+            let mut by_source: BTreeMap<&str, Vec<String>> = BTreeMap::new();
+            let mut absent = Vec::new();
+            for skill in &missing {
+                let locked = lock
+                    .entries
+                    .get(skill)
+                    .filter(|locked| locked.kind == ItemKind::Skill)
+                    .map(|locked| locked.source.as_str());
+                let from_catalog = source
+                    .skills
+                    .iter()
+                    .any(|s| &s.name == skill)
+                    .then_some(entry.source.as_str());
+                match locked.or(from_catalog) {
+                    Some(skill_source) => by_source
+                        .entry(skill_source)
+                        .or_default()
+                        .push(skill.clone()),
+                    None => absent.push(skill.clone()),
+                }
+            }
             let mut remedies = Vec::new();
-            if !installable.is_empty() {
+            for (skill_source, skills) in &by_source {
                 remedies.push(format!(
                     "run `vstack add {} {scope_flag}--skill {}`",
-                    crate::shell::quote(&entry.source),
-                    installable.join(",")
+                    crate::shell::quote(skill_source),
+                    skills.join(",")
                 ));
             }
             if !absent.is_empty() {
