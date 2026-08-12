@@ -543,6 +543,19 @@ fn install_pi_extension_inner(
     let dest = checked_pi_package_path(&ext.name, global)?;
     let previous_bin_names = installed_bin_names(&dest);
 
+    // Preflight the bin names before anything destructive: catching a collision
+    // inside `install_bin_links` would leave the old package already cleared,
+    // recopied, and its earlier links replaced, with Pi able to load the new
+    // package through its existing settings entry.
+    #[cfg(unix)]
+    {
+        let bin_dir = crate::config::pi_bin_dir(global);
+        for cli_name in ext.bin.keys() {
+            validate_pi_bin_name(cli_name)?;
+            reject_foreign_bin_link(&bin_dir.join(cli_name), cli_name, &dest, &ext.name)?;
+        }
+    }
+
     // Idempotent reinstall: clear any prior copy. NotFound is fine; other
     // errors (EACCES etc.) propagate so we don't copy onto a broken state.
     clear_path(&dest)?;
@@ -2153,6 +2166,48 @@ printf 'module.exports = 1;\n' > node_modules/left-pad/index.js
             install_pi_extension(&ext, false).unwrap().unwrap();
             install_pi_extension(&ext, false).unwrap().unwrap();
         });
+
+        // An update that adds a colliding bin must be refused before the
+        // installed package is cleared and recopied.
+        let installed_marker = project
+            .join(".pi")
+            .join("packages")
+            .join("pi-tooly")
+            .join("bin")
+            .join("tool.js");
+        std::fs::write(source.join("bin").join("other.js"), "#!/usr/bin/env node\n").unwrap();
+        // Changed content: only a refusal that precedes the copy leaves the
+        // installed package holding the original bytes.
+        std::fs::write(source.join("bin").join("tool.js"), "// updated\n").unwrap();
+        std::fs::write(
+            source.join("package.json"),
+            r#"{
+                "name": "pi-tooly",
+                "pi": { "extensions": ["./extensions/ext.ts"] },
+                "bin": { "pi-tool": "./bin/tool.js", "pi-other": "./bin/other.js" }
+            }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            project.join(".pi").join("bin").join("pi-other"),
+            "#!/bin/sh\necho theirs\n",
+        )
+        .unwrap();
+        with_project_root(&project, || {
+            let ext = PiExtension::from_dir(&source).unwrap();
+            let err = install_pi_extension(&ext, false).unwrap_err().to_string();
+            assert!(err.contains("already taken"), "{err}");
+        });
+        assert_eq!(
+            std::fs::read_to_string(&installed_marker).unwrap(),
+            "#!/usr/bin/env node\n",
+            "a refused update must not have replaced the installed package"
+        );
+        assert_eq!(
+            std::fs::read_to_string(project.join(".pi").join("bin").join("pi-other")).unwrap(),
+            "#!/bin/sh\necho theirs\n",
+            "the colliding file must be untouched"
+        );
 
         let _ = std::fs::remove_dir_all(&sandbox);
     }
