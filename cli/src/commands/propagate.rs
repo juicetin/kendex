@@ -637,13 +637,24 @@ fn require_codex_prose_block_matches_source(
             .unwrap_or(path.as_path())
             .display();
         match std::fs::read_to_string(&path) {
-            Ok(body) if body.contains(&expected) => {}
+            Ok(body) if codex_instructions_body(&body).is_some_and(|b| b.contains(&expected)) => {}
             Ok(_) => failures.push(format!(
                 "{display} does not carry the locked safety prose for Codex hook {name}"
             )),
             Err(err) => failures.push(format!("{display} is unreadable: {err}")),
         }
     }
+}
+
+/// The multi-line instructions literal a Codex agent TOML carries — the only
+/// body Codex reads, and where `install_hook_codex_prose` splices the safety
+/// block. Searching the whole file would accept prose sitting in a comment or
+/// another key, which Codex ignores.
+fn codex_instructions_body(agent_toml: &str) -> Option<&str> {
+    let start = agent_toml.find("'''")? + 3;
+    let rest = &agent_toml[start..];
+    let end = rest.find("'''")?;
+    Some(&rest[..end])
 }
 
 /// A translated safety artifact — an OpenCode instruction file, a Cursor rule —

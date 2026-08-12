@@ -222,6 +222,27 @@ pub fn refresh_items_in_scope(
     name_filter: Option<&[String]>,
 ) -> RefreshStats {
     let mut stats = RefreshStats::default();
+    // `MappingConfig::load` falls back to the default mapping when a source's
+    // `vstack.toml` will not parse, so agents would be regenerated without their
+    // authoritative `[agent-skills]`, `[role-skills]`, and `[hook-events]`
+    // assignments — and, with the parse sentinel in the hash, that state would
+    // then be recorded as successfully refreshed. Stop instead.
+    for source in sources {
+        let config_path = source.root.join("vstack.toml");
+        let Ok(content) = std::fs::read_to_string(&config_path) else {
+            continue;
+        };
+        if content.parse::<toml::Value>().is_err() {
+            stats.fail(
+                &config_path.display().to_string(),
+                None,
+                anyhow::anyhow!(
+                    "source mapping will not parse; refusing to regenerate items without their [agent-skills]/[role-skills]/[hook-events] assignments"
+                ),
+            );
+            return stats;
+        }
+    }
     let pass = |name: &str| name_filter.is_none_or(|f| f.iter().any(|n| n == name));
     let all_hooks = all_source_hooks(sources);
 

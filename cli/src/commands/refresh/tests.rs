@@ -1643,3 +1643,60 @@ fn refresh_run_fails_when_an_agent_is_missing_a_declared_skill() {
 
     let _ = std::fs::remove_dir_all(root);
 }
+
+/// `MappingConfig::load` silently defaults on a malformed source `vstack.toml`,
+/// so regenerating would drop every `[agent-skills]`/`[role-skills]`/
+/// `[hook-events]` assignment while the parse sentinel in the hash recorded the
+/// result as satisfied. Refresh must stop instead.
+#[test]
+fn refresh_stops_when_a_source_mapping_will_not_parse() {
+    let root = tmpdir("malformed-source-mapping");
+    let project = root.join("project");
+    let source = make_source(&root, "source");
+    std::fs::create_dir_all(&project).unwrap();
+    write_colliding_source(&source, "1", "PreToolUse", "source-model");
+
+    let mut lock = LockFile::default();
+    lock.add(lock_entry(
+        "rust",
+        ItemKind::Agent,
+        &source,
+        vec!["claude-code"],
+    ));
+    lock.add(lock_entry(
+        "shared",
+        ItemKind::Skill,
+        &source,
+        vec!["claude-code"],
+    ));
+
+    // Control: with a parseable mapping the agent refreshes.
+    let sources = vec![RefreshSource::from_root(&source)];
+    let stats = crate::test_util::with_project_root(&project, || {
+        let mut project_config = ProjectConfig::default();
+        refresh_items_in_scope(false, &lock, &sources, &mut project_config, &project, None)
+    });
+    assert!(stats.successful_items.contains("rust"));
+
+    std::fs::write(source.join("vstack.toml"), "[agent-skills\nrust = broken").unwrap();
+    let sources = vec![RefreshSource::from_root(&source)];
+    let stats = crate::test_util::with_project_root(&project, || {
+        let mut project_config = ProjectConfig::default();
+        refresh_items_in_scope(false, &lock, &sources, &mut project_config, &project, None)
+    });
+    assert!(
+        stats.has_failures(),
+        "a malformed mapping must fail refresh"
+    );
+    assert!(
+        stats.failures[0].error.contains("will not parse"),
+        "{:?}",
+        stats.failures
+    );
+    assert!(
+        stats.successful_items.is_empty(),
+        "nothing may be recorded as refreshed"
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}

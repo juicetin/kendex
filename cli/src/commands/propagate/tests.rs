@@ -3144,7 +3144,7 @@ fn stage_mode_rejects_a_replaced_codex_prose_safety_block() {
         let registration = locked_hook_registration(&entry).unwrap();
         let block = crate::installer::codex_hook_safety_block(&registration.hook);
         let agent = project.join(".codex/agents/rust.toml");
-        write_file(&agent, &format!("instructions = \"\"\"\n{block}\n\"\"\"\n"));
+        write_file(&agent, &format!("instructions = '''\n{block}\n'''\n"));
 
         // No `.codex/hooks/guard.sh`: this is the prose-fallback path.
         let mut failures = Vec::new();
@@ -3154,7 +3154,7 @@ fn stage_mode_rejects_a_replaced_codex_prose_safety_block() {
         // The marker survives while the advisory it carries is gone.
         write_file(
             &agent,
-            "instructions = \"\"\"\n## Safety: guard\n\ndisabled\n\"\"\"\n",
+            "instructions = '''\n## Safety: guard\n\ndisabled\n'''\n",
         );
         let mut failures = Vec::new();
         verify_hook_auxiliary_install("guard", Harness::Codex, Some(&registration), &mut failures);
@@ -3167,7 +3167,22 @@ fn stage_mode_rejects_a_replaced_codex_prose_safety_block() {
 
         // Deleted outright from every agent: marker presence would have read as
         // "no prose fallback here" and passed.
-        write_file(&agent, "instructions = \"\"\"\nnothing here\n\"\"\"\n");
+        write_file(&agent, "instructions = '''\nnothing here\n'''\n");
+        let mut failures = Vec::new();
+        verify_hook_auxiliary_install("guard", Harness::Codex, Some(&registration), &mut failures);
+        assert!(
+            failures
+                .iter()
+                .any(|f| f.contains("does not carry the locked safety prose")),
+            "{failures:?}"
+        );
+
+        // Prose sitting outside the instructions literal is prose Codex never
+        // reads, so it must not satisfy the check.
+        write_file(
+            &agent,
+            &format!("# {block}\\ninstructions = '''\\nnothing here\\n'''\\n"),
+        );
         let mut failures = Vec::new();
         verify_hook_auxiliary_install("guard", Harness::Codex, Some(&registration), &mut failures);
         assert!(
@@ -3178,9 +3193,9 @@ fn stage_mode_rejects_a_replaced_codex_prose_safety_block() {
         );
 
         // The block deleted from one agent while a sibling still carries it.
-        write_file(&agent, &format!("instructions = \"\"\"\n{block}\n\"\"\"\n"));
+        write_file(&agent, &format!("instructions = '''\n{block}\n'''\n"));
         let sibling = project.join(".codex/agents/analyst.toml");
-        write_file(&sibling, "instructions = \"\"\"\nno safety here\n\"\"\"\n");
+        write_file(&sibling, "instructions = '''\nno safety here\n'''\n");
         let mut failures = Vec::new();
         verify_hook_auxiliary_install("guard", Harness::Codex, Some(&registration), &mut failures);
         assert!(
@@ -3206,7 +3221,7 @@ fn stage_mode_rejects_a_native_codex_hook_downgraded_to_prose() {
         let block = crate::installer::codex_hook_safety_block(&registration.hook);
         write_file(
             &project.join(".codex/agents/rust.toml"),
-            &format!("instructions = \"\"\"\n{block}\n\"\"\"\n"),
+            &format!("instructions = '''\n{block}\n'''\n"),
         );
 
         // Script and registration removed, advisory prose left in their place.
