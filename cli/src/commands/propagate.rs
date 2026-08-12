@@ -250,7 +250,9 @@ fn stage_project_paths(pre_refresh_paths: &[PathBuf]) -> Result<()> {
     let mut paths = BTreeSet::new();
     paths.extend(pre_refresh_paths.iter().cloned());
     paths.extend(project_stage_paths(&lock, false)?);
-    let status_paths = managed_paths_from_git_status(&paths)?;
+    let mut ownership_paths = paths.clone();
+    ownership_paths.extend(project_stage_paths(&lock, true)?);
+    let status_paths = managed_paths_from_git_status(&ownership_paths)?;
     paths.extend(status_paths);
     let paths: Vec<PathBuf> = paths.into_iter().collect();
     stage_paths(&paths)
@@ -724,8 +726,10 @@ fn managed_paths_from_git_status(seed_paths: &BTreeSet<PathBuf>) -> Result<Vec<P
     let git = git_project()?;
     let committed_paths = committed_project_stage_paths(&git)?;
     let owned_shared_paths = owned_shared_status_paths(seed_paths, &committed_paths);
-    let status_pathspecs = managed_status_pathspecs(seed_paths, &owned_shared_paths)?;
     let owned_deleted_native_hooks = owned_deleted_native_hook_paths(seed_paths, &committed_paths);
+    let owned_cursor_safety_rules = owned_cursor_safety_rule_paths(seed_paths, &committed_paths);
+    let status_pathspecs =
+        managed_status_pathspecs(seed_paths, &owned_shared_paths, &owned_cursor_safety_rules)?;
     let pi_package_prefixes = pi_package_status_prefixes(seed_paths);
     let top_level_pathspecs: Vec<PathBuf> = status_pathspecs
         .iter()
@@ -775,6 +779,7 @@ fn managed_paths_from_git_status(seed_paths: &BTreeSet<PathBuf>) -> Result<Vec<P
                 &pi_package_prefixes,
                 &owned_shared_paths,
                 &owned_deleted_native_hooks,
+                &owned_cursor_safety_rules,
                 status,
             )
         {
@@ -790,6 +795,15 @@ fn owned_deleted_native_hook_paths(
 ) -> BTreeSet<PathBuf> {
     let mut owned = native_hook_paths_from(seed_paths);
     owned.extend(native_hook_paths_from(committed_paths));
+    owned
+}
+
+fn owned_cursor_safety_rule_paths(
+    seed_paths: &BTreeSet<PathBuf>,
+    committed_paths: &BTreeSet<PathBuf>,
+) -> BTreeSet<PathBuf> {
+    let mut owned = cursor_safety_rule_paths_from(seed_paths);
+    owned.extend(cursor_safety_rule_paths_from(committed_paths));
     owned
 }
 
@@ -822,12 +836,28 @@ fn native_hook_paths_from(paths: &BTreeSet<PathBuf>) -> BTreeSet<PathBuf> {
         .collect()
 }
 
+fn cursor_safety_rule_paths_from(paths: &BTreeSet<PathBuf>) -> BTreeSet<PathBuf> {
+    paths
+        .iter()
+        .filter(|path| is_cursor_safety_rule_path(path))
+        .cloned()
+        .collect()
+}
+
 fn is_native_hook_script_path(path: &Path) -> bool {
     let Some(path_str) = path.to_str() else {
         return false;
     };
     path.extension().is_some_and(|extension| extension == "sh")
         && (path_str.starts_with(".claude/hooks/") || path_str.starts_with(".codex/hooks/"))
+}
+
+fn is_cursor_safety_rule_path(path: &Path) -> bool {
+    let Some(path_str) = path.to_str() else {
+        return false;
+    };
+    path.extension().is_some_and(|extension| extension == "mdc")
+        && path_str.starts_with(".cursor/rules/safety-")
 }
 
 fn pi_package_status_prefixes(seed_paths: &BTreeSet<PathBuf>) -> BTreeSet<PathBuf> {
@@ -884,19 +914,20 @@ fn is_shared_status_path(path: &Path) -> bool {
 fn managed_status_pathspecs(
     seed_paths: &BTreeSet<PathBuf>,
     owned_shared_paths: &BTreeSet<PathBuf>,
+    owned_cursor_safety_rules: &BTreeSet<PathBuf>,
 ) -> Result<Vec<PathBuf>> {
     let mut paths = seed_paths.clone();
     for prefix in pi_package_status_prefixes(seed_paths) {
         paths.insert(prefix);
     }
     paths.extend(owned_shared_paths.iter().cloned());
+    paths.extend(owned_cursor_safety_rules.iter().cloned());
     for path in [
         ".vstack-lock.json",
         "vstack.toml",
         "vstack.settings.toml",
         ".claude/hooks",
         ".codex/hooks",
-        ".cursor/rules",
         ".opencode/instructions",
     ] {
         paths.insert(PathBuf::from(path));
@@ -948,6 +979,7 @@ fn is_managed_status_path(
     pi_package_prefixes: &BTreeSet<PathBuf>,
     owned_shared_paths: &BTreeSet<PathBuf>,
     owned_deleted_native_hooks: &BTreeSet<PathBuf>,
+    owned_cursor_safety_rules: &BTreeSet<PathBuf>,
     status: &[u8],
 ) -> bool {
     let path = path.components().collect::<PathBuf>();
@@ -970,7 +1002,7 @@ fn is_managed_status_path(
         .components()
         .any(|component| component.as_os_str() == OsStr::new("node_modules"));
     (is_pi_package_path && (!is_node_modules_path || status.contains(&b'D')))
-        || path_str.starts_with(".cursor/rules/safety-")
+        || (is_cursor_safety_rule_path(&path) && owned_cursor_safety_rules.contains(&path))
         || path_str.starts_with(".opencode/instructions/vstack-hook-")
         || (status.contains(&b'D')
             && is_native_hook_script_path(&path)

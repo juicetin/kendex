@@ -792,6 +792,18 @@ fn update_cached_repo_strict(display: &str, repo_dir: &Path) -> Result<()> {
             git_output_summary(&reset)
         );
     }
+    let clean = std::process::Command::new("git")
+        .args(["clean", "-ffdx", "--", "."])
+        .current_dir(repo_dir)
+        .stdout(std::process::Stdio::null())
+        .output()
+        .with_context(|| format!("running git clean for cached source {display}"))?;
+    if !clean.status.success() {
+        bail!(
+            "git clean failed for cached source {display}: {}",
+            git_output_summary(&clean)
+        );
+    }
     Ok(())
 }
 

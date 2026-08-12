@@ -481,6 +481,89 @@ fn staging_does_not_stage_shared_configs_without_lock_ownership() {
 }
 
 #[test]
+fn staging_does_not_stage_cursor_safety_rules_without_hook_ownership() {
+    let project = tmpdir("stage-unowned-cursor-rule");
+    std::fs::create_dir_all(&project).unwrap();
+    init_git_project(&project);
+
+    crate::test_util::with_project_root(&project, || {
+        LockFile::default()
+            .save(&config::lock_file_path(false))
+            .unwrap();
+        write_file(
+            &project.join(".cursor/rules/safety-consumer.mdc"),
+            "consumer rule\n",
+        );
+
+        stage_project_paths(&[]).unwrap();
+
+        let staged = git_output(&project, &["diff", "--cached", "--name-only"]);
+        assert!(staged.contains(".vstack-lock.json\n"), "{staged}");
+        assert!(
+            !staged.contains(".cursor/rules/safety-consumer.mdc"),
+            "{staged}"
+        );
+    });
+}
+
+#[test]
+fn staging_records_owned_cursor_safety_rules() {
+    let project = tmpdir("stage-owned-cursor-rule");
+    std::fs::create_dir_all(&project).unwrap();
+    init_git_project(&project);
+
+    crate::test_util::with_project_root(&project, || {
+        let mut lock = LockFile::default();
+        lock.add(lock_entry("guard", ItemKind::Hook, &["cursor"]));
+        lock.save(&config::lock_file_path(false)).unwrap();
+        write_file(
+            &project.join(".cursor/rules/safety-guard.mdc"),
+            "managed cursor hook\n",
+        );
+
+        stage_project_paths(&[]).unwrap();
+
+        let staged = git_output(&project, &["diff", "--cached", "--name-only"]);
+        assert!(
+            staged.contains(".cursor/rules/safety-guard.mdc\n"),
+            "{staged}"
+        );
+    });
+}
+
+#[test]
+fn retry_staging_records_deleted_owned_cursor_safety_rules_from_committed_lock() {
+    let project = tmpdir("stage-deleted-cursor-rule");
+    std::fs::create_dir_all(&project).unwrap();
+    init_git_project(&project);
+
+    crate::test_util::with_project_root(&project, || {
+        let mut lock = LockFile::default();
+        lock.add(lock_entry("guard", ItemKind::Hook, &["cursor"]));
+        lock.save(&config::lock_file_path(false)).unwrap();
+        write_file(
+            &project.join(".cursor/rules/safety-guard.mdc"),
+            "managed cursor hook\n",
+        );
+        git(&project, &["add", "-A"]);
+        git(&project, &["commit", "-m", "baseline"]);
+
+        LockFile::default()
+            .save(&config::lock_file_path(false))
+            .unwrap();
+        std::fs::remove_file(project.join(".cursor/rules/safety-guard.mdc")).unwrap();
+
+        stage_project_paths(&[]).unwrap();
+        let staged = git_output(&project, &["diff", "--cached", "--name-status"]);
+        assert!(staged.contains("M\t.vstack-lock.json"), "{staged}");
+        assert!(
+            staged.contains("D\t.cursor/rules/safety-guard.mdc"),
+            "{staged}"
+        );
+    });
+}
+
+#[test]
 fn staging_pre_refresh_paths_records_refresh_deletions() {
     let project = tmpdir("stage-delete-project");
     std::fs::create_dir_all(&project).unwrap();

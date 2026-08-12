@@ -571,6 +571,46 @@ fn clone_or_update_remote_source_at_clones_updates_and_fails_closed() {
 }
 
 #[test]
+fn cached_repo_update_removes_untracked_worktree_files() {
+    let root = TempDir::new("remote-cache-clean");
+    let remote = root.path().join("remote.git");
+    let source = root.path().join("source");
+    let cache = root.path().join("cache").join("owner_repo");
+    std::fs::create_dir_all(root.path()).unwrap();
+    git(root.path(), &["init", "--bare", remote.to_str().unwrap()]);
+
+    init_git_repo(&source);
+    write_skill(&source, "v1\n");
+    git(&source, &["add", "."]);
+    git(&source, &["commit", "-m", "initial"]);
+    git(
+        &source,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    git(&source, &["push", "origin", "main"]);
+    git(&remote, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+
+    let remote_url = remote.to_string_lossy().to_string();
+    clone_or_update_remote_source_at("owner/repo", "owner/repo", &remote_url, &cache).unwrap();
+    let stale = cache.join("skills/stale/SKILL.md");
+    std::fs::create_dir_all(stale.parent().unwrap()).unwrap();
+    std::fs::write(&stale, "---\nname: stale\ndescription: Stale\n---\n").unwrap();
+    assert!(stale.exists(), "negative control: stale file must exist");
+
+    clone_or_update_remote_source_at("owner/repo", "owner/repo", &remote_url, &cache).unwrap();
+
+    assert!(
+        !stale.exists(),
+        "refreshed cache kept untracked source file"
+    );
+    assert!(
+        cache.join(".git").is_dir(),
+        "git metadata must be preserved"
+    );
+    assert!(cache.join("skills/demo/SKILL.md").exists());
+}
+
+#[test]
 fn legacy_remote_cache_is_used_without_moving_after_origin_validation() {
     let root = TempDir::new("remote-cache-migration");
     let remote = root.path().join("remote.git");
