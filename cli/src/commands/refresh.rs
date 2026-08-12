@@ -351,12 +351,17 @@ pub fn refresh_items_in_scope(
             // Recorded, not merely printed: callers gate on `has_missing()`, so
             // a warning alone would let a summary report success while the
             // agent was regenerated without a dependency it declares.
+            // `vstack add` takes its positional argument as the source and
+            // selects skills through `--skill`, comma-separated; a global
+            // refresh needs `--global` too. Rendering anything else hands the
+            // consumer a command that cannot resolve.
+            let scope_flag = if global { "--global " } else { "" };
             stats.mark_incomplete(
                 name,
                 format!(
-                    "requires skill(s) not installed: {}; run `vstack add {}`",
+                    "requires skill(s) not installed: {}; run `vstack add {scope_flag}--skill {}`",
                     missing.join(", "),
-                    missing.join(" ")
+                    missing.join(",")
                 ),
             );
         }

@@ -1485,6 +1485,13 @@ fn refresh_withholds_agent_success_when_a_declared_skill_is_not_installed() {
         stats.has_incomplete(),
         "and must be recorded, not just printed"
     );
+    // The advertised recovery command has to be one `vstack add` can parse:
+    // the positional argument is the source, skills come through `--skill`.
+    let reason = stats.incomplete.get("rust").unwrap();
+    assert!(
+        reason.contains("vstack add --skill never-shipped"),
+        "{reason}"
+    );
 
     let _ = std::fs::remove_dir_all(root);
 }
