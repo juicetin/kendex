@@ -50,12 +50,18 @@ fn write_agent_skill_source(root: &Path, role_skills: bool) {
     std::fs::write(root.join("vstack.toml"), mapping).unwrap();
 }
 
+/// The exact bytes the installer copies to `.claude/hooks/<name>.sh` and
+/// `.codex/hooks/<name>.sh` — the whole source file, frontmatter included.
+fn hook_script_contents(name: &str) -> String {
+    format!(
+        "# ---\n# name: {name}\n# event: PreToolUse\n# matcher: Bash\n# description: Guard shell commands\n# safety: Keep shell commands safe\n# ---\n#!/bin/sh\nexit 0\n"
+    )
+}
+
 fn write_hook_source(root: &Path, name: &str) {
     write_file(
         &root.join("hooks").join(format!("{name}.sh")),
-        &format!(
-            "# ---\n# name: {name}\n# event: PreToolUse\n# matcher: Bash\n# description: Guard shell commands\n# safety: Keep shell commands safe\n# ---\n#!/bin/sh\nexit 0\n"
-        ),
+        &hook_script_contents(name),
     );
 }
 
@@ -1867,7 +1873,7 @@ fn stage_mode_fails_before_staging_when_claude_hook_settings_missing() {
         lock.save(&config::lock_file_path(false)).unwrap();
         write_file(
             &project.join(".claude/hooks/guard.sh"),
-            "#!/bin/sh\nexit 0\n",
+            &hook_script_contents("guard"),
         );
         write_file(
             &project.join(".claude/settings.json"),
@@ -1904,7 +1910,7 @@ fn stage_mode_fails_before_staging_when_codex_hooks_registry_missing() {
         lock.save(&config::lock_file_path(false)).unwrap();
         write_file(
             &project.join(".codex/hooks/guard.sh"),
-            "#!/bin/sh\nexit 0\n",
+            &hook_script_contents("guard"),
         );
         write_file(
             &project.join(".codex/hooks.json"),
@@ -2105,7 +2111,7 @@ fn stage_mode_fails_before_staging_when_codex_hooks_feature_is_off() {
         lock.save(&config::lock_file_path(false)).unwrap();
         write_file(
             &project.join(".codex/hooks/guard.sh"),
-            "#!/bin/sh\nexit 0\n",
+            &hook_script_contents("guard"),
         );
         write_file(
             &project.join(".codex/hooks.json"),
@@ -2357,7 +2363,7 @@ fn stage_mode_rejects_a_codex_hooks_feature_written_as_a_string() {
         lock.save(&config::lock_file_path(false)).unwrap();
         write_file(
             &project.join(".codex/hooks/guard.sh"),
-            "#!/bin/sh\nexit 0\n",
+            &hook_script_contents("guard"),
         );
         write_file(
             &project.join(".codex/hooks.json"),
@@ -2404,7 +2410,7 @@ fn stage_mode_rejects_a_hook_path_that_is_not_a_live_command_handler() {
         lock.save(&config::lock_file_path(false)).unwrap();
         write_file(
             &project.join(".claude/hooks/guard.sh"),
-            "#!/bin/sh\nexit 0\n",
+            &hook_script_contents("guard"),
         );
         // The script path appears only in an unrelated metadata string, so the
         // harness will never invoke it.
@@ -2503,7 +2509,7 @@ fn stage_mode_refuses_when_a_shared_config_file_already_carried_consumer_edits()
         lock.save(&config::lock_file_path(false)).unwrap();
         write_file(
             &project.join(".claude/hooks/guard.sh"),
-            "#!/bin/sh\nexit 0\n",
+            &hook_script_contents("guard"),
         );
         write_file(
             &project.join(".claude/settings.json"),
@@ -2818,7 +2824,7 @@ fn no_drift_stage_path_refuses_pre_existing_shared_config_edits() {
         lock.save(&config::lock_file_path(false)).unwrap();
         write_file(
             &project.join(".claude/hooks/guard.sh"),
-            "#!/bin/sh\nexit 0\n",
+            &hook_script_contents("guard"),
         );
         let command = crate::installer::claude_project_hook_command("guard");
         write_file(
@@ -2895,5 +2901,62 @@ fn stage_mode_refuses_pre_existing_edits_to_project_owned_skills() {
             vec![PathBuf::from(".agents/skills/house-rules/SKILL.md")]
         );
         assert!(refuse_pre_existing_shared_config_edits(&dirty).is_err());
+    });
+}
+
+#[test]
+fn stage_mode_rejects_a_locally_edited_managed_hook_script() {
+    let project = tmpdir("stage-edited-hook-script");
+    let source = tmpdir("stage-edited-hook-script-source");
+    std::fs::create_dir_all(&project).unwrap();
+    init_git_project(&project);
+    write_hook_source(&source, "guard");
+
+    crate::test_util::with_project_root(&project, || {
+        let mut entry = hook_entry("guard", &source, &["claude-code"]);
+        entry.source_hash = config::compute_source_hash(&entry);
+        let mut lock = LockFile::default();
+        lock.add(entry);
+        lock.save(&config::lock_file_path(false)).unwrap();
+        write_file(
+            &project.join(".claude/hooks/guard.sh"),
+            &hook_script_contents("guard"),
+        );
+        let command = crate::installer::claude_project_hook_command("guard");
+        write_file(
+            &project.join(".claude/settings.json"),
+            &serde_json::json!({
+                "hooks": {
+                    "PreToolUse": [{
+                        "matcher": "Bash",
+                        "hooks": [{ "type": "command", "command": command }]
+                    }]
+                }
+            })
+            .to_string(),
+        );
+        git(&project, &["add", "-A"]);
+        git(&project, &["commit", "-m", "baseline"]);
+
+        // Control: the untouched install stages fine.
+        run(ScopeFilter::Project, false, false, true, true).unwrap();
+        git(&project, &["reset"]);
+
+        // The body is neutered while the source and lock hash are unchanged and
+        // the registration still points at it.
+        write_file(
+            &project.join(".claude/hooks/guard.sh"),
+            &hook_script_contents("guard").replace("exit 0", "exit 0 # disabled"),
+        );
+
+        let err = run(ScopeFilter::Project, false, false, true, true)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("auxiliary verification failed"), "{err}");
+        assert!(err.contains("does not match the locked script"), "{err}");
+        assert!(
+            git_output(&project, &["diff", "--cached", "--name-only"]).is_empty(),
+            "nothing may be staged"
+        );
     });
 }

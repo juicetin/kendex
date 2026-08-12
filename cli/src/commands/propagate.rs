@@ -219,6 +219,12 @@ fn verify_hook_auxiliary_install(
                 .join("hooks")
                 .join(format!("{name}.sh"));
             if config::project_root().join(&script).exists() {
+                require_installed_hook_script_matches_source(
+                    &script,
+                    registration,
+                    &format!("Claude hook {name}"),
+                    failures,
+                );
                 require_hook_command_registration(
                     Path::new(".claude").join("settings.json").as_path(),
                     &crate::installer::claude_project_hook_command(name),
@@ -231,6 +237,12 @@ fn verify_hook_auxiliary_install(
         Harness::Codex => {
             let script = Path::new(".codex").join("hooks").join(format!("{name}.sh"));
             if config::project_root().join(&script).exists() {
+                require_installed_hook_script_matches_source(
+                    &script,
+                    registration,
+                    &format!("Codex hook {name}"),
+                    failures,
+                );
                 require_hook_command_registration(
                     Path::new(".codex").join("hooks.json").as_path(),
                     &crate::installer::codex_project_hook_command(name),
@@ -306,6 +318,9 @@ fn opencode_config_lists_instruction(json: &serde_json::Value, expected: &str) -
 struct LockedHookRegistration {
     event: String,
     matcher: Option<String>,
+    /// The script body the installer writes verbatim to
+    /// `.claude/hooks/<name>.sh` and `.codex/hooks/<name>.sh`.
+    script: String,
 }
 
 fn locked_hook_registration(entry: &config::LockEntry) -> Option<LockedHookRegistration> {
@@ -317,6 +332,7 @@ fn locked_hook_registration(entry: &config::LockEntry) -> Option<LockedHookRegis
         .map(|hook| LockedHookRegistration {
             event: hook.event,
             matcher: hook.matcher,
+            script: hook.script,
         })
 }
 
@@ -475,6 +491,36 @@ fn pi_bin_link_failure(
         ));
     }
     None
+}
+
+/// The installer writes a native hook script verbatim from its source
+/// definition, so any difference on disk is a local edit — a body replaced or
+/// commented out still passes an existence check and still registers, and
+/// staging would commit the disabled script into an automated PR. Compared
+/// byte for byte against the source; an unreadable source fails closed, the
+/// same way the event check does.
+fn require_installed_hook_script_matches_source(
+    relative: &Path,
+    registration: Option<&LockedHookRegistration>,
+    label: &str,
+    failures: &mut Vec<String>,
+) {
+    let Some(registration) = registration else {
+        failures.push(format!(
+            "cannot read the locked script for {label} from its source; refusing to verify {}",
+            relative.display()
+        ));
+        return;
+    };
+    let path = config::project_root().join(relative);
+    match std::fs::read_to_string(&path) {
+        Ok(installed) if installed == registration.script => {}
+        Ok(_) => failures.push(format!(
+            "{} does not match the locked script for {label}",
+            relative.display()
+        )),
+        Err(err) => failures.push(format!("{} is unreadable: {err}", relative.display())),
+    }
 }
 
 /// Require the exact command the installer writes to be live in the harness
