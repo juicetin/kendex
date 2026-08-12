@@ -3153,5 +3153,19 @@ fn stage_mode_rejects_a_replaced_codex_prose_safety_block() {
                 .any(|f| f.contains("does not carry the locked safety prose")),
             "{failures:?}"
         );
+
+        // The block deleted outright from one agent while a sibling still
+        // carries it: marker-bearing files alone would never see this.
+        write_file(&agent, &format!("instructions = \"\"\"\n{block}\n\"\"\"\n"));
+        let sibling = project.join(".codex/agents/analyst.toml");
+        write_file(&sibling, "instructions = \"\"\"\nno safety here\n\"\"\"\n");
+        let mut failures = Vec::new();
+        verify_hook_auxiliary_install("guard", Harness::Codex, Some(&registration), &mut failures);
+        assert!(
+            failures
+                .iter()
+                .any(|f| f.contains("analyst.toml") && f.contains("locked safety prose")),
+            "{failures:?}"
+        );
     });
 }

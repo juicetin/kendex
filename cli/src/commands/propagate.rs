@@ -595,17 +595,20 @@ fn require_codex_prose_block_matches_source(
         return;
     };
     let marker = format!("## Safety: {name}");
-    let mut carriers = Vec::new();
+    let mut agents = Vec::new();
+    let mut any_carrier = false;
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().is_none_or(|ext| ext != "toml") {
             continue;
         }
-        if std::fs::read_to_string(&path).is_ok_and(|body| body.contains(&marker)) {
-            carriers.push(path);
-        }
+        any_carrier |= std::fs::read_to_string(&path).is_ok_and(|body| body.contains(&marker));
+        agents.push(path);
     }
-    if carriers.is_empty() {
+    // The fallback applies to every installed Codex agent, so a block deleted
+    // from one of them is a broken install even while its siblings still carry
+    // it. Checking only marker-bearing files would never see that deletion.
+    if agents.is_empty() || !any_carrier {
         return;
     }
     let Some(registration) = registration else {
@@ -615,7 +618,7 @@ fn require_codex_prose_block_matches_source(
         return;
     };
     let expected = crate::installer::codex_hook_safety_block(&registration.hook);
-    for path in carriers {
+    for path in agents {
         let carries_block =
             std::fs::read_to_string(&path).is_ok_and(|body| body.contains(&expected));
         if !carries_block {

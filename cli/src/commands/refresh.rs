@@ -368,12 +368,19 @@ pub fn refresh_items_in_scope(
             // selects skills through `--skill`, comma-separated; a global
             // refresh needs `--global` too. Rendering anything else hands the
             // consumer a command that cannot resolve.
+            // `vstack add` resolves its catalog from the positional source, and
+            // without one it prefers the project's selected source (global
+            // recovery does not consult the global lock at all) — which can be a
+            // different catalog than the one that declared the skill. Name the
+            // entry's own source so the command searches where the declaration
+            // came from.
             let scope_flag = if global { "--global " } else { "" };
             stats.mark_incomplete(
                 name,
                 format!(
-                    "requires skill(s) not installed: {}; run `vstack add {scope_flag}--skill {}`",
+                    "requires skill(s) not installed: {}; run `vstack add {} {scope_flag}--skill {}`",
                     missing.join(", "),
+                    entry.source,
                     missing.join(",")
                 ),
             );

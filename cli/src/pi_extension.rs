@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
@@ -720,6 +720,7 @@ fn install_bin_links(ext: &PiExtension, package_dest: &Path, global: bool) -> Re
             continue;
         }
         let link = bin_dir.join(cli_name);
+        reject_foreign_bin_link(&link, cli_name, package_dest, &ext.name)?;
         let _ = std::fs::remove_file(&link);
         #[cfg(unix)]
         {
@@ -738,6 +739,39 @@ fn install_bin_links(ext: &PiExtension, package_dest: &Path, global: bool) -> Re
         }
     }
     Ok(())
+}
+
+/// Refuse to take over a `bin` name that something else already owns. Removing
+/// the path unconditionally silently replaced a consumer's own file or another
+/// package's command — and on a platform without symlink support it deleted the
+/// path with nothing put back. Only an absent path, or a link already resolving
+/// into this package, may be replaced.
+fn reject_foreign_bin_link(
+    link: &Path,
+    cli_name: &str,
+    package_dest: &Path,
+    package_name: &str,
+) -> Result<()> {
+    let Ok(meta) = std::fs::symlink_metadata(link) else {
+        return Ok(());
+    };
+    let owned = meta.file_type().is_symlink()
+        && std::fs::read_link(link).is_ok_and(|target| {
+            let resolved = if target.is_absolute() {
+                target
+            } else {
+                link.parent().unwrap_or(Path::new(".")).join(target)
+            };
+            crate::installer::normalize_absolute_path(&resolved)
+                .starts_with(crate::installer::normalize_absolute_path(package_dest))
+        });
+    if owned {
+        return Ok(());
+    }
+    bail!(
+        "bin name {cli_name} is already taken by something Pi package {package_name} does not own; remove or rename {} first",
+        link.display()
+    )
 }
 
 /// Relative target for a project-scope `.pi/bin/<cmd>` link.
@@ -2070,6 +2104,55 @@ printf 'module.exports = 1;\n' > node_modules/left-pad/index.js
         let unreadable = sandbox.join("dir-in-the-way");
         std::fs::create_dir_all(&unreadable).unwrap();
         assert!(append_system_has_managed_block(&unreadable).is_err());
+
+        let _ = std::fs::remove_dir_all(&sandbox);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn install_refuses_a_bin_name_owned_by_something_else() {
+        let sandbox =
+            std::env::temp_dir().join(format!("vstack_pi_bin_collision_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&sandbox);
+        let source = sandbox.join("src").join("pi-tooly");
+        std::fs::create_dir_all(source.join("bin")).unwrap();
+        std::fs::create_dir_all(source.join("extensions")).unwrap();
+        std::fs::write(source.join("extensions").join("ext.ts"), "// noop\n").unwrap();
+        std::fs::write(source.join("bin").join("tool.js"), "#!/usr/bin/env node\n").unwrap();
+        std::fs::write(
+            source.join("package.json"),
+            r#"{
+                "name": "pi-tooly",
+                "pi": { "extensions": ["./extensions/ext.ts"] },
+                "bin": { "pi-tool": "./bin/tool.js" }
+            }"#,
+        )
+        .unwrap();
+
+        let project = sandbox.join("project");
+        std::fs::create_dir_all(project.join(".pi").join("bin")).unwrap();
+        // A consumer's own file already occupies the command name.
+        let occupied = project.join(".pi").join("bin").join("pi-tool");
+        std::fs::write(&occupied, "#!/bin/sh\necho mine\n").unwrap();
+
+        with_project_root(&project, || {
+            let ext = PiExtension::from_dir(&source).unwrap();
+            let err = install_pi_extension(&ext, false).unwrap_err().to_string();
+            assert!(err.contains("already taken"), "{err}");
+        });
+        assert_eq!(
+            std::fs::read_to_string(&occupied).unwrap(),
+            "#!/bin/sh\necho mine\n",
+            "the consumer's file must survive the refusal"
+        );
+
+        // Its own prior link is replaceable: reinstall must stay idempotent.
+        std::fs::remove_file(&occupied).unwrap();
+        with_project_root(&project, || {
+            let ext = PiExtension::from_dir(&source).unwrap();
+            install_pi_extension(&ext, false).unwrap().unwrap();
+            install_pi_extension(&ext, false).unwrap().unwrap();
+        });
 
         let _ = std::fs::remove_dir_all(&sandbox);
     }

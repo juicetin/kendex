@@ -1489,7 +1489,10 @@ fn refresh_withholds_agent_success_when_a_declared_skill_is_not_installed() {
     // the positional argument is the source, skills come through `--skill`.
     let reason = stats.incomplete.get("rust").unwrap();
     assert!(
-        reason.contains("vstack add --skill never-shipped"),
+        reason.contains(&format!(
+            "vstack add {} --skill never-shipped",
+            source.display()
+        )),
         "{reason}"
     );
 
