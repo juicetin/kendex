@@ -94,6 +94,23 @@ EXIT_NO_SCOPE=3
 EXIT_NO_REVIEW=4
 EXIT_CLI_FAILED=5
 
+# The containing directory of a path, without `dirname`. --output is caller
+# input and may legitimately begin with '-', which dirname parses as options —
+# and the `--` end-of-options marker is not available here, because BSD dirname
+# can reject it on the macOS Bash 3.2 support target. Parameter expansion has
+# neither problem. Mirrors dirname for the cases that reach it: no slash yields
+# ".", a root-level path yields "/".
+path_dir() {
+  local path="$1" dir="${1%/*}"
+  if [[ "$dir" == "$path" ]]; then
+    printf '%s' "."
+  elif [[ -z "$dir" ]]; then
+    printf '%s' "/"
+  else
+    printf '%s' "$dir"
+  fi
+}
+
 # --- Help ---------------------------------------------------------------------
 
 show_help() {
@@ -674,20 +691,42 @@ if $MULTI_LANE; then
   # is empty, and pins the SAME resolved range for every lane.
   derive_review_scope "$CWD" "$RANGE"
 
+  # Lane scratch has one owner and one rule (VST-221): LANE_TMP_DIR is the only
+  # directory this run creates, and it holds nothing but the per-lane stderr
+  # captures — so removing it, by the cleanup below at exit or by an outsider
+  # mid-run, can only ever cost a log replay. A lane's REVIEW is never in it:
+  # with --output it is the durable sibling <output>.<lane>.json, without one it
+  # is a plain temp file this parent creates and removes, on the same footing as
+  # every other mktemp file here. And the parent holds each lane's review in
+  # memory from the moment that lane is reaped, so nothing it still needs is on
+  # disk after the reap either.
   LANE_TMP_DIR=$(mktemp -d)
+  LANE_TMP_FILES=()
   LANE_PIDS=()
   # On any exit — including INT/TERM — kill still-running lane children before
   # cleanup: an interrupted parent must not leave external model CLIs running
   # (and billing) in the background, writing orphaned sidecars.
   cleanup_lanes() {
-    local pid
+    local pid art
     for pid in ${LANE_PIDS[@]+"${LANE_PIDS[@]}"}; do
       kill "$pid" 2>/dev/null || true
     done
     if [[ ${#LANE_PIDS[@]} -gt 0 ]]; then
       wait ${LANE_PIDS[@]+"${LANE_PIDS[@]}"} 2>/dev/null || true
     fi
-    rm -rf "$LANE_TMP_DIR"
+    # Never let cleanup decide the run's exit status: rm still fails on an
+    # entry it cannot unlink (something under a directory the run cannot write,
+    # a foreign-owned file in a sticky /tmp), and inside this EXIT trap that
+    # failure would both override a delivered two-lane union with a non-zero
+    # status and skip everything below it. Every command in this trap is
+    # guarded for that reason.
+    rm -rf "$LANE_TMP_DIR" || true
+    # Stdout-mode lane artifacts plus each child's own sidecar family
+    # (<art>.noreview.json, <art>.raw.txt, …): the mktemp name makes the glob
+    # unambiguous, and a glob that matches nothing is a no-op for rm -f.
+    for art in ${LANE_TMP_FILES[@]+"${LANE_TMP_FILES[@]}"}; do
+      rm -f "$art" "$art".* || true
+    done
   }
   trap 'cleanup_lanes' EXIT
   trap 'exit 130' INT
@@ -697,50 +736,219 @@ if $MULTI_LANE; then
   # left by a PREVIOUS run at the same path would read as a fresh pass to a
   # caller that continues past the advisory failure. Clear it before lanes
   # spawn.
+  # --output is caller input and may begin with '-', which every one of these
+  # utilities would parse as options: `--` marks the end of options, and
+  # path_dir stands in for dirname, which cannot take that marker portably.
   if [[ -n "$OUTPUT_PATH" ]]; then
-    mkdir -p "$(dirname "$OUTPUT_PATH")"
-    rm -f "$OUTPUT_PATH"
+    mkdir -p -- "$(path_dir "$OUTPUT_PATH")"
+    rm -f -- "$OUTPUT_PATH"
   fi
 
   SELF="$SCRIPT_DIR/$(basename -- "${BASH_SOURCE[0]}")"
   LANE_OUTS=()
   LANE_ERRS=()
+  # Lane children write their sidecar families (.raw.txt, .retry.txt,
+  # .noreview.json, .failed.json) beside the artifact path they are handed,
+  # with plain `printf > path`, so they carry the ambient umask — and in stdout
+  # mode that path is in the TMPDIR root, where 0644 leaves the model's raw
+  # review of the reviewed repository readable by every local user for the life
+  # of the run. Spawn the children owner-only; restored before the union write
+  # so the caller's own --output artifact keeps the caller's umask.
+  LANE_UMASK_PREV=$(umask)
+  umask 077
   for lane in "${REVIEW_LANES[@]}"; do
     if [[ -n "$OUTPUT_PATH" ]]; then
       lane_out="${OUTPUT_PATH}.${lane}.json"
+      # Same policy as the stale union artifact above, applied to this lane's
+      # family: a previous run's lane artifact is misleading whether or not
+      # this run overwrites it, and the umask only governs files the child
+      # CREATES — writing through a surviving inode keeps that inode's old
+      # mode, so a family left at 0644 would stay world-readable through every
+      # later run. Unremovable here means the artifact family cannot be
+      # guaranteed clean, which is worth failing on before any model spend.
+      #
+      # Every suffix the recursive writer can produce, enumerated rather than
+      # globbed: this path is the CALLER's, so `"$lane_out".*` would also take
+      # anything else of theirs that happens to sit under this prefix. (The
+      # same glob in cleanup_lanes is safe because it runs on a random mktemp
+      # name that cannot collide with a caller's file.) Keep in step with
+      # preserve_cli_failure_and_fail, preserve_raw_and_fail and
+      # preserve_no_review_and_fail, the only writers of these sidecars.
+      rm -f -- "$lane_out" \
+        "$lane_out.raw.txt" "$lane_out.retry.txt" "$lane_out.failed.json" \
+        "$lane_out.noreview.json" "$lane_out.incomplete.json"
     else
-      lane_out="$LANE_TMP_DIR/lane-${lane}.json"
+      lane_out=$(mktemp)
+      LANE_TMP_FILES+=("$lane_out")
     fi
     lane_err="$LANE_TMP_DIR/lane-${lane}.stderr"
-    "$SELF" review --target "$lane" --range "$REVIEW_RANGE" --cwd "$CWD" \
-      --timeout "$TIMEOUT" --output "$lane_out" >/dev/null 2>"$lane_err" &
+    # The capture exists only so the lane's log can be replayed, so it must
+    # never be able to stop the lane from running. A redirection named on the
+    # launch itself is performed by the forked child BEFORE the command runs:
+    # if the scratch directory has gone by then — the same actor this whole
+    # change is about, and every lane after the first is exposed for as long as
+    # the fan-out takes — the child dies without ever reviewing, and scratch
+    # loss costs a VERDICT rather than a log.
+    #
+    # So the lane opens the capture itself, in its own process, with a fallback
+    # that cannot fail, and hands the result to the review as an already-open
+    # descriptor: duplicating an open fd cannot fail no matter what happens to
+    # the directory afterwards. fd 4 parks the real stderr for the duration of
+    # the attempt so bash's own open error does not reach the operator
+    # unattributed; the loss is reported in the same shape as the other capture
+    # losses instead.
+    (
+      exec 4>&2 2>/dev/null
+      if exec 3>"$lane_err"; then
+        exec 2>&4 4>&-
+      else
+        exec 3>/dev/null 2>&4 4>&-
+        echo "→ lane stderr capture could not be opened — log replay lost: $lane" >&2
+      fi
+      exec "$SELF" review --target "$lane" --range "$REVIEW_RANGE" --cwd "$CWD" \
+        --timeout "$TIMEOUT" --output "$lane_out" >/dev/null 2>&3 3>&-
+    ) &
     LANE_PIDS+=($!)
     LANE_OUTS+=("$lane_out")
     LANE_ERRS+=("$lane_err")
   done
+  umask "$LANE_UMASK_PREV"
+
+  # Gate every lane artifact on the shape the union merge actually consumes.
+  # A zero exit and a parse are not enough: the merge adds `{source: …}` to
+  # each finding, iterates questions, lowercases locations and concatenates
+  # summaries, so a top-level-complete artifact carrying `blockers: ["bad"]`
+  # parses fine and then aborts the merge under `set -e` — no union at all,
+  # even though the other lane returned a perfectly good review. Rejecting it
+  # here keeps that lane's failure local (exit 4, coverage degraded) and lets
+  # the healthy lanes publish. Slurped, so a stream of several JSON values is
+  # refused too rather than smuggling extra lanes into the merge.
+  LANE_WRAP_JQ='
+    def bad(m): error("invalid review artifact: " + m);
+    def check(k):
+      if (.[k] | type) != "array" then bad(k + " is not an array")
+      elif any(.[k][]; type != "object") then bad(k + " holds a non-object entry")
+      elif any(.[k][]; .location != null and (.location | type) != "string")
+        then bad(k + " holds a non-string location")
+      else . end;
+    if length == 0 then bad("artifact holds no JSON value at all")
+    elif length > 1 then bad("artifact holds " + (length | tostring) + " JSON values, expected one")
+    else .[0] end
+    | if type != "object" then bad("artifact is not a JSON object")
+      elif (.questions | type) != "array" then bad("questions is not an array")
+      elif .summary != null and (.summary | type) != "string" then bad("summary is not a string")
+      else check("blockers") | check("suggestions") end
+    | {target: $target, review: .}'
 
   LANES_FAILED_JSON="[]"
-  OK_WRAP_FILES=()
+  LANE_WRAPS=()
   ANY_LANE_EXIT4=false
   for i in "${!LANE_PIDS[@]}"; do
     lane="${REVIEW_LANES[$i]}"
     lane_rc=0
     wait "${LANE_PIDS[$i]}" || lane_rc=$?
     # Replay the lane's stderr with a lane prefix so parallel logs stay
-    # attributable in sequential order.
-    sed "s/^/[${lane}] /" "${LANE_ERRS[$i]}" >&2 || true
+    # attributable in sequential order. The stderr capture is scratch: when it
+    # is gone (VST-221 — the reviewed repo's own agent CLI, a sandbox, or a tmp
+    # reaper can clear scratch while lanes run) the log is lost and nothing
+    # else is. Branch on the read ITSELF rather than a prior -r test: a capture
+    # removed between the test and the read would otherwise emit the bare
+    # "can't read" error this branch exists to replace. The one message covers
+    # removal before and during the read, states the observed condition instead
+    # of an inferred cause, and never colours the lane's own verdict.
+    #
+    # Redirection order below is load-bearing: fd1 must be duplicated from the
+    # REAL stderr BEFORE fd2 is silenced. Written the other way round
+    # (2>/dev/null first) `>&2` dupes fd1 from the already-silenced fd2 and the
+    # whole replay — an operator's only view of a lane's cause text, and how
+    # exit 5 is diagnosed — goes to /dev/null on the success path, where no
+    # verdict assertion would ever notice. The `jq … 2>&1 >/dev/null` capture
+    # further down wants the opposite order and is correct as written.
+    if ! sed "s/^/[${lane}] /" "${LANE_ERRS[$i]}" >&2 2>/dev/null; then
+      echo "→ lane stderr replay unavailable (scratch capture unreadable): $lane" >&2
+    fi
     lane_ok=false
+    # Read the artifact ONCE, into memory (VST-221). Everything downstream —
+    # the wrap, and the cause reported when the wrap is refused — works on
+    # those same bytes, so a test-then-read pair can no longer straddle the
+    # mid-run clearing this fix is about, and the reported cause is always the
+    # one that actually rejected the lane rather than whatever a later re-read
+    # happens to find (an artifact removed a moment after being rejected as
+    # malformed would otherwise be explained as "No such file or directory").
+    # Which failure class a lane lands in is decided by what it WROTE, so the
+    # test is the artifact's size on disk. A shell string cannot stand in for
+    # that: command substitution cannot hold NUL bytes, so an artifact holding
+    # only a NUL would read back as the empty string and be called
+    # never-answered even though the lane did produce a byte — and the contract
+    # is that the line between the classes is whether any bytes exist at all.
+    # Testing before reading cannot revive the older hazard: an artifact that
+    # vanishes between the two lands in answered-unusably, because the gate
+    # then has nothing to parse, and never in never-answered.
+    lane_raw=""
     if [[ $lane_rc -eq 0 && -s "${LANE_OUTS[$i]}" ]]; then
-      wrap="$LANE_TMP_DIR/wrap-${lane}.json"
-      # A zero exit with a non-empty file is not proof of a valid artifact —
-      # jq must parse it, or the merge would abort on one corrupt lane.
-      if jq --arg target "$lane" '{target: $target, review: .}' "${LANE_OUTS[$i]}" > "$wrap" 2>/dev/null; then
-        OK_WRAP_FILES+=("$wrap")
+      # Read through a redirection, not a path operand: the lane artifact's
+      # name carries the caller's --output value, which may begin with '-' and
+      # would otherwise be parsed as options — the lane would then look like it
+      # exited 0 having produced nothing. A redirection has no such parsing,
+      # and needs no `--` marker to be portable. The sentinel keeps the gate's
+      # input faithful to the file, which command substitution would otherwise
+      # shorten by every trailing newline.
+      #
+      # NUL is translated rather than read, because a shell string is the one
+      # thing that cannot carry it: bash drops NUL bytes from a command
+      # substitution, so an artifact jq refuses on disk — valid JSON with a NUL
+      # appended, say — would reach the gate as the clean prefix and be counted
+      # a healthy lane, coverage reading "full" over bytes no reader would
+      # accept. 0x01 stands in for it because jq refuses every control
+      # character below 0x20 in exactly the positions it refuses NUL, bare or
+      # inside a string, so the gate's verdict is the verdict it would reach on
+      # the file itself. The group's stderr goes nowhere because the only
+      # writer to it is tr, already silenced.
+      #
+      # A failed read is poisoned with that same byte rather than checked: the
+      # sentinel makes `printf X` the last command, so the substitution's own
+      # status is always 0 and tr's is unrecoverable from it. Without the
+      # poison a read that died partway — the file unlinked under it, or an I/O
+      # error — would hand the gate a prefix that can parse clean on its own,
+      # and an artifact nobody managed to read would be merged as a healthy
+      # lane. Appending the byte makes the truncation something jq refuses, so
+      # a read that did not finish can only ever land in answered-unusably.
+      { lane_raw=$(tr '\000' '\001' 2>/dev/null < "${LANE_OUTS[$i]}" || printf '\001'; printf X); } 2>/dev/null
+      lane_raw="${lane_raw%X}"
+      # A zero exit and readable content are not proof of a usable artifact —
+      # it must survive LANE_WRAP_JQ, or one bad lane takes the whole merge
+      # down with it. The wrapped review is held IN MEMORY from here on: the
+      # union merge must not depend on a scratch file surviving between this
+      # reap and the final write, or losing scratch would report healthy lanes
+      # as unusable and drop a verdict both models actually delivered.
+      #
+      # The wrap must also be NON-EMPTY: jq exits 0 printing nothing for input
+      # that holds no JSON value at all, which would push an empty element into
+      # the merge — a lane counted as healthy that contributes no findings,
+      # dropping a real blocker while coverage still reads "full".
+      if lane_wrap=$(printf '%s\n' "$lane_raw" | jq -c -s --arg target "$lane" "$LANE_WRAP_JQ" 2>/dev/null) \
+         && [[ -n "$lane_wrap" ]]; then
+        LANE_WRAPS+=("$lane_wrap")
         lane_ok=true
       else
-        echo "→ lane produced an unparseable artifact: $lane" >&2
+        # Say WHY it is unusable — jq's own message names a truncated artifact,
+        # a malformed one, or the shape the merge could not have consumed. In
+        # stdout mode the artifact is gone at exit, so this line is the only
+        # evidence left. `2>&1 >/dev/null` is the opposite order from the sed
+        # replay above on purpose: here fd2 must reach the pipe before fd1 is
+        # discarded.
+        lane_reason=$(printf '%s\n' "$lane_raw" | jq -s --arg target "$lane" "$LANE_WRAP_JQ" 2>&1 >/dev/null | head -1) || true
+        [[ -n "$lane_reason" ]] || lane_reason="no JSON value in artifact"
+        echo "→ lane produced an unusable artifact: $lane ($lane_reason)" >&2
         lane_rc="$EXIT_NO_REVIEW"
       fi
+    elif [[ $lane_rc -eq 0 ]]; then
+      # Clean exit, nothing usable on disk: the lane never delivered an answer.
+      # That is the lane-level class (5), not the response-level one (4) — and
+      # it must never be reported as the child's bare "exit 0", which reads as
+      # a lane that both succeeded and failed.
+      echo "→ lane exited 0 without a usable artifact: $lane" >&2
+      lane_rc="$EXIT_CLI_FAILED"
     fi
     if ! $lane_ok; then
       # Exit-code contract: 4 = the lane ANSWERED but unusably. A lane's own
@@ -755,7 +963,7 @@ if $MULTI_LANE; then
     fi
   done
 
-  if [[ ${#OK_WRAP_FILES[@]} -eq 0 ]]; then
+  if [[ ${#LANE_WRAPS[@]} -eq 0 ]]; then
     jq -n --argjson lanes "$LANES_FAILED_JSON" \
       '{error: "every review lane failed — no external verdict", lanes: $lanes}' >&2
     if $ANY_LANE_EXIT4; then exit "$EXIT_NO_REVIEW"; else exit "$EXIT_CLI_FAILED"; fi
@@ -773,7 +981,7 @@ if $MULTI_LANE; then
   # reviewed_head is the scope-derivation pin, for per-push budget accounting.
   STAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   REVIEWED_HEAD="$REVIEW_HEAD_SHA"
-  MERGED=$(jq -s --argjson failed "$LANES_FAILED_JSON" --arg ts "$STAMP" --arg head "$REVIEWED_HEAD" '
+  MERGED=$(printf '%s\n' "${LANE_WRAPS[@]}" | jq -s --argjson failed "$LANES_FAILED_JSON" --arg ts "$STAMP" --arg head "$REVIEWED_HEAD" '
     def norm: ((.location // "") | ascii_downcase | gsub("`"; "") | gsub("\\s+"; " ") | ltrimstr(" ") | rtrimstr(" "));
     def with_occ: reduce .[] as $f ({seen: {}, out: []};
       ($f | norm) as $n
@@ -816,11 +1024,21 @@ if $MULTI_LANE; then
                    suggestions_in: ($ask | length), suggestions_out: ($suggestions | length)}
         } + (if $head == "" then {} else {reviewed_head: $head} end))
       }
-  ' "${OK_WRAP_FILES[@]}")
+  ')
 
   if [[ -n "$OUTPUT_PATH" ]]; then
     printf '%s\n' "$MERGED" > "$OUTPUT_PATH"
-    echo "→ Written: $OUTPUT_PATH (union of ${#OK_WRAP_FILES[@]} lanes)" >&2
+    # Count what the artifact CARRIES, not what went into the merge: a count
+    # taken from the input array describes the artifact without being bound to
+    # it, and the two can disagree without either being wrong on its own terms.
+    # A re-query that fails says so, with jq's message: the merge just produced
+    # this JSON, so a shape it cannot read back is an internal inconsistency,
+    # and a bare "?" would hide the only evidence of it.
+    if union_lanes=$(printf '%s\n' "$MERGED" | jq '[.qa_metadata.lanes[] | select(.status == "ok")] | length' 2>&1); then
+      echo "→ Written: $OUTPUT_PATH (union of $union_lanes lanes)" >&2
+    else
+      echo "→ Written: $OUTPUT_PATH (lane count unavailable: $union_lanes)" >&2
+    fi
     echo "$OUTPUT_PATH"
   else
     printf '%s\n' "$MERGED"
@@ -916,7 +1134,7 @@ preserve_cli_failure_and_fail() {
   fi
 
   if [[ -n "$OUTPUT_PATH" ]]; then
-    mkdir -p "$(dirname "$OUTPUT_PATH")"
+    mkdir -p -- "$(path_dir "$OUTPUT_PATH")"
     sidecar="${OUTPUT_PATH}.failed.json"
   else
     sidecar=$(mktemp)
@@ -1069,7 +1287,7 @@ RAW_PRESERVED_PATH=""
 preserve_raw_response() {
   local raw="$1"
   if [[ -n "$OUTPUT_PATH" ]]; then
-    mkdir -p "$(dirname "$OUTPUT_PATH")"
+    mkdir -p -- "$(path_dir "$OUTPUT_PATH")"
     RAW_PRESERVED_PATH="${OUTPUT_PATH}.raw.txt"
   else
     RAW_PRESERVED_PATH=$(mktemp)
@@ -1089,7 +1307,7 @@ preserve_raw_and_fail() {
   if [[ -n "$RAW_PRESERVED_PATH" ]]; then
     raw_path="$RAW_PRESERVED_PATH"
   elif [[ -n "$OUTPUT_PATH" ]]; then
-    mkdir -p "$(dirname "$OUTPUT_PATH")"
+    mkdir -p -- "$(path_dir "$OUTPUT_PATH")"
     raw_path="${OUTPUT_PATH}.raw.txt"
     printf '%s\n' "$raw" > "$raw_path"
   else
@@ -1180,7 +1398,7 @@ preserve_no_review_and_fail() {
   fi
 
   if [[ -n "$OUTPUT_PATH" ]]; then
-    mkdir -p "$(dirname "$OUTPUT_PATH")"
+    mkdir -p -- "$(path_dir "$OUTPUT_PATH")"
     sidecar="${OUTPUT_PATH}.${suffix}.json"
   else
     sidecar=$(mktemp)
@@ -1310,7 +1528,7 @@ fi
 # --- Output -------------------------------------------------------------------
 
 if [[ -n "$OUTPUT_PATH" ]]; then
-  mkdir -p "$(dirname "$OUTPUT_PATH")"
+  mkdir -p -- "$(path_dir "$OUTPUT_PATH")"
   printf '%s\n' "$RESULT" > "$OUTPUT_PATH"
   echo "→ Written: $OUTPUT_PATH" >&2
   echo "$OUTPUT_PATH"
