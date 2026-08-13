@@ -346,7 +346,7 @@ Source: `"roadmap-create"` | Parent issue: from `hierarchy_recommendation` in ma
 - `mixed` → split items per TPM grouping (some parented, some standalone)
 - `none` / absent → `parent_issue: null`
 
-**Dependency conversion**: Preserve TPM's parent-level relation assignments for bundled issues (per [agent-sequencing.md](../../orch/workflows/agent-sequencing.md) rule 5). For non-bundled issues, convert plan's `#N` references to `blocked_by_items: [N]` and existing refs to `blocked_by_issues: ["[ISSUE_ID]"]`.
+**Dependency conversion**: Preserve TPM's parent-level relation assignments for bundled issues (per [agent-sequencing.md](../../orch/workflows/agent-sequencing.md) § How to Apply, "Relations at the right level"). For non-bundled issues, convert plan's `#N` references to `blocked_by_items: [N]` and existing refs to `blocked_by_issues: ["[ISSUE_ID]"]`.
 
 **Source path**: Format as file path, not markdown link: `docs/roadmaps/roadmap-[FEATURE].md`
 
@@ -356,15 +356,15 @@ Source: `"roadmap-create"` | Parent issue: from `hierarchy_recommendation` in ma
 
 2. **Run Workflow**: `⤵ workflows/audit-issues.md --issues [FILE_PATH] § 1-9 → § 6.2`
 
-### 6.2 Set Cross-Project Relations
+### 6.2 Set Relations to Issues Outside the Project
 
-**Skip if** no cross-project dependencies in plan.
+**Skip if** the plan has no dependencies on issues outside `PROJECT_NAME`.
 
-For dependencies referencing issues outside `PROJECT_NAME`:
+For a real dependency, use `blocks`/`blocked_by`; for an informational link, use `related`:
 ```bash
+.agents/skills/linear/scripts/linear.sh issues add-relation [ISSUE_ID] --blocked-by [EXTERNAL_ISSUE_ID]
 .agents/skills/linear/scripts/linear.sh issues add-relation [ISSUE_ID] --related [EXTERNAL_ISSUE_ID]
 ```
-`blocks`/`blocked_by` require same project. Use `related` for cross-project informational links.
 
 ---
 
