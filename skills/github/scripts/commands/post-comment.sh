@@ -6,8 +6,6 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/../lib/github-api.sh"
-# shellcheck source=../lib/pr-branch.sh
-source "$SCRIPT_DIR/../lib/pr-branch.sh"
 
 show_help() {
     cat << 'EOF'
@@ -35,10 +33,10 @@ Examples:
   post-comment.sh 23 "Addressed all feedback"
 
   # Markdown with backticks/code — use --body-file
-  cat > tmp/comment.md <<'EOF'
+  cat > tmp/comment.md <<'MD'
   ## Summary
   - Fixed `WindowKind` enum.
-  EOF
+MD
   post-comment.sh 23 --body-file tmp/comment.md
 
   # Current branch's PR
@@ -139,23 +137,7 @@ post_comment() {
     local url
     url=$(echo "$result" | jq -r '.html_url // .url // ""')
 
-    local pr_branch
-    pr_branch=$(pr_branch_name "$pr_num")
-    local emit_args=(
-        --severity info
-        --importance normal
-        --summary "Comment left on PR #$pr_num"
-        --pr-number "$pr_num"
-        --details-json "$(jq -cn --arg url "$url" '{url: $url}')"
-    )
-    [ -n "$pr_branch" ] && emit_args+=(--branch "$pr_branch")
-    bash "$SCRIPT_DIR/../_activity-emit.sh" pr.comments_left "${emit_args[@]}" || true
-
-    if [ -n "$url" ]; then
-        echo "{\"success\": true, \"url\": \"$url\"}"
-    else
-        echo '{"success": true, "url": null}'
-    fi
+    jq -nc --arg url "$url" '{success: true, url: (if $url == "" then null else $url end)}'
 }
 
 # Main

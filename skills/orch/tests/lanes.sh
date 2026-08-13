@@ -101,6 +101,38 @@ assert_eq "$(jq -r '.[] | select(.alias=="openclaude") | .status' <<<"$OUT")" "n
 assert_eq "$(jq -r '.[] | select(.alias=="claude") | .plan' <<<"$OUT")" "max" \
   "the plan is read from the credentials file without a network call"
 
+echo "=== the inventory is discovered; aliases are only an overlay ==="
+
+# Discovery must keep finding every account with no configuration at all — a
+# hand-maintained lane list is the thing this deliberately does not have.
+NO_ALIAS="$(run_lanes list --harness claude --json)"
+assert_eq "$(jq -r '[.[].alias] | sort | join(",")' <<<"$NO_ALIAS")" "claude,eclaude,nclaude,openclaude" \
+  "with no aliases configured, every discovered lane keeps its directory name"
+
+run_lanes_aliased() { LANES_HOME="$H" ORCH_LANE_ALIASES="$1" ORCH_LANES_FETCH_CMD="$FETCHER" "$LANES" "${@:2}"; }
+
+ALIASED="$(run_lanes_aliased "eclaude=work, nclaude = overflow" list --harness claude --json)"
+assert_eq "$(jq -r '.[] | select(.config_dir | endswith("/.eclaude")) | .alias' <<<"$ALIASED")" "work" \
+  "an alias renames the lane it names"
+assert_eq "$(jq -r '.[] | select(.config_dir | endswith("/.nclaude")) | .alias' <<<"$ALIASED")" "overflow" \
+  "surrounding whitespace in the pair list is tolerated"
+assert_eq "$(jq -r '.[] | select(.config_dir | endswith("/.claude")) | .alias' <<<"$ALIASED")" "claude" \
+  "a lane with no mapping keeps its discovered name"
+assert_eq "$(jq 'length' <<<"$ALIASED")" "4" "aliasing changes labels only — no lane is added or dropped"
+
+# An alias for a directory that does not exist must be inert, never conjure a
+# lane: the inventory is what discovery found, and nothing else.
+GHOST="$(run_lanes_aliased "notthere=phantom" list --harness claude --json)"
+assert_eq "$(jq 'length' <<<"$GHOST")" "4" "an alias naming no discovered directory adds no lane"
+assert_eq "$(jq -r '[.[].alias] | index("phantom") // "absent"' <<<"$GHOST")" "absent" \
+  "an alias naming no discovered directory is inert"
+
+# Measurement must be untouched by relabeling — headroom comes from the API
+# response, not from what the lane is called.
+assert_eq "$(jq -r '.[] | select(.alias=="work") | .headroom_pct' <<<"$ALIASED")" \
+  "$(jq -r '.[] | select(.alias=="eclaude") | .headroom_pct' <<<"$NO_ALIAS")" \
+  "an alias does not change the lane's measured headroom"
+
 echo "=== headroom is the binding bucket, not an average ==="
 
 # nclaude: 5% session but 95% weekly. Averaging would call that ~50% free and
@@ -224,8 +256,23 @@ cat > "$OT_STUB_BIN/gh" <<'STUBEOF'
 #!/usr/bin/env bash
 exit 1
 STUBEOF
-chmod +x "$OT_STUB_BIN/worktree" "$OT_STUB_BIN/gh"
-run_ot() { PATH="$OT_STUB_BIN:$PATH" WORKTREE_CLI="$OT_STUB_BIN/worktree" "$OPEN_TERMINAL" "$@"; }
+# tmux is stubbed so launch-success cases never touch a real tmux server: run
+# under a live session (TMUX set), open-terminal's flagless default is tmux
+# mode, and an unstubbed launch creates a real window per case. The log is the
+# hermeticity proof — every window these cases "create" must appear here.
+OT_TMUX_LOG="$TMP_ROOT/lanes.tmux-log"
+cat > "$OT_STUB_BIN/tmux" <<'STUBEOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$OT_TMUX_LOG"
+case "${1:-}" in
+  new-window) echo "%7" ;;
+  list-windows) echo "1" ;;
+  display-message) echo "stub" ;;
+esac
+exit 0
+STUBEOF
+chmod +x "$OT_STUB_BIN/worktree" "$OT_STUB_BIN/gh" "$OT_STUB_BIN/tmux"
+run_ot() { TMUX=stub,1,0 OT_TMUX_LOG="$OT_TMUX_LOG" PATH="$OT_STUB_BIN:$PATH" WORKTREE_CLI="$OT_STUB_BIN/worktree" "$OPEN_TERMINAL" "$@"; }
 
 # Assert against what a user actually sees, not against a parse of the source.
 # --help must work with no git repository in sight. It used to die with git's
@@ -266,6 +313,76 @@ if grep -qF "Opened" <<<"$bogus_out"; then
   fail "a refused --lane launches nothing"
 else
   pass "a refused --lane launches nothing"
+fi
+
+# A bare word is resolved as a lane alias against the same discovered inventory
+# `pick` measures, so a named lane needs no second source of truth.
+# GH_ISSUE_PATTERN is pinned here so the assertion tests lane resolution rather
+# than whatever issue convention the surrounding checkout happens to configure.
+run_ot_aliased() { LANES_HOME="$H" ORCH_LANE_ALIASES="$1" ORCH_LANES_FETCH_CMD="$FETCHER" \
+  GH_ISSUE_PATTERN='[A-Z]+-[0-9]+' TMUX=stub,1,0 OT_TMUX_LOG="$OT_TMUX_LOG" \
+  PATH="$OT_STUB_BIN:$PATH" WORKTREE_CLI="$OT_STUB_BIN/worktree" "$OPEN_TERMINAL" "${@:2}"; }
+
+set +e
+alias_out=$(run_ot_aliased "eclaude=work" --harness claude --lane work --cmd "true" CC-1 2>&1)
+alias_rc=$?
+set -e
+assert_eq "$alias_rc" "0" "--lane <alias> resolves to a discovered lane"
+assert_contains "$alias_out" "CLAUDE_CONFIG_DIR=$H/.eclaude" \
+  "--lane <alias> launches under the aliased lane's config dir"
+
+set +e
+unknown_out=$(run_ot_aliased "eclaude=work" --harness claude --lane nosuchlane --cmd "true" CC-1 2>&1)
+unknown_rc=$?
+set -e
+assert_eq "$unknown_rc" "1" "an unknown --lane alias is refused"
+assert_contains "$unknown_out" "known lane alias" "the alias refusal names what it looked for"
+
+# Collision: the caller's cwd holds a directory with the same name as a lane
+# alias. Resolving the filesystem first made that directory win, so the fleet
+# launched under a config dir nobody configured — silently, since a directory
+# that exists raises no error. The alias owns the bare word.
+COLLIDE="$TMP_ROOT/collide"; mkdir -p "$COLLIDE/work"
+git -C "$COLLIDE" init -q -b main
+set +e
+collide_out=$( (cd "$COLLIDE" && LANES_HOME="$H" ORCH_LANE_ALIASES="eclaude=work" \
+  ORCH_LANES_FETCH_CMD="$FETCHER" GH_ISSUE_PATTERN='[A-Z]+-[0-9]+' \
+  TMUX=stub,1,0 OT_TMUX_LOG="$OT_TMUX_LOG" \
+  PATH="$OT_STUB_BIN:$PATH" WORKTREE_CLI="$OT_STUB_BIN/worktree" \
+  "$OPEN_TERMINAL" --harness claude --lane work --cmd "true" CC-1) 2>&1 )
+collide_rc=$?
+set -e
+assert_eq "$collide_rc" "0" "--lane <alias> still resolves when a cwd directory shares its name"
+assert_contains "$collide_out" "CLAUDE_CONFIG_DIR=$H/.eclaude" \
+  "a cwd directory does not shadow the lane alias it collides with"
+if grep -qF "CLAUDE_CONFIG_DIR=work" <<<"$collide_out"; then
+  fail "the cwd-relative directory is never used as the lane config dir"
+else
+  pass "the cwd-relative directory is never used as the lane config dir"
+fi
+
+# A bare word that no alias claims still resolves as a directory, so the
+# alias-first order narrows nothing.
+BARE="$TMP_ROOT/bare"; mkdir -p "$BARE/somelane"
+git -C "$BARE" init -q -b main
+set +e
+bare_out=$( (cd "$BARE" && LANES_HOME="$H" ORCH_LANE_ALIASES="eclaude=work" \
+  ORCH_LANES_FETCH_CMD="$FETCHER" GH_ISSUE_PATTERN='[A-Z]+-[0-9]+' \
+  TMUX=stub,1,0 OT_TMUX_LOG="$OT_TMUX_LOG" \
+  PATH="$OT_STUB_BIN:$PATH" WORKTREE_CLI="$OT_STUB_BIN/worktree" \
+  "$OPEN_TERMINAL" --harness claude --lane somelane --cmd "true" CC-1) 2>&1 )
+bare_rc=$?
+set -e
+assert_eq "$bare_rc" "0" "a bare directory name with no matching alias still resolves"
+assert_contains "$bare_out" "CLAUDE_CONFIG_DIR=somelane" \
+  "the unclaimed bare word falls back to the directory"
+
+# Hermeticity proof: every window the launch-success cases created must have
+# gone through the stub. An empty log means a real tmux server took the call.
+if [[ -s "$OT_TMUX_LOG" ]] && grep -q "new-window" "$OT_TMUX_LOG"; then
+  pass "launch cases drove the tmux stub, not a real server"
+else
+  fail "launch cases bypassed the tmux stub (real windows were created)"
 fi
 
 echo
