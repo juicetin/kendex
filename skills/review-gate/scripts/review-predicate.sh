@@ -10,7 +10,13 @@
 #
 # Predicate: review evidence present for the CURRENT head — any of
 #   (a) a review OBJECT at the exact head from a non-author, non-dismissed,
-#       trusted login (trust list empty = any non-author);
+#       trusted login (trust list empty = any non-author) whose body is not
+#       the reviewer's own errored-run attestation: the reviews API has no
+#       errored state, so a bot review that ERRORS lands as a normal review
+#       row (COMMENTED) whose body says the review never ran ("encountered
+#       an error and was unable to review"). Like a skip-marked check pass
+#       it proves nothing ran — silence, routed to NOT-EVIDENCE, never to
+#       failure, and never a carry-forward candidate;
 #   (b) a trusted clean-analysis CHECK-RUN or legacy COMMIT STATUS succeeding
 #       on this head, whose title/summary/description carries no
 #       skip-pattern marker (a "pass" that says the analysis was rate
@@ -61,6 +67,9 @@
 #   REVIEW_GATE_REVIEW_OBJECT_MIN_STATE       (a) "any" (any review row) or "approved"
 #                                             (an APPROVED row not withdrawn by a later
 #                                             CHANGES_REQUESTED from the same login)
+#   REVIEW_GATE_REVIEW_OBJECT_ERROR_PATTERNS  (a) errored-attestation body markers,
+#                                             ';'-separated, case-insensitive
+#                                             substrings; empty disables
 #   REVIEW_GATE_THREADS                       "enforce" (default) or "off": "off" skips
 #                                             the reviewThreads GraphQL read entirely and
 #                                             never emits threads-open — for repos whose
@@ -168,6 +177,7 @@ fi
 PUBLISHER_REJECT="$(rg_setting REVIEW_GATE_STATUS_PUBLISHER_REJECT "")" || exit 2
 TRUSTED_LOGINS="$(rg_setting REVIEW_GATE_REVIEW_OBJECT_TRUSTED_LOGINS "")" || exit 2
 MIN_STATE="$(rg_setting REVIEW_GATE_REVIEW_OBJECT_MIN_STATE "any")" || exit 2
+ERROR_PATTERNS="$(rg_setting REVIEW_GATE_REVIEW_OBJECT_ERROR_PATTERNS "encountered an error and was unable to review")" || exit 2
 THREADS_MODE="$(rg_setting REVIEW_GATE_THREADS "enforce")" || exit 2
 API_ATTEMPTS="$(rg_setting REVIEW_GATE_API_ATTEMPTS "1")" || exit 2
 API_RETRY_DELAY="$(rg_setting REVIEW_GATE_API_RETRY_DELAY_SECONDS "2")" || exit 2
@@ -364,17 +374,40 @@ cr="$(jq '[.[] | select(.state != "DISMISSED" and .state != "PENDING") | select(
   echo "::error::could not evaluate changes-requested reviews for PR #$PR_NUMBER" >&2
   exit 2
 }
+# An ERRORED bot review is a normal review ROW: the reviews API has no
+# errored state, so the failure lives only in the row's body — the
+# reviewer's own attestation that the review never ran (live shape:
+# "Copilot encountered an error and was unable to review this pull
+# request."). Such a row is the review-object mirror of a skip-marked check
+# pass: NOT-EVIDENCE, never a failure — it must not satisfy the gate, not
+# mask other rows, and not seed a carry. The body is read only to WITHDRAW
+# its own row toward silence (the fail-closed direction), never to
+# establish trust, so the trust model is unchanged. The markers come from
+# REVIEW_GATE_REVIEW_OBJECT_ERROR_PATTERNS — case-insensitive substrings,
+# ';'-separated, the same shape as the check-run skip patterns; a
+# configured value replaces the default list, and empty disables the filter
+# (an explicit choice to count errored rows as evidence). Deliberately NOT
+# applied to the changes-requested reduction above: body text that could
+# erase a standing objection would be a fail-open lever, and an errored row
+# can never block anyway (it is not CHANGES_REQUESTED).
+#
 # Review-object evidence. NOT a latest-review-per-reviewer reduction (see the
 # header): in "any" mode every accepted row counts; in "approved" mode a
 # login contributes evidence when its newest APPROVED at head is not followed
 # by a newer CHANGES_REQUESTED from that same login — a trailing COMMENTED
 # never withdraws an approval.
 got="$(jq --arg sha "$HEAD_SHA" --arg author "$PR_AUTHOR" \
-        --arg trusted "$TRUSTED_LOGINS" --arg minstate "$MIN_STATE" '
+        --arg trusted "$TRUSTED_LOGINS" --arg minstate "$MIN_STATE" \
+        --arg errmarks "$ERROR_PATTERNS" '
   ($trusted | split("[;,\n]+"; "") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))) as $t
+  | ($errmarks | split(";") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0)) | map(ascii_downcase)) as $mk
   | [ .[]
       | select(.commit_id == $sha and .state != "DISMISSED" and .state != "PENDING" and .user.login != $author)
       | select(($t | length) == 0 or (.user.login as $l | ($t | index($l)) != null))
+      # Bind the body BEFORE testing containment — same rebinding trap as
+      # the skip-pattern filter: inside contains(.) the dot would rebind.
+      | select((((.body // "") | ascii_downcase) as $b
+                | [ $mk[] | . as $p | select($b | contains($p)) ] | length) == 0)
     ]
   | if $minstate == "approved" then
       group_by(.user.login)
@@ -824,16 +857,22 @@ carry_kind=""
 if [ -n "$CARRY_FORWARD" ] && [ "$got" = "0" ] && [ "$check" = "0" ] \
    && [ "$comment_hits" = "0" ] && [ "$outageok" = "0" ]; then
   # Candidate commits: accepted review rows (same trust filters as head
-  # evidence; min_state=approved accepts only APPROVED rows — a later
+  # evidence — errored-attestation rows excluded here too, or an errored
+  # ancestor review would seed a carry nothing ever reviewed;
+  # min_state=approved accepts only APPROVED rows — a later
   # withdrawal by the same login is a standing CR and fails the gate before
   # carry could matter), newest-first, distinct, never the head itself,
   # bounded so a force-push-heavy PR cannot turn the walk into an API storm.
   carry_candidates="$(jq -r --arg sha "$HEAD_SHA" --arg author "$PR_AUTHOR" \
-      --arg trusted "$TRUSTED_LOGINS" --arg minstate "$MIN_STATE" '
+      --arg trusted "$TRUSTED_LOGINS" --arg minstate "$MIN_STATE" \
+      --arg errmarks "$ERROR_PATTERNS" '
     ($trusted | split("[;,\n]+"; "") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))) as $t
+    | ($errmarks | split(";") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0)) | map(ascii_downcase)) as $mk
     | [ .[]
         | select(.state != "DISMISSED" and .state != "PENDING" and .user.login != $author)
         | select(($t | length) == 0 or (.user.login as $l | ($t | index($l)) != null))
+        | select((((.body // "") | ascii_downcase) as $b
+                  | [ $mk[] | . as $p | select($b | contains($p)) ] | length) == 0)
         | select($minstate != "approved" or .state == "APPROVED")
         | select((.commit_id // "") != "" and .commit_id != $sha)
       ]

@@ -10,9 +10,19 @@ set -euo pipefail
 usage() {
   cat >&2 << 'EOF'
 Usage:
-  review-artifact-check <worktree_path> <agent_name> <delegated_at_epoch>
+  review-artifact-check <worktree_path> <agent_name> <delegated_at_epoch> \
+    [--wait SECS] [--interval SECS]
   review-artifact-check --file <json_path> [delegated_at_epoch]
   review-artifact-check --path <worktree_path> <agent_name>
+
+--wait SECS (glob mode): blocking — poll every --interval seconds (default 5)
+until a FRESH artifact lands (valid returns immediately; a fresh rejection is
+confirmed once after one interval, then returned) or SECS elapse. "missing"
+and "stale" both keep polling: a prior round's artifact on disk is the normal
+state while the current reviewer works. A deadline return (missing/stale) is
+the escalation trigger. Arm it in the background at delegation and the caller
+wakes the moment the reviewer writes, independent of any return-message
+delivery.
 
 Path mode (--path): prints the canonical artifact path for the agent with a
 real UTC timestamp ([WORKTREE]/tmp/review-[AGENT]-YYYYMMDD-HHMMSS.json) and
@@ -264,14 +274,26 @@ if [[ "${1:-}" == "--file" ]]; then
   exit 0
 fi
 
-if [[ $# -ne 3 ]]; then
+wait_secs=0
+interval=5
+if (( $# >= 3 )); then
+  worktree="$1"
+  agent="$2"
+  delegated_at="$3"
+  shift 3
+  while (( $# > 0 )); do
+    case "$1" in
+      --wait)     [[ -n "${2:-}" ]] || { echo "Error: --wait requires a value" >&2; exit 2; }; wait_secs="$2"; shift 2 ;;
+      --interval) [[ -n "${2:-}" ]] || { echo "Error: --interval requires a value" >&2; exit 2; }; interval="$2"; shift 2 ;;
+      *) usage; exit 2 ;;
+    esac
+  done
+else
   usage
   exit 2
 fi
-
-worktree="$1"
-agent="$2"
-delegated_at="$3"
+[[ "$wait_secs" =~ ^[0-9]+$ ]] || { echo "Error: --wait must be a non-negative integer (seconds), got '$wait_secs'" >&2; exit 2; }
+[[ "$interval" =~ ^[1-9][0-9]*$ ]] || { echo "Error: --interval must be a positive integer (seconds), got '$interval'" >&2; exit 2; }
 
 if [[ ! -d "$worktree" ]]; then
   echo "Error: worktree path '$worktree' is not a directory" >&2
@@ -286,6 +308,7 @@ if ! [[ "$delegated_at" =~ ^[0-9]+$ ]]; then
   exit 2
 fi
 
+glob_check() {
 reason="missing"
 fail_path=""
 fail_detail=""
@@ -331,8 +354,52 @@ while IFS= read -r file; do
     continue
   fi
   emit true "$file" "valid"
-  exit 0
+  return 0
 done < <(ls -1t "$worktree/tmp/review-$agent-"*.json 2>/dev/null)
 
 emit false "$fail_path" "$reason" "$fail_detail"
-exit 1
+return 1
+}
+
+if (( wait_secs > 0 )); then
+  # Blocking watchdog: "missing" AND "stale" both mean "no fresh artifact yet"
+  # — re-review cycles reuse agent names in the same worktree, so a prior
+  # round's artifact (older than delegated_at) is the normal on-disk state
+  # while the current reviewer works. Any FRESH artifact — valid or rejected —
+  # returns immediately, so an armed background invocation wakes the caller
+  # the moment the reviewer writes, independent of any return-message
+  # delivery. Reviewer artifacts are written non-atomically, so a fresh
+  # failure is confirmed once after one interval before it is returned (a
+  # torn mid-write read must not become a false rejection). A deadline
+  # return carries missing/stale and is the escalation trigger.
+  deadline=$(( $(date +%s) + wait_secs ))
+  confirming=false
+  while :; do
+    rc=0
+    out="$(glob_check)" || rc=$?
+    landed_reason="$(jq -r '.reason // ""' <<<"$out" 2>/dev/null || printf '')"
+    if [[ "$rc" == "0" ]]; then
+      printf '%s\n' "$out"
+      exit 0
+    fi
+    if [[ "$landed_reason" != "missing" && "$landed_reason" != "stale" ]]; then
+      if [[ "$confirming" == "true" ]] || (( $(date +%s) >= deadline )); then
+        printf '%s\n' "$out"
+        exit "$rc"
+      fi
+      confirming=true
+    else
+      confirming=false
+      if (( $(date +%s) >= deadline )); then
+        printf '%s\n' "$out"
+        exit "$rc"
+      fi
+    fi
+    remaining=$(( deadline - $(date +%s) ))
+    sleep_for="$interval"
+    if (( remaining < interval )); then sleep_for="$remaining"; fi
+    if (( sleep_for < 1 )); then sleep_for=1; fi
+    sleep "$sleep_for"
+  done
+fi
+glob_check

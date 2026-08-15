@@ -2,6 +2,41 @@
 
 ## Unreleased
 
+- orch: `dev-artifact-check` and `review-artifact-check` gain a blocking
+  `--wait SECS [--interval N]` mode; the armed watchdog now returns the moment
+  a completion artifact lands (or at the deadline), so round closure never
+  depends on a sub-agent's return message being delivered.
+- orch: `queue-wait` guards queued PRs against late review findings (#1289,
+  five near-misses in one night): a new unresolved thread while queued or
+  armed triggers a dequeue — verdict `dequeued`, cause `late_findings` —
+  and merge-pr routes it to comment triage and re-enqueue. Default on;
+  `--no-guard` opts out. Failed reads are never quiet; failed dequeues are
+  loud and distinct.
+- orch oversee: unattended by default (#1290). Minted briefs route blocking
+  questions to the overseer via harness session-messaging where available
+  (local question tool still used); the watch checks tmux lanes for pending
+  question prompts and answers what available evidence decides, relaying
+  only product-changing or owner-standing calls to the user.
+- reviewer: six gap-closing scope lines from the vgs #133-135 analysis (87
+  real bot findings, 91% precision): decoy-mutation must-fail controls,
+  unconfirmed-start and dead-branch-success fail-open shapes, full
+  field×malformation enumeration for new declarative formats,
+  pre-steady-state probes, and mutation kills under every selection mode.
+  review-pr's cycle cap now bounds new cycles, never verification — an
+  unreviewed fix diff always gets its focused pass; submit-pr proves the
+  HEAD it pushes (preflight + the session's validation command).
+- review-gate: an errored bot review object is treated as silence, not
+  approval evidence — the gate stays awaiting (VST-253; fail-open observed
+  live). New selftest cases with pre-fix controls.
+- cli: `vstack add` without `-y` in a non-TTY session fails with an
+  actionable message instead of `os error 6`, and no longer repoints the
+  global source registry on that failure (VST-255).
+- decider: index rows are append-only, never re-sorted — the template's
+  "date order" clause contradicted its own example and the CLI reads rows
+  positionally (VST-263); the schema carries the placement rule.
+- AGENTS.md: the "Engineer over patch" rule now states determinism/tooling
+  first, prose last; skills are instructions, not explanations.
+
 - Post-merge bot triage of #1284: `open-terminal` now renders the
   merged-and-cleaned terminal condition into every launched brief — including
   the tmux delivery/re-send copy, which first shipped without it (caught by

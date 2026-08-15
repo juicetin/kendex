@@ -615,5 +615,62 @@ review_pr_recovery="$REPO_ROOT/skills/orch/workflows/review-pr.md"
 assert_file_contains "$review_pr_recovery" "every required field of \`review-finding.md\`" \
   "review-pr's re-delegation routes the reviewer to the schema's required fields"
 
+echo "=== --wait blocking mode (glob) ==="
+
+# A reviewer artifact landing mid-wait ends the wait immediately with its
+# verdict — valid here; a rejected artifact would return equally fast.
+wwt="$TMP_ROOT/waitwt"
+mkdir -p "$wwt/tmp"
+start_epoch="$(date +%s)"
+( sleep 2; printf '{"agent":"waitrev","verdict":"pass","summary":"s","blockers":[],"suggestions":[],"questions":[]}' \
+    > "$wwt/tmp/review-waitrev-20260101-000001.json" ) &
+writer_pid=$!
+rc=0
+wait_out="$("$CHECK" "$wwt" waitrev 0 --wait 20 --interval 1 2>/dev/null)" || rc=$?
+wait "$writer_pid" 2>/dev/null || true
+elapsed=$(( $(date +%s) - start_epoch ))
+assert_eq "$(jq -r '.ok' <<<"$wait_out")" "true" "--wait returns the landed artifact as ok"
+assert_eq "$rc" "0" "--wait exit 0 on a valid landing"
+if (( elapsed < 15 )); then
+  PASS=$((PASS + 1)); printf '  ok    %s\n' "--wait returned on the landing, not the deadline (${elapsed}s)"
+else
+  FAIL=$((FAIL + 1)); printf '  FAIL  %s\n' "--wait burned toward its deadline (${elapsed}s)"
+fi
+
+# Deadline with nothing landed: reason missing, exit 1.
+rc=0
+wait_out="$("$CHECK" "$wwt" ghostrev 0 --wait 2 --interval 1 2>/dev/null)" || rc=$?
+assert_eq "$(jq -r '.reason' <<<"$wait_out")" "missing" "--wait deadline reports missing"
+assert_eq "$rc" "1" "--wait deadline exits 1"
+
+# The production shape from cycle 2 onward: a STALE prior-round artifact on
+# disk must keep the wait polling for the fresh one, not end it instantly.
+swt="$TMP_ROOT/stalewt"
+mkdir -p "$swt/tmp"
+printf '{"agent":"cyc","verdict":"pass","summary":"old","blockers":[],"suggestions":[],"questions":[]}' \
+  > "$swt/tmp/review-cyc-20200101-000000.json"
+touch -t 202001010000 "$swt/tmp/review-cyc-20200101-000000.json"
+now_epoch="$(date +%s)"
+start_epoch="$now_epoch"
+( sleep 2; printf '{"agent":"cyc","verdict":"pass","summary":"fresh","blockers":[],"suggestions":[],"questions":[]}' \
+    > "$swt/tmp/review-cyc-20990101-000000.json" ) &
+writer_pid=$!
+rc=0
+wait_out="$("$CHECK" "$swt" cyc "$now_epoch" --wait 20 --interval 1 2>/dev/null)" || rc=$?
+wait "$writer_pid" 2>/dev/null || true
+elapsed=$(( $(date +%s) - start_epoch ))
+assert_eq "$(jq -r '.ok' <<<"$wait_out")" "true" "--wait polls past a stale prior-round artifact to the fresh one"
+if (( elapsed >= 1 && elapsed < 15 )); then
+  PASS=$((PASS + 1)); printf '  ok    %s\n' "--wait neither returned instantly on stale nor burned the deadline (${elapsed}s)"
+else
+  FAIL=$((FAIL + 1)); printf '  FAIL  %s\n' "--wait stale handling wrong (${elapsed}s: 0s = instant-stale regression, >=15s = deadline burn)"
+fi
+
+# Flag validation is a usage error; the frozen 3-positional call is untouched.
+rc=0; "$CHECK" "$wwt" waitrev 0 --wait nope >/dev/null 2>&1 || rc=$?
+assert_eq "$rc" "2" "a non-integer --wait is a usage error"
+rc=0; "$CHECK" "$wwt" waitrev 0 >/dev/null 2>&1 || rc=$?
+assert_eq "$rc" "0" "the bare three-positional contract still validates"
+
 printf 'pass: %d   fail: %d\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]
