@@ -1126,7 +1126,7 @@ role: engineer
 
     #[cfg(unix)]
     #[test]
-    fn project_add_skips_project_settings_when_source_is_same_checkout_via_symlink() {
+    fn project_add_seeds_settings_but_not_config_when_source_is_same_checkout_via_symlink() {
         use std::os::unix::fs::symlink;
 
         let root = tmpdir("source-alias");
@@ -1165,9 +1165,11 @@ role: engineer
             std::fs::read_to_string(source.join("vstack.toml")).unwrap(),
             "[role-skills]\n"
         );
+        let settings = std::fs::read_to_string(source.join("vstack.settings.toml"))
+            .expect("settings seeding runs for a repo that is its own source");
         assert!(
-            !source.join("vstack.settings.toml").exists(),
-            "installing a source into itself through a symlink alias must not seed project settings"
+            settings.contains("DEMO_TIMEOUT"),
+            "the installed skill's settings keys are seeded: {settings}"
         );
 
         let _ = std::fs::remove_dir_all(root);
@@ -2561,22 +2563,46 @@ source (e.g. switching vstack repos, or starting clean), pass --clobber:
         }
     }
 
+    let lock_path = config::lock_file_path(global);
+    let mut lock = LockFile::load(&lock_path).unwrap_or_default();
+
     // Write computed agent→skill mappings to project vstack.toml.
     // Must happen BEFORE lock timestamps are captured so that the
     // vstack.toml mtime doesn't post-date installed_at (which would
     // make every item appear outdated on next launch).
     if writes_project_config {
         crate::project_config::write_agent_skills(&project_root, &agent_skill_map);
-        if let Some(result) =
-            crate::project_settings::ensure_skill_settings(&project_root, &selected_skills)?
-        {
+    }
+    // Settings seeding is per-checkout runtime state with no catalog
+    // counterpart, so it runs for self-source repos too — same rule as
+    // refresh. It reads the FULL installed set (lock ∪ this selection), not
+    // the selection alone: the seeder dedups same-key templates first-wins,
+    // and a filtered add must not reorder that against what refresh sees.
+    if !global {
+        let selected_names: std::collections::HashSet<&str> =
+            selected_skills.iter().map(|s| s.name.as_str()).collect();
+        let mut settings_skills: Vec<Skill> = selected_skills.clone();
+        for skill in crate::catalog::discover_skills(&source_dir)? {
+            if !selected_names.contains(skill.name.as_str())
+                && lock.entries.get(&skill.name).is_some_and(|e| {
+                    e.kind == config::ItemKind::Skill && e.source == resolved_source.source
+                })
+            {
+                settings_skills.push(skill);
+            }
+        }
+        // Same first-wins order refresh derives from the lock's BTreeMap.
+        settings_skills.sort_by(|a, b| a.name.cmp(&b.name));
+        if let Some(result) = crate::project_settings::ensure_skill_settings(
+            &project_root,
+            &settings_skills,
+            &mut lock.settings_seeds,
+        )? {
             settings_note = Some(format!("Project settings: {}", result.summary()));
         }
     }
 
     // Update lock file
-    let lock_path = config::lock_file_path(global);
-    let mut lock = LockFile::load(&lock_path).unwrap_or_default();
     lock.version = 1;
     for legacy in &migrated_pi_extensions {
         lock.remove(legacy);
