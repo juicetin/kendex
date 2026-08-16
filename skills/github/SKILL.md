@@ -127,10 +127,20 @@ parsing stderr:
 |------|---------|-------------|------|
 | `0`  | MERGED | `MERGED PR #N` | Merge completed immediately |
 | `0`  | MERGED | `ALREADY MERGED PR #N <mergedAt>` | PR was merged before the call; nothing attempted |
-| `75` | MERGE PENDING | `QUEUED IN MERGE QUEUE PR #N` | A required GitHub merge queue has an active entry |
-| `75` | MERGE PENDING | `AUTO-MERGE ENABLED PR #N` | Classic auto-merge is armed until protection clears |
+| `75` | MERGE PENDING (volatile) | `QUEUED IN MERGE QUEUE PR #N` | A required GitHub merge queue has an active entry — an ejection disarms it silently; keep watching until MERGED |
+| `75` | MERGE PENDING (volatile) | `AUTO-MERGE ENABLED PR #N` | Classic auto-merge is armed until protection clears — a protection failure disarms it silently; keep watching until MERGED |
 | `1`  | BLOCKED | `BLOCKED PR #N` | Nothing merged, queued, or armed |
 | `1`  | BLOCKED | `CLOSED (not merged) PR #N` | PR is closed unmerged; nothing attempted |
+
+Exit `75` is not a resting state: an ejection or a failed protection check
+disarms it silently and the PR sits open, gate-clear, merging nothing. The
+caller that armed it keeps re-running a watcher until the PR is `MERGED`
+(`.agents/skills/orch/scripts/queue-wait <N>` or the review-gate reducer
+`GH_REPO=<owner/repo> .agents/skills/review-gate/scripts/pr-watch.sh` — neither
+is durable) and re-arms with `.agents/skills/github/scripts/github.sh pr-merge
+<N> --auto` after repairing what the cause names; verdict routing is in
+README.md § Exit 75 recovery. `await-mergeable` is not that watcher — it
+returns as soon as GitHub computes a merge state.
 
 A PR that has left `OPEN` is terminal and short-circuits every mode before any
 check, auth, or mutation: `mergeable` is permanently `UNKNOWN` after a merge,

@@ -5,7 +5,9 @@
 # Outcomes (distinct exit codes + messages):
 #   0   MERGED                 — merge completed immediately
 #   0   ALREADY MERGED         — PR was already merged; nothing attempted
-#   75  QUEUED / AUTO-MERGE     — merge queue entry or classic auto-merge is active
+#   75  QUEUED / AUTO-MERGE     — merge queue entry or classic auto-merge is active;
+#                                 VOLATILE: a queue ejection disarms it silently,
+#                                 so the caller keeps watching until MERGED
 #   1   BLOCKED                — checks failed; no merge attempted, none queued
 #   1   CLOSED (not merged)    — PR is closed unmerged; nothing attempted
 #
@@ -78,6 +80,7 @@ Modes:
 Exit codes:
   0    MERGED / ALREADY MERGED — merge completed now, or the PR was already merged
   75   QUEUED / AUTO-MERGE     — merge queue entry or classic auto-merge is active
+                                 (volatile: an ejection disarms it silently — keep watching)
   1    BLOCKED / CLOSED        — checks failed or the PR is closed unmerged; nothing queued
 
 Examples:
@@ -362,6 +365,56 @@ gh_with_token() {
     fi
 }
 
+# Exit 75 is not a resting state: a merge-group failure ejects the entry, a
+# failed protection check drops classic auto-merge, and GitHub disarms the PR
+# silently either way — it can sit open, gate-clear, and unwatched. Every 75
+# exit says so and names runnable watchers.
+volatile_note() {
+    local pr_num="$1" repo="${GH_REPO:-}" remote resolved reducer
+    # pr-watch.sh requires GH_REPO; print the reducer with the repository it
+    # will need. Resolved LOCALLY (env, else the origin remote) — no network
+    # request may stand between a queued/armed PR and its exit 75. When
+    # nothing local names it the placeholder keeps the shape and says so.
+    local remote_name="origin"
+    if [ -z "$repo" ]; then
+        # gh's configured default (`gh repo set-default`) is stored as
+        # remote.<name>.gh-resolved: an OWNER/REPO value names the repository
+        # gh operates on when the checkout is a fork; "base" means that
+        # remote's own repository — resolve that remote's URL, not origin's.
+        resolved="$(git config --get-regexp '^remote\..*\.gh-resolved$' 2>/dev/null | awk 'NF == 2 { print $1, $2; exit }' || true)"
+        if [ -n "$resolved" ]; then
+            if [ "${resolved##* }" = "base" ]; then
+                remote_name="${resolved% *}"
+                remote_name="${remote_name#remote.}"
+                remote_name="${remote_name%.gh-resolved}"
+            else
+                repo="${resolved##* }"
+            fi
+        fi
+    fi
+    if [ -z "$repo" ]; then
+        remote="$(git config --get "remote.$remote_name.url" 2>/dev/null || true)"
+        case "$remote" in
+            *github.com[:/]*/*)
+                repo="${remote##*github.com[:/]}"
+                repo="${repo%.git}"
+                repo="${repo%/}"
+                ;;
+        esac
+    fi
+    # Only an OWNER/REPO-shaped value (one slash, plain segments) is printed
+    # into a pasteable command.
+    case "$repo" in
+        */*/* | */ | /* | "" | *[!A-Za-z0-9._/-]*) repo="" ;;
+        */*) ;;
+        *) repo="" ;;
+    esac
+    echo "  NOTE: queue/auto-merge state is VOLATILE — an ejection or a failed protection check disarms it silently; keep watching until MERGED" >&2
+    local reducer="GH_REPO=$repo .agents/skills/review-gate/scripts/pr-watch.sh (disarmed lines)"
+    [ -n "$repo" ] || reducer=".agents/skills/review-gate/scripts/pr-watch.sh with GH_REPO set to the repository (not resolvable locally here)"
+    echo "  Watch, re-running until MERGED (neither call is durable — queue-wait exits at its poll budget, pr-watch.sh is one pass), with the orch and review-gate skills installed: .agents/skills/orch/scripts/queue-wait $pr_num (re-arm on ejected/disarmed/not_queued after repairing what the cause names — a failed merge-group/check is a CI repair first; dequeued = triage the late findings first; closed/unknown = stop) or $reducer; re-arm with .agents/skills/github/scripts/github.sh pr-merge $pr_num --auto" >&2
+}
+
 # Read one authoritative post-mutation snapshot. `gh pr view --json` does not
 # expose merge-queue membership, so required-queue repositories need GraphQL.
 # Fall back to the classic `gh pr view` fields when the queue query itself is
@@ -644,13 +697,13 @@ main() {
 
     if [ "$post_in_queue" = "true" ] || [ "$post_queue_entry" = "true" ]; then
         echo "QUEUED IN MERGE QUEUE PR #$pr_num — queueState=${post_queue_state:-active}" >&2
-        echo "  Track with: github.sh await-mergeable $pr_num" >&2
+        volatile_note "$pr_num"
         exit 75
     fi
 
     if [ "$post_auto" = "true" ]; then
         echo "AUTO-MERGE ENABLED PR #$pr_num — will fire when CI + branch protection clear" >&2
-        echo "  Track with: github.sh await-mergeable $pr_num" >&2
+        volatile_note "$pr_num"
         exit 75
     fi
 
