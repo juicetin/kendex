@@ -75,9 +75,41 @@ sr_dotenv_value() { # RAW — value on stdout; nonzero on an unsupported shape
   return 1
 }
 
+# A source is skipped only when it is ABSENT. A path that exists as
+# something else — directory, FIFO, socket, device — fails -f exactly like
+# an absent one, and a symlink that does not resolve fails -e as well as -f,
+# so -L is what sees it at all: either shape would skip a configured source
+# with nothing said and let a lower-precedence value decide. /dev/null is
+# the documented force-defaults handle and stays exempt.
+sr_settings_usable() { # PATH — 0 = readable-shaped or absent; 1 + ::error otherwise
+  [ "$1" != "/dev/null" ] || return 0
+  { [ -e "$1" ] || [ -L "$1" ]; } || return 0
+  [ ! -f "$1" ] || return 0
+  if [ ! -e "$1" ]; then
+    echo "::error::$1: settings source is a symlink that does not resolve (dangling target, cycle, or over-long chain); a source is skipped only when it is absent" >&2
+  else
+    echo "::error::$1: settings source exists but is not a regular file (directory, FIFO, socket or device); a source is skipped only when it is absent" >&2
+  fi
+  return 1
+}
+
+# One read discipline for every settings probe: grep exits 0/1 are
+# measurements, anything else is an unreadable source and fails loud —
+# falling through to a lower-precedence layer would silently change the
+# resolved value.
+sr_settings_grep() { # REGEX FILE — matching lines on stdout; 1 = no match
+  local status=0
+  grep -E -- "$1" "$2" || status=$?
+  if [ "$status" -gt 1 ]; then
+    echo "::error::$2: unreadable while resolving a setting (grep exit $status)" >&2
+    return 2
+  fi
+  return "$status"
+}
+
 sr_setting() { # NAME DEFAULT — resolved value on stdout; nonzero + ::error on
                # a present-but-unparseable assignment (callers must propagate)
-  local name="$1" default="$2" line val file
+  local name="$1" default="$2" line val file status matches
   # The name is interpolated into ERE patterns below; constrain it to the
   # identifier shape every real key has, so a metacharacter can neither
   # misgrep nor inject pattern syntax.
@@ -96,8 +128,12 @@ sr_setting() { # NAME DEFAULT — resolved value on stdout; nonzero + ::error on
   # Env-file overrides (standard project layering: .env.local beats the
   # committed settings, .env is the base) — LAST matching KEY= line wins (shell-sourcing semantics),
   # optional surrounding quotes stripped. Parsed, never sourced.
+  sr_settings_usable ".env.local" || return 1
   if [ -f ".env.local" ]; then
-    line="$(grep -E -- "^[[:space:]]*(export[[:space:]]+)?${name}=" .env.local | tail -n 1 || true)"
+    status=0
+    matches="$(sr_settings_grep "^[[:space:]]*(export[[:space:]]+)?${name}=" .env.local)" || status=$?
+    [ "$status" -le 1 ] || return 1
+    line="$(printf '%s\n' "$matches" | tail -n 1)"
     if [ -n "$line" ]; then
       if ! val="$(sr_dotenv_value "${line#*=}")"; then
         echo "::error::.env.local: unsupported syntax for $name (a quoted value must end at its closing quote, optionally followed by a comment)" >&2
@@ -115,21 +151,7 @@ sr_setting() { # NAME DEFAULT — resolved value on stdout; nonzero + ::error on
     set -- ".vstack/settings.toml" "vstack.settings.toml"
   fi
   for file in "$@"; do
-  # The fall-back past this file covers an ABSENT PLAIN FILE only. A path
-  # that EXISTS as something else — directory, FIFO, socket, device — fails
-  # -f exactly like an absent one, so the configured settings would be
-  # skipped with nothing said and the built-in default would decide. A
-  # symlink that does not resolve fails -e as well as -f, so -L is what sees
-  # it at all. /dev/null is the documented force-defaults handle and stays
-  # exempt.
-  if [ "$file" != "/dev/null" ] && { [ -e "$file" ] || [ -L "$file" ]; } && [ ! -f "$file" ]; then
-    if [ ! -e "$file" ]; then
-      echo "::error::$file: settings path is a symlink that does not resolve (dangling target, cycle, or over-long chain); the fall-back to built-in defaults covers an absent plain file only" >&2
-    else
-      echo "::error::$file: settings path exists but is not a regular file (directory, FIFO, socket or device); the fall-back to built-in defaults covers an absent plain file only" >&2
-    fi
-    return 1
-  fi
+  sr_settings_usable "$file" || return 1
   if [ -f "$file" ]; then
     # Key PRESENCE decides, not value non-emptiness: `NAME = ""` is a real
     # assignment and must override the built-in default, exactly like a
@@ -139,16 +161,19 @@ sr_setting() { # NAME DEFAULT — resolved value on stdout; nonzero + ::error on
     # — anchoring at column one made an indented duplicate bypass the
     # fail-loud guard and an indented sole assignment collapse silently to
     # the built-in default (vstack#1059).
-    if grep -Eq -- "^[[:space:]]*${name}[[:space:]]*=" "$file"; then
+    status=0
+    matches="$(sr_settings_grep "^[[:space:]]*${name}[[:space:]]*=" "$file")" || status=$?
+    [ "$status" -le 1 ] || return 1
+    if [ "$status" -eq 0 ]; then
       # File-wide matching (header contract) makes a re-assigned name
       # ambiguous — e.g. the same key under two tables. Silently taking the
       # first could read an unrelated table's value, so ambiguity is a
       # configuration error.
-      if [ "$(grep -Ec -- "^[[:space:]]*${name}[[:space:]]*=" "$file")" -gt 1 ]; then
+      if [ "$(printf '%s\n' "$matches" | grep -c .)" -gt 1 ]; then
         echo "::error::$file: $name is assigned more than once (keys are matched file-wide regardless of TOML table; each name must be unique in the file)" >&2
         return 1
       fi
-      line="$(grep -E -- "^[[:space:]]*${name}[[:space:]]*=" "$file" | head -n 1)"
+      line="$(printf '%s\n' "$matches" | head -n 1)"
       # A PRESENT assignment this parser cannot read must fail LOUDLY, never
       # collapse to empty. Only the flat single-line basic-string shape is
       # supported — the value is quote-free ([^"]*), which makes the
@@ -164,8 +189,12 @@ sr_setting() { # NAME DEFAULT — resolved value on stdout; nonzero + ::error on
     fi
   fi
   done
+  sr_settings_usable ".env" || return 1
   if [ -f ".env" ]; then
-    line="$(grep -E -- "^[[:space:]]*(export[[:space:]]+)?${name}=" .env | tail -n 1 || true)"
+    status=0
+    matches="$(sr_settings_grep "^[[:space:]]*(export[[:space:]]+)?${name}=" .env)" || status=$?
+    [ "$status" -le 1 ] || return 1
+    line="$(printf '%s\n' "$matches" | tail -n 1)"
     if [ -n "$line" ]; then
       if ! val="$(sr_dotenv_value "${line#*=}")"; then
         echo "::error::.env: unsupported syntax for $name (a quoted value must end at its closing quote, optionally followed by a comment)" >&2
