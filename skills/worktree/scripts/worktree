@@ -2542,6 +2542,12 @@ pid_is_self_or_ancestor() {
 # records no usable pid.
 issue_release_permits_removal() {
   local wt="$1" owner="$2" status rc=0 err_file pid host
+  # The lease GENERATION this verdict was reached on, for the caller's
+  # compare-and-release; empty when the lease records none, which the caller
+  # refuses to release optimistically. The generation, not the pid: a pid is
+  # reused by the OS, so a claim taken by a new session after the recorded one
+  # exited can carry the same number and pass a pid compare.
+  LEASE_VERIFIED_GEN=""
   if ! err_file="$(mktemp "${TMPDIR:-/tmp}/worktree-lease-status.XXXXXX")"; then
     echo "Error: could not create a scratch file to verify the session lease of $wt; refusing to remove it." >&2
     return 1
@@ -2559,6 +2565,9 @@ issue_release_permits_removal() {
   rm -f "$err_file"
   pid="$(session_lease_field "$status" pid || true)"
   host="$(session_lease_field "$status" host || true)"
+  # Captured before the permit-by-default exits below, so every path that
+  # permits a removal still binds the release to the lease it was read from.
+  LEASE_VERIFIED_GEN="$(session_lease_field "$status" generation || true)"
   # pid 1 is init, never a claiming session; a lease recording it is corrupt,
   # and the ancestor walk would call it everyone's ancestor.
   [[ "$pid" =~ ^[1-9][0-9]*$ && "$pid" != "1" ]] || return 0
@@ -2595,10 +2604,9 @@ issue_release_permits_removal() {
 # and an unreadable state are all left exactly as they are and fall through to
 # the precheck, which names the owner and the way out.
 release_own_session_lease() {
-  local wt="$1" issue_owner="${2:-}" force="${3:-false}" env_owner ladder_owner owner="" candidate rc
+  local wt="$1" issue_owner="${2:-}" force="${3:-false}" env_owner owner="" candidate rc
   session_guard_available || return 0
   env_owner="$(session_guard_owner)"
-  ladder_owner="$env_owner"
   if [[ "$env_owner" == "$issue_owner" ]]; then
     env_owner=""
   fi
@@ -2616,13 +2624,30 @@ release_own_session_lease() {
     esac
   done
   [[ -n "$owner" ]] || return 0
-  # The env-ladder identity is this session asserting who IT is; the issue
-  # identity asserts only which issue was named, so it alone takes the
-  # liveness gate. `remove --force` skips exactly this refusal, nothing else.
-  if [[ "$owner" == "$issue_owner" && "$owner" != "$ladder_owner" && "$force" != true ]]; then
+  # An issue-shaped identity asserts only which ISSUE was named, so it takes
+  # the liveness gate — including when the session env happens to carry that
+  # same issue ID, because two sessions on one issue export the same value and
+  # the string match proves nothing the argument did not. Only an env-ladder
+  # identity DISTINCT from the issue is the session naming itself. `remove
+  # --force` skips exactly this refusal, nothing else.
+  local expect_gen_args=()
+  if [[ "$owner" == "$issue_owner" && "$force" != true ]]; then
     issue_release_permits_removal "$wt" "$owner" || return 1
+    # Bind the release to the lease that verdict was reached on: a sibling that
+    # claims between the two guard calls mints a new generation, and the
+    # release refuses rather than unlocking a live claim (see --expect-gen).
+    # A lease recording no generation cannot be bound, so it is refused rather
+    # than released blind — the owning session records one on its next
+    # claim/refresh; a dead legacy lease takes `remove --force`.
+    if [[ -z "$LEASE_VERIFIED_GEN" ]]; then
+      echo "Error: the session lease on $wt records no generation token; refusing an unbound release." >&2
+      echo "  Retry after the owning session's next refresh records one, or use: remove --force" >&2
+      return 1
+    fi
+    expect_gen_args=(--expect-gen "$LEASE_VERIFIED_GEN")
   fi
-  if ! "$SESSION_GUARD" release "$wt" --owner "$owner" --repo "$PROJECT_ROOT" >/dev/null; then
+  if ! "$SESSION_GUARD" release "$wt" --owner "$owner" --repo "$PROJECT_ROOT" \
+    "${expect_gen_args[@]+"${expect_gen_args[@]}"}" >/dev/null; then
     echo "Error: could not release this session's guard lease on $wt; refusing to remove it." >&2
     echo "  Release it, then retry: $SESSION_GUARD release \"$wt\" --owner \"$owner\"" >&2
     return 1
@@ -2671,11 +2696,15 @@ reuse_respects_session_lease() {
     echo "Coordinate with the owning session instead of reusing its worktree." >&2
     return 1
   fi
-  # `refresh` REJECTS `--repo` — it applies only to release/status/list/sweep.
-  # Passing it fails every refresh, and a best-effort wrapper would swallow that
-  # so the guard looks wired while silently never refreshing. Do not add it.
-  if ! "$SESSION_GUARD" refresh "$wt" --owner "$owner" >/dev/null; then
-    echo "Error: could not refresh this session's guard lease on $wt." >&2
+  # A reuse is a REPLACEMENT session for the issue, not a heartbeat of the
+  # session that claimed the lease: `claim`'s same-owner branch mints a new
+  # generation, so a concurrent remove that decided against the previous
+  # session's lease refuses instead of unlocking this one. (`claim`, like
+  # `refresh`, REJECTS `--repo` — it applies only to release/status/list/
+  # sweep; a best-effort wrapper would swallow that failure, so do not add
+  # it.)
+  if ! "$SESSION_GUARD" claim "$wt" --owner "$owner" >/dev/null; then
+    echo "Error: could not take over the session guard lease on $wt." >&2
     return 1
   fi
   return 0

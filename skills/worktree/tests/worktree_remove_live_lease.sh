@@ -134,6 +134,35 @@ assert_eq "$rec_code" "0" "same-session remove <ID> with a live recorded leader 
 assert_contains "$rec_out" "Removed: $REC_WT" "the same-session removal reports the removal"
 assert_path_absent "$REC_WT" "the same-session worktree is gone"
 
+echo "=== a lease with no generation refuses the optimistic release ==="
+
+# A pre-generation lease cannot be bound with --expect-gen, so the remove
+# flow refuses rather than releasing blind; --force stays the way out.
+LEG_ROOT="$TMP_ROOT/legacy"
+make_repo "$LEG_ROOT/main"
+git -C "$LEG_ROOT/main" worktree add -q -b issue-leg "$LEG_ROOT/trees/issue-leg" main
+LEG_WT="$LEG_ROOT/trees/issue-leg"
+"$GUARD_SCRIPT" claim "$LEG_WT" --owner issue-leg >/dev/null
+LEG_LOCK="$LEG_ROOT/main/.git/worktrees/issue-leg/locked"
+sed 's/ gen=[^ ]*//' "$LEG_LOCK" > "$LEG_LOCK.planted" && mv "$LEG_LOCK.planted" "$LEG_LOCK"
+set +e
+leg_out=$(cd "$LEG_ROOT/main" && env -u VSTACK_SESSION_OWNER -u HT_SESSION_OWNER \
+  "$WORKTREE_SCRIPT" remove issue-leg 2>"$LEG_ROOT/leg.err")
+leg_code=$?
+set -e
+assert_eq "$leg_code" "1" "remove <ID> on a generation-less lease refuses"
+assert_contains "$(cat "$LEG_ROOT/leg.err")" "records no generation token" \
+  "the refusal names the missing generation"
+assert_path_exists "$LEG_WT" "the worktree survives the unbound-release refusal"
+set +e
+leg_force_out=$(cd "$LEG_ROOT/main" && env -u VSTACK_SESSION_OWNER -u HT_SESSION_OWNER \
+  "$WORKTREE_SCRIPT" remove issue-leg --force 2>"$LEG_ROOT/leg-force.err")
+leg_force_code=$?
+set -e
+assert_eq "$leg_force_code" "0" "remove --force still releases a generation-less lease"
+assert_contains "$leg_force_out" "Removed: $LEG_WT" "the forced legacy removal is reported"
+assert_path_absent "$LEG_WT" "the worktree is gone after --force"
+
 echo "=== a live foreign session's issue-keyed lease refuses remove <ID> ==="
 
 ROOT="$TMP_ROOT/live"
@@ -184,6 +213,145 @@ assert_path_absent "$LIVE_WT" "the worktree is gone after --force"
 kill "$SLEEPER_PID" 2>/dev/null || true
 wait "$SLEEPER_PID" 2>/dev/null || true
 SLEEPER_PID=""
+
+echo "=== the env owner matching the issue ID does not skip the liveness gate ==="
+
+# VSTACK_SESSION_OWNER/HT_SESSION_OWNER are set to the ISSUE ID by the
+# orchestrating workflows, so a sibling session on the same issue exports the
+# very same string. The recorded pid must still decide.
+ENV_ROOT="$TMP_ROOT/envowner"
+make_repo "$ENV_ROOT/main"
+git -C "$ENV_ROOT/main" worktree add -q -b issue-envown "$ENV_ROOT/trees/issue-envown" main
+ENV_WT="$ENV_ROOT/trees/issue-envown"
+"$GUARD_SCRIPT" claim "$ENV_WT" --owner issue-envown >/dev/null
+sleep 300 &
+ENV_SLEEPER=$!
+plant_lease_pid "$ENV_ROOT/main/.git/worktrees/issue-envown/locked" "$ENV_SLEEPER"
+
+set +e
+env_out=$(cd "$ENV_ROOT/main" && VSTACK_SESSION_OWNER=issue-envown \
+  "$WORKTREE_SCRIPT" remove issue-envown 2>"$ENV_ROOT/env.err")
+env_code=$?
+set -e
+assert_eq "$env_code" "1" "remove <ID> with VSTACK_SESSION_OWNER equal to the issue ID still refuses"
+assert_contains "$(cat "$ENV_ROOT/env.err")" "(owner=issue-envown pid=$ENV_SLEEPER)" \
+  "the env-owner path names the live pid it refused on"
+if grep -qF "Removed:" <<<"$env_out"; then
+  fail "the env-owner removal does not report a removal"
+else
+  pass "the env-owner removal does not report a removal"
+fi
+assert_path_exists "$ENV_WT" "the sibling's worktree survives an equal-env-owner removal"
+assert_eq "$(guard_status_code "$ENV_WT" "$ENV_ROOT/main" --owner issue-envown)" "0" \
+  "the sibling's lease survives an equal-env-owner removal"
+kill "$ENV_SLEEPER" 2>/dev/null || true
+wait "$ENV_SLEEPER" 2>/dev/null || true
+
+echo "=== compare-and-release refuses a lease re-claimed after the liveness check ==="
+
+# The liveness verdict and the release are two guard calls; a sibling that
+# claims in between mints a new lease GENERATION. `release --expect-gen` is
+# what makes the pair atomic — it re-reads the generation under the same lock.
+# The token is the claim's, not the pid's, because the OS reuses pids.
+CAS_ROOT="$TMP_ROOT/cas"
+make_repo "$CAS_ROOT/main"
+git -C "$CAS_ROOT/main" worktree add -q -b issue-cas "$CAS_ROOT/trees/issue-cas" main
+CAS_WT="$CAS_ROOT/trees/issue-cas"
+"$GUARD_SCRIPT" claim "$CAS_WT" --owner issue-cas >/dev/null
+CAS_LOCK="$CAS_ROOT/main/.git/worktrees/issue-cas/locked"
+lease_gen() { sed -n 's/.* gen=\([^ ]*\) .*/\1/p' "$1"; }
+cas_gen_before="$(lease_gen "$CAS_LOCK")"
+cas_pid_before="$(sed -n 's/.* pid=\([0-9]*\) .*/\1/p' "$CAS_LOCK")"
+
+if [[ -n "$cas_gen_before" ]]; then
+  pass "a claim records a lease generation"
+else
+  fail "a claim records a lease generation"
+fi
+
+# A refresh continues the SAME claim, so it must carry the generation across:
+# a token that rotated per heartbeat would refuse every release that took more
+# than one heartbeat to decide.
+"$GUARD_SCRIPT" refresh "$CAS_WT" --owner issue-cas >/dev/null
+assert_eq "$(lease_gen "$CAS_LOCK")" "$cas_gen_before" \
+  "a refresh carries the generation across unchanged"
+
+# Control: the release DOES go through when the lease still records the
+# generation the caller checked — without this the refusals below prove nothing.
+set +e
+cas_ok_out=$("$GUARD_SCRIPT" release "$CAS_WT" --owner issue-cas --repo "$CAS_ROOT/main" \
+  --expect-gen "$cas_gen_before" 2>"$CAS_ROOT/cas-ok.err")
+cas_ok_code=$?
+set -e
+assert_eq "$cas_ok_code" "0" "control: --expect-gen matching the lease releases it"
+assert_contains "$cas_ok_out" "released $CAS_WT" "control: the matching release is reported"
+
+# The racing case: re-claim, then release naming the generation seen BEFORE.
+"$GUARD_SCRIPT" claim "$CAS_WT" --owner issue-cas >/dev/null
+sleep 300 &
+CAS_SLEEPER=$!
+plant_lease_pid "$CAS_LOCK" "$CAS_SLEEPER"
+set +e
+"$GUARD_SCRIPT" release "$CAS_WT" --owner issue-cas --repo "$CAS_ROOT/main" \
+  --expect-gen "$cas_gen_before" >/dev/null 2>"$CAS_ROOT/cas.err"
+cas_code=$?
+set -e
+assert_eq "$cas_code" "75" "--expect-gen refuses a lease re-claimed since the check"
+assert_contains "$(cat "$CAS_ROOT/cas.err")" "re-claimed since it was checked" \
+  "the refusal says the lease was re-claimed under the caller"
+assert_contains "$(cat "$CAS_ROOT/cas.err")" "expected gen=$cas_gen_before" \
+  "the refusal names the generation the caller checked"
+assert_eq "$(guard_status_code "$CAS_WT" "$CAS_ROOT/main" --owner issue-cas)" "0" \
+  "the re-claimed lease survives the compare-and-release refusal"
+
+# THE PID-REUSE CASE. The replacement claim is planted with the SAME pid the
+# caller checked, which is what the OS does when it reuses a freed pid. A pid
+# compare passes here and unlocks a live lease; only the generation refuses.
+cas_reuse_gen="$(lease_gen "$CAS_LOCK")"
+plant_lease_pid "$CAS_LOCK" "$cas_pid_before"
+assert_eq "$(sed -n 's/.* pid=\([0-9]*\) .*/\1/p' "$CAS_LOCK")" "$cas_pid_before" \
+  "the replacement claim records the same pid the caller checked (reuse)"
+if [[ "$cas_reuse_gen" != "$cas_gen_before" ]]; then
+  pass "the replacement claim carries a different generation despite the reused pid"
+else
+  fail "the replacement claim carries a different generation despite the reused pid"
+fi
+set +e
+"$GUARD_SCRIPT" release "$CAS_WT" --owner issue-cas --repo "$CAS_ROOT/main" \
+  --expect-gen "$cas_gen_before" >/dev/null 2>"$CAS_ROOT/cas-reuse.err"
+cas_reuse_code=$?
+set -e
+assert_eq "$cas_reuse_code" "75" \
+  "a replacement claim on a REUSED pid is still refused (the pid compare would have released it)"
+assert_eq "$(guard_status_code "$CAS_WT" "$CAS_ROOT/main" --owner issue-cas)" "0" \
+  "the live lease survives the reused-pid release attempt"
+kill "$CAS_SLEEPER" 2>/dev/null || true
+wait "$CAS_SLEEPER" 2>/dev/null || true
+
+# THE SAME-OWNER RE-CLAIM CASE. A second session for the same issue claims
+# while the lease is still LOCKED, which routes through claim's same-owner
+# branch rather than a fresh lock. That claim is a replacement session, not a
+# heartbeat: it must mint a new generation, or a release decided against the
+# previous session's lease would unlock the replacement's live claim.
+cas_live_gen="$(lease_gen "$CAS_LOCK")"
+"$GUARD_SCRIPT" claim "$CAS_WT" --owner issue-cas >/dev/null
+cas_reclaim_gen="$(lease_gen "$CAS_LOCK")"
+if [[ -n "$cas_reclaim_gen" && "$cas_reclaim_gen" != "$cas_live_gen" ]]; then
+  pass "a same-owner claim on a live lease mints a new generation"
+else
+  fail "a same-owner claim on a live lease mints a new generation"
+fi
+set +e
+"$GUARD_SCRIPT" release "$CAS_WT" --owner issue-cas --repo "$CAS_ROOT/main" \
+  --expect-gen "$cas_live_gen" >/dev/null 2>"$CAS_ROOT/cas-reclaim.err"
+cas_reclaim_code=$?
+set -e
+assert_eq "$cas_reclaim_code" "75" \
+  "--expect-gen from before a same-owner re-claim refuses to release"
+assert_contains "$(cat "$CAS_ROOT/cas-reclaim.err")" "re-claimed since it was checked" \
+  "the same-owner refusal says the lease was re-claimed"
+assert_eq "$(guard_status_code "$CAS_WT" "$CAS_ROOT/main" --owner issue-cas)" "0" \
+  "the replacement session's lease survives the stale release"
 
 echo "=== a dead recorded pid proceeds as before ==="
 
