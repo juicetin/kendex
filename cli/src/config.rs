@@ -184,8 +184,9 @@ impl SourceRegistry {
 
     /// Drop entries that look like local filesystem paths but no longer exist.
     /// Remote shorthand entries (e.g. "owner/repo", "https://...") are
-    /// preserved unconditionally — they're not paths to check. Returns the
-    /// number of entries removed.
+    /// preserved unconditionally — they're not paths to check. A per-project
+    /// choice is dropped when either side is a dead path: its source, or the
+    /// project root it was recorded for. Returns the number of entries removed.
     pub fn prune_dead_paths(&mut self) -> usize {
         let before = self.entries.len();
         self.entries.retain(|entry| !is_dead_local_path(entry));
@@ -196,7 +197,7 @@ impl SourceRegistry {
         }
         let before_project = self.project_current.len();
         self.project_current
-            .retain(|_, source| !is_dead_local_path(source));
+            .retain(|project, source| !is_dead_local_path(project) && !is_dead_local_path(source));
         before - self.entries.len() + before_project - self.project_current.len()
     }
 
@@ -342,8 +343,13 @@ pub(crate) fn is_project_self_non_source(entry: &str, project_root: &Path) -> bo
         && !crate::resolve::has_vstack_source_content(project_root)
 }
 
+/// The local-path shapes a registry entry or project key can take: absolute
+/// for the running platform (`/…` on Unix; `C:\…` and `\\server\share\…` on
+/// Windows), `~`-tilde, or relative starting with `.`. Remote shorthand
+/// (`owner/repo`) and URLs are never paths.
 fn expanded_local_path(entry: &str) -> Option<PathBuf> {
-    let looks_like_path = entry.starts_with('/')
+    let looks_like_path = Path::new(entry).is_absolute()
+        || entry.starts_with('/')
         || entry.starts_with('~')
         || entry.starts_with("./")
         || entry.starts_with("../");
@@ -2388,6 +2394,99 @@ mod source_registry_tests {
         assert!(reg.entries.contains(&"owner/b".to_string()));
         let _ = fs::remove_dir_all(&project_a);
         let _ = fs::remove_dir_all(&project_b);
+    }
+
+    /// A per-project source choice outlives its project (deleted worktree,
+    /// vanished temp checkout): the KEY is a dead path even when the value is
+    /// a remote shorthand that never dies. Both sides are checked; a live
+    /// project keeps its remote choice untouched.
+    #[test]
+    fn prune_drops_project_current_keys_for_vanished_projects() {
+        let dir = sandbox("prune_project_current_keys");
+        let live_project = dir.join("live-project");
+        fs::create_dir_all(&live_project).unwrap();
+        let dead_project = dir.join("dead-project");
+        // dead_project is intentionally not created.
+
+        let mut reg = SourceRegistry::default();
+        reg.remember_for_project(&live_project, "vanillagreencom/vstack");
+        reg.project_current.insert(
+            dead_project.display().to_string(),
+            "vanillagreencom/vstack".to_string(),
+        );
+
+        let pruned = reg.prune_dead_paths();
+
+        assert_eq!(pruned, 1);
+        assert_eq!(
+            reg.current_for_project(&live_project),
+            Some("vanillagreencom/vstack")
+        );
+        assert!(
+            !reg.project_current
+                .contains_key(&dead_project.display().to_string()),
+            "vanished project key must be dropped: {:?}",
+            reg.project_current
+        );
+        assert_eq!(reg.entries, vec!["vanillagreencom/vstack".to_string()]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Path-likeness follows the running platform's notion of an absolute
+    /// path, so a dead Windows drive-letter or UNC key/source is pruned like a
+    /// dead `/…` one. Remote shorthand and URLs are never paths on any platform.
+    #[test]
+    fn prune_recognizes_platform_absolute_paths_and_never_prunes_remotes() {
+        #[cfg(windows)]
+        {
+            let mut reg = SourceRegistry::default();
+            reg.entries.push(r"C:\vanished-source".to_string());
+            reg.project_current.insert(
+                r"C:\vanished-project".to_string(),
+                "vanillagreencom/vstack".to_string(),
+            );
+            reg.project_current.insert(
+                r"\\server\share\vanished-project".to_string(),
+                "vanillagreencom/vstack".to_string(),
+            );
+            assert_eq!(reg.prune_dead_paths(), 3);
+            assert!(reg.entries.is_empty(), "{:?}", reg.entries);
+            assert!(reg.project_current.is_empty(), "{:?}", reg.project_current);
+        }
+        #[cfg(unix)]
+        {
+            assert!(expanded_local_path("/vanished").is_some());
+            assert!(is_dead_local_path("/vanished/never/existed"));
+        }
+        for remote in [
+            "vanillagreencom/vstack",
+            "https://example.com/repo",
+            "git@github.com:owner/repo.git",
+        ] {
+            assert!(
+                expanded_local_path(remote).is_none(),
+                "{remote:?} is not a path"
+            );
+        }
+
+        let dir = sandbox("prune_remotes_untouched");
+        let mut reg = SourceRegistry {
+            current: Some("vanillagreencom/vstack".to_string()),
+            entries: vec![
+                "vanillagreencom/vstack".to_string(),
+                "https://example.com/repo".to_string(),
+                "git@github.com:owner/repo.git".to_string(),
+            ],
+            ..Default::default()
+        };
+        reg.remember_for_project(&dir, "https://example.com/repo");
+        let before = reg.clone();
+
+        assert_eq!(reg.prune_dead_paths(), 0);
+        assert_eq!(reg.entries, before.entries);
+        assert_eq!(reg.current, before.current);
+        assert_eq!(reg.project_current, before.project_current);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

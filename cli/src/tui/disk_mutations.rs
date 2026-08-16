@@ -30,6 +30,15 @@ impl DiskMutationReport {
     fn fail(&mut self, item: &str, err: impl std::fmt::Display) {
         self.failed.push(format!("{item}: {err}"));
     }
+
+    /// Record an item that was deliberately not attempted. A skip is a
+    /// notice, never a failure: it must not veto follow-up work gated on
+    /// `failed` (the CLI update behind an "Update All"), and it leaves
+    /// `attempted` so the completed/attempted ratio counts only real tries.
+    fn skip(&mut self, item: &str, why: impl std::fmt::Display) {
+        self.attempted = self.attempted.saturating_sub(1);
+        self.notices.push(format!("skipped {item}: {why}"));
+    }
 }
 
 /// Resolve a lock entry's harness id list to the set that actually supports
@@ -539,41 +548,47 @@ fn reinstall_codex_hooks_for_moved_agents(
     Ok(())
 }
 
-pub(super) fn perform_inline_update(
-    names: &[String],
-    items: &DiscoveredItems,
-) -> DiskMutationReport {
+/// Refresh the named installs in place, each from its own recorded source.
+///
+/// Sources are resolved per scope from that scope's lock, exactly as
+/// `vstack refresh` does — never from whichever source the picker has
+/// selected — so an entry recorded from any source refreshes.
+pub(super) fn perform_inline_update(names: &[String]) -> DiskMutationReport {
     let mut report = DiskMutationReport::new(names.len());
     let mut completed_names = std::collections::HashSet::new();
+    let mut extras_reported = std::collections::HashSet::new();
     let project_root = config::project_root();
-    let source_dir = source_dir_for_items(items);
-    let mapping = source_dir
-        .as_deref()
-        .map(crate::mapping::MappingConfig::load)
-        .unwrap_or_default();
-    let refresh_sources: Vec<crate::refresh_sources::RefreshSource> = source_dir
-        .as_deref()
-        .map(|root| crate::refresh_sources::RefreshSource {
-            root: root.to_path_buf(),
-            aliases: vec![root.to_string_lossy().into_owned()],
-            source_repo: config::source_repo_for_source(Some(root), &root.to_string_lossy()),
-            mapping: mapping.clone(),
-            agents: items.agents.clone(),
-            skills: items.skills.clone(),
-            hooks: items.hooks.clone(),
-            pi_extensions: items.pi_extensions.clone(),
-        })
-        .into_iter()
-        .collect();
-    let selected_source_repo = refresh_sources
-        .first()
-        .map(|source| source.source_repo.clone());
 
     for scope_global in [false, true] {
         let lock_path = config::lock_file_path(scope_global);
         let Ok(mut lock) = config::LockFile::load(&lock_path) else {
             continue;
         };
+        // Extras are applied, not installed: the refresh pass has no branch
+        // for them, so a requested extra would count as neither done nor
+        // failed. Skip it with a notice — not a failure: a failure would
+        // veto the CLI update queued behind the same "Update All", and a
+        // stale extra stays stale until re-applied, so it would veto every
+        // one after it too.
+        let is_extra = |name: &String| {
+            lock.entries
+                .get(name)
+                .is_some_and(|entry| entry.kind == ItemKind::Extra)
+        };
+        for name in names.iter().filter(|name| is_extra(name)) {
+            if extras_reported.insert(name.clone()) {
+                report.skip(
+                    name,
+                    format!("extras are reapplied with `vstack apply {name}`"),
+                );
+            }
+        }
+        let names: Vec<String> = names
+            .iter()
+            .filter(|name| !is_extra(name))
+            .cloned()
+            .collect();
+        let names = names.as_slice();
         if !names.iter().any(|n| lock.entries.contains_key(n)) {
             continue;
         }
@@ -608,10 +623,14 @@ pub(super) fn perform_inline_update(
                 .is_some_and(|entry| entry.kind == ItemKind::Hook)
         });
 
+        let source_records = crate::refresh_sources::resolve_source_records(&lock);
+        let sources = crate::refresh_sources::load_refresh_sources(&source_records);
+        let source_hooks = crate::refresh_sources::all_source_hooks(&sources);
+
         let pruned = crate::commands::refresh::prune_hook_harnesses(
             scope_global,
             &mut lock,
-            &items.hooks,
+            &source_hooks,
             Some(names),
         );
         if pruned && let Err(err) = lock.save(&lock_path) {
@@ -637,7 +656,7 @@ pub(super) fn perform_inline_update(
         let stats = crate::commands::refresh::refresh_items_in_scope(
             scope_global,
             &lock,
-            &refresh_sources,
+            &sources,
             &mut project_config,
             &project_root,
             Some(&refresh_names),
@@ -657,14 +676,27 @@ pub(super) fn perform_inline_update(
                 format!("refresh failed{harness}: {}", failure.error),
             );
         }
+        // An entry whose source is gone (or no longer carries it) is not
+        // refreshed; without this it would count as neither done nor failed
+        // and the flash would read "Updated 0 item(s)". Agents the hook
+        // update pulled in on its own are named as such — the user never
+        // asked for them, but their stale payload is a real outcome.
+        for (item, reason) in &stats.missing {
+            if names.contains(item) {
+                report.fail(item, format!("not refreshed: {reason}"));
+            } else {
+                report.fail(
+                    item,
+                    format!("agent not regenerated after hook update: {reason}"),
+                );
+            }
+        }
 
         let now = config::now_iso();
         for (name, entry) in lock.entries.iter_mut() {
             if stats.successful_items.contains(name) {
+                crate::commands::refresh::sync_lock_entry_source_repo(&source_records, entry);
                 entry.installed_at = now.clone();
-                if let Some(source_repo) = &selected_source_repo {
-                    entry.source_repo = source_repo.clone();
-                }
                 entry.source_hash = config::compute_source_hash(entry);
             }
         }
