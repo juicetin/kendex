@@ -1,6 +1,7 @@
 import { type ExtensionAPI, type ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { debug, diagDump, diagGuidance } from "./debug.js";
 import { type QueryContext } from "./query-state.js";
+import { currentRequestLaneId } from "./request-lane.js";
 import { summarizeMissingToolNames, type MissingToolResult } from "./tool-pairing-audit.js";
 
 export interface SessionState {
@@ -45,16 +46,91 @@ export interface SessionState {
 	forceRotate?: boolean;
 }
 
-// Shared mutable bridge state. Lives in its own module so the extracted
-// modules and index.ts observe the SAME state: ESM live bindings let every
-// importer READ these `let` bindings live, but only this module may assign
-// them — cross-module writes must go through the setters below.
-export let sharedSession: SessionState | null = null;
+// Claude session state is scoped to Pi's provider `sessionId`. Parent and child
+// agents can load separate copies of the extension module while sharing the
+// primary provider closure, so the lane registry must live on globalThis rather
+// than in one module instance. The versioned symbol prevents an incompatible
+// future store shape from being mistaken for this one.
+interface SharedSessionLaneStoreV1 {
+	defaultSession: SessionState | null;
+	sessions: Map<string, SessionState | null>;
+}
+
+const SHARED_SESSION_LANES_SYMBOL = Symbol.for("vstack.pi.claude-bridge.shared-session-lanes.v1");
+
+function sharedSessionLaneStore(): SharedSessionLaneStoreV1 {
+	const host = globalThis as Record<symbol, unknown>;
+	let store = host[SHARED_SESSION_LANES_SYMBOL] as SharedSessionLaneStoreV1 | undefined;
+	if (!store) {
+		store = { defaultSession: null, sessions: new Map() };
+		host[SHARED_SESSION_LANES_SYMBOL] = store;
+	}
+	return store;
+}
+
 export let extensionApi: ExtensionAPI | undefined;
 export let piUI: ExtensionUIContext | undefined;
 
+export function getSharedSession(): SessionState | null {
+	const store = sharedSessionLaneStore();
+	const sessionId = currentRequestLaneId();
+	return sessionId === undefined
+		? store.defaultSession
+		: (store.sessions.get(sessionId) ?? null);
+}
+
 export function setSharedSession(next: SessionState | null): void {
-	sharedSession = next;
+	const store = sharedSessionLaneStore();
+	const sessionId = currentRequestLaneId();
+	if (sessionId === undefined) store.defaultSession = next;
+	else store.sessions.set(sessionId, next);
+}
+
+export function deleteSharedSessionLane(sessionId: string | undefined): void {
+	const store = sharedSessionLaneStore();
+	if (sessionId === undefined) store.defaultSession = null;
+	else store.sessions.delete(sessionId);
+}
+
+export function clearSharedSessionLanes(): void {
+	const store = sharedSessionLaneStore();
+	store.sessions.clear();
+	store.defaultSession = null;
+}
+
+// The lane each pi session started in, keyed by its SessionManager. An in-memory
+// session (`pi --no-session`) forks by mutating the SAME SessionManager's id
+// before session_shutdown fires, so the live id there names the fork rather than
+// the session being torn down, and the fallback to it would prune a live
+// sibling. Keyed per manager (not one slot) so overlapping parent/child
+// session_start events keep their own entries, and on globalThis like the
+// registry above because session_start and session_shutdown can reach different
+// module instances (`/reload` mid-session, a child agent's own copy) and both
+// must see the same entry.
+const STARTED_LANES_SYMBOL = Symbol.for("vstack.pi.claude-bridge.started-lanes.v1");
+
+function startedLaneStore(): WeakMap<object, string> {
+	const host = globalThis as Record<symbol, unknown>;
+	let store = host[STARTED_LANES_SYMBOL] as WeakMap<object, string> | undefined;
+	if (!store) {
+		store = new WeakMap<object, string>();
+		host[STARTED_LANES_SYMBOL] = store;
+	}
+	return store;
+}
+
+export function recordStartedLane(sessionManager: object, sessionId: string): void {
+	startedLaneStore().set(sessionManager, sessionId);
+}
+
+/** The lane recorded at this manager's session_start, removed as it is read —
+ *  one shutdown per start. Undefined when no start was recorded (the caller
+ *  falls back to the manager's live id). */
+export function takeStartedLane(sessionManager: object): string | undefined {
+	const store = startedLaneStore();
+	const sessionId = store.get(sessionManager);
+	store.delete(sessionManager);
+	return sessionId;
 }
 
 /** Force the next syncSharedSession down the REBUILD path (no-op without a
@@ -62,8 +138,9 @@ export function setSharedSession(next: SessionState | null): void {
  *  a concurrent CC writer may still be flushing (abort, idle kill); see the
  *  field docs on SessionState. */
 export function markSessionForRebuild(opts: { forceRotate?: boolean } = {}): void {
+	const sharedSession = getSharedSession();
 	if (!sharedSession) return;
-	sharedSession = { ...sharedSession, needsRebuild: true, ...(opts.forceRotate ? { forceRotate: true } : {}) };
+	setSharedSession({ ...sharedSession, needsRebuild: true, ...(opts.forceRotate ? { forceRotate: true } : {}) });
 }
 
 export function setExtensionApi(next: ExtensionAPI | undefined): void {
@@ -183,6 +260,7 @@ export function reportToolResultMismatch(
 			return true;
 		}
 		const toolNameSummary = compactToolNameSummary(progress.toolNames);
+		const sharedSession = getSharedSession();
 		diagDump("tool_result_delivery_mismatch", {
 			reason,
 			cwd,
@@ -225,9 +303,19 @@ export function reportToolResultMismatch(
 
 export function __testSetBridgeIntegrityState(state: { ui?: Pick<ExtensionUIContext, "notify"> | null; sharedSession?: SessionState | null }): void {
 	if ("ui" in state) piUI = state.ui as ExtensionUIContext | undefined;
-	if ("sharedSession" in state) sharedSession = state.sharedSession ?? null;
+	if ("sharedSession" in state) {
+		if (currentRequestLaneId() !== undefined) setSharedSession(state.sharedSession ?? null);
+		else {
+			clearSharedSessionLanes();
+			sharedSessionLaneStore().defaultSession = state.sharedSession ?? null;
+		}
+	}
 }
 
 export function __testGetBridgeIntegrityState(): { sharedSession: SessionState | null } {
-	return { sharedSession };
+	return { sharedSession: getSharedSession() };
+}
+
+export function __testSharedSessionLaneCount(): number {
+	return sharedSessionLaneStore().sessions.size;
 }

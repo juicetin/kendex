@@ -7,7 +7,7 @@ import { PROVIDER_ID, messageContentToText } from "./convert.js";
 import { buildModels, modelDisplayName } from "./models.js";
 import { MCP_SERVER_NAME, MCP_TOOL_PREFIX } from "./skills.js";
 import { extractAllToolResults as _extractAllToolResults, type McpResult } from "./extract-tool-results.js";
-import { QueryContext, ctx, drainPendingToolCalls, popContext, stackDepth, pushContext, summarizeDroppedUserMessages, toolCallDrainCause, type DeferredUserMessage } from "./query-state.js";
+import { QueryContext, ctx, deleteQueryLane, drainPendingToolCalls, popContext, stackDepth, pushContext, summarizeDroppedUserMessages, toolCallDrainCause, type DeferredUserMessage } from "./query-state.js";
 import { teardownQuery } from "./query-teardown.js";
 import { loadConfig, recordProjectTrust, registerExternalConfigResolver } from "./config.js";
 import { hasClaudeCredentials } from "./auth-presence.js";
@@ -38,7 +38,7 @@ export { connectorCachePath, connectorCacheScopeKey, readCachedConnectors, scope
 export { connectorServersSnapshot, primeConnectorServers } from "./connector-runtime.js";
 import { debug, diagDump, makeCliDebugOptions, moduleInstanceId } from "./debug.js";
 import { preflightClaudeExecutable, resolveClaudeExecutable } from "./claude-executable.js";
-import { appendIntegrityEntry, argKeys, extensionApi, markSessionForRebuild, reportToolResultMismatch, safeNotify, safeToolCallSummary, setExtensionApi, setPiUI, setSharedSession, sharedSession, type SessionState } from "./bridge-state.js";
+import { appendIntegrityEntry, argKeys, deleteSharedSessionLane, extensionApi, getSharedSession, markSessionForRebuild, recordStartedLane, reportToolResultMismatch, safeNotify, safeToolCallSummary, setExtensionApi, setPiUI, setSharedSession, takeStartedLane, type SessionState } from "./bridge-state.js";
 import { connectorsEnabledFor, isChildExecutedTool } from "./connectors.js";
 import { primeConnectorServers } from "./connector-runtime.js";
 import { cancelScheduledSessionPersistence, conversationFingerprint, restoreSharedSessionFromPi, schedulePersistSharedSession, syncSharedSession } from "./session-persistence.js";
@@ -63,6 +63,7 @@ import { registerBridgeCommands } from "./bridge-commands.js";
 import { consumeQuery, emitRateLimitEvent, type ClaudeAttemptFailure } from "./consume-query.js";
 import { buildClaudeQueryOptions } from "./query-options.js";
 import { sdkQueryFactory } from "./sdk-query.js";
+import { currentRequestLaneId, runInRequestLane } from "./request-lane.js";
 
 // Re-exports: the module decomposition must not change the bundle entry's
 // public surface — unit tests and downstream consumers import these from
@@ -531,7 +532,24 @@ function applyProviderRegistration(trigger: string): void {
  *  Two cases: tool result delivery (active query) or fresh query. Exported for
  *  the rotation-stream unit tests, which drive it with a fake SDK factory. */
 export function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: SimpleStreamOptions): AssistantMessageEventStream {
+	return runInRequestLane(options?.sessionId, () => streamClaudeAgentSdkInLane(model, context, options));
+}
+
+function streamClaudeAgentSdkInLane(model: Model<any>, context: Context, options?: SimpleStreamOptions): AssistantMessageEventStream {
 	const stream = newAssistantMessageEventStream();
+	// The lane this request runs in, for callbacks that fire OUTSIDE it: an
+	// AbortSignal listener runs in the aborter's async context, not ours.
+	const laneId = currentRequestLaneId();
+	// Pi marks its compaction and branch-summary one-shots with cacheRetention
+	// "none" and a fresh sessionId per call; no session_shutdown ever prunes
+	// those lanes. Map the hint onto lane lifetime: nothing about this request
+	// is retained once it settles.
+	const ephemeralLane = laneId !== undefined && options?.cacheRetention === "none";
+	const releaseEphemeralLane = (): void => {
+		if (!ephemeralLane) return;
+		deleteSharedSessionLane(laneId);
+		deleteQueryLane(laneId);
+	};
 
 	// DEBUG: trace followUp message triggering
 	const lastMsgRole = context.messages[context.messages.length - 1]?.role;
@@ -638,8 +656,9 @@ export function streamClaudeAgentSdk(model: Model<any>, context: Context, option
 		// advance it past history Claude never saw (vstack#1001); Math.max
 		// remains the backstop for a legacy-record foreign context the
 		// fingerprint guard could not classify.
-		if (sharedSession && stackDepth() === 0 && !queryCtx.detachedFromSharedSession) {
-			setSharedSession({ ...sharedSession, cursor: Math.max(sharedSession.cursor, capturedThrough) });
+		const activeSession = getSharedSession();
+		if (activeSession && stackDepth() === 0 && !queryCtx.detachedFromSharedSession) {
+			setSharedSession({ ...activeSession, cursor: Math.max(activeSession.cursor, capturedThrough) });
 		}
 		queryCtx.latestCursor = Math.max(queryCtx.latestCursor, capturedThrough);
 		return stream;
@@ -654,12 +673,14 @@ export function streamClaudeAgentSdk(model: Model<any>, context: Context, option
 		// The detached flag deliberately survives query end: an orphaned result
 		// from a foreign one-shot indexes ITS conversation, and writing that
 		// length here would move (even shrink) the parent's cursor (vstack#1001).
-		if (sharedSession && stackDepth() === 0 && !ctx().detachedFromSharedSession) setSharedSession({ ...sharedSession, cursor: context.messages.length });
+		const activeSession = getSharedSession();
+		if (activeSession && stackDepth() === 0 && !ctx().detachedFromSharedSession) setSharedSession({ ...activeSession, cursor: context.messages.length });
 		const c = ctx();  // capture current context for the microtask
 		queueMicrotask(() => {
 			c.resetTurnState(model);
 			stream.push({ type: "done", reason: "stop", message: c.turnOutput });
 			stream.end();
+			releaseEphemeralLane();
 		});
 		return stream;
 	}
@@ -690,6 +711,7 @@ export function streamClaudeAgentSdk(model: Model<any>, context: Context, option
 		queueMicrotask(() => {
 			stream.push({ type: "error", reason: "error", error: errorOutput });
 			stream.end();
+			releaseEphemeralLane();
 		});
 		return stream;
 	}
@@ -765,6 +787,7 @@ export function streamClaudeAgentSdk(model: Model<any>, context: Context, option
 			queueMicrotask(() => {
 				stream.push({ type: "error", reason: "error", error: errorOutput });
 				stream.end();
+				releaseEphemeralLane();
 			});
 			return stream;
 		}
@@ -813,7 +836,7 @@ export function streamClaudeAgentSdk(model: Model<any>, context: Context, option
 	const claudeExecutablePreflight = claudeExecutable ? preflightClaudeExecutable(claudeExecutable, cwd) : undefined;
 
 	const accountScope = accountSessionScope(account);
-	const cursorBeforeSync = sharedSession?.cursor ?? null;
+	const cursorBeforeSync = getSharedSession()?.cursor ?? null;
 	// A REENTRANT (subagent) query never touches the module-level shared
 	// session: syncSharedSession's REBUILD path is destructive to the PARENT's
 	// session file, and any resume id borrowed from the parent would splice the
@@ -856,7 +879,10 @@ export function streamClaudeAgentSdk(model: Model<any>, context: Context, option
 			cursorBeforeSync,
 			promptStart,
 			promptRoles: promptMessages.map((m) => m.role).join(" "),
-			sharedSession: sharedSession ? { sessionId: sharedSession.sessionId.slice(0, 8), cursor: sharedSession.cursor } : null,
+			sharedSession: (() => {
+				const activeSession = getSharedSession();
+				return activeSession ? { sessionId: activeSession.sessionId.slice(0, 8), cursor: activeSession.cursor } : null;
+			})(),
 			messageRoles: context.messages.map((m, i) => `[${i}]${m.role}`).join(" "),
 		});
 		// Recover: use a continuation prompt so the SDK doesn't send an empty text block
@@ -1039,7 +1065,10 @@ export function streamClaudeAgentSdk(model: Model<any>, context: Context, option
 		activeStreamIdleWatchdogs.set(abortCtx, streamIdleWatchdog);
 		streamIdleWatchdog.refresh();
 	}
-	const onAbort = () => {
+	// Runs in the ABORTER's async context (AbortSignal listeners do not inherit
+	// AsyncLocalStorage), so re-enter this request's lane explicitly: the
+	// mismatch report marks the shared record of whatever lane is current.
+	const onAbort = () => runInRequestLane(laneId, () => {
 		wasAborted = true;
 		// Prevent stale deferred messages from being replayed by parent on pop
 		dropDeferredUserMessages("abort");
@@ -1051,7 +1080,7 @@ export function streamClaudeAgentSdk(model: Model<any>, context: Context, option
 		if (drained > 0) debug(`provider: abort drained ${drained} waiting MCP handler(s) as errors`);
 		abortCtx.pendingResults.clear();
 		requestAbort();
-	};
+	});
 	if (options?.signal) {
 		if (options.signal.aborted) onAbort();
 		else options.signal.addEventListener("abort", onAbort, { once: true });
@@ -1125,9 +1154,10 @@ export function streamClaudeAgentSdk(model: Model<any>, context: Context, option
 				// turn would silently lose them forever (#967).
 				if (!abortCtx.handledTerminalError) surfaceFailure(failure);
 				const droppedSteers = dropDeferredUserMessages("terminal-failure");
-				const failedSessionId = capturedSessionId ?? sharedSession?.sessionId;
+				const activeSession = getSharedSession();
+				const failedSessionId = capturedSessionId ?? activeSession?.sessionId;
 				if (failedSessionId) {
-					const cursor = Math.max(context.messages.length, abortCtx.latestCursor, sharedSession?.cursor ?? 0);
+					const cursor = Math.max(context.messages.length, abortCtx.latestCursor, activeSession?.cursor ?? 0);
 					debug(`provider: terminal failure, persisting session=${failedSessionId.slice(0, 8)}, cursor=${cursor}, account=${account?.label ?? "legacy"}, droppedSteers=${droppedSteers.length}`);
 					persistSession({ sessionId: failedSessionId, cursor, cwd, ...accountScope, ...(droppedSteers.length > 0 ? { needsRebuild: true } : {}) });
 				}
@@ -1135,9 +1165,10 @@ export function streamClaudeAgentSdk(model: Model<any>, context: Context, option
 			}
 
 			// --- Capture session ID ---
-			const sessionId = capturedSessionId ?? sharedSession?.sessionId;
+			const activeSession = getSharedSession();
+			const sessionId = capturedSessionId ?? activeSession?.sessionId;
 			if (sessionId) {
-				const cursor = Math.max(context.messages.length, abortCtx.latestCursor, sharedSession?.cursor ?? 0);
+				const cursor = Math.max(context.messages.length, abortCtx.latestCursor, activeSession?.cursor ?? 0);
 				debug(`provider: query done, session=${sessionId.slice(0, 8)}, cursor=${cursor}, account=${account?.label ?? "legacy"}`);
 				// Fresh record on purpose: a transient mid-turn needsRebuild/forceRotate
 				// must not survive a completed query and force a rebuild next turn.
@@ -1159,7 +1190,7 @@ export function streamClaudeAgentSdk(model: Model<any>, context: Context, option
 
 					// A foreign one-shot has no claim on the shared record: its steers
 					// continue ITS OWN child session, never --resume the parent's.
-					const resumeId = foreignContext ? capturedSessionId : sharedSession?.sessionId;
+					const resumeId = foreignContext ? capturedSessionId : getSharedSession()?.sessionId;
 					if (!resumeId) {
 						debug(`WARNING: no session to resume for deferred message, dropping`);
 						// No record survives here (no session id), so the next turn
@@ -1191,9 +1222,10 @@ export function streamClaudeAgentSdk(model: Model<any>, context: Context, option
 							}
 							break;
 						}
-						const sid = continuation.capturedSessionId ?? sharedSession?.sessionId;
+						const activeSession = getSharedSession();
+						const sid = continuation.capturedSessionId ?? activeSession?.sessionId;
 						if (sid) {
-							persistSession({ sessionId: sid, cursor: sharedSession?.cursor ?? 0, cwd, ...accountScope });
+							persistSession({ sessionId: sid, cursor: activeSession?.cursor ?? 0, cwd, ...accountScope });
 						}
 					} catch (contError) {
 						debug(`provider: continuation query error:`, contError);
@@ -1301,7 +1333,9 @@ export function streamClaudeAgentSdk(model: Model<any>, context: Context, option
 			}
 			stream.push({ type: "error", reason: "error", error: abortCtx.turnOutput! });
 			stream.end();
-		});
+		})
+		// After teardown and any retry pipeline: nothing else reads this lane.
+		.finally(releaseEphemeralLane);
 
 	return stream;
 }
@@ -1337,11 +1371,13 @@ export default function (pi: ExtensionAPI) {
 	// (load / session_start / pre-spawn) and releaseProviderTokens (shutdown), so
 	// a mid-session credential flip is handled while token ownership is intact.
 	const clearSession = (event: string) => {
-		debug(`${event}: clearing session ${sharedSession?.sessionId?.slice(0, 8) ?? "none"}`);
+		const activeSession = getSharedSession();
+		debug(`${event}: clearing session ${activeSession?.sessionId?.slice(0, 8) ?? "none"}`);
 		setSharedSession(null);
 	};
 
-	pi.on("session_start", (event, ctx) => {
+	pi.on("session_start", (event, ctx) => runInRequestLane(ctx.sessionManager.getSessionId(), () => {
+		recordStartedLane(ctx.sessionManager, ctx.sessionManager.getSessionId());
 		recordProjectTrust(ctx);
 		setPiUI(ctx.ui);
 		if (event.reason === "new" || event.reason === "resume" || event.reason === "fork") {
@@ -1355,16 +1391,21 @@ export default function (pi: ExtensionAPI) {
 		// Live availability flip: re-evaluate credential presence every
 		// session_start so login/logout since load is reflected without /reload.
 		applyProviderRegistration(`session_start:${event.reason}`);
+	}));
+	pi.on("session_shutdown", (_event, ctx) => {
+		const sessionId = takeStartedLane(ctx.sessionManager) ?? ctx.sessionManager.getSessionId();
+		runInRequestLane(sessionId, () => {
+			cancelScheduledSessionPersistence(ctx.sessionManager);
+			clearSession("session_shutdown");
+			releaseProviderTokens("session_shutdown");
+		});
+		deleteSharedSessionLane(sessionId);
+		deleteQueryLane(sessionId);
 	});
-	pi.on("session_shutdown", () => {
-		cancelScheduledSessionPersistence();
-		clearSession("session_shutdown");
-		releaseProviderTokens("session_shutdown");
-	});
-	pi.on("message_end", (event, ctx) => {
+	pi.on("message_end", (event, ctx) => runInRequestLane(ctx.sessionManager.getSessionId(), () => {
 		const message = (event as { message?: AssistantMessage }).message;
 		if (message?.role === "assistant" && message.provider === PROVIDER_ID) schedulePersistSharedSession(ctx);
-	});
+	}));
 
 	// pi /compact and session-tree navigation (rewind / fork-at-point /
 	// branch switch) both mutate pi's messages array out from under the
@@ -1374,16 +1415,17 @@ export default function (pi: ExtensionAPI) {
 	// triggers CC's autocompact-thrashing guard (issue #8). Force the next
 	// call down the REBUILD path so CC sees the current history.
 	const markRebuild = (event: string) => {
+		const activeSession = getSharedSession();
 		if (ctx().activeQuery) {
-			reportToolResultMismatch(ctx(), event, sharedSession?.cwd ?? process.cwd());
+			reportToolResultMismatch(ctx(), event, activeSession?.cwd ?? process.cwd());
 		}
-		if (sharedSession) {
-			debug(`${event}: marking needsRebuild on session ${sharedSession.sessionId.slice(0, 8)}`);
+		if (activeSession) {
+			debug(`${event}: marking needsRebuild on session ${activeSession.sessionId.slice(0, 8)}`);
 			markSessionForRebuild();
 		}
 	};
-	pi.on("session_compact", () => markRebuild("session_compact"));
-	pi.on("session_tree", () => markRebuild("session_tree"));
+	pi.on("session_compact", (_event, ctx) => runInRequestLane(ctx.sessionManager.getSessionId(), () => markRebuild("session_compact")));
+	pi.on("session_tree", (_event, ctx) => runInRequestLane(ctx.sessionManager.getSessionId(), () => markRebuild("session_tree")));
 
 	// --- Provider ---
 	//
