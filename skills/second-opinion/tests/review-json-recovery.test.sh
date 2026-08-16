@@ -14,11 +14,39 @@
 
 set -euo pipefail
 
+# Declare this session as having no model (none), so the cross-model
+# guard neither depends on nor is defeated by the harness running the tests.
+export SECOND_OPINION_CURRENT_MODEL=none
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 SECOND_OPINION="$REPO_ROOT/skills/second-opinion/scripts/second-opinion"
 TMP_ROOT="$(mktemp -d)"
 trap 'rm -rf "$TMP_ROOT"' EXIT
+
+# --- Deterministic harness-free session -------------------------------------
+# A positively detected single-model harness now beats any contradicting
+# declaration, whatever its source — so a suite can no longer neutralize the
+# harness that runs it by exporting an identity. It has to actually not have
+# one. This `ps` stand-in reports the first parent as init, so the ancestor walk
+# finds nothing and the declared identity below is what the script uses. It also
+# makes these suites independent of where they run: same result under Claude
+# Code, under Codex, and in CI.
+_PSBIN="$TMP_ROOT/psbin"
+mkdir -p "$_PSBIN"
+cat > "$_PSBIN/ps" <<'PSSH'
+#!/usr/bin/env bash
+mode=""; while [[ $# -gt 0 ]]; do case "$1" in -o) mode="$2"; shift 2 ;; *) shift ;; esac; done
+case "$mode" in ppid=) printf '1\n' ;; comm=) printf 'bash\n' ;; esac
+PSSH
+chmod +x "$_PSBIN/ps"
+PATH="$_PSBIN:$PATH"
+export PATH
+# The process tree is only half the signal; the environment markers are the
+# other half, and this session's are inherited. Drop them too.
+unset CLAUDECODE CLAUDE_CODE CLAUDE_PROJECT_DIR CODEX_SANDBOX \
+      CODEX_SANDBOX_NETWORK_DISABLED PI_CODING_AGENT_DIR OPENCODE \
+      CURSOR_AGENT CURSOR_TRACE_ID
 
 PASS=0
 FAIL=0
@@ -58,7 +86,9 @@ assert_file_absent() {
 
 assert_file_contains() {
   local file="$1" needle="$2" name="$3"
-  if [[ -f "$file" ]] && grep -Fq "$needle" "$file"; then
+  # -e: a needle that begins with `-` (a flag name in an error message) would
+  # otherwise be parsed by grep as its own options.
+  if [[ -f "$file" ]] && grep -Fq -e "$needle" "$file"; then
     pass "$name"
   else
     fail "$name"
@@ -213,6 +243,37 @@ assert_file_contains "$s3_err" "raw_response" "scenario 3 error JSON references 
 assert_file_absent "$s3_out" "scenario 3 writes no JSON artifact on failure"
 assert_file_exists "$s3_out.retry.txt" "scenario 3 writes the <output>.retry.txt sidecar"
 assert_file_contains "$s3_out.retry.txt" "provided previously" "scenario 3 retry sidecar preserves the retry response"
+
+echo "=== scenario 4: stdout mode keeps the raw and retry records as distinct files in the artifact home ==="
+# Without --output the records go to SECOND_OPINION_ARTIFACT_DIR under --cwd.
+# preserve_raw_and_fail writes two records in one run — the one shape where a
+# stale path would silently overwrite the first — so both must exist, differ,
+# and each hold its own response.
+s4_err="$TMP_ROOT/s4.stderr"
+s4_tmp="$TMP_ROOT/tmpdir4"
+mkdir -p "$s4_tmp"
+rm -rf "$WORK/tmp"
+printf '0' > "$COUNTER"
+rc4=0
+set +e
+PATH="$TMP_ROOT/bin:$PATH" TMPDIR="$s4_tmp" \
+  SECOND_OPINION_TARGET=claude SECOND_OPINION_CLAUDE_CMD="$STUB" STUB_COUNTER="$COUNTER" \
+  STUB_RESP1_FILE="$s3_r1" STUB_RESP2_FILE="$s3_r2" \
+  "$SECOND_OPINION" review --range HEAD --cwd "$WORK" >/dev/null 2>"$s4_err"
+rc4=$?
+set -e
+[[ "$rc4" -ne 0 ]] && pass "scenario 4 exits nonzero" || fail "scenario 4 exits nonzero (got $rc4)"
+s4_raw=$(ls "$WORK"/tmp/second-opinion/review-claude-raw.* 2>/dev/null | head -1 || true)
+s4_retry=$(ls "$WORK"/tmp/second-opinion/review-claude-retry.* 2>/dev/null | head -1 || true)
+[[ -n "$s4_raw" ]] && pass "scenario 4 raw record in the artifact home" || fail "scenario 4 raw record missing from the artifact home"
+[[ -n "$s4_retry" ]] && pass "scenario 4 retry record in the artifact home" || fail "scenario 4 retry record missing from the artifact home"
+[[ -n "$s4_raw" && -n "$s4_retry" && "$s4_raw" != "$s4_retry" ]] && pass "scenario 4 raw and retry records are distinct files" || fail "scenario 4 raw and retry records are not distinct"
+assert_file_contains "$s4_raw" "critical SQL injection in login()" "scenario 4 raw record holds the first response intact"
+assert_file_contains "$s4_retry" "provided previously" "scenario 4 retry record holds the retry response"
+if [[ -n "$s4_raw" ]] && grep -q "provided previously" "$s4_raw"; then fail "scenario 4 raw record was overwritten by the retry"; else pass "scenario 4 raw record not overwritten by the retry"; fi
+assert_file_contains "$s4_err" "$WORK/tmp/second-opinion/review-claude-raw." "scenario 4 error names the raw record path"
+assert_eq "$(ls "$s4_tmp" | wc -l | tr -d ' ')" "0" "scenario 4 leaves nothing in TMPDIR"
+rm -rf "$WORK/tmp"
 
 echo
 printf 'pass: %d   fail: %d\n' "$PASS" "$FAIL"

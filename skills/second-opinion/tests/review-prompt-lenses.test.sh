@@ -22,10 +22,38 @@
 
 set -euo pipefail
 
+# Declare this session as having no model (none), so the cross-model
+# guard neither depends on nor is defeated by the harness running the tests.
+export SECOND_OPINION_CURRENT_MODEL=none
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 TMP_ROOT="$(mktemp -d)"
 trap 'rm -rf "$TMP_ROOT"' EXIT
+
+# --- Deterministic harness-free session -------------------------------------
+# A positively detected single-model harness now beats any contradicting
+# declaration, whatever its source — so a suite can no longer neutralize the
+# harness that runs it by exporting an identity. It has to actually not have
+# one. This `ps` stand-in reports the first parent as init, so the ancestor walk
+# finds nothing and the declared identity below is what the script uses. It also
+# makes these suites independent of where they run: same result under Claude
+# Code, under Codex, and in CI.
+_PSBIN="$TMP_ROOT/psbin"
+mkdir -p "$_PSBIN"
+cat > "$_PSBIN/ps" <<'PSSH'
+#!/usr/bin/env bash
+mode=""; while [[ $# -gt 0 ]]; do case "$1" in -o) mode="$2"; shift 2 ;; *) shift ;; esac; done
+case "$mode" in ppid=) printf '1\n' ;; comm=) printf 'bash\n' ;; esac
+PSSH
+chmod +x "$_PSBIN/ps"
+PATH="$_PSBIN:$PATH"
+export PATH
+# The process tree is only half the signal; the environment markers are the
+# other half, and this session's are inherited. Drop them too.
+unset CLAUDECODE CLAUDE_CODE CLAUDE_PROJECT_DIR CODEX_SANDBOX \
+      CODEX_SANDBOX_NETWORK_DISABLED PI_CODING_AGENT_DIR OPENCODE \
+      CURSOR_AGENT CURSOR_TRACE_ID
 
 # Hermetic copy: no git repo above it, no settings files.
 mkdir -p "$TMP_ROOT/proj/skills"
@@ -219,6 +247,58 @@ out8="$TMP_ROOT/out8.json"
 run_review "$WITH" "$out8" SECOND_OPINION_REVIEW_INSTRUCTIONS=
 assert_not_contains "$PROMPT_CAPTURE" "Repository review instructions" "caller-empty disables despite project settings"
 rm -f "$TMP_ROOT/proj/vstack.settings.toml"
+
+echo "=== scenario 9: a changed path in a dash-leading directory still resolves ==="
+# The reviewed repo is untrusted, so a directory name may begin with '-'. The
+# nested-AGENTS walk splits changed paths into directories and cd's into them;
+# `dirname` cannot take `--` portably, so the walk uses this file's own path_dir
+# stand-in. Untreated, `-dir` is read as options and its AGENTS.md is dropped.
+DASH="$TMP_ROOT/dashrepo"
+make_repo "$DASH"
+mkdir -p "$DASH/-svc"
+printf 'RULE-DASHDIR\n' > "$DASH/-svc/AGENTS.md"
+printf 'x\n' > "$DASH/-svc/code.txt"
+git -C "$DASH" add -A >/dev/null 2>&1
+git -C "$DASH" -c commit.gpgsign=false commit -q -m dash >/dev/null 2>&1
+printf 'y\n' >> "$DASH/-svc/code.txt"
+out9="$TMP_ROOT/out9.json"
+run_review "$DASH" "$out9"
+assert_contains "$PROMPT_CAPTURE" "RULE-DASHDIR" "AGENTS.md under a dash-leading directory is appended"
+
+echo "=== scenario 10: BSD utilities that reject '--' still build a full prompt ==="
+# The macOS/Bash 3.2 target ships BSD utilities, and they disagree with GNU
+# about the end-of-options marker — BSD sed reads `--` as a FILE operand, and
+# BSD dirname rejects it. An end-of-options sweep once added `--` to sed, which
+# on that platform made the schema substitution fail; the failure is swallowed
+# by the command substitution, so the run still exits 0 having sent a prompt
+# with NO output schema at all. Shims stand in for the whole family, so
+# re-adding `--` to any of them turns this red on Linux too.
+BSDBIN="$TMP_ROOT/bsdbin"
+mkdir -p "$BSDBIN"
+for u in sed head stat cat basename dirname; do
+  real="$(command -v "$u" 2>/dev/null)" || continue
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'for a in "$@"; do [[ "$a" == "--" ]] && { echo "%s: --: No such file or directory" >&2; exit 1; }; done\n' "$u"
+    printf 'exec %q "$@"\n' "$real"
+  } > "$BSDBIN/$u"
+  chmod +x "$BSDBIN/$u"
+done
+out10="$TMP_ROOT/out10.json"
+rm -f "$out10"
+run_review "$WITH" "$out10" PATH="$BSDBIN:$PATH"
+if [[ -f "$out10" ]]; then
+  pass "a review completes under utilities that reject '--'"
+else
+  fail "a review completes under utilities that reject '--'"
+fi
+assert_contains "$PROMPT_CAPTURE" "Output ONLY valid JSON" "the schema still reaches the prompt"
+assert_contains "$PROMPT_CAPTURE" '"verdict": "pass or action_required"' "the schema body is intact, not silently empty"
+# ...and the instruction block, which is read through head/stat. Those failures
+# are `|| true`-guarded too, so without this the content would vanish just as
+# silently as the schema did.
+assert_contains "$PROMPT_CAPTURE" "RULE-ALPHA" "instruction-file content still reaches the prompt"
+assert_contains "$PROMPT_CAPTURE" "RULE-AGENTS" "the AGENTS.md content is appended too"
 
 echo
 printf 'pass: %d   fail: %d\n' "$PASS" "$FAIL"

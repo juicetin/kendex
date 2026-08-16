@@ -136,6 +136,100 @@
   under `tools/`, enforced PR-time in the preflight job, queue-time in the
   merge group's shell shard, and locally by the pre-commit lane; the
   1000-line bar has a machine enforcer again (VST-248).
+- second-opinion: the cross-model guarantee holds in every mode. Target
+  selection is one roster walk — `SECOND_OPINION_MODELS`, priority-ordered
+  (default `claude codex`) — that skips any target whose declared model
+  identity equals the session's (the detected harness's model where there is
+  one, else `SECOND_OPINION_CURRENT_MODEL`; per-target `SECOND_OPINION_<NAME>_MODEL`,
+  default the name), forced `--target`/`SECOND_OPINION_TARGET` included, and
+  refuses (exit 1, every candidate and its reason on stderr, nothing written
+  or invoked) when no eligible model remains. `review` collects
+  `SECOND_OPINION_COUNT` opinions (default 1); 2+ is the former multi-lane
+  union, now opt-in breadth. `SECOND_OPINION_REVIEW_TARGETS` is no longer
+  read (a set value is named on stderr). **Migration, consumer repos:** sweep
+  every file these keys are seeded into — `vstack.settings.toml`, `.env.local`
+  AND any `.env.local.example` or `.env.example`, which carry their own copies
+  and are what a new checkout copies from. Drop `SECOND_OPINION_REVIEW_TARGETS`
+  wherever it appears, and drop a `SECOND_OPINION_TARGET` that names the
+  session's own model: it is now refused rather than honoured (the refusal names
+  what the roster would pick). Pi/OpenCode/Cursor and undetected
+  sessions must set `SECOND_OPINION_CURRENT_MODEL` (model ids normalize;
+  `none` = no session model) or are refused; a declared identity the roster
+  does not spell is refused too. A shortfall against
+  `SECOND_OPINION_COUNT` is stamped as `qa_metadata.requested_count` /
+  `selected_count` with `coverage: "degraded"`. `SECOND_OPINION_ARTIFACT_DIR`
+  (default `tmp/second-opinion` under `--cwd`, owner-only) is the home for
+  review/audit records written without `--output`. `detect` prints the
+  target(s) a review would run.
+- second-opinion: a split-form option refuses a flag-shaped value —
+  `review --timeout --output report.json` is now a named parse error instead of
+  taking `--output` as the timeout and silently dropping the designated output.
+  Pass a value that legitimately begins with `-` as `--output=-report.json`.
+- second-opinion: no run can hand a caller a stale result. Every mode that
+  writes `--output` — `review`, `audit`, `challenge`, `quick` — DELETES that
+  path at startup, plus exactly the sidecar records that mode can produce
+  (`.raw.txt`, `.retry.txt`, `.failed.json`, `.noreview.json`,
+  `.incomplete.json` for `review`/`audit`; `challenge` and `quick` write no such
+  record, so beside their `--output` those names are yours and are left alone), before target selection and
+  before any CLI runs, so no exit past the argument loop leaves a previous run's
+  output standing — external review is advisory, and callers are told to
+  continue past its non-zero exits. `--help` and `detect` never reach the write
+  and clear nothing. One rule governs every deletion: a path is removed
+  unconditionally only when THIS run will write it — `--output` itself, and the
+  `<output>.<lane>.json` files a multi-lane run is about to write. Every other
+  sibling must first prove the skill wrote it (the review schema AND an
+  `external-…` agent marker, which only this skill's pipeline produces),
+  ROSTER-NAMED ONES INCLUDED: at the default `SECOND_OPINION_COUNT=1` a run
+  writes no lane file, so `<output>.codex.json` holding your own data survives
+  while the same name carrying the marker is reclaimed. A sibling sharing the name shape
+  (`<output>.notes.json`), or sharing the review schema under another agent (an
+  internal `reviewer-*` artifact — that schema is a shared contract, not a
+  signature), is never removed, and nothing outside `--output`'s own name space
+  is ever touched. The `agent` field is wrapper-stamped like `timestamp`
+  (`external-<target>` for a lane, `external-union(...)` for a union),
+  overwriting whatever the provider returned, so the marker is this skill's own
+  assertion of authorship rather than something a provider may omit. Reusing one
+  `--output` path across runs is now safe, and pointing `--output` at a file you
+  want to keep is not.
+- second-opinion: a positively detected single-model harness (`claude`,
+  `codex`) beats any CONTRADICTING `SECOND_OPINION_CURRENT_MODEL`, whatever its
+  source — the run refuses naming both values rather than picking one. A
+  declaration is a variable and variables are inherited, so an exported identity
+  reaches every nested session (a Claude session starting a Codex one), where
+  trusting it would dispatch to that session's own model; the harness is
+  evidence about this process, the variable is not. An agreeing declaration
+  changes nothing. Where detection CANNOT arbitrate (Pi, OpenCode, Cursor,
+  undetected) the declaration is the only identity available and is still
+  required — exported in that session's environment. **A value reaching
+  such a run from any project file — `.env`, `vstack.settings.toml`,
+  `.vstack/settings.toml`, `.env.local` — is refused, naming the file**: those
+  are read by every session in the repo, so a value in one is not a declaration
+  about any single session. A declaration set to make Pi or OpenCode work
+  otherwise arrives in Claude Code and Codex sessions too (where it outranks
+  detection that was already correct) and in other Pi sessions running a
+  different model (where nothing can catch it) — either way a silent same-model
+  review. The one exemption is a project value that agrees with a positively
+  detected `claude`/`codex` harness: it changes nothing and is simply not used.
+  Migration: move the key out of every project file that carries it —
+  `vstack.settings.toml`, `.env`, `.vstack/settings.toml`, `.env.local` and any
+  `.env.local.example` — and export it in the sessions that need it.
+  Model ids also canonicalize with their provider prefix
+  (`openai-codex/gpt-5.6-sol` → codex, `anthropic/claude-opus-4` → claude), and
+  surrounding whitespace is ignored — a stray space in a settings file no longer
+  makes an identity compare unequal and leave the session's own model eligible. The
+  roster-spelling refusal applies only to DECLARED identities: a detected
+  identity the roster does not name excludes nothing, so `SECOND_OPINION_MODELS`
+  may name only the cross-model target. Set that roster to the empty string and
+  the run refuses instead of falling back to the default targets.
+  `SECOND_OPINION_COUNT` is validated only in the modes that read it
+  (`review`, `detect`).
+- second-opinion: `SECOND_OPINION_ARTIFACT_DIR` accepts `~/…` (expanded via
+  `$HOME`, like `WORKTREE_BASE_DIR`) alongside relative and absolute paths, and
+  a relative home the run CREATES is seeded with a `*` `.gitignore` so records
+  never dirty the reviewed working tree. A directory that already existed is
+  left as the operator arranged it: no `.gitignore` is seeded into it, so
+  records written there are visible to git — point the setting at a directory
+  you already ignore, or let the run create its own.
 - orch: `PR_REVIEW_QUORUM` — approval-wait's multi-bot enqueue gate. When a
   repo lists its reviewer logins, no success emits (either mode) until every
   listed login has a non-dismissed review pinned to the current head AND

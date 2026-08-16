@@ -96,7 +96,9 @@ External review runs automatically alongside the internal panel when available, 
 .agents/skills/second-opinion/scripts/second-opinion detect
 ```
 
-A failure, `none`, or empty output sets `EXTERNAL_REVIEW_REQUESTED=false`; anything else sets it `true` with that output as `EXTERNAL_TARGET`.
+A failure, `none`, or empty output sets `EXTERNAL_REVIEW_REQUESTED=false`; anything else sets it `true`. The output is an availability signal only — the external review is launched without `--target`, so nothing parses it.
+
+Output of `none` is a configuration gap, not a missing skill, and stderr names which one: the error JSON's `candidates` carry a reason per target. Tell the user once, quoting them — `External review skipped — [CANDIDATE_REASONS]. Fix: [FIX]` — then continue. `[FIX]` follows the reasons, not a guess: **CLI not found** → install that target's CLI or set its `SECOND_OPINION_<NAME>_CMD` in `vstack.settings.toml [env]`; **same model as this session** or a session-identity reason → export `SECOND_OPINION_CURRENT_MODEL` in this session (session-scoped, never committed to project settings) or widen `SECOND_OPINION_MODELS`.
 
 ### 2.2 Launch And Delegate
 
