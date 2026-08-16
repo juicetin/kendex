@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # preflight — diff-scoped, fail-only checks: fail-open bash, docs citing
 # repo paths that do not exist, TODO markers with no issue behind them,
-# malformed JSON/TOML.
+# malformed JSON/TOML, workflow run: blocks bash cannot parse.
 #
 # Precision before coverage: a lane that cannot decide says nothing. The
 # line-scoped lanes report only on lines this diff ADDED, so a pre-existing
 # violation on an untouched line never fails somebody else's change. A
-# missing optional tool (shellcheck, jq, taplo, python3) skips its lane
+# missing optional tool (shellcheck, jq, taplo, python3, PyYAML) skips its lane
 # silently — the run never fails because a tool is absent, and a lane never
 # degrades into a warning: it fails or it says nothing.
 #
@@ -30,7 +30,7 @@ and the default branch (origin/HEAD, else origin/main, else main).
   --repo PATH   run against the repository containing PATH (default: cwd)
 
 Lanes: shell-syntax, shellcheck-errors, masked-returns, fail-open,
-docs-cited-paths, todo-links, data-syntax.
+docs-cited-paths, todo-links, data-syntax, workflow-run-syntax.
 
 Exit codes: 0 clean; 1 findings; 2 usage/environment error.
 EOF
@@ -292,6 +292,120 @@ except Exception as exc:
     sys.stdout.write(str(exc) + "\n")
     sys.exit(1)
 '
+# Workflow `run:` blocks are shell that no shell lane sees: bash -n each block
+# (GitHub expressions replaced by a placeholder, non-shell `shell:` steps
+# skipped) and report file line numbers, mapped through the block scalar's
+# position. Output: TAB-separated `line<TAB>message` per finding.
+WORKFLOW_PY='import re, subprocess, sys, tempfile, os
+import yaml
+path = sys.argv[1]
+with open(path, "r", encoding="utf-8") as fh:
+    text = fh.read()
+try:
+    root = yaml.compose(text)
+except yaml.YAMLError as exc:
+    mark = getattr(exc, "problem_mark", None)
+    line = mark.line + 1 if mark is not None else 1
+    problem = getattr(exc, "problem", None) or str(exc).splitlines()[0]
+    sys.stdout.write("%d\tworkflow YAML did not parse: %s\n" % (line, problem))
+    sys.exit(0)
+def mapping(node):
+    if not isinstance(node, yaml.MappingNode):
+        return {}
+    out = {}
+    for k, v in node.value:
+        if isinstance(k, yaml.ScalarNode):
+            out[k.value] = v
+    return out
+def scalar(node):
+    return node.value if isinstance(node, yaml.ScalarNode) else None
+def shell_of(node):
+    m = mapping(node)
+    s = scalar(m.get("shell"))
+    return s
+# The interpreter that will parse the block: bash or sh, given as a bare name
+# or an executable path (`/bin/bash {0}`); anything else is out of scope.
+def interpreter_of(shell):
+    m = re.match(r"^(?:.*/)?(bash|sh)(?:\s|$)", shell.strip())
+    return m.group(1) if m else None
+# With no shell declared anywhere, GitHub runs bash on Linux/macOS runners and
+# PowerShell on Windows ones. An implicit shell is bash only when every
+# runs-on label is a plain ubuntu-* or macos-* label; an expression, a
+# Windows label, or a custom/self-hosted label leaves the default unresolved
+# and the step is skipped.
+def implicit_shell_is_bash(jm):
+    ro = jm.get("runs-on")
+    labels = []
+    if isinstance(ro, yaml.ScalarNode):
+        labels = [ro.value]
+    elif isinstance(ro, yaml.SequenceNode):
+        labels = [n.value for n in ro.value if isinstance(n, yaml.ScalarNode)]
+    elif isinstance(ro, yaml.MappingNode):
+        lab = mapping(ro).get("labels")
+        if isinstance(lab, yaml.ScalarNode):
+            labels = [lab.value]
+        elif isinstance(lab, yaml.SequenceNode):
+            labels = [n.value for n in lab.value if isinstance(n, yaml.ScalarNode)]
+    if not labels:
+        return False
+    for label in labels:
+        if "${{" in label or not re.match(r"^(ubuntu|macos)([-_]|$)", label.lower()):
+            return False
+    return True
+top = mapping(root)
+default_shell = shell_of(mapping(top.get("defaults")).get("run")) if "defaults" in top else None
+jobs = mapping(top.get("jobs"))
+for _, job in jobs.items():
+    jm = mapping(job)
+    job_shell = (shell_of(mapping(jm.get("defaults")).get("run")) or default_shell) if "defaults" in jm else default_shell
+    steps = jm.get("steps")
+    if not isinstance(steps, yaml.SequenceNode):
+        continue
+    for step in steps.value:
+        sm = mapping(step)
+        run = sm.get("run")
+        if not isinstance(run, yaml.ScalarNode):
+            continue
+        shell = scalar(sm.get("shell"))
+        effective = shell if shell is not None else job_shell
+        if effective is None:
+            if not implicit_shell_is_bash(jm):
+                continue
+            interp = "bash"
+        else:
+            interp = interpreter_of(effective)
+            if interp is None:
+                continue
+        # Block scalars (| >) start their content on the line after the key;
+        # flow/plain scalars start on the key line itself. A folded scalar
+        # (>) has had its newlines collapsed before bash sees it, so its
+        # diagnostics cannot be mapped to a source line: they land on the
+        # first line of the block. (No apostrophes here: this Python lives in
+        # a single-quoted bash string.)
+        first = run.start_mark.line + 1
+        if run.style in ("|", ">"):
+            first += 1
+        folded = run.style == ">"
+        body = re.sub(r"\$\{\{.*?\}\}", "X", run.value, flags=re.S)
+        with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as t:
+            t.write(body)
+            tmp = t.name
+        try:
+            res = subprocess.run([interp, "-n", tmp], capture_output=True, text=True)
+        finally:
+            os.unlink(tmp)
+        if res.returncode == 0:
+            continue
+        for raw in res.stderr.splitlines():
+            m = re.match(r"^.*?: line (\d+): (.*)$", raw)
+            if m:
+                at = first if folded else first + int(m.group(1)) - 1
+                sys.stdout.write("%d\t%s\n" % (at, m.group(2)))
+            elif raw.strip():
+                sys.stdout.write("%d\t%s\n" % (first, raw.strip()))
+'
+HAVE_WORKFLOW_PY=0
+have python3 && python3 -c 'import sys, yaml; sys.exit(0 if sys.version_info >= (3, 7) else 1)' >/dev/null 2>&1 && HAVE_WORKFLOW_PY=1
 HAVE_SHELLCHECK=0
 have shellcheck && HAVE_SHELLCHECK=1
 HAVE_TOML=none
@@ -448,6 +562,17 @@ while IFS= read -r f; do
     *.toml)
       if ! out="$(check_toml "$cpath")"; then
         emit "$f" "$(line_hint "$out")" data-syntax "invalid TOML: $(first_line "$out")"
+      fi
+      ;;
+    .github/workflows/*.yml | .github/workflows/*.yaml)
+      if [ "$HAVE_WORKFLOW_PY" = 1 ]; then
+        # The tool is present, so a crash is an environment error, never an
+        # empty (clean-looking) result.
+        wf_out="$(python3 -c "$WORKFLOW_PY" "$cpath" 2>"$TMP/wf.err")" || env_error "workflow-run-syntax lane failed on $f: $(first_line "$(cat "$TMP/wf.err")")"
+        while IFS="$TAB" read -r n msg; do
+          [ -n "$msg" ] || continue
+          emit "$f" "$n" workflow-run-syntax "$msg"
+        done <<<"$wf_out"
       fi
       ;;
   esac

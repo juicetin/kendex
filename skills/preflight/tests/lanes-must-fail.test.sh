@@ -145,6 +145,101 @@ else
   skipped "data-syntax TOML must-fail control" "no taplo and no python3 with tomllib"
 fi
 
+echo "=== lane workflow-run-syntax: a run: block bash cannot parse ==="
+seed workflow
+if command -v python3 >/dev/null 2>&1 && python3 -c 'import sys, yaml; sys.exit(0 if sys.version_info >= (3, 7) else 1)' >/dev/null 2>&1; then
+  mkdir -p "$R/.github/workflows"
+  # The defect that motivated the lane: an apostrophe in a comment INSIDE a
+  # single-quoted jq program ends the quote, and the next `|` line is a bash
+  # syntax error. A GitHub expression sits on a clean line so the placeholder
+  # substitution is exercised too; a python step must be left alone.
+  cat >"$R/.github/workflows/ci.yml" <<'YML'
+name: ci
+on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: fine
+        run: echo "${{ github.sha }}"
+      - name: broken
+        run: |
+          set -euo pipefail
+          out="$(jq -n 'add
+            # one attempt's runs
+            | length')"
+          echo "$out"
+      - name: not shell
+        shell: python
+        run: print("this isn't bash")
+      - name: folded
+        run: >
+          echo one
+          echo "unterminated
+  win:
+    runs-on: windows-latest
+    steps:
+      - name: implicit pwsh
+        run: if ($true) { Write-Host "not bash" }
+  matrix:
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: unresolved default shell
+        run: if ($true) { Write-Host "not bash" }
+  hosted:
+    runs-on: [self-hosted, linux]
+    steps:
+      - name: custom runner, unresolved default
+        run: if ($true) { Write-Host "not bash" }
+  pathshell:
+    runs-on: windows-latest
+    steps:
+      - name: bash by path
+        shell: /bin/bash {0}
+        run: echo "unterminated
+  posix:
+    runs-on: ubuntu-latest
+    steps:
+      - name: sh step
+        shell: sh
+        run: echo "unterminated
+YML
+  # A workflow-level non-bash default survives a job-level `defaults` that
+  # only sets working-directory.
+  cat >"$R/.github/workflows/defaults.yml" <<'YML'
+name: d
+on: push
+defaults:
+  run:
+    shell: pwsh
+jobs:
+  x:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: src
+    steps:
+      - name: pwsh inherited
+        run: if ($true) { Write-Host "not bash" }
+YML
+  # Invalid YAML is a finding at the parser's line, never a silent skip.
+  printf 'name: bad\non: push\njobs:\n\tx: 1\n' >"$R/.github/workflows/bad.yml"
+  git -C "$R" add -A
+  run_pf
+  fires "an unparseable run: block fails, attributed to workflow-run-syntax at the offending file line" ".github/workflows/ci.yml:14: [workflow-run-syntax]"
+  fires "a folded (>) block reports at its first line, since bash never sees its source lines" ".github/workflows/ci.yml:21: [workflow-run-syntax]"
+  fires "a workflow file that is not valid YAML is a finding at the parser's line" ".github/workflows/bad.yml:4: [workflow-run-syntax] workflow YAML did not parse"
+  fires "a bash given as an executable path (/bin/bash {0}) is in scope" ".github/workflows/ci.yml:43: [workflow-run-syntax]"
+  fires "a shell: sh step is parsed too" ".github/workflows/ci.yml:49: [workflow-run-syntax]"
+  case "$OUT" in
+    *"ci.yml:8: "* | *"ci.yml:18: "* | *"ci.yml:27: "* | *"ci.yml:32: "* | *"ci.yml:37: "* | *"defaults.yml"*)
+      bad "clean (8), python (18), implicit-pwsh Windows (27), expression runner (32), self-hosted runner (37) and inherited-pwsh (defaults.yml) steps contribute no findings" "out=$OUT" ;;
+    *) ok "clean (8), python (18), implicit-pwsh Windows (27), expression runner (32), self-hosted runner (37) and inherited-pwsh (defaults.yml) steps contribute no findings" ;;
+  esac
+else
+  skipped "workflow-run-syntax must-fail control" "no python3 with PyYAML"
+fi
+
 echo "=== the verdict line counts findings and changed files ==="
 seed verdict
 printf '# Guide\n\nNothing here yet.\n\nTODO: one.\nTODO: two.\n' >"$R/docs/guide.md"
