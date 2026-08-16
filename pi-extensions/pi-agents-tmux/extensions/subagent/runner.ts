@@ -408,6 +408,28 @@ export function detailsWithTruncation(details: SubagentDetails, prepared: Prepar
 	};
 }
 
+/**
+ * Append-only JSONL writer for one transcript. Records are written strictly in
+ * call order: each append starts after the previous one settles, because
+ * concurrent `appendFile` calls on one path complete in any order and a
+ * transcript whose records are out of order misreports the last assistant
+ * text (vstack#1311). A failed write never blocks the next one.
+ */
+export function createTranscriptAppender(
+	transcriptPath: string,
+	appendFile: (path: string, data: string) => Promise<void> = (p, data) => fs.promises.appendFile(p, data, { encoding: "utf-8" }),
+	onError: (error: unknown) => void = () => undefined,
+): { append: (record: Record<string, unknown>) => void; settled: () => Promise<void> } {
+	let chain: Promise<void> = Promise.resolve();
+	return {
+		append(record) {
+			const line = `${JSON.stringify({ ts: new Date().toISOString(), ...record })}\n`;
+			chain = chain.then(() => appendFile(transcriptPath, line)).catch((error) => onError(error));
+		},
+		settled: () => chain,
+	};
+}
+
 export async function runSingleAgent(
 	defaultCwd: string,
 	runtimeRoot: string,
@@ -588,15 +610,12 @@ async function runSingleAgentAttempt(
 	let tmpPromptPath: string | null = null;
 	const oneShotTaskId = createTaskId(agent.name);
 	const transcriptPath = oneShotTranscriptPath(runtimeRoot, agent.name, oneShotTaskId);
-	const transcriptWrites: Promise<unknown>[] = [];
-
-	const appendTranscript = (record: Record<string, unknown>) => {
-		transcriptWrites.push(
-			fs.promises
-				.appendFile(transcriptPath, `${JSON.stringify({ ts: new Date().toISOString(), ...record })}\n`, { encoding: "utf-8" })
-				.catch(() => undefined),
-		);
-	};
+	// A dropped record leaves the transcript incomplete for whoever reads the
+	// final answer out of it, so a write failure surfaces on the result.
+	const transcript = createTranscriptAppender(transcriptPath, undefined, (error) =>
+		appendResultDiagnostic(currentResult, `transcript write failed (${transcriptPath}): ${stringifyError(error)}`),
+	);
+	const appendTranscript = transcript.append;
 
 	const currentResult: SingleResult = {
 		agent: agentName,
@@ -798,7 +817,7 @@ async function runSingleAgentAttempt(
 				clearSettledCloseTimer();
 				clearAbortCloseTimer();
 				if (signal && abortListener) signal.removeEventListener("abort", abortListener);
-				Promise.allSettled(transcriptWrites).finally(() => resolve(code));
+				transcript.settled().finally(() => resolve(code));
 			};
 
 			const scheduleKillEscalation = (onSignal?: (outcomes: SignalOutcome[]) => void) => {
@@ -915,8 +934,9 @@ async function runSingleAgentAttempt(
 				// format moved -- skipping it on any path restores the silent failure this
 				// accumulator exists to prevent.
 				const diagnostic = partialAssistantMessageDiagnostic(partialMessageState);
-				// Route through result diagnostics, not the transcript alone: appendTranscript drops
-				// write failures, so a transcript-only signal has no second chance to surface.
+				// Route through result diagnostics, not the transcript alone: a failed
+				// transcript write is itself only a diagnostic, so a transcript-only
+				// signal has no second chance to surface.
 				const emitDiagnostic = () => {
 					if (!diagnostic) return;
 					appendResultDiagnostic(currentResult, diagnostic);
@@ -1299,7 +1319,7 @@ async function runSingleAgentAttempt(
 		});
 		return currentResult;
 	} finally {
-		await Promise.allSettled(transcriptWrites);
+		await transcript.settled();
 		// vstack#192: recursive+force removal so the session tmp dir is reclaimed
 		// on child failure/refusal paths too, not only after a clean unlink.
 		if (tmpPromptDir) removePromptTempDir(tmpPromptDir);

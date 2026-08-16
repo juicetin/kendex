@@ -18,6 +18,25 @@
   GitHub-route Linear-free check — its sed pattern was BRE (parens grouped,
   never matched) and the extraction failure inside `$(...)` could not stop
   the run. ERE now, and an empty region fails the assertion.
+- orch: `queue-wait` default budget is 2400s, sized to the merge-group suite
+  (VST-249); the budget-exhausted `queued` verdict now carries `progressing`
+  and a `cause` of `still_progressing` vs `stalled` from merge-queue-entry
+  movement or a still-running check-run on the merge-group head, so a caller
+  never re-arms a merge that is about to land.
+
+- github: every `git diff` scan in `git-diff-summary` — stats, `*.rs` risk
+  flags, and both panic-path scans — fails closed and loud when git fails
+  (unreadable tracked file, exit 128): a diagnostic naming the scan, the
+  arguments, and git's stderr, exit 1, no summary. Previously the panic scan
+  died bare, the test-path scan degraded to "no test panics", the risk-flag
+  scan to no unsafe/repr(C)/extern/atomics flags, and stats to a fabricated
+  "0 files changed" (VST-233); nested `{ }` inside `( )`/`[ ]` groups no
+  longer end an item early (VST-254).
+- pi-agents-tmux 2.8.2: oneshot transcript records are appended in event
+  order (one ordered write chain instead of concurrent `appendFile` calls),
+  so the last assistant text a consumer extracts is the last one written —
+  the out-of-order case surfaced as a merge-queue flake in
+  `session-lanes.test.ts`.
 - agents: the seven engineer/analyst agents (generalist, iced, planner,
   researcher, rust, scout, tpm) drop the house "never trust a green check"
   blockquote — the rule's canonical homes are `code-quality` § Prove Your
