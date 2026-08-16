@@ -536,9 +536,7 @@ impl ProjectConfig {
 
         out = dedupe_agent_frontmatter_sections(&out);
 
-        if !same_ignoring_trailing_newline(&out, &existing) {
-            let _ = std::fs::write(&path, out);
-        }
+        write_if_changed(&path, out, &existing);
     }
 }
 
@@ -610,10 +608,7 @@ fn upsert_agent_value_in_section(
         i += 1;
     }
 
-    let mut out = result.join("\n");
-    if content.ends_with('\n') && !out.ends_with('\n') {
-        out.push('\n');
-    }
+    let mut out = join_like(content, &result);
 
     if !found_any {
         // Section didn't have an entry yet — append one.
@@ -1014,11 +1009,7 @@ fn upsert_agent_frontmatter_field(
         ));
     }
 
-    let mut out = result.join("\n");
-    if content.ends_with('\n') && !out.ends_with('\n') {
-        out.push('\n');
-    }
-    out
+    join_like(content, &result)
 }
 
 /// Write computed agent→skill mappings into the project vstack.toml.
@@ -1059,9 +1050,7 @@ pub fn merge_upstream_agent_skills(project_root: &Path, updates: &HashMap<String
     }
 
     out = ensure_value_section_entry_spacing(&out);
-    if !same_ignoring_trailing_newline(&out, &content) {
-        let _ = std::fs::write(&path, out);
-    }
+    write_if_changed(&path, out, &content);
 }
 
 /// Replace a TOML array value for a key within a specific section.
@@ -1120,12 +1109,7 @@ fn replace_toml_array_value(
         i += 1;
     }
 
-    let mut out = result.join("\n");
-    // Preserve trailing newline if original had one
-    if content.ends_with('\n') && !out.ends_with('\n') {
-        out.push('\n');
-    }
-    out
+    join_like(content, &result)
 }
 
 /// For each agent: if the project toml already has an `[agent-skills]` entry,
@@ -1174,9 +1158,7 @@ pub fn write_agent_skills(project_root: &Path, agent_skill_map: &HashMap<String,
         "[agent-skills]",
         &new_entries,
     ));
-    if !same_ignoring_trailing_newline(&out, &existing) {
-        let _ = std::fs::write(&path, out);
-    }
+    write_if_changed(&path, out, &existing);
 }
 
 /// Deprecated compatibility shim. Default colors now live in each
@@ -1246,9 +1228,7 @@ pub fn write_agent_frontmatter_defaults(
     }
 
     content = ensure_value_section_entry_spacing(&dedupe_agent_frontmatter_sections(&content));
-    if !same_ignoring_trailing_newline(&content, &existing) {
-        let _ = std::fs::write(path, content);
-    }
+    write_if_changed(&path, content, &existing);
 }
 
 fn project_config_from_content(content: &str) -> ProjectConfig {
@@ -1276,11 +1256,7 @@ fn remove_agent_frontmatter_base_section(content: &str) -> String {
         }
     }
 
-    let mut rendered = out.join("\n");
-    if content.ends_with('\n') && !rendered.ends_with('\n') {
-        rendered.push('\n');
-    }
-    rendered
+    join_like(content, &out)
 }
 
 fn remove_agent_colors_section(content: &str) -> String {
@@ -1302,11 +1278,7 @@ fn remove_agent_colors_section(content: &str) -> String {
         }
     }
 
-    let mut rendered = out.join("\n");
-    if content.ends_with('\n') && !rendered.ends_with('\n') {
-        rendered.push('\n');
-    }
-    rendered
+    join_like(content, &out)
 }
 
 fn harness_frontmatter_defaults(
@@ -1816,11 +1788,7 @@ fn upsert_missing_inline_table_fields(
         ));
     }
 
-    let mut rendered = result.join("\n");
-    if content.ends_with('\n') {
-        rendered.push('\n');
-    }
-    rendered
+    join_keep_blank_tail(content, &result)
 }
 
 /// Create or update vstack.toml at the project root.
@@ -1871,9 +1839,7 @@ fn repair_project_config_structure(path: &Path) {
     // ours to keep in sync.
     let preserve_header = path.file_name().and_then(|n| n.to_str()) == Some("vstack-local.toml");
     let out = repair_project_config_content(&existing, preserve_header);
-    if !same_ignoring_trailing_newline(&out, &existing) {
-        let _ = std::fs::write(path, out);
-    }
+    write_if_changed(path, out, &existing);
 }
 
 fn repair_project_config_content(existing: &str, preserve_header: bool) -> String {
@@ -2040,11 +2006,7 @@ fn normalize_attached_section_headers(content: &str) -> String {
             }
         }
     }
-    let mut rendered = out.join("\n");
-    if content.ends_with('\n') {
-        rendered.push('\n');
-    }
-    rendered
+    join_keep_blank_tail(content, &out)
 }
 
 fn repair_instruction_multiline_values(content: &str) -> String {
@@ -2123,11 +2085,7 @@ fn repair_instruction_multiline_values(content: &str) -> String {
         out.push(lines[i].to_string());
         i += 1;
     }
-    let mut rendered = out.join("\n");
-    if content.ends_with('\n') {
-        rendered.push('\n');
-    }
-    rendered
+    join_keep_blank_tail(content, &out)
 }
 
 fn ensure_value_section_entry_spacing(content: &str) -> String {
@@ -2192,10 +2150,7 @@ fn ensure_value_section_entry_spacing(content: &str) -> String {
         i += 1;
     }
 
-    let mut rendered = out.join("\n");
-    if content.ends_with('\n') {
-        rendered.push('\n');
-    }
+    let rendered = join_keep_blank_tail(content, &out);
     ensure_blank_line_before_section_headers(&rendered)
 }
 
@@ -2214,11 +2169,7 @@ fn ensure_blank_line_before_section_headers(content: &str) -> String {
         out.push(line.to_string());
     }
 
-    let mut rendered = out.join("\n");
-    if content.ends_with('\n') {
-        rendered.push('\n');
-    }
-    rendered
+    join_keep_blank_tail(content, &out)
 }
 
 fn starts_multiline_array_value(trimmed_line: &str) -> bool {
@@ -2266,11 +2217,7 @@ fn dedupe_agent_frontmatter_sections(content: &str) -> String {
         out.push(line.to_string());
     }
 
-    let mut rendered = out.join("\n");
-    if content.ends_with('\n') {
-        rendered.push('\n');
-    }
-    rendered
+    join_keep_blank_tail(content, &out)
 }
 
 fn skip_orphan_duplicate_multiline_body(lines: &[&str], i: usize) -> usize {
@@ -2335,10 +2282,7 @@ fn migrate_agent_colors_to_frontmatter(content: &str) -> String {
         i += 1;
     }
 
-    let mut rendered = out.join("\n");
-    if content.ends_with('\n') && !rendered.ends_with('\n') {
-        rendered.push('\n');
-    }
+    let mut rendered = join_like(content, &out);
 
     for (agent, color) in colors {
         if !agent_frontmatter_has_field(&rendered, &agent, "color") {
@@ -2616,7 +2560,7 @@ fn migrate_section_names(path: &Path) {
         }
     }
     if changed {
-        let _ = std::fs::write(path, out);
+        write_if_changed(path, out, &content);
     }
 }
 
@@ -2701,7 +2645,9 @@ fn create_project_config(path: &Path, agents: &[String], skills: &[String]) {
     out.push_str("# description = \"What this hook does\"     # inlined as instructions in non-Claude-Code harnesses\n");
     out.push_str("# agents = \"all\"             # \"all\", a role (\"engineer\"), or a list [\"rust\", \"iced\"]\n");
 
-    let _ = std::fs::write(path, out);
+    // `path` does not exist here (`ensure_project_config` branches on that),
+    // so the existing content is empty and the write always happens.
+    write_if_changed(path, out, "");
 }
 
 fn update_project_config(path: &Path, agents: &[String], skills: &[String]) {
@@ -2743,21 +2689,54 @@ fn update_project_config(path: &Path, agents: &[String], skills: &[String]) {
     out = ensure_value_section_entry_spacing(&out);
     out = ensure_agent_frontmatter_scaffold(&out);
 
-    // Only write if content actually changed to avoid bumping mtime,
-    // which would make staleness checks flag everything as outdated.
-    if !same_ignoring_trailing_newline(&out, &existing) {
-        let _ = std::fs::write(path, out);
+    // Only write if content actually changed — a no-op rewrite would dirty
+    // a consumer's tracked vstack.toml for nothing.
+    write_if_changed(path, out, &existing);
+}
+
+/// Write `out` to `path` only when it differs from `existing`, so an
+/// unchanged config is never rewritten (no needless working-tree churn).
+/// Non-empty written text always ends in a newline: a file that lost its
+/// terminator is repaired by the first pass that reads it, and every later
+/// pass sees identical content and skips the write. A failed write prints a
+/// warning to stderr; the command still exits successfully, so that warning
+/// is the only signal.
+fn write_if_changed(path: &Path, mut out: String, existing: &str) {
+    if !out.is_empty() && !out.ends_with('\n') {
+        out.push('\n');
+    }
+    if out != existing
+        && let Err(e) = std::fs::write(path, out)
+    {
+        eprintln!("warning: could not write {}: {e}", path.display());
     }
 }
 
-/// True when the two contents differ at most by the presence of a single
-/// trailing newline. Refresh writers must skip the write in that case:
-/// consumers commit `vstack.toml` without a final newline, and a write whose
-/// only effect is normalizing that newline dirties their working tree on
-/// every refresh (vstack#987). A real content change still writes — and may
-/// normalize the newline along the way.
-fn same_ignoring_trailing_newline(a: &str, b: &str) -> bool {
-    a.strip_suffix('\n').unwrap_or(a) == b.strip_suffix('\n').unwrap_or(b)
+/// Rejoin edited lines with `\n`, restoring a final newline iff `content`
+/// had one. This is the terminator convention for the section transforms
+/// that split on `lines()` and rebuild by key/entry (`insert_*`,
+/// `replace_toml_array_value`, `upsert_*`); a trailing blank line in
+/// `content` collapses into the terminator. Transforms that must round-trip
+/// a trailing blank line use [`join_keep_blank_tail`] instead.
+fn join_like(content: &str, lines: &[String]) -> String {
+    let mut out = lines.join("\n");
+    if content.ends_with('\n') && !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out
+}
+
+/// Rejoin edited lines with `\n`, appending a final newline iff `content`
+/// had one — even when the last element is empty, so a trailing blank line
+/// survives the round trip. Used by the whole-file layout transforms
+/// (spacing, header, dedupe, scaffold) whose output must be byte-stable
+/// across passes.
+fn join_keep_blank_tail(content: &str, lines: &[String]) -> String {
+    let mut out = lines.join("\n");
+    if content.ends_with('\n') {
+        out.push('\n');
+    }
+    out
 }
 
 /// Returns true if a name does NOT appear as a TOML key in the file.
@@ -2842,7 +2821,7 @@ fn insert_keys_into_section(content: &str, section_header: &str, new_keys: &[&St
         }
     }
 
-    result.join("\n")
+    join_like(content, &result)
 }
 
 /// Insert raw TOML text after existing keys in a `[section]`, preserving all
@@ -2898,7 +2877,7 @@ fn insert_entries_into_section(content: &str, section_header: &str, entries: &st
         }
     }
 
-    result.join("\n")
+    join_like(content, &result)
 }
 
 fn strip_skills_reference(content: &str) -> String {
@@ -3301,6 +3280,37 @@ trading-design = "Dark theme."
         let on_disk = std::fs::read_to_string(dir.join("vstack.toml")).unwrap();
         assert!(on_disk.contains("rust = \"mine\""), "on disk: {on_disk}");
         assert!(!on_disk.contains("Old shared."), "on disk: {on_disk}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_extracted_new_agent_entry_keeps_trailing_newline() {
+        let dir = std::env::temp_dir().join(format!(
+            "vstack_test_save_extracted_newline_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("vstack.toml"),
+            "[agent-launch-instructions]\nother = \"x\"\n",
+        )
+        .unwrap();
+        let mut config = ProjectConfig::load(&dir);
+
+        // No entry for `rust` yet: the value is inserted as a new entry.
+        let extracted = crate::agent::AgentExtras {
+            guidance: Some("mine".to_string()),
+            ..Default::default()
+        };
+        config.save_extracted(&dir, "rust", &extracted);
+        let on_disk = std::fs::read_to_string(dir.join("vstack.toml")).unwrap();
+        assert!(on_disk.contains("rust = \"mine\""), "on disk: {on_disk:?}");
+        assert!(
+            on_disk.ends_with('\n') && !on_disk.ends_with("\n\n"),
+            "exactly one final newline expected: {on_disk:?}"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -4673,11 +4683,108 @@ command = \"./scripts/x.sh\"\n";
     }
 
     #[test]
-    fn refresh_skips_write_when_only_trailing_newline_differs() {
+    fn write_if_changed_terminates_and_skips_identical() {
         let dir = std::env::temp_dir().join(format!(
-            "vstack_test_newline_only_skip_{}",
+            "vstack_test_write_if_changed_{}",
             std::process::id()
         ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("vstack.toml");
+
+        std::fs::write(&path, "[a]\nx = 1").unwrap();
+        write_if_changed(&path, "[a]\nx = 2".to_string(), "[a]\nx = 1");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "[a]\nx = 2\n");
+
+        let past = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(past)
+            .unwrap();
+        write_if_changed(&path, "[a]\nx = 2".to_string(), "[a]\nx = 2\n");
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().modified().unwrap(),
+            past,
+            "identical content must not be rewritten"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_agent_skills_heals_missing_trailing_newline_once() {
+        let dir = std::env::temp_dir().join(format!(
+            "vstack_test_agent_skills_heal_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("vstack.toml");
+        std::fs::write(&path, "[agent-skills]\ngeneralist = [\"github\"]").unwrap();
+
+        let mut skills = std::collections::HashMap::new();
+        skills.insert("rust".to_string(), vec!["github".to_string()]);
+        write_agent_skills(&dir, &skills);
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(after.contains("rust = [\n    \"github\",\n]"), "{after:?}");
+        assert!(after.ends_with('\n'), "{after:?}");
+
+        let past = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(past)
+            .unwrap();
+        write_agent_skills(&dir, &skills);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), after);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().modified().unwrap(),
+            past,
+            "second identical pass must not rewrite"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn insert_keys_into_section_preserves_trailing_newline() {
+        let content = "[agent-skills]\ngeneralist = [\"github\"]\n";
+        let key = "github".to_string();
+        let out = insert_keys_into_section(content, "[skill-instructions]", &[&key]);
+        assert!(
+            out.ends_with("[skill-instructions]\ngithub = \"\"\n"),
+            "{out:?}"
+        );
+
+        let existing = "[skill-instructions]\nfoo = \"\"\n";
+        let out = insert_keys_into_section(existing, "[skill-instructions]", &[&key]);
+        assert!(out.ends_with("github = \"\"\n"), "{out:?}");
+
+        // A file with no terminator keeps none — the helper is shape-preserving.
+        let out = insert_keys_into_section("[a]\nx = 1", "[skill-instructions]", &[&key]);
+        assert!(out.ends_with("github = \"\""), "{out:?}");
+    }
+
+    #[test]
+    fn insert_entries_into_section_preserves_trailing_newline() {
+        let content = "[agent-skills]\ngeneralist = [\"github\"]\n";
+        let out = insert_entries_into_section(content, "[agent-skills]", "rust = [\"github\"]");
+        assert!(out.ends_with("rust = [\"github\"]\n"), "{out:?}");
+
+        let out = insert_entries_into_section("[other]\nx = 1\n", "[agent-skills]", "rust = []");
+        assert!(out.ends_with("[agent-skills]\nrust = []\n"), "{out:?}");
+
+        let out = insert_entries_into_section("[other]\nx = 1", "[agent-skills]", "rust = []");
+        assert!(out.ends_with("rust = []"), "{out:?}");
+    }
+
+    #[test]
+    fn refresh_heals_missing_trailing_newline_once() {
+        let dir =
+            std::env::temp_dir().join(format!("vstack_test_newline_heal_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("vstack.toml");
@@ -4692,17 +4799,33 @@ command = \"./scripts/x.sh\"\n";
 
         let no_newline = stable.strip_suffix('\n').unwrap().to_string();
         std::fs::write(&path, &no_newline).unwrap();
+        // Pin the mtime well into the past so a repair write is
+        // distinguishable regardless of the filesystem's timestamp grain.
+        let past = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(past)
+            .unwrap();
         let mtime_before = std::fs::metadata(&path).unwrap().modified().unwrap();
 
         ensure_project_config(&dir, &agents, &skills);
 
+        // First pass repairs the terminator (a real write)...
         let after = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(
-            after, no_newline,
-            "newline-only normalization must not touch the file"
-        );
+        assert_eq!(after, stable, "missing final newline must be repaired");
         let mtime_after = std::fs::metadata(&path).unwrap().modified().unwrap();
-        assert_eq!(mtime_before, mtime_after, "no write should have occurred");
+        assert_ne!(mtime_before, mtime_after, "the repair is a write");
+
+        // ...and every later pass sees identical content and skips.
+        ensure_project_config(&dir, &agents, &skills);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), stable);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().modified().unwrap(),
+            mtime_after,
+            "no write should occur once the file is healed"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -4758,6 +4881,10 @@ command = \"./scripts/x.sh\"\n";
         assert!(
             after.contains("extra-skill"),
             "new skill entry missing: {after}"
+        );
+        assert!(
+            after.ends_with('\n') && !after.ends_with("\n\n"),
+            "exactly one final newline expected: {after:?}"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
