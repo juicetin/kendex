@@ -84,6 +84,9 @@ ACTIVE_ERROR_PATTERNS="$(rg_setting REVIEW_GATE_REVIEW_OBJECT_ERROR_PATTERNS "en
 ACTIVE_GATE_CONTEXT="$(rg_setting REVIEW_GATE_CONTEXT "Review gate")" || exit 1
 ACTIVE_THREADS="$(rg_setting REVIEW_GATE_THREADS "enforce")" || exit 1
 ACTIVE_API_ATTEMPTS="$(rg_setting REVIEW_GATE_API_ATTEMPTS "1")" || exit 1
+# The repo's ACTIVE delay is never copied into behavior cases (reset() pins
+# 0 — the delay paces production retries and decides no verdict); one case
+# below drives THIS value through the predicate instead.
 ACTIVE_API_DELAY="$(rg_setting REVIEW_GATE_API_RETRY_DELAY_SECONDS "2")" || exit 1
 ACTIVE_CARRY="$(rg_setting REVIEW_GATE_CARRY_FORWARD "")" || exit 1
 ACTIVE_CARRY_EXCLUDE="$(rg_setting REVIEW_GATE_CARRY_FORWARD_EXCLUDE "")" || exit 1
@@ -354,7 +357,11 @@ reset() {
   unset GH_SHIM_FAIL GH_SHIM_FAIL_TIMES GH_SHIM_EMPTY || true
   CFG_THREADS="$ACTIVE_THREADS"
   CFG_API_ATTEMPTS="$ACTIVE_API_ATTEMPTS"
-  CFG_API_DELAY="$ACTIVE_API_DELAY"
+  # PINNED to 0, never the repo's ACTIVE value: the delay paces production
+  # retries and decides no verdict, while under a committed attempts>1 every
+  # fail-loud case would sleep it out per retry. The retry cases below set
+  # their own attempts/delay explicitly.
+  CFG_API_DELAY="0"
   CFG_CARRY="$ACTIVE_CARRY"
   CFG_CARRY_EXCLUDE="$ACTIVE_CARRY_EXCLUDE"
   # PINNED to enforce, never the repo's ACTIVE value: mode "off" is a bypass
@@ -1293,6 +1300,17 @@ run "non-numeric API attempts is a config error" "" 2
 reset
 CFG_API_DELAY="-1"
 run "negative retry delay is a config error" "" 2
+
+# What a valid delay IS belongs to the predicate, which validates it before
+# any read — so the repo's committed value is driven through it rather than
+# re-derived here. run() discards the predicate's stderr, so the diagnosis
+# has to come from the case NAME: it carries both the key and the offending
+# value, and a refused value prints them on the FAIL line. The delay is only
+# slept inside the retry loop after a failed read, so no wall time rides on
+# its size.
+reset
+CFG_API_DELAY="$ACTIVE_API_DELAY"
+run "committed REVIEW_GATE_API_RETRY_DELAY_SECONDS ('$ACTIVE_API_DELAY') is a value the predicate accepts" awaiting
 
 # Multi-page pagination merges (VST-35): the shim serves <name>.page2.json
 # concatenated after page 1 under --paginate, so the `jq -s` page merges are
