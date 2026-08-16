@@ -197,22 +197,22 @@ scan_decl_records() {
         # leave attribute tokens to swallow the declaration that follows.
         # Quoted brackets are inert: the scan runs on the mask. 0 when the
         # attribute is not closed in this buffer yet (it continues next line).
-        # Offset of the first item boundary in the masked buffer. Braces
-        # bound an item at any depth, as before; a SEMICOLON does not when it
-        # sits inside a ( ) or [ ] token group — the length in an array type
-        # ([u8; 4]) is not the end of the item, and splitting there would
-        # drop the pending attribute gate and record what follows as ungated.
-        # 0 when the item has no boundary in this buffer yet.
+        # Offset of the first item boundary in the masked buffer: a ; { or }
+        # at token-group depth 0. Inside a ( ) or [ ] group none of them ends
+        # the item — the length in an array type ([u8; 4]) is not a statement
+        # end, and a brace there opens a block EXPRESSION, not an item body.
+        # Splitting at either would drop the pending attribute gate and
+        # record what follows as an ungated production route. 0 when the item
+        # has no boundary in this buffer yet.
         function item_boundary(ms,   i, n, c, pd, bd) {
             n = length(ms); pd = 0; bd = 0
             for (i = 1; i <= n; i++) {
                 c = substr(ms, i, 1)
-                if (c == "{" || c == "}") return i
                 if (c == "(") pd++
                 else if (c == ")") { if (pd > 0) pd-- }
                 else if (c == "[") bd++
                 else if (c == "]") { if (bd > 0) bd-- }
-                else if (c == ";" && pd == 0 && bd == 0) return i
+                else if (pd == 0 && bd == 0 && (c == ";" || c == "{" || c == "}")) return i
             }
             return 0
         }
@@ -613,6 +613,29 @@ scan_dir_declaring_files() {
     done < <(new_side_rs_siblings "$1")
 }
 
+# scan_diff <out-var> <label> <git-diff-arg>...
+# `git diff <git-diff-arg>...` for a scan named <label>, failing closed and
+# loud when git fails (an unreadable tracked file in the diff, exit 128): a
+# bare death under pipefail, an empty diff, or a placeholder stat would each
+# read downstream as "nothing found". Stdout lands in <out-var>; git's stderr
+# is kept out of it (a warning must not shift hunk line numbers) and quoted
+# in the diagnostic.
+scan_diff() {
+    local __out_var="$1" __label="$2"; shift 2
+    local __err __rc=0 __out
+    __err=$(mktemp -t git-diff-summary-err.XXXXXX)
+    __out=$(git diff "$@" 2>"$__err") || __rc=$?
+    if [ "$__rc" -ne 0 ]; then
+        printf 'git-diff-summary: git diff failed (exit %d) while scanning %s (git diff %s): %s\n' \
+            "$__rc" "$__label" "$(printf '%s' "$*" | head -c 300)" \
+            "$(tr '\n' ' ' <"$__err" | head -c 300)" >&2
+        rm -f -- "$__err"
+        exit 1
+    fi
+    rm -f -- "$__err"
+    printf -v "$__out_var" '%s' "$__out"
+}
+
 is_cfg_test_declared() {
     local candidate="$1"
     local basefile dir d relevant_dirs routes
@@ -711,14 +734,16 @@ main() {
     fi
 
     # Get stats
-    local stats
-    stats=$(git diff --stat --stat-count=999 "$diff_ref" 2>/dev/null | tail -1 || echo "0 files changed")
+    local stat_out="" stats
+    scan_diff stat_out "stats" --stat --stat-count=999 "$diff_ref"
+    stats=$(printf '%s\n' "$stat_out" | tail -1)
 
     # Detect risk flags via grep (avoids passing huge diffs through jq)
     local risk_flags="[]"
     local flags=()
-    local rust_diff_added
-    rust_diff_added=$(git diff "$diff_ref" -- '*.rs' 2>/dev/null | grep -E '^\+' || true)
+    local rust_diff_added=""
+    scan_diff rust_diff_added "risk flags" "$diff_ref" -- '*.rs'
+    rust_diff_added=$(printf '%s\n' "$rust_diff_added" | grep -E '^\+' || true)
 
     if echo "$rust_diff_added" | grep -qE '^\+.*unsafe '; then flags+=("unsafe_code_added"); fi
     if echo "$rust_diff_added" | grep -qE '^\+.*#\[repr\(C\)\]'; then flags+=("repr_c_struct_changed"); fi
@@ -759,9 +784,9 @@ main() {
     done <<<"$prod_paths"
     if [ ${#prod_path_args[@]} -gt 0 ]; then
         # path<TAB>new-side line number of each added panic-pattern line
-        local panic_lines
-        # shellcheck disable=SC2086
-        panic_lines=$(git diff "$diff_ref" -- "${prod_path_args[@]}" 2>/dev/null | awk '
+        local prod_diff="" panic_lines
+        scan_diff prod_diff "panic paths" "$diff_ref" -- "${prod_path_args[@]}"
+        panic_lines=$(printf '%s\n' "$prod_diff" | awk '
             /^diff --git / { path = ""; inhunk = 0 }
             /^\+\+\+ b\//  { path = substr($0, 7); next }
             /^@@/ {
@@ -836,9 +861,9 @@ main() {
         [ -n "$p" ] && test_path_args+=("$p")
     done <<<"$test_paths"
     if [ ${#test_path_args[@]} -gt 0 ]; then
-        local test_diff
-        # shellcheck disable=SC2086
-        test_diff=$(git diff "$diff_ref" -- "${test_path_args[@]}" 2>/dev/null | grep -E '^\+' || true)
+        local test_diff=""
+        scan_diff test_diff "test panic paths" "$diff_ref" -- "${test_path_args[@]}"
+        test_diff=$(printf '%s\n' "$test_diff" | grep -E '^\+' || true)
         if echo "$test_diff" | grep -qE '^\+.*(panic!|unwrap\(\))'; then test_panic=1; fi
     fi
     if [ "$test_panic" -eq 1 ]; then flags+=("test_panic_path_added"); fi
