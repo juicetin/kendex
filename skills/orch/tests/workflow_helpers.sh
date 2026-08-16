@@ -172,6 +172,22 @@ for wf in dev-start dev-fix review-pr-comments ci-fix; do
     "$wf claims the worktree before delegating"
 done
 
+# The lease generation cannot separate two orchestrators that read the same
+# stored token, so the always-loaded docs must not promise that it refuses any
+# second writer — the script's own header carries the real limit.
+for phrase in 'exit 75 refuses a second writer' 'rather than adding a second writer'; do
+  if grep -Fq -- "$phrase" "$SKILL_DIR/SKILL.md"; then
+    fail "SKILL.md promises more exclusion than worktree-claim delivers: $phrase"
+  else
+    pass "SKILL.md does not over-claim the possession gate: $phrase"
+  fi
+done
+# Paired with the absence checks: deleting the rows entirely would satisfy them
+# while losing the contract, so the accurate condition must be present in both
+# places that state it.
+assert_eq "$(grep -c 'already claimed under a different lease generation' "$SKILL_DIR/SKILL.md")" "2" \
+  "SKILL.md states the real refusal condition in both the scripts table and Round Closure"
+
 # The delegated agent re-verifies the same lease, so a delegation that lands in
 # a tree another session has taken fails closed instead of clobbering it. The
 # orch side must therefore pass the token, and the dev side must check it.
