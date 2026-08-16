@@ -357,12 +357,18 @@ printf 'REVIEW_GATE_CARRY_FORWARD = "docs"\nREVIEW_GATE_CARRY_FORWARD_EXCLUDE = 
   >"$work/rooted/repo/falsified.settings.toml"
 grep -v '^REVIEW_GATE_CARRY_FORWARD = ' "$work/configured/vstack.settings.toml" \
   >>"$work/rooted/repo/falsified.settings.toml"
+
+printf 'REVIEW_GATE_CARRY_FORWARD = "docs"\nREVIEW_GATE_CARRY_FORWARD_EXCLUDE_PROPHYLACTIC = "gudies/*"\n' \
+  >"$work/rooted/repo/emptyexcl.settings.toml"
+grep -v '^REVIEW_GATE_CARRY_FORWARD = ' "$work/configured/vstack.settings.toml" \
+  >>"$work/rooted/repo/emptyexcl.settings.toml"
 replay rooted "$work/rooted/repo/sub" REVIEW_GATE_SETTINGS_FILE="$work/rooted/repo/vstack.settings.toml"
 replay rootedtypo "$work/rooted/repo" REVIEW_GATE_SETTINGS_FILE="$work/rooted/repo/typo.settings.toml"
 replay rooteddecl "$work/rooted/repo" REVIEW_GATE_SETTINGS_FILE="$work/rooted/repo/declared.settings.toml"
 replay rootedinert "$work/rooted/repo" REVIEW_GATE_SETTINGS_FILE="$work/rooted/repo/inert.settings.toml"
 replay rootedorphan "$work/rooted/repo" REVIEW_GATE_SETTINGS_FILE="$work/rooted/repo/orphan.settings.toml"
 replay rootedfalsified "$work/rooted/repo" REVIEW_GATE_SETTINGS_FILE="$work/rooted/repo/falsified.settings.toml"
+replay rootedemptyexcl "$work/rooted/repo" REVIEW_GATE_SETTINGS_FILE="$work/rooted/repo/emptyexcl.settings.toml"
 
 # A SYMLINKED override anchors evidence at its TARGET's repository. The
 # symlink lives in a non-repository directory (the common install shape:
@@ -385,15 +391,17 @@ BROKENREADLINK
 chmod +x "$work/brokenreadlink/bin/readlink"
 replay brokenreadlink "$work/symlinked/outside" PATH="$work/brokenreadlink/bin:$PATH" REVIEW_GATE_SETTINGS_FILE="$work/symlinked/outside/settings.toml"
 
-# CYCLIC, DANGLING, and UNREADABLE settings overrides.
+# CYCLIC, DANGLING, UNREADABLE, and NON-REGULAR settings overrides.
 mkdir -p "$work/cyclic"
 ln -s cycle-b.settings.toml "$work/cyclic/cycle-a.settings.toml"
 ln -s cycle-a.settings.toml "$work/cyclic/cycle-b.settings.toml"
 ln -s does-not-exist.toml "$work/cyclic/dangling.settings.toml"
 cp "$work/rooted/repo/vstack.settings.toml" "$work/cyclic/unreadable.settings.toml"
 chmod 000 "$work/cyclic/unreadable.settings.toml"
+mkdir -p "$work/cyclic/nonregular.dir"
 replay cyclic "$work/rooted/repo" REVIEW_GATE_SETTINGS_FILE="$work/cyclic/cycle-a.settings.toml"
 replay dangling "$work/rooted/repo" REVIEW_GATE_SETTINGS_FILE="$work/cyclic/dangling.settings.toml"
+replay nonregular "$work/rooted/repo" REVIEW_GATE_SETTINGS_FILE="$work/cyclic/nonregular.dir"
 # Skipped when the runner can read mode-000 files anyway (privileged CI) —
 # the guard is [ -r ]-based and cannot fire there.
 unreadable_skip=""
@@ -746,13 +754,13 @@ fi
 if passed cyclic; then
   note "selftest passed with a CYCLIC symlinked override — the unresolvable-override guard no longer refuses"
 else
-  grep -q "names a symlink that does not resolve to a readable file" "$work/cyclic.out" \
+  grep -q "does not resolve" "$work/cyclic.out" \
     || note "cyclic-override failure does not carry the unresolvable-override diagnostic"
 fi
 if passed dangling; then
   note "selftest passed with a DANGLING symlinked override — the unresolvable-override guard no longer refuses"
 else
-  grep -q "names a symlink that does not resolve to a readable file" "$work/dangling.out" \
+  grep -q "does not resolve" "$work/dangling.out" \
     || note "dangling-override failure does not carry the unresolvable-override diagnostic"
 fi
 
@@ -766,6 +774,17 @@ elif passed unreadable; then
 else
   grep -q "exists but is not readable" "$work/unreadable.out" \
     || note "unreadable-override failure does not carry the not-readable diagnostic"
+fi
+
+# An EXISTING NON-REGULAR override (a directory here; a FIFO or socket is
+# the same shape) fails -f without being a symlink: without rg_setting's
+# refusal every key quietly resolves to its built-in default and the whole
+# run green-lights settings nobody configured.
+if passed nonregular; then
+  note "selftest passed with a DIRECTORY as the settings override — the non-regular-override guard no longer refuses"
+else
+  grep -q "is not a regular file" "$work/nonregular.out" \
+    || note "non-regular-override failure does not carry the not-a-regular-file diagnostic"
 fi
 
 # A BROKEN WORKTREE (a .git file naming a missing gitdir) earns git's
@@ -804,6 +823,15 @@ if passed rootedfalsified; then
 else
   grep -q "no longer holds" "$work/rootedfalsified.out" \
     || note "falsified prophylactic declaration does not carry the no-longer-holds diagnostic"
+fi
+# (c) With declarations present and the exclusion list EMPTY, every
+# declaration is an orphan by definition — the ledger must be validated
+# anyway, never sit inert behind the battery's non-empty-exclusions gate.
+if passed rootedemptyexcl; then
+  note "selftest passed with a prophylactic declaration and an EMPTY exclusion list — the all-orphan ledger sits inert behind the exclusion gate again"
+else
+  grep -q "is not an active REVIEW_GATE_CARRY_FORWARD_EXCLUDE entry" "$work/rootedemptyexcl.out" \
+    || note "the empty-exclusion-list orphan failure does not carry the stale-waiver diagnostic"
 fi
 
 # A repository with ZERO tracked files is still tracked mode — payload
