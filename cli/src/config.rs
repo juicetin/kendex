@@ -827,42 +827,6 @@ fn collect_key_values(prefix: &str, table: &toml::value::Table, name: &str, out:
     }
 }
 
-/// Refresh cached repos for all remote sources found in installed lock entries.
-/// Called once at TUI startup so staleness checks see the latest content.
-pub fn refresh_remote_caches(lock: &LockFile) {
-    let mut seen = std::collections::HashSet::new();
-    for entry in lock.entries.values() {
-        let src = &entry.source;
-        // Only remote sources (owner/repo format)
-        if src.contains('/') && !src.starts_with('.') && !src.starts_with('/') {
-            if !seen.insert(src.clone()) {
-                continue;
-            }
-            let cache_key = src.replace('/', "_");
-            let cache_dir = global_base_dir()
-                .join(".vstack")
-                .join("cache")
-                .join(&cache_key);
-            if cache_dir.join(".git").exists() {
-                let fetch = std::process::Command::new("git")
-                    .args(["fetch", "origin", "--quiet"])
-                    .current_dir(&cache_dir)
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .status();
-                if fetch.is_ok_and(|s| s.success()) {
-                    let _ = std::process::Command::new("git")
-                        .args(["reset", "--hard", "origin/HEAD"])
-                        .current_dir(&cache_dir)
-                        .stdout(std::process::Stdio::null())
-                        .stderr(std::process::Stdio::null())
-                        .status();
-                }
-            }
-        }
-    }
-}
-
 /// Resolve a lock entry's source string to an actual directory path.
 /// Handles "." by walking up from CWD to find a vstack source repo,
 /// and absolute paths directly.
@@ -894,15 +858,8 @@ pub fn parse_github_slug(url: &str) -> Option<String> {
         }
         let bare = url.strip_suffix(".git").unwrap_or(url);
         let mut parts = bare.split('/');
-        if let (Some(owner), Some(repo), None) = (parts.next(), parts.next(), parts.next())
-            && !owner.is_empty()
-            && !repo.is_empty()
-        {
-            return Some(format!(
-                "{}/{}",
-                owner.to_ascii_lowercase(),
-                repo.to_ascii_lowercase()
-            ));
+        if let (Some(owner), Some(repo), None) = (parts.next(), parts.next(), parts.next()) {
+            return github_slug_from(owner, repo);
         }
         return None;
     }
@@ -926,14 +883,38 @@ pub fn parse_github_slug(url: &str) -> Option<String> {
     let mut parts = after.split('/');
     let owner = parts.next()?;
     let repo = parts.next()?;
-    if owner.is_empty() || repo.is_empty() || parts.next().is_some() {
+    if parts.next().is_some() {
         return None;
     }
-    Some(format!(
-        "{}/{}",
-        owner.to_ascii_lowercase(),
-        repo.to_ascii_lowercase()
-    ))
+    github_slug_from(owner, repo)
+}
+
+/// The one place a slug is minted, so every caller gets a name GitHub could
+/// actually have.
+///
+/// The charset is the gate, not a tidy-up. A slug is pasted straight into
+/// `https://github.com/{slug}.git` for the bare `owner/repo` shorthand, which
+/// is not URL-shaped and so never reaches the credential refusal: without
+/// this, `owner/repo?access_token=secret.git` handed the token to `git clone`
+/// and to every diagnostic the URL appears in. Reserved URL characters — `?`,
+/// `#`, `@`, `:`, `%` — are therefore not owner or repository name characters
+/// here, and `.`/`..` are not names at all.
+fn github_slug_from(owner: &str, repo: &str) -> Option<String> {
+    fn is_name(part: &str) -> bool {
+        !part.is_empty()
+            && part != "."
+            && part != ".."
+            && part
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+    }
+    (is_name(owner) && is_name(repo)).then(|| {
+        format!(
+            "{}/{}",
+            owner.to_ascii_lowercase(),
+            repo.to_ascii_lowercase()
+        )
+    })
 }
 
 pub fn github_slug_eq(left: &str, right: &str) -> bool {
@@ -943,8 +924,8 @@ pub fn github_slug_eq(left: &str, right: &str) -> bool {
 }
 
 fn source_repo_from_git_origin(source_root: &Path) -> Option<String> {
-    let output = std::process::Command::new("git")
-        .args(["-C", source_root.to_str()?, "remote", "get-url", "origin"])
+    let output = crate::refresh_sources::hardened_git_command(source_root)
+        .args(["remote", "get-url", "origin"])
         .output()
         .ok()?;
     if !output.status.success() {
@@ -965,10 +946,18 @@ pub fn source_repo_for_source(source_root: Option<&Path>, recorded_source: &str)
 
 /// Compute source hash for a lock entry based on its kind.
 pub fn compute_source_hash(entry: &LockEntry) -> String {
-    let source_root = match resolve_source_path(&entry.source) {
-        Some(p) => p,
-        None => return String::new(),
-    };
+    match resolve_source_path(&entry.source) {
+        Some(root) => compute_source_hash_in(entry, &root),
+        None => String::new(),
+    }
+}
+
+/// [`compute_source_hash`] against an already-resolved source root, for a
+/// caller that resolved it itself — `check` and `verify` resolve once to
+/// report the cause when there is no root, and would otherwise resolve a
+/// second time here.
+pub fn compute_source_hash_in(entry: &LockEntry, source_root: &Path) -> String {
+    let source_root = source_root.to_path_buf();
     let proj_root = project_root();
 
     let mut state = FNV_OFFSET;
@@ -1074,8 +1063,18 @@ pub fn is_source_changed(entry: &LockEntry) -> bool {
     if entry.source_hash.is_empty() {
         return false; // No hash stored — assume fresh (legacy lock)
     }
-    let current = compute_source_hash(entry);
-    current != entry.source_hash
+    // An unresolved source hashes to nothing, which reads as changed — that is
+    // what puts a vanished-source entry in the TUI's Updates list, where
+    // picking it reports the source as gone.
+    compute_source_hash(entry) != entry.source_hash
+}
+
+/// [`is_source_changed`] against an already-resolved source root.
+pub fn is_source_changed_in(entry: &LockEntry, source_root: &Path) -> bool {
+    if entry.source_hash.is_empty() {
+        return false; // No hash stored — assume fresh (legacy lock)
+    }
+    compute_source_hash_in(entry, source_root) != entry.source_hash
 }
 
 /// Discovered item on disk that was installed by vstack.
@@ -2106,6 +2105,57 @@ mod source_registry_tests {
         assert_eq!(fs::read_to_string(&path).unwrap(), first);
 
         let _ = fs::remove_dir_all(dir);
+    }
+
+    /// `check` and `verify` resolve a recorded source once — to report the
+    /// cause when there is none — and hash against the root they got. Hashing
+    /// through the resolving entry point would resolve the same source a
+    /// second time, including a second pass through the refusal paths.
+    #[test]
+    fn hashing_against_a_resolved_root_does_not_consult_the_recorded_source() {
+        let root = std::env::temp_dir().join(format!(
+            "vstack-hash-in-root-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let source = root.join("source");
+        fs::create_dir_all(source.join("skills/demo")).unwrap();
+        fs::write(
+            source.join("skills/demo/SKILL.md"),
+            "---\nname: demo\ndescription: Demo\n---\n# Demo\n",
+        )
+        .unwrap();
+
+        // The entry records a source that names nothing on this machine.
+        let entry = LockEntry {
+            name: "demo".into(),
+            kind: ItemKind::Skill,
+            source: "owner/no-such-repo".into(),
+            source_repo: None,
+            harnesses: vec!["claude-code".into()],
+            method: InstallMethod::Copy,
+            installed_at: "2026-07-03T00:00:00Z".into(),
+            source_hash: String::new(),
+        };
+
+        let home = root.join("home");
+        crate::test_util::with_home_and_config(&home, &home.join(".config"), || {
+            assert_eq!(
+                compute_source_hash(&entry),
+                String::new(),
+                "control: resolving that source yields no root, so no hash"
+            );
+            assert_ne!(
+                compute_source_hash_in(&entry, &source),
+                String::new(),
+                "the caller's resolved root is what is hashed"
+            );
+        });
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

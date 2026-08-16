@@ -183,9 +183,19 @@ struct ResolvedSource {
 
 fn source_label(source: &str) -> String {
     if Path::new(source).exists() {
-        return format!("local: {source}");
+        // A lock-recorded local path is untrusted text like any other: a
+        // matching directory whose name carries an escape would put it on the
+        // picker row. Through the same redacting display as every other source
+        // diagnostic — a credential-looking string can name a real path.
+        return format!(
+            "local: {}",
+            crate::refresh_sources::remote_source_display(source)
+        );
     }
 
+    // A registry or lock written by an earlier vstack can still hold a
+    // credential URL; a picker row is one of the places that would print it.
+    let source = crate::refresh_sources::remote_source_display(source);
     let trimmed = source
         .trim_end_matches('/')
         .trim_end_matches(".git")
@@ -465,6 +475,44 @@ mod auto_include_agent_skills_tests {
 mod source_option_tests {
     use super::*;
 
+    /// A registry or lock written by an earlier vstack can still hold a
+    /// credential URL — exactly the strings the parser now refuses. The picker
+    /// row that renders it must not be where the token is printed.
+    #[test]
+    fn source_label_never_prints_a_credential() {
+        for source in [
+            "https://user:token@github.com/owner/repo.git",
+            "https://token@github.com/owner/repo.git",
+            "https://user:to ken@github.com/owner/repo.git",
+        ] {
+            let label = source_label(source);
+            assert!(!label.contains("token"), "{source}: {label}");
+            assert!(label.contains("<redacted>"), "{source}: {label}");
+        }
+        // A local path is echoed as recorded, minus anything a terminal would
+        // act on rather than print.
+        let root = std::env::temp_dir().join(format!(
+            "vstack-source-label-\u{1b}[31m-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let label = source_label(&root.to_string_lossy());
+        assert!(!label.contains('\u{1b}'), "{label}");
+        assert!(label.starts_with("local: "), "{label}");
+        let _ = std::fs::remove_dir_all(&root);
+
+        // Ordinary sources are untouched.
+        assert_eq!(source_label("owner/repo"), "owner/repo");
+        assert_eq!(
+            source_label("https://github.com/owner/repo.git"),
+            "owner/repo"
+        );
+        assert_eq!(
+            source_label("ssh://git@github.com/owner/repo.git"),
+            "ssh://git@github.com/owner/repo"
+        );
+    }
+
     fn tmpdir(label: &str) -> PathBuf {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -716,6 +764,40 @@ role: engineer
             !crate::resolve::is_vstack_source(&alternate),
             "fixture must exercise the non-canonical-layout case"
         );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A refused source is not an absent one here either: walking past it
+    /// installs items from a different source over the ones already installed.
+    #[test]
+    fn resolve_source_for_app_fails_rather_than_replacing_a_refused_project_source() {
+        let root = tmpdir("refused-project-source");
+        let project_root = root.join("project");
+        std::fs::create_dir_all(&project_root).unwrap();
+        // A fallback that WOULD resolve: the walk from CWD finds this
+        // checkout's own vstack source, so the chain has somewhere to go.
+        assert!(
+            std::env::current_dir()
+                .unwrap()
+                .ancestors()
+                .any(crate::resolve::is_vstack_source),
+            "control: the fallback chain must have a source to reach"
+        );
+
+        let mut registry = config::SourceRegistry::default();
+        registry.remember_for_project(
+            &project_root,
+            "https://user:ghp_TESTTOKEN@github.com/owner/repo.git",
+        );
+
+        let Err(err) = resolve_source_for_app(None, &registry, &project_root) else {
+            panic!("a refused project source must not fall through");
+        };
+        let err = format!("{err:#}");
+        assert!(err.contains("credential-bearing"), "{err}");
+        assert!(!err.contains("ghp_TESTTOKEN"), "{err}");
+        assert!(err.contains("<redacted>"), "{err}");
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -1833,7 +1915,7 @@ fn resolve_source_for_app(
             // intentionally project-scoped: choosing a repo while working in
             // one project must not silently change the source used by another.
             if let Some(current) = registry.current_for_project(project_root)
-                && let Ok(dir) = resolve_source(Some(current))
+                && let Some(dir) = resolve_remembered_source(current)?
                 && usable(&dir)
             {
                 return Ok(ResolvedSource {
@@ -1849,7 +1931,7 @@ fn resolve_source_for_app(
             // lock file. Use that before any global/default source so a
             // project's repo choice remains stable across invocations.
             if let Some(current) = source_from_project_lock(project_root)
-                && let Ok(dir) = resolve_source(Some(&current))
+                && let Some(dir) = resolve_remembered_source(&current)?
                 && usable(&dir)
             {
                 return Ok(ResolvedSource {
@@ -2797,14 +2879,58 @@ source (e.g. switching vstack repos, or starting clean), pass --clobber:
     Ok(())
 }
 
+/// Resolve a source the project remembered — the registry's selection, or the
+/// one its lock records — for the fallback chain.
+///
+/// `Ok(None)` is the one outcome that may walk on: a local candidate that names
+/// nothing. A remote that is refused, an unowned cache entry or a failed clone
+/// is an ERROR, because continuing past it installs items from a different
+/// source over the ones already installed — the same refused-is-not-absent
+/// fail-open the refresh side closed.
+fn resolve_remembered_source(source: &str) -> Result<Option<PathBuf>> {
+    // Ordered as `refresh` orders it: an absolute path that exists is that
+    // path, then the remote reading, then a relative one. A remote-shaped
+    // spelling that ALSO names a directory under the current working
+    // directory is the remote — otherwise a project holding an `owner/repo`
+    // subdirectory would silently install from it.
+    let path = Path::new(source);
+    if path.is_absolute() && path.exists() {
+        return Ok(Some(std::fs::canonicalize(source)?));
+    }
+    if crate::refresh_sources::looks_like_remote_source(source) {
+        return clone_or_update(source).map(Some).with_context(|| {
+            format!(
+                "resolving the source this project is set to use ({})",
+                crate::refresh_sources::remote_source_display(source)
+            )
+        });
+    }
+    if path.exists() {
+        return Ok(Some(std::fs::canonicalize(source)?));
+    }
+    // A spelling that opens with a scheme is an attempt at a URL, so it names
+    // something even when the strict parser cannot read it. Walking on would
+    // install from whatever source the chain reaches next.
+    if crate::refresh_sources::names_a_transport(source) {
+        anyhow::bail!(
+            "the source this project is set to use is not a usable URL: {}",
+            crate::refresh_sources::remote_source_display(source)
+        );
+    }
+    Ok(None)
+}
+
 fn resolve_source(source: Option<&str>) -> Result<PathBuf> {
     match source {
         Some(path) if Path::new(path).exists() => Ok(std::fs::canonicalize(path)?),
-        Some(source) if looks_like_remote(source) => clone_or_update(source),
+        Some(source) if crate::refresh_sources::looks_like_remote_source(source) => {
+            clone_or_update(source)
+        }
         Some(source) => {
             anyhow::bail!(
-                "Source not found: {source}\n\
-                 Use a local path or GitHub shorthand (owner/repo)"
+                "Source not found: {}\n\
+                 Use a local path or GitHub shorthand (owner/repo)",
+                crate::refresh_sources::remote_source_display(source)
             );
         }
         None => {
@@ -2824,88 +2950,42 @@ fn resolve_source(source: Option<&str>) -> Result<PathBuf> {
     }
 }
 
-fn looks_like_remote(source: &str) -> bool {
-    // owner/repo, https://github.com/..., git@github.com:...
-    source.contains('/') && !source.starts_with('.') && !source.starts_with('/')
-        || source.starts_with("https://")
-        || source.starts_with("git@")
-}
-
-/// Clone or update a remote repo into ~/.vstack/cache/<owner>/<repo>
+/// Clone or update a remote repo into its entry under `~/.vstack/cache/`.
 fn clone_or_update(source: &str) -> Result<PathBuf> {
-    let cache_dir = crate::config::global_base_dir()
-        .join(".vstack")
-        .join("cache");
-    std::fs::create_dir_all(&cache_dir)?;
+    let remote = crate::refresh_sources::RemoteSource::parse(source)?
+        .ok_or_else(|| anyhow::anyhow!("Source not found: {source}"))?;
+    let display = &remote.display;
 
-    // Normalize source to a git URL and a cache key
-    let (git_url, cache_key) = if source.starts_with("https://") || source.starts_with("git@") {
-        // Full URL — extract owner/repo for cache key
-        let key = source
-            .trim_end_matches('/')
-            .trim_end_matches(".git")
-            .rsplit('/')
-            .take(2)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect::<Vec<_>>()
-            .join("_");
-        (source.to_string(), key)
-    } else {
-        // owner/repo shorthand
-        let url = format!("https://github.com/{}.git", source);
-        let key = source.replace('/', "_");
-        (url, key)
-    };
-
-    let repo_dir = cache_dir.join(&cache_key);
-
-    if repo_dir.join(".git").exists() {
-        // Update existing clone (handles force-pushed histories)
-        eprintln!("Updating cached repo...");
-        let fetch = std::process::Command::new("git")
-            .args(["fetch", "origin", "--quiet"])
-            .current_dir(&repo_dir)
-            .status();
-        if fetch.is_ok_and(|s| s.success()) {
-            let _ = std::process::Command::new("git")
-                .args(["reset", "--hard", "origin/HEAD"])
-                .current_dir(&repo_dir)
-                .stderr(std::process::Stdio::null())
-                .status();
-        }
+    if crate::refresh_sources::cache_entry_present(&remote) {
+        // Update existing clone (handles force-pushed histories). A refusal —
+        // the entry is not vstack's own clone — is an error; a failed fetch
+        // keeps the stale clone.
+        eprintln!("Updating cached repo {display}...");
+        crate::refresh_sources::update_cached_repo(&remote)?;
     } else {
         // Fresh shallow clone
-        eprintln!("Cloning {}...", git_url);
-        let status = std::process::Command::new("git")
-            .args([
-                "clone",
-                "--depth",
-                "1",
-                &git_url,
-                repo_dir.to_str().unwrap(),
-            ])
-            .status()
-            .context("failed to run git clone — is git installed?")?;
-        if !status.success() {
-            anyhow::bail!(
-                "git clone failed. For private repos, make sure you have access:\n\
+        eprintln!("Cloning {display}...");
+        crate::refresh_sources::clone_cached_repo(&remote).with_context(|| {
+            let ssh_hint = crate::config::parse_github_slug(source)
+                .map(|slug| format!("SSH:   git clone git@github.com:{slug}.git\n"))
+                .unwrap_or_default();
+            format!(
+                "caching {display} failed. For private repos, make sure you have access:\n\
                  \n\
-                 SSH:   git clone git@github.com:{source}.git\n\
+                 {ssh_hint}\
                  HTTPS: gh auth login\n\
                  Token: export GH_TOKEN=<your-token>"
-            );
-        }
+            )
+        })?;
     }
 
-    if !crate::resolve::is_vstack_source(&repo_dir) {
+    if !crate::resolve::is_vstack_source(&remote.cache_dir) {
         anyhow::bail!(
             "Cloned repo doesn't look like a vstack repo (no catalog table or source item directories found)"
         );
     }
 
-    Ok(repo_dir)
+    Ok(remote.cache_dir)
 }
 
 fn reconcile_agents(
@@ -2942,7 +3022,29 @@ fn reconcile_agents(
     // Discover source agents and skills for descriptions
     let source_agents = crate::catalog::discover_agents(source_dir).unwrap_or_default();
     let source_skills = crate::catalog::discover_skills(source_dir).unwrap_or_default();
-    let source_hooks = crate::catalog::discover_hooks(source_dir).unwrap_or_default();
+    // Hooks come from EVERY recorded source, not just the one being installed
+    // from: an agent's frontmatter is rewritten below with whatever hook set
+    // this function can see, and a hook installed from another source — or
+    // from a remote whose cache is absent or refused — is not absent, it is
+    // unreadable. Read as they stand, with no fetch: reconciling is not a
+    // reason to update a source the user did not name.
+    let hook_records = crate::refresh_sources::resolve_source_records_without_update(&lock);
+    let all_hooks = crate::refresh_sources::all_source_hooks(
+        &crate::refresh_sources::load_refresh_sources(&hook_records.sources),
+    );
+    // Hook entries this run cannot read, asked of the same function the agent
+    // frontmatter is built from — so the two can never disagree about which
+    // entries have no hook. An agent whose set includes one is left exactly as
+    // installed: dropping the hook from its frontmatter while the script, the
+    // settings.json registration and the lock entry all survive is the
+    // inconsistency a successful `add` must not leave behind.
+    let undetermined_hooks: Vec<(String, Vec<String>)> = lock
+        .entries
+        .values()
+        .filter(|entry| entry.kind == config::ItemKind::Hook)
+        .filter(|entry| crate::resolve::source_hook_for_lock_entry(&all_hooks, entry).is_none())
+        .map(|entry| (entry.name.clone(), entry.harnesses.clone()))
+        .collect();
     let mut regenerated_codex_agents: Vec<crate::agent::Agent> = Vec::new();
     let mut regenerated_codex_agent_names = std::collections::HashSet::new();
 
@@ -2958,6 +3060,19 @@ fn reconcile_agents(
         let Some(agent) = source_agents.iter().find(|a| &a.name == *name) else {
             continue;
         };
+
+        let undetermined: Vec<&str> = undetermined_hooks
+            .iter()
+            .filter(|(_, harnesses)| harnesses.iter().any(|h| entry.harnesses.contains(h)))
+            .map(|(hook, _)| hook.as_str())
+            .collect();
+        if !undetermined.is_empty() {
+            eprintln!(
+                "  Warning: leaving agent {name} as installed: its hook set is not known this run — {} (run `vstack refresh` once every source is readable)",
+                undetermined.join(", ")
+            );
+            continue;
+        }
 
         // Use project [agent-skills] if present, else source mapping
         let skill_names: Vec<String> =
@@ -2997,7 +3112,7 @@ fn reconcile_agents(
                 if harnesses.contains(&harness) {
                     let matched_hooks = crate::resolve::matched_installed_hooks_for_agent_harness(
                         &lock,
-                        &source_hooks,
+                        &all_hooks,
                         &mapping,
                         &agent.role,
                         harness.id(),
@@ -3017,7 +3132,7 @@ fn reconcile_agents(
 
     if !regenerated_codex_agents.is_empty() {
         let codex_fallback_hooks =
-            crate::resolve::installed_codex_fallback_hooks(&lock, &source_hooks);
+            crate::resolve::installed_codex_fallback_hooks(&lock, &all_hooks);
         installer::install_codex_fallback_hooks_for_agents(
             &codex_fallback_hooks,
             global,
