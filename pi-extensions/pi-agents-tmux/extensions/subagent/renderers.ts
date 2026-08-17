@@ -260,6 +260,76 @@ export async function readTextFileIfExists(filePath: string | undefined, maxByte
 	}
 }
 
+/**
+ * Tail-read a JSONL transcript on a byte budget without ever cutting
+ * mid-record: only the final window is materialized (the dropped prefix is
+ * newline-counted through a small reusable buffer, never held in memory),
+ * the cut lands on a line boundary, and the dropped-event count lets the
+ * caller say what is not shown instead of rendering a leading fragment.
+ */
+export async function readTranscriptTail(filePath: string | undefined, maxBytes = 256_000): Promise<{ text: string; droppedLines: number; originTs?: unknown } | undefined> {
+	if (!filePath) return undefined;
+	let handle: fs.promises.FileHandle | undefined;
+	try {
+		handle = await fs.promises.open(filePath, "r");
+		const { size } = await handle.stat();
+		if (size <= maxBytes) return { droppedLines: 0, text: (await handle.readFile()).toString("utf-8") };
+		const start = size - maxBytes;
+		let droppedLines = 0;
+		// The first record's stamp survives the cut so elapsed times keep the
+		// session's real origin instead of restarting at the tail.
+		let originTs: unknown;
+		const chunk = Buffer.alloc(64 * 1024);
+		// The first record is read to ITS OWN newline — which can sit past the
+		// cut offset when the record (it embeds the full task prompt) is longer
+		// than the whole dropped prefix — bounded at 1MB.
+		{
+			let firstLine = Buffer.alloc(0);
+			for (let position = 0; position < size && firstLine.length <= 1024 * 1024; ) {
+				const { bytesRead } = await handle.read(chunk, 0, chunk.length, position);
+				if (bytesRead <= 0) break;
+				const boundary = chunk.subarray(0, bytesRead).indexOf(10);
+				firstLine = Buffer.concat([firstLine, chunk.subarray(0, boundary === -1 ? bytesRead : boundary)]);
+				position += bytesRead;
+				if (boundary !== -1) break;
+			}
+			try {
+				const parsed = JSON.parse(firstLine.toString("utf-8"));
+				originTs = parsed?.ts ?? parsed?.timestamp;
+			} catch {
+				originTs = undefined;
+			}
+		}
+		for (let position = 0; position < start; ) {
+			const { bytesRead } = await handle.read(chunk, 0, Math.min(chunk.length, start - position), position);
+			if (bytesRead <= 0) break;
+			for (let index = 0; index < bytesRead; index += 1) if (chunk[index] === 10) droppedLines += 1;
+			position += bytesRead;
+		}
+		const tail = Buffer.alloc(maxBytes);
+		const { bytesRead } = await handle.read(tail, 0, maxBytes, start);
+		let text = tail.subarray(0, Math.max(0, bytesRead)).toString("utf-8");
+		const prev = Buffer.alloc(1);
+		await handle.read(prev, 0, 1, start - 1);
+		if (prev[0] !== 10) {
+			// The window opens mid-record: drop the fragment (counted — its
+			// newline sits inside the window). A single record larger than the
+			// whole window has no boundary; it stays as one line for the
+			// formatter to label rather than vanishing into a blank tab.
+			const boundary = text.indexOf("\n");
+			if (boundary !== -1) {
+				droppedLines += 1;
+				text = text.slice(boundary + 1);
+			}
+		}
+		return { droppedLines, originTs, text };
+	} catch {
+		return undefined;
+	} finally {
+		await handle?.close().catch(() => undefined);
+	}
+}
+
 export async function formatTraceView(record: PaneTaskRecord, verbose = false): Promise<string> {
 	const base = formatTaskRecordResult(record, true);
 	const transcript = await readTextFileIfExists(record.transcriptPath, verbose ? 80_000 : 24_000);

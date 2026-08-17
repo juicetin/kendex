@@ -168,73 +168,15 @@ export function inputDeliveryLabel(value: unknown): string | undefined {
 	return normalizeInputDelivery(value);
 }
 
-function oneLine(text: string, maxChars = 500): string {
+export function oneLine(text: string, maxChars = 500): string {
 	const compact = text.replace(/\s+/g, " ").trim();
 	return compact.length > maxChars ? `${compact.slice(0, maxChars - 1)}…` : compact;
 }
 
-function stringValue(value: unknown): string | undefined {
+export function stringValue(value: unknown): string | undefined {
 	return typeof value === "string" ? value : undefined;
 }
 
-function numberValue(value: unknown): number | undefined {
+export function numberValue(value: unknown): number | undefined {
 	return typeof value === "number" && Number.isFinite(value) ? value : undefined;
-}
-
-function textFromMessageContent(content: unknown): string | undefined {
-	if (typeof content === "string") return content;
-	if (!Array.isArray(content)) return undefined;
-	const text = content.find((part: any) => part?.type === "text" && typeof part.text === "string");
-	return text?.text;
-}
-
-export function describeTranscriptEvent(record: any): string | undefined {
-	const normalized = normalizeTranscriptRecordEvent(record);
-	const event = normalized.event;
-	if (!event || typeof event !== "object") return undefined;
-	const type = typeof event.type === "string" ? event.type : undefined;
-	if (type === "input") {
-		const delivery = inputDeliveryLabel(event.streamingBehavior ?? event.streaming_behavior) ?? "idle";
-		const source = stringValue(event.source);
-		const preview = stringValue(event.textPreview ?? event.text_preview ?? event.text) ?? "";
-		const bytes = numberValue(event.textBytes ?? event.text_bytes);
-		const truncated = event.textTruncated === true || event.text_truncated === true;
-		const imagesCount = numberValue(event.imagesCount ?? event.images_count);
-		const meta = [delivery, source, imagesCount !== undefined ? `${imagesCount} image${imagesCount === 1 ? "" : "s"}` : undefined]
-			.filter(Boolean)
-			.join(" · ");
-		const suffix = [bytes !== undefined ? `${bytes}B` : undefined, truncated ? "truncated" : undefined].filter(Boolean).join(" · ");
-		return [`── input${meta ? ` (${meta})` : ""} ──`, preview ? `${oneLine(preview)}${suffix ? ` (${suffix})` : ""}` : suffix].filter(Boolean).join("\n");
-	}
-	if (type === "message_end") {
-		const message = event.message && typeof event.message === "object" ? event.message : event;
-		const role = stringValue(message.role);
-		const text = textFromMessageContent(message.content);
-		if (role && text) return [`── ${role} message ──`, oneLine(text)].join("\n");
-	}
-	if (type === "tool_execution_start" || type === "tool_execution_end") {
-		const toolName = stringValue(event.toolName ?? event.tool_name) ?? stringValue(event.name);
-		const status = stringValue(event.status);
-		return `── ${type === "tool_execution_start" ? "tool start" : "tool end"}${toolName ? ` (${toolName})` : ""}${status ? ` · ${status}` : ""} ──`;
-	}
-	if (type === "agent_end") {
-		const preview = stringValue(event.finalTextPreview ?? event.final_text_preview);
-		return [`── agent end ──`, preview ? oneLine(preview) : undefined].filter(Boolean).join("\n");
-	}
-	if (record?.type === "exit") return `── exit ──\ncode ${record.code ?? "unknown"}`;
-	return undefined;
-}
-
-export function formatTranscriptForDisplay(raw: string): string {
-	const lines: string[] = [];
-	for (const line of raw.split(/\r?\n/)) {
-		if (!line.trim()) continue;
-		try {
-			const parsed = JSON.parse(line);
-			lines.push(describeTranscriptEvent(parsed) ?? line);
-		} catch {
-			lines.push(line);
-		}
-	}
-	return lines.join("\n");
 }
