@@ -183,29 +183,20 @@ pub(crate) fn codex_hook_registered(
         })
 }
 
-/// Whether `<root>/config.toml` has `[features] hooks = true`.
+/// Whether `<root>/config.toml` has `[features] hooks = true`. A real TOML
+/// parse, so the same lines inside a multiline string decide nothing; a file
+/// that does not parse enables nothing.
 fn codex_hooks_feature_enabled(root: &Path) -> bool {
     let Ok(content) = std::fs::read_to_string(root.join("config.toml")) else {
         return false;
     };
-    let mut in_features = false;
-    let mut enabled = false;
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if trimmed == "[features]" {
-            in_features = true;
-            continue;
-        }
-        if in_features && is_toml_table_header(trimmed) {
-            in_features = false;
-        }
-        if in_features && toml_assignment_key(line) == Some("hooks") {
-            enabled = toml_assignment_value(line)
-                .map(|value| value.split('#').next().unwrap_or(value).trim())
-                == Some("true");
-        }
-    }
-    enabled
+    let Ok(doc) = content.parse::<toml::Value>() else {
+        return false;
+    };
+    doc.get("features")
+        .and_then(|features| features.get("hooks"))
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
 }
 
 /// Whether any generated Codex agent file carries this hook's
@@ -680,8 +671,17 @@ fn merge_codex_hooks_feature(config_path: &Path, enable_hooks: bool) -> Result<(
     let mut in_features = false;
     let mut hooks_written = false;
     let mut merged = Vec::with_capacity(lines.len() + 2);
+    let mut string_state: Option<&'static str> = None;
 
     for line in lines.drain(..) {
+        // A line inside a multiline string is content, not structure: it is
+        // carried verbatim and decides nothing.
+        let started_in_string = string_state.is_some();
+        string_state = advance_toml_string_state(&line, string_state);
+        if started_in_string {
+            merged.push(line);
+            continue;
+        }
         let trimmed = line.trim();
 
         if trimmed == "[features]" {
@@ -769,11 +769,75 @@ struct DeprecatedCodexHooksFeature {
     value: String,
 }
 
+/// Multiline-string state for a line-oriented TOML walk: `None` outside,
+/// `Some(delimiter)` inside. Escapes are not tracked — TOML forbids an
+/// unescaped `"""` inside a basic multiline string, and the configs this
+/// walks are ones this tool and its users write.
+fn advance_toml_string_state(line: &str, mut state: Option<&'static str>) -> Option<&'static str> {
+    fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+        haystack
+            .windows(needle.len())
+            .position(|window| window == needle)
+    }
+    let bytes = line.as_bytes();
+    let mut i = 0;
+    // A single-line string or a comment is content: a delimiter inside one
+    // opens nothing. Escapes count only in basic (double-quoted) strings.
+    let mut single_line: Option<u8> = None;
+    while i < bytes.len() {
+        match state {
+            Some(delimiter) => match find_bytes(&bytes[i..], delimiter.as_bytes()) {
+                Some(idx) => {
+                    i += idx + delimiter.len();
+                    state = None;
+                }
+                None => return state,
+            },
+            None => match single_line {
+                Some(quote) => {
+                    if quote == b'"' && bytes[i] == b'\\' {
+                        i += 2;
+                        continue;
+                    }
+                    if bytes[i] == quote {
+                        single_line = None;
+                    }
+                    i += 1;
+                }
+                None => {
+                    if bytes[i..].starts_with(b"\"\"\"") {
+                        state = Some("\"\"\"");
+                        i += 3;
+                    } else if bytes[i..].starts_with(b"'''") {
+                        state = Some("'''");
+                        i += 3;
+                    } else {
+                        match bytes[i] {
+                            b'#' => return None,
+                            b'"' => single_line = Some(b'"'),
+                            b'\'' => single_line = Some(b'\''),
+                            _ => {}
+                        }
+                        i += 1;
+                    }
+                }
+            },
+        }
+    }
+    state
+}
+
 fn codex_features_state(lines: &[String]) -> CodexFeaturesState {
     let mut state = CodexFeaturesState::default();
     let mut in_features = false;
+    let mut string_state: Option<&'static str> = None;
 
     for line in lines {
+        let started_in_string = string_state.is_some();
+        string_state = advance_toml_string_state(line, string_state);
+        if started_in_string {
+            continue;
+        }
         let trimmed = line.trim();
         if trimmed == "[features]" {
             state.features_seen = true;
