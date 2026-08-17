@@ -5,10 +5,16 @@ use crate::path_safety::validate_item_name;
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
+pub(crate) mod contract;
+pub(crate) mod enforcement;
 mod opencode;
 
+use contract::{ADVISORY_BANNER, Cell, Mechanism};
 use opencode::{install_hook_opencode, remove_hook_from_opencode_json};
-pub(crate) use opencode::{opencode_hook_instruction_contents, opencode_hook_instruction_path};
+pub(crate) use opencode::{
+    opencode_hook_instruction_contents, opencode_hook_instruction_path,
+    opencode_hook_instruction_registered,
+};
 
 fn validate_file_name(file_name: &str) -> Result<()> {
     if file_name.is_empty()
@@ -61,11 +67,11 @@ fn checked_child_path(parent: &Path, file_name: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
-fn command_matches_owned_hook_command(command: &str, owned_commands: &[String]) -> bool {
-    owned_commands.iter().any(|owned| command == owned)
-}
+/// Decides whether a registered command belongs to a vstack hook, so a
+/// reinstall replaces its own entry and a removal takes it away.
+type OwnsCommand<'a> = &'a dyn Fn(&str) -> bool;
 
-fn hook_entry_mentions_owned_command(entry: &serde_json::Value, owned_commands: &[String]) -> bool {
+fn hook_entry_mentions_owned_command(entry: &serde_json::Value, owns: OwnsCommand<'_>) -> bool {
     entry
         .get("hooks")
         .and_then(|h| h.as_array())
@@ -74,23 +80,158 @@ fn hook_entry_mentions_owned_command(entry: &serde_json::Value, owned_commands: 
                 handler
                     .get("command")
                     .and_then(|c| c.as_str())
-                    .is_some_and(|command| {
-                        command_matches_owned_hook_command(command, owned_commands)
-                    })
+                    .is_some_and(owns)
             })
         })
 }
 
+fn owns_exactly(owned_commands: &[String]) -> impl Fn(&str) -> bool + '_ {
+    move |command| owned_commands.iter().any(|owned| owned == command)
+}
+
+fn hooks_object_has_owned_entry_for_event(
+    hooks_obj: &serde_json::Map<String, serde_json::Value>,
+    event: &str,
+    matcher: Option<&str>,
+    owns: OwnsCommand<'_>,
+) -> bool {
+    hooks_obj
+        .get(event)
+        .and_then(|value| value.as_array())
+        .is_some_and(|entries| {
+            entries.iter().any(|entry| {
+                entry.get("matcher").and_then(|value| value.as_str()) == matcher
+                    && hook_entry_mentions_owned_command(entry, owns)
+            })
+        })
+}
+
+fn claude_settings_path(global: bool) -> PathBuf {
+    if global {
+        crate::config::claude_global_dir().join("settings.json")
+    } else {
+        crate::config::project_root()
+            .join(".claude")
+            .join("settings.json")
+    }
+}
+
+/// Whether Claude Code's settings still carry this hook's registration under
+/// its declared event and matcher. A settings file that cannot be read or
+/// parsed reports unregistered: a level is a claim, and a registration
+/// nothing can read backs none — one under another event runs at the wrong
+/// time, and one with another matcher runs for the wrong tools.
+pub(crate) fn claude_hook_registered(
+    global: bool,
+    name: &str,
+    event: &str,
+    matcher: Option<&str>,
+) -> bool {
+    let Some(script_path) = Harness::ClaudeCode
+        .hooks_dir(global)
+        .map(|dir| dir.join(format!("{name}.sh")))
+    else {
+        return false;
+    };
+    let Ok(content) = std::fs::read_to_string(claude_settings_path(global)) else {
+        return false;
+    };
+    let Ok(settings) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return false;
+    };
+    let owned = claude_owned_hook_commands(global, name, &script_path);
+    settings
+        .get("hooks")
+        .and_then(|h| h.as_object())
+        .is_some_and(|hooks| {
+            hooks_object_has_owned_entry_for_event(hooks, event, matcher, &owns_exactly(&owned))
+        })
+}
+
+/// Whether `<scope>/.codex/hooks.json` still carries this hook's handler
+/// under its declared event AND `config.toml` keeps the `hooks` feature on —
+/// all of which is what makes Codex run the handler, and install writes.
+pub(crate) fn codex_hook_registered(
+    global: bool,
+    name: &str,
+    event: &str,
+    matcher: Option<&str>,
+) -> bool {
+    let Some(codex_event) = codex_event_for(event) else {
+        return false;
+    };
+    let root = codex_root(global);
+    if !codex_hooks_feature_enabled(&root) {
+        return false;
+    }
+    let Ok(content) = std::fs::read_to_string(root.join("hooks.json")) else {
+        return false;
+    };
+    let Ok(doc) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return false;
+    };
+    let script_path = root.join("hooks").join(format!("{name}.sh"));
+    doc.get("hooks")
+        .and_then(|h| h.as_object())
+        .is_some_and(|hooks| {
+            hooks_object_has_owned_entry_for_event(
+                hooks,
+                codex_event,
+                matcher,
+                &codex_owns_command(global, name, &script_path),
+            )
+        })
+}
+
+/// Whether `<root>/config.toml` has `[features] hooks = true`.
+fn codex_hooks_feature_enabled(root: &Path) -> bool {
+    let Ok(content) = std::fs::read_to_string(root.join("config.toml")) else {
+        return false;
+    };
+    let mut in_features = false;
+    let mut enabled = false;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed == "[features]" {
+            in_features = true;
+            continue;
+        }
+        if in_features && is_toml_table_header(trimmed) {
+            in_features = false;
+        }
+        if in_features && toml_assignment_key(line) == Some("hooks") {
+            enabled = toml_assignment_value(line)
+                .map(|value| value.split('#').next().unwrap_or(value).trim())
+                == Some("true");
+        }
+    }
+    enabled
+}
+
+/// Whether any generated Codex agent file carries this hook's
+/// `## Safety: <name>` prose block.
+pub(crate) fn codex_hook_prose_present(global: bool, name: &str) -> bool {
+    let Ok(entries) = std::fs::read_dir(Harness::Codex.agents_dir(global)) else {
+        return false;
+    };
+    let marker = format!("## Safety: {name}\n");
+    entries.flatten().any(|entry| {
+        let path = entry.path();
+        path.extension().is_some_and(|ext| ext == "toml")
+            && std::fs::read_to_string(&path).is_ok_and(|content| content.contains(&marker))
+    })
+}
+
 fn remove_hook_entries_from_hooks_object(
     hooks_obj: &mut serde_json::Map<String, serde_json::Value>,
-    owned_commands: &[String],
+    owns: OwnsCommand<'_>,
 ) -> bool {
     let mut changed = false;
     let event_keys: Vec<String> = hooks_obj.keys().cloned().collect();
     for event in event_keys {
         if let Some(arr) = hooks_obj.get_mut(&event).and_then(|v| v.as_array_mut()) {
             let before = arr.len();
-            arr.retain(|entry| !hook_entry_mentions_owned_command(entry, owned_commands));
+            arr.retain(|entry| !hook_entry_mentions_owned_command(entry, owns));
             if arr.len() != before {
                 changed = true;
             }
@@ -103,12 +244,26 @@ fn remove_hook_entries_from_hooks_object(
     changed
 }
 
-fn claude_hook_command(global: bool, hook_name: &str, script_path: &Path) -> String {
+/// Build the command Claude Code runs. Project scope anchors on
+/// `$CLAUDE_PROJECT_DIR`, which the harness sets in every project including
+/// one that is not a git repository; global scope has no project layer to
+/// resolve against and takes the install-time absolute path.
+pub(crate) fn claude_hook_command(global: bool, hook_name: &str, script_path: &Path) -> String {
     if global {
         format!("bash {}", shell_quote(&script_path.to_string_lossy()))
     } else {
         format!("bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/{hook_name}.sh\"")
     }
+}
+
+/// The command an installed Claude hook script is invoked through, for callers
+/// that render the registration rather than write it.
+pub(crate) fn claude_installed_hook_command(global: bool, hook_name: &str) -> String {
+    let script_path = Harness::ClaudeCode
+        .hooks_dir(global)
+        .map(|dir| dir.join(format!("{hook_name}.sh")))
+        .unwrap_or_default();
+    claude_hook_command(global, hook_name, &script_path)
 }
 
 fn claude_owned_hook_commands(global: bool, hook_name: &str, script_path: &Path) -> Vec<String> {
@@ -123,12 +278,10 @@ fn claude_owned_hook_commands(global: bool, hook_name: &str, script_path: &Path)
 
 /// Install a hook to a specific harness.
 ///
-/// - Claude Code: copy script + add to settings.json hooks
-/// - OpenCode: add permission rules to opencode.json
-/// - Codex: native hooks.json entry + script when codex supports the event;
-///   safety prose appended to agent TOML developer_instructions otherwise
-/// - Cursor: write a dedicated `.cursor/rules/safety-<name>.mdc` rule file
-/// - Pi: no per-hook install artifact; the native `pi-hooks` extension owns behavior
+/// The mechanism is not chosen here: [`contract::cell`] decides it for the
+/// hook's event, and this function only writes what that cell names. An event
+/// the contract does not cover is refused, because nothing could be said
+/// honestly about what such an install enforces.
 ///
 /// Honors the optional `harnesses:` allowlist in the hook frontmatter.
 pub fn install_hook(
@@ -138,6 +291,9 @@ pub fn install_hook(
     agents: &[Agent],
 ) -> Result<String> {
     crate::path_safety::validate_new_item_name(&hook.name)?;
+    let Some(cell) = contract::cell(&hook.event, harness) else {
+        anyhow::bail!(contract::unknown_event_error(&hook.name, &hook.event));
+    };
     if !hook.applies_to(harness.id()) {
         return Ok(format!(
             "[hook] {} → {} (skipped: harness not in `harnesses:`)",
@@ -145,19 +301,23 @@ pub fn install_hook(
             harness.name()
         ));
     }
-    match harness {
-        Harness::ClaudeCode => install_hook_claude(hook, global)?,
-        Harness::OpenCode => install_hook_opencode(hook, global)?,
-        Harness::Codex => install_hook_codex(hook, global, agents)?,
-        Harness::Cursor => install_hook_cursor(hook, global)?,
-        Harness::Pi => {}
+    match cell.mechanism() {
+        Some(Mechanism::ClaudeSettingsHook) => install_hook_claude(hook, global)?,
+        Some(Mechanism::OpenCodeInstruction) => install_hook_opencode(hook, global)?,
+        Some(Mechanism::CodexHooksJson) => install_hook_codex_native(hook, global)?,
+        Some(Mechanism::CodexInstructions) => install_hook_codex_prose(hook, global, agents)?,
+        Some(Mechanism::CursorRule) => install_hook_cursor(hook, global)?,
+        // An unsupported cell writes nothing, and Pi carries hook behavior in
+        // the `pi-hooks` package rather than a per-hook artifact.
+        Some(Mechanism::PiHooksExtension) | None => {}
     }
 
     Ok(format!(
-        "[hook] {} → {} ({})",
+        "[hook] {} → {} ({}, {})",
         hook.name,
         harness.name(),
-        hook.event
+        hook.event,
+        cell.level()
     ))
 }
 
@@ -170,6 +330,9 @@ fn install_hook_claude(hook: &Hook, global: bool) -> Result<()> {
         .expect("Claude hooks dir");
     std::fs::create_dir_all(&hooks_dir)?;
     let dest = checked_child_path(&hooks_dir, &format!("{}.sh", hook.name))?;
+    if global {
+        require_utf8_script_path(&dest)?;
+    }
     std::fs::write(&dest, &hook.script)?;
 
     // Make executable
@@ -180,13 +343,7 @@ fn install_hook_claude(hook: &Hook, global: bool) -> Result<()> {
     }
 
     // Merge into settings.json
-    let settings_path = if global {
-        crate::config::claude_global_dir().join("settings.json")
-    } else {
-        crate::config::project_root()
-            .join(".claude")
-            .join("settings.json")
-    };
+    let settings_path = claude_settings_path(global);
     let mut settings: serde_json::Value = if settings_path.exists() {
         let content = std::fs::read_to_string(&settings_path)?;
         serde_json::from_str(&content).unwrap_or(serde_json::json!({}))
@@ -200,7 +357,7 @@ fn install_hook_claude(hook: &Hook, global: bool) -> Result<()> {
     }
     let hooks_obj = map.get_mut("hooks").unwrap().as_object_mut().unwrap();
     let owned_commands = claude_owned_hook_commands(global, &hook.name, &dest);
-    remove_hook_entries_from_hooks_object(hooks_obj, &owned_commands);
+    remove_hook_entries_from_hooks_object(hooks_obj, &owns_exactly(&owned_commands));
 
     // Build the hook entry.
     // Project installs: use $CLAUDE_PROJECT_DIR so hooks resolve regardless of CWD.
@@ -256,37 +413,31 @@ pub(crate) fn cursor_hook_rule_contents(hook: &Hook) -> String {
     ));
     output.push_str("alwaysApply: true\n");
     output.push_str("---\n\n");
+    output.push_str(ADVISORY_BANNER);
+    output.push_str("\n\n");
     output.push_str(&format!("# Safety: {}\n\n", hook.name));
     output.push_str(&hook.safety_prose());
     output
 }
 
 pub(crate) fn codex_hook_safety_block(hook: &Hook) -> String {
-    format!("## Safety: {}\n\n{}", hook.name, hook.safety_prose())
+    format!(
+        "## Safety: {}\n\n{ADVISORY_BANNER}\n\n{}",
+        hook.name,
+        hook.safety_prose()
+    )
 }
 
-/// Map a canonical (Claude-style) hook event to its codex equivalent.
+/// The Codex event a canonical (Claude-style) hook event registers as, or
+/// `None` when the contract routes it to Codex's prose fallback instead.
 ///
-/// Codex supports these events natively (per
-/// <https://developers.openai.com/codex/hooks>):
-///   SessionStart, UserPromptSubmit, PreToolUse, PostToolUse,
-///   PreCompact, PostCompact, PermissionRequest, Stop.
-///
-/// Claude's `TaskCompleted` has no clean equivalent — Stop fires when a turn
-/// ends and treats `exit 2 + stderr` as "continue with this reason as the next
-/// prompt" rather than "block the done state". Returning None routes such
-/// hooks to the prose-only fallback; authors who want codex coverage should
-/// scope the hook with `harnesses: [claude-code]` or rewrite for Stop.
+/// Codex names its events exactly as the canonical set does, so the mapping is
+/// the identity wherever the contract says Codex runs the hook.
 pub(crate) fn codex_event_for(event: &str) -> Option<&'static str> {
-    match event {
-        "SessionStart" => Some("SessionStart"),
-        "UserPromptSubmit" => Some("UserPromptSubmit"),
-        "PreToolUse" => Some("PreToolUse"),
-        "PostToolUse" => Some("PostToolUse"),
-        "PreCompact" => Some("PreCompact"),
-        "PostCompact" => Some("PostCompact"),
-        "PermissionRequest" => Some("PermissionRequest"),
-        "Stop" => Some("Stop"),
+    match contract::cell(event, Harness::Codex) {
+        Some(Cell::Enforced(Mechanism::CodexHooksJson)) => {
+            contract::events().find(|known| *known == event)
+        }
         _ => None,
     }
 }
@@ -300,26 +451,19 @@ pub(crate) fn codex_root(global: bool) -> PathBuf {
     }
 }
 
-/// Codex hook install. Native install (script + hooks.json + features flag)
-/// when codex understands the event; safety-prose appendix to agent TOML
-/// otherwise.
-fn install_hook_codex(hook: &Hook, global: bool, agents: &[Agent]) -> Result<()> {
-    match codex_event_for(&hook.event) {
-        Some(codex_event) => install_hook_codex_native(hook, codex_event, global),
-        None => install_hook_codex_prose(hook, global, agents),
-    }
-}
-
 /// Install a codex-native hook: copy the script under `<root>/hooks/<name>.sh`,
 /// merge the entry into `<root>/hooks.json`, and ensure
 /// `[features] hooks = true` is set in `<root>/config.toml`.
-fn install_hook_codex_native(hook: &Hook, codex_event: &str, global: bool) -> Result<()> {
+fn install_hook_codex_native(hook: &Hook, global: bool) -> Result<()> {
     validate_item_name(&hook.name)?;
+    let codex_event = codex_event_for(&hook.event)
+        .with_context(|| format!("hook {} has no native Codex event", hook.name))?;
     let root = codex_root(global);
 
     let hooks_dir = root.join("hooks");
     std::fs::create_dir_all(&hooks_dir)?;
     let script_path = checked_child_path(&hooks_dir, &format!("{}.sh", hook.name))?;
+    require_utf8_script_path(&script_path)?;
     std::fs::write(&script_path, &hook.script)?;
     #[cfg(unix)]
     {
@@ -327,10 +471,10 @@ fn install_hook_codex_native(hook: &Hook, codex_event: &str, global: bool) -> Re
         std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))?;
     }
 
-    let command = codex_hook_command(global, &hook.name, &script_path);
-    let owned_commands = codex_owned_hook_commands(global, &hook.name, &script_path);
+    let command = codex_hook_command(&script_path);
+    let owns = codex_owns_command(global, &hook.name, &script_path);
     let hooks_json = root.join("hooks.json");
-    merge_codex_hooks_json_owned(&hooks_json, codex_event, hook, &command, &owned_commands)?;
+    merge_codex_hooks_json_owned(&hooks_json, codex_event, hook, &command, &owns)?;
     enable_codex_hooks_feature(&root.join("config.toml"))?;
     Ok(())
 }
@@ -341,24 +485,72 @@ pub fn migrate_codex_config(global: bool) -> Result<()> {
     migrate_codex_hooks_feature(&codex_root(global).join("config.toml"))
 }
 
-/// Build the command codex runs. For global scope we resolve to the absolute
-/// path under `~/.codex/hooks/`. For project scope we resolve from the git root
-/// (the codex docs recommend this so the hook works regardless of session cwd).
-fn codex_hook_command(global: bool, hook_name: &str, script_path: &Path) -> String {
-    if global {
-        format!("bash {}", shell_quote(&script_path.to_string_lossy()))
-    } else {
-        format!(
-            "bash \"$(git rev-parse --show-toplevel)/.codex/hooks/{}.sh\"",
-            hook_name
-        )
+/// Build the command codex runs. Codex sets no project-root variable and runs
+/// the command from the session cwd, so the anchor is the install-time
+/// absolute path — the one resolution that holds from any directory and in a
+/// project that is not a git repository.
+fn codex_hook_command(script_path: &Path) -> String {
+    format!("bash {}", shell_quote(&script_path.to_string_lossy()))
+}
+
+/// Whether a registered Codex command is one of this hook's, so a reinstall
+/// replaces it instead of adding a second handler beside it.
+///
+/// A project registration is matched by the script it runs, not by the literal
+/// string: the command carries an absolute path, and a project that moved — or
+/// a `hooks.json` written from an older anchor — otherwise leaves a handler
+/// pointing at a script that is gone. Beyond this install's own script (in
+/// any quoting), only the install shape `<root>/.codex/hooks/<name>.sh` whose
+/// script no longer exists matches: a live handler is some checkout's working
+/// registration, never this project's relic, and stays.
+fn codex_owns_command(global: bool, hook_name: &str, script_path: &Path) -> impl Fn(&str) -> bool {
+    let exact = codex_hook_command(script_path);
+    let script = script_path.to_string_lossy().into_owned();
+    let project_tail = format!("/.codex/hooks/{hook_name}.sh");
+    move |command: &str| {
+        if command == exact {
+            return true;
+        }
+        if global {
+            return false;
+        }
+        let Some(argument) = command.strip_prefix("bash ") else {
+            return false;
+        };
+        let argument = argument.trim();
+        let unquoted = argument
+            .strip_prefix('"')
+            .and_then(|rest| rest.strip_suffix('"'))
+            .or_else(|| {
+                argument
+                    .strip_prefix('\'')
+                    .and_then(|rest| rest.strip_suffix('\''))
+            })
+            .unwrap_or(argument);
+        if unquoted == script {
+            return true;
+        }
+        unquoted.ends_with(&project_tail) && !Path::new(unquoted).exists()
     }
 }
 
-fn codex_owned_hook_commands(global: bool, hook_name: &str, script_path: &Path) -> Vec<String> {
-    vec![codex_hook_command(global, hook_name, script_path)]
+/// Refuse a hook script path that is not valid UTF-8.
+///
+/// The registration is written into a JSON config, which cannot carry the
+/// bytes at all; a lossy conversion would register a command naming a file
+/// that does not exist and fail on every tool call instead of installing.
+fn require_utf8_script_path(script_path: &Path) -> Result<()> {
+    if script_path.to_str().is_some() {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "hook script path is not valid UTF-8, so no harness config can carry it: {}",
+        script_path.display()
+    )
 }
 
+/// Quote for a shell command. Callers pass a path already proven UTF-8 by
+/// [`require_utf8_script_path`].
 fn shell_quote(s: &str) -> String {
     if s.chars()
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-'))
@@ -380,8 +572,10 @@ fn merge_codex_hooks_json(
     hook: &Hook,
     command: &str,
 ) -> Result<()> {
-    let owned_commands = [command.to_string()];
-    merge_codex_hooks_json_owned(hooks_json, codex_event, hook, command, &owned_commands)
+    let owned = command.to_string();
+    merge_codex_hooks_json_owned(hooks_json, codex_event, hook, command, &|candidate| {
+        candidate == owned
+    })
 }
 
 fn merge_codex_hooks_json_owned(
@@ -389,7 +583,7 @@ fn merge_codex_hooks_json_owned(
     codex_event: &str,
     hook: &Hook,
     command: &str,
-    owned_commands: &[String],
+    owns: OwnsCommand<'_>,
 ) -> Result<()> {
     let mut doc: serde_json::Value = if hooks_json.exists() {
         let content = std::fs::read_to_string(hooks_json)?;
@@ -403,7 +597,7 @@ fn merge_codex_hooks_json_owned(
         root_map.insert("hooks".into(), serde_json::json!({}));
     }
     let hooks_obj = root_map.get_mut("hooks").unwrap().as_object_mut().unwrap();
-    remove_hook_entries_from_hooks_object(hooks_obj, owned_commands);
+    remove_hook_entries_from_hooks_object(hooks_obj, owns);
     if !hooks_obj.get(codex_event).is_some_and(|v| v.is_array()) {
         hooks_obj.insert(codex_event.to_string(), serde_json::json!([]));
     }
@@ -674,7 +868,7 @@ pub fn install_codex_fallback_hooks_for_agents(
     agents: &[Agent],
 ) -> Result<()> {
     for hook in hooks {
-        if hook.applies_to(Harness::Codex.id()) && codex_event_for(&hook.event).is_none() {
+        if hook.applies_to(Harness::Codex.id()) && contract::is_codex_prose(&hook.event) {
             install_hook_codex_prose(hook, global, agents)?;
         }
     }
@@ -746,13 +940,7 @@ pub fn remove_hook_install(name: &str, harness: Harness, global: bool) -> Result
 /// Remove a hook entry from Claude Code settings.json
 fn remove_hook_from_claude_settings(global: bool, name: &str, script_path: &Path) -> Result<()> {
     validate_item_name(name)?;
-    let settings_path = if global {
-        crate::config::claude_global_dir().join("settings.json")
-    } else {
-        crate::config::project_root()
-            .join(".claude")
-            .join("settings.json")
-    };
+    let settings_path = claude_settings_path(global);
     if !settings_path.exists() {
         return Ok(());
     }
@@ -762,7 +950,7 @@ fn remove_hook_from_claude_settings(global: bool, name: &str, script_path: &Path
     let mut changed = false;
     if let Some(hooks) = settings.get_mut("hooks").and_then(|h| h.as_object_mut()) {
         let owned_commands = claude_owned_hook_commands(global, name, script_path);
-        changed |= remove_hook_entries_from_hooks_object(hooks, &owned_commands);
+        changed |= remove_hook_entries_from_hooks_object(hooks, &owns_exactly(&owned_commands));
     }
 
     if changed {
@@ -791,8 +979,8 @@ fn remove_hook_from_codex_json(global: bool, name: &str, script_path: &Path) -> 
     let mut changed = false;
 
     if let Some(hooks) = doc.get_mut("hooks").and_then(|h| h.as_object_mut()) {
-        let owned_commands = codex_owned_hook_commands(global, name, script_path);
-        changed |= remove_hook_entries_from_hooks_object(hooks, &owned_commands);
+        let owns = codex_owns_command(global, name, script_path);
+        changed |= remove_hook_entries_from_hooks_object(hooks, &owns);
         if hooks.is_empty()
             && let Some(map) = doc.as_object_mut()
         {
