@@ -1,7 +1,6 @@
 use crate::agent::Agent;
 use crate::config::{InstallMethod, ItemKind, LockEntry, LockFile};
 use crate::harness::Harness;
-use crate::hook::Hook;
 use crate::skill::Skill;
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
@@ -10,16 +9,16 @@ mod hooks;
 
 pub(crate) use crate::path_safety::{validate_item_name, validate_new_item_name};
 pub(crate) use hooks::{
-    claude_installed_hook_command, codex_event_for, codex_root, cursor_hook_rule_contents,
-    cursor_hook_rule_path, install_codex_fallback_hooks_for_agents, install_hook,
-    migrate_codex_config, opencode_hook_instruction_contents, opencode_hook_instruction_path,
+    CodexProse, HookRegistration, HookSwitch, RegistrationSlot, claude_hook_registration,
+    claude_installed_hook_command, codex_event_for, codex_hook_prose, codex_native_hook_gaps,
+    codex_root, cursor_hook_rule_contents, cursor_hook_rule_path, hook_switch,
+    install_codex_fallback_hooks_for_agents, install_hook, migrate_codex_config,
+    opencode_hook_instruction_contents, opencode_hook_instruction_path, opencode_hook_registration,
     remove_hook_install,
 };
+#[cfg(test)]
+pub(crate) use hooks::{codex_agent_prose_section, codex_hook_safety_block};
 pub(crate) use hooks::{contract, enforcement};
-
-pub(crate) fn codex_hook_safety_block(hook: &Hook) -> String {
-    hooks::codex_hook_safety_block(hook)
-}
 
 /// Result of a single installation
 pub struct InstallResult {
@@ -683,34 +682,42 @@ pub fn remove_item(
             // Direct-canonical owner evidence: the owning checkout's lock
             // names this skill — its Codex/Pi install IS the canonical dir
             // and must keep its recovery marker through our removal.
+            //
+            // A lock file that is THERE and cannot be read answers nothing,
+            // and nothing is not permission to clear another checkout's
+            // recovery marker: unreadable is preserved, only a lock that is
+            // absent — or read, parsed, and silent about this skill — clears.
             let owner_lock = owning_root.join(".vstack-lock.json");
-            std::fs::read_to_string(&owner_lock)
-                .ok()
-                .and_then(|raw| serde_json::from_str::<crate::config::LockFile>(&raw).ok())
-                .is_some_and(|lock| {
-                    lock.entries
-                        .get(name.to_str().unwrap_or_default())
-                        .is_some_and(|entry| {
-                            // Only a symlink-mode install for a
-                            // direct-canonical harness (Codex/Pi: the
-                            // project artifact IS the canonical dir) makes
-                            // the lock entry ownership evidence for THIS
-                            // path. A copy-mode entry (or one for
-                            // link-artifact harnesses only, whose evidence
-                            // is the symlink checked above) never
-                            // references the canonical, and preserving the
-                            // marker on its word would let reconciliation
-                            // later adopt a stale foreign copy.
-                            entry.kind == crate::config::ItemKind::Skill
-                                && entry.method == crate::config::InstallMethod::Symlink
-                                && entry.harnesses.iter().any(|id| {
-                                    matches!(
-                                        Harness::from_id(id),
-                                        Some(Harness::Codex | Harness::Pi)
-                                    )
-                                })
-                        })
-                })
+            let names_this_skill = |lock: crate::config::LockFile| {
+                lock.entries
+                    .get(name.to_str().unwrap_or_default())
+                    .is_some_and(|entry| {
+                        // Only a symlink-mode install for a direct-canonical
+                        // harness (Codex/Pi: the project artifact IS the
+                        // canonical dir) makes the lock entry ownership
+                        // evidence for THIS path. A copy-mode entry (or one
+                        // for link-artifact harnesses only, whose evidence is
+                        // the symlink checked above) never references the
+                        // canonical, and preserving the marker on its word
+                        // would let reconciliation later adopt a stale
+                        // foreign copy.
+                        entry.kind == crate::config::ItemKind::Skill
+                            && entry.method == crate::config::InstallMethod::Symlink
+                            && entry.harnesses.iter().any(|id| {
+                                matches!(Harness::from_id(id), Some(Harness::Codex | Harness::Pi))
+                            })
+                    })
+            };
+            match std::fs::read_to_string(&owner_lock) {
+                Ok(raw) => match serde_json::from_str::<crate::config::LockFile>(&raw) {
+                    Ok(lock) => names_this_skill(lock),
+                    Err(_) => true,
+                },
+                // No lock at all: nothing claims the canonical, so nothing
+                // here holds the marker.
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
+                Err(_) => true,
+            }
         };
         if owner_still_references {
             continue;

@@ -1,239 +1,12 @@
-use crate::agent::Agent;
-use crate::config::{self, ItemKind};
-use crate::hook::Hook;
-use crate::mapping::MappingConfig;
-use crate::pi_extension::PiExtension;
-use crate::skill::Skill;
+use crate::config::{self, CacheLease};
 use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
 
-#[derive(Clone, Debug)]
-pub(crate) struct ResolvedSource {
-    pub root: PathBuf,
-    pub aliases: Vec<String>,
-    pub source_repo: Option<String>,
-}
+mod records;
+mod url;
 
-#[derive(Clone)]
-pub struct RefreshSource {
-    pub root: PathBuf,
-    pub aliases: Vec<String>,
-    pub source_repo: Option<String>,
-    pub mapping: MappingConfig,
-    pub agents: Vec<Agent>,
-    pub skills: Vec<Skill>,
-    pub hooks: Vec<Hook>,
-    pub pi_extensions: Vec<PiExtension>,
-}
-
-impl RefreshSource {
-    pub(crate) fn load(record: &ResolvedSource) -> Self {
-        Self {
-            root: record.root.clone(),
-            aliases: record.aliases.clone(),
-            source_repo: record.source_repo.clone(),
-            mapping: MappingConfig::load(&record.root),
-            agents: crate::catalog::discover_agents(&record.root).unwrap_or_default(),
-            skills: crate::catalog::discover_skills(&record.root).unwrap_or_default(),
-            hooks: crate::catalog::discover_hooks(&record.root).unwrap_or_default(),
-            pi_extensions: crate::catalog::discover_pi_extensions(&record.root).unwrap_or_default(),
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn from_root(root: &Path) -> Self {
-        Self::load(&ResolvedSource {
-            root: root.to_path_buf(),
-            aliases: vec![root.to_string_lossy().into_owned()],
-            source_repo: config::source_repo_for_source(Some(root), &root.to_string_lossy()),
-        })
-    }
-}
-
-/// What resolving one recorded source string produced.
-///
-/// `Refused` is a source that exists and must not be substituted; `Absent` is
-/// one that names nothing. Collapsing the two into `None` is what forced the
-/// distinction to be rebuilt out of band.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum SourceResolution {
-    Resolved(PathBuf),
-    Absent,
-    Refused(String),
-}
-
-impl SourceResolution {
-    fn refused(err: &anyhow::Error) -> Self {
-        Self::Refused(format!("{err:#}"))
-    }
-
-    /// What to report when this produced no root — the refusal, or why the
-    /// source is absent. `None` when it resolved.
-    ///
-    /// One place decides it, so `refresh`, `check` and `verify` name the same
-    /// cause for the same state. Telling a refused source to `vstack add`
-    /// itself sends the user back to the refusal.
-    pub(crate) fn unresolved_note(&self, source: &str) -> Option<String> {
-        match self {
-            Self::Resolved(_) => None,
-            Self::Refused(reason) => Some(reason.clone()),
-            Self::Absent => Some(absent_source_reason(source)),
-        }
-    }
-
-    /// The resolved directory for the callers that only ever had an `Option`
-    /// to act on, reporting a refusal to the user on the way past.
-    fn or_warn(self, key: &str) -> Option<PathBuf> {
-        match self {
-            Self::Resolved(dir) => Some(dir),
-            Self::Absent => None,
-            Self::Refused(reason) => {
-                warn_once(key, &reason);
-                None
-            }
-        }
-    }
-}
-
-/// The sources a lock resolved to, and what resolution refused on the way.
-pub(crate) struct SourceRecords {
-    pub sources: Vec<ResolvedSource>,
-    pub refused: SourceRefusals,
-}
-
-/// The recorded sources resolution refused, keyed by the recorded string so a
-/// caller holding a lock entry can look its own reason up — and whether source
-/// resolution ran at all. Every refresh path now resolves each entry's own
-/// source from its lock, so a refusal is always available to the report.
-#[derive(Clone, Debug, Default)]
-pub struct SourceRefusals {
-    reasons: std::collections::BTreeMap<String, String>,
-    attempted: bool,
-}
-
-impl SourceRefusals {
-    fn attempted(reasons: std::collections::BTreeMap<String, String>) -> Self {
-        Self {
-            reasons,
-            attempted: true,
-        }
-    }
-
-    pub(crate) fn reason(&self, source: &str) -> Option<&str> {
-        self.reasons.get(source).map(String::as_str)
-    }
-
-    /// Whether these refusals came from a pass that actually resolved sources.
-    pub(crate) fn attempted_resolution(&self) -> bool {
-        self.attempted
-    }
-}
-
-/// Resolve source directories from lock file entries.
-/// Handles absolute local paths, "." (walks up from CWD), and remote shorthand (cached clones).
-pub(crate) fn resolve_source_records(lock: &config::LockFile) -> SourceRecords {
-    resolve_source_records_with(lock, resolve_recorded_source_resolution)
-}
-
-/// [`resolve_source_records`] reading each cache entry as it stands, with no
-/// fetch.
-///
-/// For a caller that is reconciling rather than updating: it needs to know
-/// which assets every recorded source carries, and updating a source it was
-/// not asked to install from would be a side effect of asking.
-pub(crate) fn resolve_source_records_without_update(lock: &config::LockFile) -> SourceRecords {
-    resolve_source_records_with(lock, source_path_resolution)
-}
-
-fn resolve_source_records_with(
-    lock: &config::LockFile,
-    mut resolver: impl FnMut(&str) -> SourceResolution,
-) -> SourceRecords {
-    let mut sources: Vec<ResolvedSource> = Vec::new();
-    let mut refused = std::collections::BTreeMap::new();
-    let mut seen = std::collections::HashSet::new();
-
-    for entry in lock.entries.values() {
-        if !seen.insert(entry.source.clone()) {
-            continue;
-        }
-        match resolver(&entry.source) {
-            SourceResolution::Resolved(dir) => {
-                push_resolved_source(&mut sources, dir, entry.source.clone());
-            }
-            SourceResolution::Absent => {}
-            SourceResolution::Refused(reason) => {
-                warn_once(&entry.source, &reason);
-                refused.insert(entry.source.clone(), reason);
-            }
-        }
-    }
-
-    // A refused remote cache is a source that exists and must not be
-    // substituted: no fallback stands in for it.
-    if !sources.is_empty() || !refused.is_empty() {
-        return SourceRecords {
-            sources,
-            refused: SourceRefusals::attempted(refused),
-        };
-    }
-
-    // Fallback: walk up from CWD to find a vstack source repo.
-    if let Ok(mut dir) = std::env::current_dir() {
-        loop {
-            if crate::resolve::is_vstack_source(&dir) {
-                let alias = dir.to_string_lossy().into_owned();
-                push_resolved_source(&mut sources, dir, alias);
-                break;
-            }
-            if !dir.pop() {
-                break;
-            }
-        }
-    }
-
-    // Fallback: try the source registry (cached remote repos).
-    if sources.is_empty() {
-        let reg_path = config::source_registry_path();
-        if let Ok(registry) = config::SourceRegistry::load(&reg_path) {
-            for entry in registry.current.iter().chain(registry.entries.iter()) {
-                if let Some(dir) = resolver(entry).or_warn(entry) {
-                    push_resolved_source(&mut sources, dir, entry.clone());
-                }
-            }
-        }
-    }
-
-    SourceRecords {
-        sources,
-        refused: SourceRefusals::attempted(refused),
-    }
-}
-
-fn push_resolved_source(sources: &mut Vec<ResolvedSource>, root: PathBuf, alias: String) {
-    let source_repo = config::source_repo_for_source(Some(&root), &alias);
-    if let Some(existing) = sources
-        .iter_mut()
-        .find(|source| same_path(&source.root, &root))
-    {
-        if !existing.aliases.iter().any(|known| known == &alias) {
-            existing.aliases.push(alias);
-        }
-        if existing.source_repo.is_none() {
-            existing.source_repo = source_repo;
-        }
-    } else {
-        sources.push(ResolvedSource {
-            root,
-            aliases: vec![alias],
-            source_repo,
-        });
-    }
-}
-
-pub(crate) fn load_refresh_sources(records: &[ResolvedSource]) -> Vec<RefreshSource> {
-    records.iter().map(RefreshSource::load).collect()
-}
+pub(crate) use records::*;
+pub(crate) use url::*;
 
 fn canonicalish(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
@@ -241,158 +14,6 @@ fn canonicalish(path: &Path) -> PathBuf {
 
 fn same_path(a: &Path, b: &Path) -> bool {
     canonicalish(a) == canonicalish(b)
-}
-
-pub(crate) fn refresh_source_for_entry<'a>(
-    sources: &'a [RefreshSource],
-    entry: &config::LockEntry,
-) -> Option<&'a RefreshSource> {
-    if let Some(source) = sources
-        .iter()
-        .find(|source| source.aliases.iter().any(|alias| alias == &entry.source))
-    {
-        return Some(source);
-    }
-
-    let entry_path = Path::new(&entry.source);
-    if entry_path.is_absolute()
-        && let Some(source) = sources
-            .iter()
-            .find(|source| same_path(&source.root, entry_path))
-    {
-        return Some(source);
-    }
-
-    // Legacy fallback: an entry that recorded no usable source at all may bind
-    // to the sole loaded source. A recorded path or remote that merely no
-    // longer resolves must not — see `may_rebind_to_fallback_source`.
-    if sources.len() == 1 && may_rebind_to_fallback_source(&entry.source) {
-        sources.first()
-    } else {
-        None
-    }
-}
-
-/// Whether an entry may be bound to a source it did not record.
-///
-/// Only a legacy placeholder qualifies: an empty source, or a bare token that
-/// is neither path-like (`/…`, `~…`, `.`, `./…`, `../…`) nor remote-like
-/// (`owner/repo`, a URL) — the shapes pre-1.0 locks and disk recovery wrote
-/// when no source was known — and only while that token does not name a live
-/// project-relative directory. A recorded path or remote that no longer
-/// resolves stays bound to what it recorded and is reported missing:
-/// rebinding it would refresh the entry from a source it was never installed
-/// from, and a same-named asset there would silently replace the real one.
-pub(crate) fn may_rebind_to_fallback_source(source: &str) -> bool {
-    is_legacy_placeholder_source(source) && !recorded_source_exists(source)
-}
-
-fn is_legacy_placeholder_source(source: &str) -> bool {
-    let source = source.trim();
-    if source.is_empty() {
-        return true;
-    }
-    let path_like = Path::new(source).is_absolute()
-        || source.starts_with('~')
-        || is_explicit_relative_local_source(source)
-        || source == "..";
-    let remote_like = source.contains('/') || source.contains("://") || source.contains('@');
-    !path_like && !remote_like
-}
-
-pub(crate) fn all_source_hooks(sources: &[RefreshSource]) -> Vec<Hook> {
-    sources
-        .iter()
-        .flat_map(|source| source.hooks.iter().cloned())
-        .collect()
-}
-
-pub(crate) fn all_source_pi_extensions(sources: &[RefreshSource]) -> Vec<PiExtension> {
-    sources
-        .iter()
-        .flat_map(|source| source.pi_extensions.iter().cloned())
-        .collect()
-}
-
-pub(crate) fn resolve_skill_pairs_from_sources(
-    names: &[String],
-    lock: &config::LockFile,
-    sources: &[RefreshSource],
-) -> Vec<(String, String)> {
-    names
-        .iter()
-        .map(|name| {
-            let description = lock
-                .entries
-                .get(name)
-                .filter(|entry| entry.kind == ItemKind::Skill)
-                .and_then(|entry| refresh_source_for_entry(sources, entry))
-                .and_then(|source| source.skills.iter().find(|skill| &skill.name == name))
-                .or_else(|| {
-                    sources
-                        .iter()
-                        .flat_map(|source| source.skills.iter())
-                        .find(|skill| &skill.name == name)
-                })
-                .map(|skill| skill.description.clone())
-                .unwrap_or_else(|| name.clone());
-            (name.clone(), description)
-        })
-        .collect()
-}
-
-pub(crate) fn source_pi_extension_for_lock_name<'a>(
-    pi_extensions: &'a [PiExtension],
-    name: &str,
-) -> Option<&'a PiExtension> {
-    pi_extensions.iter().find(|e| e.name == name).or_else(|| {
-        pi_extensions
-            .iter()
-            .find(|e| crate::pi_extension::legacy_names_for(&e.name).contains(&name))
-    })
-}
-
-/// Resolve a source string that a lock entry recorded at install time.
-///
-/// Discovery (`resolve_single_source_with(.., true, true)`) applies the
-/// [`crate::resolve::is_vstack_source`] layout heuristic so that walking up
-/// from CWD does not mistake an arbitrary directory for a package source. A
-/// recorded source needs no such guess: the user named it explicitly on
-/// `vstack add`, which accepts any directory holding the asset. Applying the
-/// heuristic here silently dropped alternate sources that the heuristic
-/// rejects — a dot-named dir, or one carrying only `skills/` — after which the
-/// entry fell back to whatever other source was loaded and edits to the real
-/// source stopped propagating.
-fn resolve_recorded_source_resolution(source: &str) -> SourceResolution {
-    let path = Path::new(source);
-    if path.is_absolute() && path.is_dir() {
-        return SourceResolution::Resolved(path.to_path_buf());
-    }
-    if let Some(path) = resolve_recorded_local_source(source) {
-        return SourceResolution::Resolved(path);
-    }
-    resolve_single_source_with(source, true, true)
-}
-
-/// Why a recorded source produced nothing, for a caller holding no refusal map
-/// of its own. One wording, so `refresh`, `check` and `verify` name the same
-/// cause and the same command for the same state.
-pub(crate) fn absent_source_reason(source: &str) -> String {
-    if looks_like_remote_source(source) {
-        format!(
-            "remote cache not present — run `vstack add {}`",
-            remote_source_display(source)
-        )
-    } else if source.trim().is_empty() {
-        "source not found (none recorded)".to_string()
-    } else {
-        // Named so the user can see WHICH source vanished, through the same
-        // redacting display every other source diagnostic uses: a credential
-        // URL malformed enough to evade `parse_remote_url` classifies as a
-        // local path and reaches here, and a lock file records the string
-        // verbatim.
-        format!("source not found: {}", remote_source_display(source))
-    }
 }
 
 /// Whether an entry's recorded source still names a source of its own.
@@ -421,21 +42,26 @@ pub(crate) fn resolve_source_path(source: &str) -> Option<PathBuf> {
 /// and the two are repaired differently. Reads the cache as it stands — no
 /// fetch — so a caller that only reports on state does not update one.
 pub(crate) fn source_path_resolution(source: &str) -> SourceResolution {
-    resolve_single_source_with(source, false, false)
+    // No fetch, so no lease: this reads the cache as it stands.
+    resolve_single_source_with(source, false, false).resolution
 }
 
+/// Resolve one source string, taking a lease when the resolution UPDATES a
+/// remote cache — because a caller that asked for an update is a caller that
+/// is about to read what the update produced. Every other branch is a local
+/// directory and leases nothing.
 fn resolve_single_source_with(
     source: &str,
     update_remote: bool,
     require_vstack_source: bool,
-) -> SourceResolution {
+) -> LeasedResolution {
     // Absolute local path that exists.
     let p = std::path::Path::new(source);
     if p.is_absolute()
         && p.is_dir()
         && (!require_vstack_source || crate::resolve::is_vstack_source(p))
     {
-        return SourceResolution::Resolved(p.to_path_buf());
+        return SourceResolution::Resolved(p.to_path_buf()).into();
     }
 
     // Explicit relative local source tokens in locks/registries are
@@ -444,7 +70,8 @@ fn resolve_single_source_with(
     // linked worktree, then repair the lock to the wrong source.
     if is_explicit_relative_local_source(source) {
         return resolve_relative_local_source(source, require_vstack_source)
-            .map_or(SourceResolution::Absent, SourceResolution::Resolved);
+            .map_or(SourceResolution::Absent, SourceResolution::Resolved)
+            .into();
     }
 
     // Legacy pure hash/reconcile paths accepted bare placeholders such as
@@ -454,7 +81,8 @@ fn resolve_single_source_with(
     if !require_vstack_source && is_bare_local_source(source) {
         return resolve_relative_local_source(source, false)
             .or_else(find_vstack_source_from_cwd)
-            .map_or(SourceResolution::Absent, SourceResolution::Resolved);
+            .map_or(SourceResolution::Absent, SourceResolution::Resolved)
+            .into();
     }
 
     // Remote shorthand or URL: update once during top-level source resolution,
@@ -462,19 +90,34 @@ fn resolve_single_source_with(
     // cache, so the pure attribution and hash paths are read-only.
     let remote = match RemoteSource::parse(source) {
         Ok(Some(remote)) => remote,
-        Ok(None) => return SourceResolution::Absent,
-        Err(err) => return SourceResolution::refused(&err),
+        Ok(None) => return SourceResolution::Absent.into(),
+        Err(err) => return SourceResolution::refused(&err).into(),
     };
     if !cache_entry_present(&remote) {
-        return SourceResolution::Absent;
+        return SourceResolution::Absent.into();
     }
     if update_remote {
         eprintln!("Updating cached repo {}...", remote.display);
         // The update path runs the filesystem checks itself, on its way to the
         // git-level ones that guard `reset --hard`.
-        if let Err(err) = update_cached_repo(&remote) {
-            return SourceResolution::refused(&err);
-        }
+        return match update_cached_repo(&remote) {
+            // The lease travels with the directory it protects: whoever reads
+            // this root holds it until the read is done.
+            Ok(lease) => LeasedResolution {
+                resolution: SourceResolution::Resolved(remote.cache_dir),
+                lease,
+            },
+            Err(err) => SourceResolution::refused(&err).into(),
+        };
+    } else if config::remote_cache_fetch_in_flight(&remote.cache_dir) {
+        // Read-only, and another process is mid-fetch: this tree is being
+        // `reset --hard` right now, so every question asked of it — which
+        // assets it ships, what they hash to, even which repository its
+        // `.git/config` names — can be answered wrongly rather than not at
+        // all. Probed, never waited on: the session-start check runs this path
+        // and must stay local, so the answer is "not this run" rather than a
+        // lease taken out from under an install.
+        return SourceResolution::Busy.into();
     } else if let Err(err) = ensure_cache_entry_is_owned(&remote) {
         // The same question the update path asks, because reading an entry is
         // how its content becomes the installed asset: a symlinked entry or a
@@ -482,14 +125,17 @@ fn resolve_single_source_with(
         // is a different repository would be installed as this source. Every
         // check is a read; only the fetch and reset the update path adds are
         // not.
-        return SourceResolution::refused(&err);
+        return SourceResolution::refused(&err).into();
     }
-    SourceResolution::Resolved(remote.cache_dir)
+    SourceResolution::Resolved(remote.cache_dir).into()
 }
 
 /// Best-effort update of every remote source's cache entry named by a lock.
 /// A refusal is reported and the entry left alone; a failed fetch keeps the
 /// stale clone. Cheap enough to run before staleness checks.
+///
+/// Nothing reads the caches afterwards, so every lease it takes is released
+/// as each entry is done.
 pub(crate) fn refresh_remote_caches(lock: &config::LockFile) {
     let mut seen = std::collections::HashSet::new();
     for entry in lock.entries.values() {
@@ -517,7 +163,7 @@ pub(crate) fn refresh_remote_caches(lock: &config::LockFile) {
 /// sources were refused is carried by [`SourceResolution`], never by this set;
 /// two callers resolving the same source must not print the same warning
 /// twice.
-fn warn_once(key: &str, message: &str) {
+pub(crate) fn warn_once(key: &str, message: &str) {
     if warn_once_is_new(key, message) {
         eprintln!("  Warning: {message}");
     }
@@ -887,7 +533,7 @@ pub(crate) fn hardened_git_command(dir: &Path) -> std::process::Command {
 
 /// [`hardened_git_command`] for a command about the cache, where vstack owns
 /// the repository and every inherited answer about where one lives is hostile.
-fn hardened_cache_git_command(dir: &Path) -> Result<std::process::Command> {
+pub(crate) fn hardened_cache_git_command(dir: &Path) -> Result<std::process::Command> {
     let mut command = hardened_git_command(dir);
     for key in GIT_CACHE_ONLY_ENV_VARS {
         command.env_remove(key);
@@ -915,7 +561,7 @@ fn hardened_cache_git_command(dir: &Path) -> Result<std::process::Command> {
 /// cache entry, whose `.git/config` is cloned content. `core.sshCommand` there
 /// names a program git runs, so an entry that passes every ownership check
 /// could still execute one; `GIT_SSH_COMMAND` outranks it.
-fn hardened_git_network_command(dir: &Path) -> Result<std::process::Command> {
+pub(crate) fn hardened_git_network_command(dir: &Path) -> Result<std::process::Command> {
     let mut command = hardened_cache_git_command(dir)?;
     command.env("GIT_SSH_COMMAND", network_ssh_command(dir));
     Ok(command)
@@ -1076,6 +722,10 @@ fn batch_mode_ssh_command(
 
 /// One shell word. `GIT_SSH_COMMAND` is run through a shell, so a program path
 /// carrying whitespace or shell metacharacters has to arrive as a single word.
+///
+/// Deliberately not [`crate::display::shell_arg`]: this word is EXECUTED, not
+/// printed, so it must carry the path byte for byte rather than escape what a
+/// terminal would act on.
 fn shell_quote(word: &str) -> String {
     format!("'{}'", word.replace('\'', r"'\''"))
 }
@@ -1095,11 +745,13 @@ fn split_program_token(command: &str) -> (&str, &str) {
 
 /// The `git clone` that mints a fresh cache entry. The destination is named on
 /// the command line, so this one runs from the cache root.
-fn cache_clone_command(remote: &RemoteSource) -> Result<std::process::Command> {
+/// `dest` is the directory git writes into, which is the staging path rather
+/// than the entry itself — see [`clone_cached_repo`].
+fn cache_clone_command(remote: &RemoteSource, dest: &Path) -> Result<std::process::Command> {
     let mut command = hardened_git_network_command(&remote_cache_root())?;
     // `--` so a URL is never read as an option, whatever it starts with.
     command.args(["clone", "--depth", "1", "--", &remote.git_url]);
-    command.arg(&remote.cache_dir);
+    command.arg(dest);
     Ok(command)
 }
 
@@ -1281,8 +933,8 @@ pub(crate) fn ensure_cache_entry_is_owned(remote: &RemoteSource) -> Result<()> {
 /// clone time and never updated by a fetch. Asking the REMOTE for its `HEAD`
 /// on every fetch, into a ref only vstack writes, is what makes the revision a
 /// fact about the source rather than about the cache.
-const CACHE_HEAD_REF: &str = "refs/vstack/head";
-const CACHE_HEAD_REFSPEC: &str = "+HEAD:refs/vstack/head";
+pub(crate) const CACHE_HEAD_REF: &str = "refs/vstack/head";
+pub(crate) const CACHE_HEAD_REFSPEC: &str = "+HEAD:refs/vstack/head";
 
 /// Set the entry's `origin` to the URL this invocation selected.
 ///
@@ -1290,7 +942,7 @@ const CACHE_HEAD_REFSPEC: &str = "+HEAD:refs/vstack/head";
 /// already known to be this repository's clone and the URL has already been
 /// through the credential and transport refusals: the write changes which
 /// transport the same repository is reached over, nothing more.
-fn point_cache_origin_at(remote: &RemoteSource) -> Result<()> {
+pub(crate) fn point_cache_origin_at(remote: &RemoteSource) -> Result<()> {
     let output = hardened_cache_git_command(&remote.cache_dir)?
         .args(["remote", "set-url", "origin", "--", &remote.git_url])
         .output()
@@ -1536,56 +1188,51 @@ fn git_stdout_line(stdout: &[u8]) -> String {
     text.strip_suffix('\r').unwrap_or(text).to_string()
 }
 
-/// Bring a cache entry to `origin/HEAD`.
+/// Bring a cache entry to its remote's `HEAD`.
 ///
 /// Refuses an entry vstack does not own — that error propagates, because the
 /// entry's contents are some other checkout's and must not be installed. A
 /// failed fetch is tolerated: the clone is still the requested source at an
 /// older revision, so it is kept and the reset skipped. A failed reset is an
 /// error: the entry is no longer known to match any revision.
-pub(crate) fn update_cached_repo(remote: &RemoteSource) -> Result<()> {
-    ensure_cache_entry_is_owned(remote)?;
-    let display = &remote.display;
-    // The ownership check proved the entry's origin names THIS repository; it
-    // may still name it over a different transport, and the URL a caller
-    // selected is the one to fetch over. Without this the entry keeps
-    // whichever URL first minted it: a user who switches to ssh because their
-    // https credentials stopped working keeps failing over https, and a failed
-    // fetch is tolerated, so the selected transport silently never runs.
-    point_cache_origin_at(remote)?;
-    let fetch = hardened_git_network_command(&remote.cache_dir)?
-        .args(["fetch", "origin", "--quiet", "--force", CACHE_HEAD_REFSPEC])
-        .stdout(std::process::Stdio::null())
-        .output()
-        .with_context(|| format!("running git fetch for cached source {display}"))?;
-    if !fetch.status.success() {
-        // Deduped: an offline run resolves the same source from the TUI's
-        // startup refresh and again from the top-level resolve.
-        warn_once(
-            &remote.cache_key,
-            &format!(
-                "git fetch failed for cached source {display}: {}; using cached version",
-                git_output_summary(&fetch)
-            ),
-        );
-        return Ok(());
-    }
-    let reset = hardened_cache_git_command(&remote.cache_dir)?
-        .args(["reset", "--hard", CACHE_HEAD_REF])
-        .stdout(std::process::Stdio::null())
-        .output()
-        .with_context(|| format!("running git reset for cached source {display}"))?;
-    if !reset.status.success() {
-        bail!(
-            "git reset failed for cached source {display}: {}",
-            git_output_summary(&reset)
-        );
-    }
-    Ok(())
+///
+/// A user asked for this fetch, so it is unbounded and ignores the TTL.
+///
+/// The returned [`CacheLease`] is what keeps the entry still: discovery,
+/// hashing and copying all read this tree AFTER the fetch, and the lease is
+/// held until the caller drops it.
+pub(crate) fn update_cached_repo(remote: &RemoteSource) -> Result<CacheLease> {
+    update_cached_repo_bounded(remote, None, config::FetchBound::Unbounded)
 }
 
-/// Shallow-clone the remote into its cache entry.
-pub(crate) fn clone_cached_repo(remote: &RemoteSource) -> Result<()> {
+/// [`update_cached_repo`] for a caller that is not willing to wait: a cache
+/// fetched within `max_age` is left alone, and the fetch is killed at `bound`.
+///
+/// The mutation itself lives in [`config::lease_remote_cache`], the one place
+/// an existing entry is fetched and reset, so the ownership proof, the lease,
+/// the deadline and the stamp are one mechanism no caller halves.
+pub(crate) fn update_cached_repo_bounded(
+    remote: &RemoteSource,
+    max_age: Option<std::time::Duration>,
+    bound: config::FetchBound,
+) -> Result<CacheLease> {
+    let (attempt, lease) = config::lease_remote_cache(remote, max_age, bound)?;
+    attempt.report(remote);
+    Ok(lease)
+}
+
+/// Shallow-clone the remote into its cache entry, and lease it: the caller
+/// reads what was cloned, and a concurrent `add` or `refresh` would otherwise
+/// be free to fetch and `reset --hard` it mid-read.
+///
+/// The clone lands in a staging directory and is RENAMED into the entry, so
+/// the entry itself appears whole or not at all. It is the one cache write no
+/// lock can cover — the lock lives inside a `.git` that does not exist yet —
+/// and a reader looks for exactly that `.git` to decide the cache is present.
+/// Cloning in place therefore published a half-checked-out tree to every
+/// concurrent reader, which is the same false "removed" a mid-`reset` tree
+/// produces, with the same `vstack remove` printed beside it.
+pub(crate) fn clone_cached_repo(remote: &RemoteSource) -> Result<CacheLease> {
     let root = remote_cache_root();
     std::fs::create_dir_all(&root)
         .with_context(|| format!("creating source cache {}", root.display()))?;
@@ -1620,23 +1267,61 @@ pub(crate) fn clone_cached_repo(remote: &RemoteSource) -> Result<()> {
             ));
         }
     }
-    let output = cache_clone_command(remote)?
+    // Dot-prefixed, so it can never be read as a cache key: every consumer of
+    // the cache root skips dot entries, and a partial clone must not be one
+    // any lookup can land on even by name. Keyed by pid as well, so two
+    // processes cloning the same remote stage into different directories and
+    // neither can delete the other's work in progress — and so a path left
+    // behind by a killed clone is reclaimed rather than accumulating.
+    let staging = root.join(format!(
+        ".staging-{}-{}",
+        remote.cache_key,
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&staging);
+    let output = cache_clone_command(remote, &staging)?
         .stdout(std::process::Stdio::null())
         .output()
         .context("failed to run git clone — is git installed?")?;
     if !output.status.success() {
+        let _ = std::fs::remove_dir_all(&staging);
         bail!(
             "git clone failed for {}: {}",
             remote.display,
             git_output_summary(&output)
         );
     }
-    Ok(())
+    // The publish. `rename` onto a path that does not exist — or onto the
+    // empty directory tolerated above — is atomic, so no reader ever sees the
+    // entry in a state the clone was still building. A rename that fails means
+    // somebody else published one first, and installing from a tree this run
+    // did not clone is exactly what the ownership proofs exist to prevent.
+    if let Err(err) = std::fs::rename(&staging, &remote.cache_dir) {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(refusal(
+            remote,
+            &format!(
+                "its cache entry could not be published ({err}); retry once no other vstack process is adding it"
+            ),
+        ));
+    }
+    // Nothing to fetch — the clone IS the newest revision — and everything to
+    // hold: the caller discovers, hashes and copies out of this tree next.
+    let (attempt, lease) = config::lease_cached_source(remote)?;
+    attempt.report(remote);
+    Ok(lease)
 }
 
 fn git_output_summary(output: &std::process::Output) -> String {
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    git_error_summary(&output.stderr, &output.stdout)
+}
+
+/// [`git_output_summary`] over raw streams, for the bounded fetch — it kills
+/// its child at a deadline and so never has an `Output` to hand over, but its
+/// diagnostics must be redacted by exactly the same rules.
+pub(crate) fn git_error_summary(stderr: &[u8], stdout: &[u8]) -> String {
+    let stderr = String::from_utf8_lossy(stderr);
+    let stdout = String::from_utf8_lossy(stdout);
     let combined = [stderr.trim(), stdout.trim()]
         .into_iter()
         .filter(|part| !part.is_empty())
@@ -1679,342 +1364,6 @@ fn redact_token(token: &str) -> String {
         return token.to_string();
     }
     format!("{prefix}{}{suffix}", remote_source_display(url))
-}
-
-// ---------------------------------------------------------------------------
-// Remote URL hygiene
-// ---------------------------------------------------------------------------
-
-/// A source as it may appear in diagnostics: shorthand as-is, URLs with any
-/// userinfo secret and any query/fragment replaced, and every control or
-/// direction-changing character escaped — a lock file records source strings
-/// verbatim, and a refusal that echoed one would put its terminal escapes on
-/// vstack's own stderr.
-pub(crate) fn remote_source_display(source: &str) -> String {
-    // Only an ssh spelling names a remote with a bare `user@`. Where the
-    // grammar says otherwise — or where it says nothing at all, which is how a
-    // local path reaches here — the two answers differ, so the question is
-    // asked of the ORIGINAL text once and carried through the redactions.
-    escape_unprintable(&redact_stray_userinfo(
-        &redact_remote_query(&redact_remote_userinfo(source)),
-        spelling_allows_bare_username(source),
-    ))
-}
-
-/// Whether a bare `user@` in `source` names an account rather than a token.
-///
-/// Only the ssh spellings carry a username. A string the grammar cannot parse
-/// gets the benefit of the doubt ONLY when it names no transport at all —
-/// which is what a local path looks like: `https:/TOKEN@host/repo` is
-/// malformed enough to parse as neither URL nor scp-like, and reading its
-/// token as a username printed it verbatim in the refusal.
-fn spelling_allows_bare_username(source: &str) -> bool {
-    if let Some(url) = parse_remote_url(source) {
-        return url.allows_bare_username();
-    }
-    scheme_prefix(source).is_none_or(|scheme| {
-        scheme.eq_ignore_ascii_case("ssh") || scheme.eq_ignore_ascii_case("git+ssh")
-    })
-}
-
-/// The scheme names git could be handed, supported or refused. A refused one
-/// still names a transport — `git://` is a URL vstack will not use, not a
-/// directory.
-const TRANSPORT_SCHEMES: &[&str] = &[
-    "https", "http", "ssh", "git+ssh", "git", "file", "ftp", "ftps", "rsync",
-];
-
-/// Whether `source` is spelled as if it names a transport, however malformed.
-///
-/// A string that opens with a transport's scheme is an attempt at a URL, so it
-/// names SOMETHING: a caller walking past it because the strict parser could
-/// not read it would install from a different source than the one recorded —
-/// the same refused-is-not-absent fail-open closed everywhere else. The scheme
-/// must be a real one, because `:` is an ordinary character in a POSIX path
-/// and a missing local directory called `foo:bar` is a local candidate that
-/// names nothing, which is the one outcome the chain may walk past.
-///
-/// Deliberately stricter than the check [`spelling_allows_bare_username`]
-/// makes: over-redacting a diagnostic costs nothing, over-refusing a source
-/// costs the user their install.
-pub(crate) fn names_a_transport(source: &str) -> bool {
-    scheme_prefix(source.trim()).is_some_and(|scheme| {
-        TRANSPORT_SCHEMES
-            .iter()
-            .any(|t| scheme.eq_ignore_ascii_case(t))
-    })
-}
-
-/// The `scheme:` a string opens with. A one-character scheme is a Windows
-/// drive letter, which names no transport.
-fn scheme_prefix(source: &str) -> Option<&str> {
-    let scheme = &source[..source.find(':')?];
-    let valid = scheme.len() > 1
-        && scheme.starts_with(|ch: char| ch.is_ascii_alphabetic())
-        && scheme
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '+' | '-' | '.'));
-    valid.then_some(scheme)
-}
-
-/// Redact anything shaped like `user:secret@` wherever it sits, after the
-/// authority has had its own pass.
-///
-/// A malformed URL puts a credential where the authority redaction cannot see
-/// it — `https:///user:token@host/repo` parses with an EMPTY authority, so the
-/// secret is path text and was echoed verbatim. Redaction has to be
-/// conservative about a shape it could not parse, including for a URL that is
-/// about to be refused: the refusal prints it.
-fn redact_stray_userinfo(text: &str, bare_username_is_a_username: bool) -> String {
-    text.split_inclusive('/')
-        .map(|segment| {
-            let Some(at) = segment.rfind('@') else {
-                return segment.to_string();
-            };
-            let (userinfo, host) = segment.split_at(at);
-            match userinfo.split_once(':') {
-                // A bare `user@host` is how an ssh remote is spelled — and how
-                // a token-only credential is spelled everywhere else, which is
-                // why the transport decides and not the punctuation.
-                None if bare_username_is_a_username => segment.to_string(),
-                None => format!("<redacted>{host}"),
-                Some((username, _)) => format!("{username}:<redacted>{host}"),
-            }
-        })
-        .collect()
-}
-
-/// Escape what a terminal would act on rather than print.
-pub(crate) fn escape_unprintable(text: &str) -> String {
-    fn is_unprintable(ch: char) -> bool {
-        ch.is_control()
-            || matches!(ch,
-                '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{feff}')
-    }
-    if !text.chars().any(is_unprintable) {
-        return text.to_string();
-    }
-    text.chars()
-        .map(|ch| {
-            if is_unprintable(ch) {
-                format!("\\u{{{:x}}}", ch as u32)
-            } else {
-                ch.to_string()
-            }
-        })
-        .collect()
-}
-
-/// The transports vstack hands to git. Anything else — `git://`, which is
-/// unauthenticated and unencrypted, and any unknown scheme, which makes git run
-/// a `git-remote-<scheme>` helper — is refused before a process sees it. `file`
-/// is here because a local clone is how a source is exercised offline.
-const SUPPORTED_TRANSPORTS: &[&str] = &["https", "ssh", "git+ssh", "file"];
-
-/// Refuse a URL whose transport vstack does not hand to git, and one that names
-/// no host to reach over a network transport.
-///
-/// The hostless form is not merely malformed: `https:///user:token@host/repo`
-/// parses with an empty authority, so its credential sits in the path where
-/// neither the credential refusal nor the authority redaction could see it, and
-/// git was handed the token as-is.
-pub(crate) fn reject_unsupported_transport(url: &str) -> Result<()> {
-    let Some(parsed) = parse_remote_url(url) else {
-        return Ok(());
-    };
-    let display = remote_source_display(url);
-    // `file://` is the one spelling that legitimately names no host.
-    if parsed.host.is_empty() && !parsed.scheme.eq_ignore_ascii_case("file") {
-        bail!("remote source URL names no host: {display}");
-    }
-    // The scp-like spelling carries no scheme and is ssh by definition.
-    if parsed.scp_like() {
-        return Ok(());
-    }
-    if !SUPPORTED_TRANSPORTS
-        .iter()
-        .any(|transport| parsed.scheme.eq_ignore_ascii_case(transport))
-    {
-        bail!(
-            "remote source transport `{}` is not supported: {display}. Use https, ssh or git+ssh",
-            escape_unprintable(parsed.scheme)
-        );
-    }
-    Ok(())
-}
-
-/// Refuse a git URL that carries a credential. Userinfo on a non-ssh scheme
-/// (`https://token@host/...`), a `user:secret@` pair on any scheme, or a query
-/// or fragment (`...?access_token=...`) would hand the secret to every git
-/// process and to every diagnostic that echoes the origin. A bare username on
-/// an ssh scheme (`ssh://git@host/...`) is how ssh remotes are spelled and is
-/// kept.
-pub(crate) fn reject_credential_bearing_git_url(url: &str) -> Result<()> {
-    if url.contains('?') || url.contains('#') {
-        bail!(
-            "remote source URLs with a query or fragment are not supported: {}. Use SSH keys, gh auth login, or a Git credential helper instead.",
-            remote_source_display(url)
-        );
-    }
-    let Some(parts) = parse_remote_url(url) else {
-        return Ok(());
-    };
-    if parts.userinfo.is_empty() {
-        return Ok(());
-    }
-    if !parts.allows_bare_username() || parts.userinfo.contains(':') {
-        bail!(
-            "credential-bearing remote source URLs are not supported: {}. Use SSH keys, gh auth login, or a Git credential helper instead.",
-            remote_source_display(url)
-        );
-    }
-    Ok(())
-}
-
-/// Replace a URL query/fragment with a marker. Git clone URLs have no
-/// legitimate use for either, and both are places a token gets carried.
-fn redact_remote_query(url: &str) -> String {
-    match url.find(['?', '#']) {
-        Some(index) => format!("{}<redacted>", &url[..=index]),
-        None => url.to_string(),
-    }
-}
-
-/// One parse of the remote-URL grammar, for every question asked about a
-/// source: is it a URL at all, what is its authority, does it carry a
-/// credential, how is it displayed, and which repository does it name. Four
-/// hand-rolled splitters used to answer those separately and disagreed on
-/// where userinfo ends — the scp-like `user:secret@host:path` had no authority
-/// by one of them, so its secret was neither refused nor redacted.
-struct RemoteUrl<'a> {
-    /// Empty for the scp-like spelling, which carries no scheme.
-    scheme: &'a str,
-    /// `[userinfo@]host` — never the path, and never a port-less prefix of it.
-    authority: &'a str,
-    /// Everything before the authority's last `@`; empty when it has none.
-    userinfo: &'a str,
-    host: &'a str,
-    /// The repository path, without the `/` or scp `:` that introduces it.
-    path: &'a str,
-    /// The input up to where the authority starts, and from where it ends —
-    /// enough to rebuild the input with a redacted userinfo.
-    prefix: &'a str,
-    suffix: &'a str,
-}
-
-impl RemoteUrl<'_> {
-    /// The `[user@]host:path` spelling, which carries no scheme and is ssh.
-    fn scp_like(&self) -> bool {
-        self.scheme.is_empty()
-    }
-
-    /// Whether a bare `user@` is how this spelling names a remote rather than
-    /// a credential. Both ssh spellings carry a username; nothing else does.
-    fn allows_bare_username(&self) -> bool {
-        self.scp_like()
-            || self.scheme.eq_ignore_ascii_case("ssh")
-            || self.scheme.eq_ignore_ascii_case("git+ssh")
-    }
-
-    /// The transport this spelling reaches the host over, in one name per
-    /// transport: the scp-like form and `git+ssh://` are both ssh.
-    fn transport(&self) -> String {
-        if self.allows_bare_username() {
-            return "ssh".to_string();
-        }
-        self.scheme.to_ascii_lowercase()
-    }
-}
-
-fn parse_remote_url(input: &str) -> Option<RemoteUrl<'_>> {
-    if let Some(scheme_end) = input.find("://") {
-        let scheme = &input[..scheme_end];
-        if scheme.is_empty()
-            || !scheme
-                .chars()
-                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '+' | '-' | '.'))
-        {
-            return None;
-        }
-        let authority_start = scheme_end + 3;
-        // The authority runs to the first `/` and nothing else: stopping at
-        // whitespace made a malformed `user:tok en@host` URL parse as having
-        // no userinfo at all, so its secret was printed in full.
-        let authority_end = input[authority_start..]
-            .find('/')
-            .map(|index| authority_start + index)
-            .unwrap_or(input.len());
-        let authority = &input[authority_start..authority_end];
-        let (userinfo, host) = split_authority(authority);
-        let suffix = &input[authority_end..];
-        return Some(RemoteUrl {
-            scheme,
-            authority,
-            userinfo,
-            host,
-            path: suffix.strip_prefix('/').unwrap_or(""),
-            prefix: &input[..authority_start],
-            suffix,
-        });
-    }
-    // scp-like `[user@]host:path` — an `@` and a `:` before the first `/`.
-    let head_end = input.find('/').unwrap_or(input.len());
-    let head = &input[..head_end];
-    if !head.contains('@') || !head.contains(':') {
-        return None;
-    }
-    // Everything before the LAST `@` is userinfo here too: reading the first
-    // `:` as the host separator instead put a `user:secret@host` credential
-    // beyond every check.
-    let at = head.rfind('@')?;
-    let authority_end = input[at + 1..]
-        .find(':')
-        .map(|index| at + 1 + index)
-        .unwrap_or(head_end);
-    let authority = &input[..authority_end];
-    let (userinfo, host) = split_authority(authority);
-    let suffix = &input[authority_end..];
-    Some(RemoteUrl {
-        scheme: "",
-        authority,
-        userinfo,
-        host,
-        path: suffix.strip_prefix(':').unwrap_or(""),
-        prefix: "",
-        suffix,
-    })
-}
-
-fn split_authority(authority: &str) -> (&str, &str) {
-    match authority.rfind('@') {
-        Some(at) => (&authority[..at], &authority[at + 1..]),
-        None => ("", authority),
-    }
-}
-
-/// Redact the secret part of a URL's userinfo, keeping a legitimate username.
-pub(crate) fn redact_remote_userinfo(input: &str) -> String {
-    let Some(parts) = parse_remote_url(input) else {
-        return input.to_string();
-    };
-    if parts.userinfo.is_empty() {
-        return input.to_string();
-    }
-    let redacted_userinfo = if let Some((username, _)) = parts.userinfo.split_once(':') {
-        if username.is_empty() {
-            "<redacted>".to_string()
-        } else {
-            format!("{username}:<redacted>")
-        }
-    } else if parts.allows_bare_username() {
-        parts.userinfo.to_string()
-    } else {
-        "<redacted>".to_string()
-    };
-    format!(
-        "{}{}@{}{}",
-        parts.prefix, redacted_userinfo, parts.host, parts.suffix
-    )
 }
 
 #[cfg(test)]

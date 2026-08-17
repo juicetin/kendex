@@ -1,7 +1,10 @@
-use super::opencode::{install_hook_opencode_at_path, remove_hook_from_opencode_json_at_path};
+use super::codex::{
+    codex_hooks_feature_state, enable_codex_hooks_feature, merge_codex_hooks_json,
+    migrate_codex_hooks_feature,
+};
 use super::*;
 
-fn hook_fixture(name: &str, event: &str, matcher: Option<&str>) -> Hook {
+pub(super) fn hook_fixture(name: &str, event: &str, matcher: Option<&str>) -> Hook {
     Hook {
         name: name.into(),
         event: event.into(),
@@ -15,7 +18,7 @@ fn hook_fixture(name: &str, event: &str, matcher: Option<&str>) -> Hook {
     }
 }
 
-fn tmpdir(label: &str) -> PathBuf {
+pub(super) fn tmpdir(label: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
         "vstack_{label}_{}_{}",
         std::process::id(),
@@ -261,11 +264,11 @@ fn hook_prune_preserves_user_handlers_with_same_basename() {
         .as_object()
         .unwrap()
         .clone();
-    let owned = vec!["bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/guard.sh\"".to_string()];
+    let owned = "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/guard.sh\"";
 
     assert!(remove_hook_entries_from_hooks_object(
         &mut hooks_obj,
-        &super::owns_exactly(&owned)
+        &|c| c == owned
     ));
     let arr = hooks_obj
         .get("PreToolUse")
@@ -610,168 +613,60 @@ fn enable_codex_hooks_feature_replaces_disabled_hooks_flag() {
 }
 
 #[test]
-fn remove_hook_from_opencode_removes_instruction() {
-    let base = std::env::temp_dir().join("vstack_test_opencode");
-    let _ = std::fs::create_dir_all(&base);
-    let config_path = base.join("opencode.json");
-    let instruction_path = base
-        .join(".opencode")
-        .join("instructions")
-        .join("vstack-hook-block-bare-cd.md");
-    std::fs::create_dir_all(instruction_path.parent().unwrap()).unwrap();
-    std::fs::write(&instruction_path, "# Safety").unwrap();
+fn codex_hooks_feature_reads_the_parsed_table() {
+    use super::codex::CodexHooksFeature;
+    let dir = tmpdir("codex_feature_read");
+    let config = dir.join("config.toml");
 
-    let content = r#"{
-  "$schema": "https://opencode.ai/config.json",
-  "instructions": [
-    ".opencode/instructions/vstack-hook-block-bare-cd.md"
-  ],
-  "permission": {
-    "bash": {
-      "*": "ask"
-    }
-  }
-}"#;
-    std::fs::write(&config_path, content).unwrap();
+    std::fs::write(&config, "[features]\nhooks = true\n").unwrap();
+    assert_eq!(
+        codex_hooks_feature_state(&config),
+        CodexHooksFeature::Enabled,
+        "control: the boolean true is enabled"
+    );
 
-    remove_hook_from_opencode_json_at_path(
-        &config_path,
-        &instruction_path,
-        ".opencode/instructions/vstack-hook-block-bare-cd.md",
-        "block-bare-cd",
+    // A multiline string whose CONTENT spells the table must not answer for it.
+    std::fs::write(
+        &config,
+        "notes = '''\n[features]\nhooks = true\n'''\n\n[features]\nhooks = false\n",
     )
     .unwrap();
+    assert_eq!(
+        codex_hooks_feature_state(&config),
+        CodexHooksFeature::Disabled,
+        "the real table says false"
+    );
 
-    let result = std::fs::read_to_string(&config_path).unwrap();
-    let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
-    assert!(result.ends_with('\n'));
-    assert!(!result.ends_with("\n\n"));
+    // Codex reads a boolean; the string is not one.
+    std::fs::write(&config, "[features]\nhooks = \"true\"\n").unwrap();
+    assert_eq!(
+        codex_hooks_feature_state(&config),
+        CodexHooksFeature::Disabled,
+        "a string is not true"
+    );
 
-    // instructions and permission should be gone
+    // A config nothing can parse is not "disabled": codex reads no feature out
+    // of it either, but what the user has to fix is the file, and the writer
+    // refuses it rather than splicing into what it cannot read.
+    std::fs::write(&config, "[features\nhooks = true\n").unwrap();
+    let state = codex_hooks_feature_state(&config);
+    let CodexHooksFeature::Unreadable(reason) = &state else {
+        panic!("an unparseable config is unreadable, got {state:?}");
+    };
     assert!(
-        parsed.get("instructions").is_none(),
-        "instructions should be removed, got: {result}"
+        reason.contains(&config.display().to_string()) && reason.contains("not valid TOML"),
+        "the reason names the file and the failure: {reason}"
     );
     assert!(
-        parsed.get("permission").is_none(),
-        "permission should be removed, got: {result}"
+        !reason.contains('\n'),
+        "the reason is one report line: {reason}"
     );
-    assert!(
-        !instruction_path.exists(),
-        "instruction file should be removed"
-    );
-
-    // Cleanup
-    let _ = std::fs::remove_dir_all(&base);
-}
-
-#[test]
-fn install_hook_opencode_normalizes_trailing_newlines_and_is_idempotent() {
-    for (label, trailing) in [("none", ""), ("one", "\n"), ("multiple", "\n\n\n")] {
-        let base = tmpdir(&format!("opencode_newline_{label}"));
-        let config_path = base.join("opencode.json");
-        let instruction_path = base.join("instructions").join("vstack-hook-guard.md");
-        let instruction_ref = "instructions/vstack-hook-guard.md";
-        let hook = hook_fixture("guard", "PreToolUse", Some("Bash"));
-        std::fs::write(&config_path, format!("{{\"custom\":true}}{trailing}")).unwrap();
-
-        install_hook_opencode_at_path(&hook, &config_path, &instruction_path, instruction_ref)
-            .unwrap();
-
-        let first = std::fs::read(&config_path).unwrap();
-        assert!(first.ends_with(b"\n"), "{label}: missing trailing newline");
-        assert!(
-            !first.ends_with(b"\n\n"),
-            "{label}: emitted multiple trailing newlines"
-        );
-        let parsed: serde_json::Value = serde_json::from_slice(&first).unwrap();
-        assert_eq!(parsed.get("custom"), Some(&serde_json::json!(true)));
-
-        install_hook_opencode_at_path(&hook, &config_path, &instruction_path, instruction_ref)
-            .unwrap();
-
-        assert_eq!(
-            std::fs::read(&config_path).unwrap(),
-            first,
-            "{label}: second install changed the rendered config"
-        );
-        let _ = std::fs::remove_dir_all(&base);
-    }
-}
-
-#[test]
-fn remove_hook_from_opencode_keeps_instruction_when_config_parse_fails() {
-    let base = std::env::temp_dir().join("vstack_test_opencode_invalid_config");
-    let _ = std::fs::remove_dir_all(&base);
-    std::fs::create_dir_all(&base).unwrap();
-    let config_path = base.join("opencode.json");
-    let instruction_path = base.join("instructions").join("vstack-hook-guard.md");
-    std::fs::create_dir_all(instruction_path.parent().unwrap()).unwrap();
-    std::fs::write(&instruction_path, "# Safety").unwrap();
-    std::fs::write(&config_path, "{not-json").unwrap();
-
-    let result = remove_hook_from_opencode_json_at_path(
-        &config_path,
-        &instruction_path,
-        "instructions/vstack-hook-guard.md",
-        "guard",
-    );
-
-    assert!(result.is_err());
-    assert!(
-        instruction_path.exists(),
-        "instruction file should remain when config cleanup fails"
-    );
-    let _ = std::fs::remove_dir_all(&base);
-}
-
-#[test]
-fn remove_hook_from_opencode_preserves_unrelated_permissions() {
-    let base = std::env::temp_dir().join("vstack_test_opencode_permissions");
-    let _ = std::fs::create_dir_all(&base);
-    let config_path = base.join("opencode.json");
-    let instruction_path = base.join("instructions").join("vstack-hook-review-bash.md");
-    std::fs::create_dir_all(instruction_path.parent().unwrap()).unwrap();
-    std::fs::write(&instruction_path, "# Safety").unwrap();
-
-    let content = r#"{
-  "$schema": "https://opencode.ai/config.json",
-  "instructions": [
-    "instructions/vstack-hook-review-bash.md"
-  ],
-  "permission": {
-    "edit": "deny",
-    "bash": {
-      "*": "ask"
-    }
-  }
-}"#;
-    std::fs::write(&config_path, content).unwrap();
-
-    remove_hook_from_opencode_json_at_path(
-        &config_path,
-        &instruction_path,
-        "instructions/vstack-hook-review-bash.md",
-        "review-bash",
-    )
-    .unwrap();
-
-    let result = std::fs::read_to_string(&config_path).unwrap();
-    let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
 
     assert_eq!(
-        parsed.get("permission").and_then(|p| p.get("edit")),
-        Some(&serde_json::Value::String("deny".into()))
+        codex_hooks_feature_state(&dir.join("missing.toml")),
+        CodexHooksFeature::Disabled
     );
-    assert!(
-        parsed
-            .get("permission")
-            .and_then(|p| p.get("bash"))
-            .is_none(),
-        "vstack-added bash permission should be removed, got: {result}"
-    );
-
-    let _ = std::fs::remove_dir_all(&base);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[cfg(unix)]

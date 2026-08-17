@@ -109,10 +109,26 @@ pub fn run_install_flow(
     if has_installed {
         let project_lock = crate::config::LockFile::load(&crate::config::lock_file_path(false))
             .unwrap_or_default();
-        crate::refresh_sources::refresh_remote_caches(&project_lock);
         let global_lock =
             crate::config::LockFile::load(&crate::config::lock_file_path(true)).unwrap_or_default();
-        crate::refresh_sources::refresh_remote_caches(&global_lock);
+        // Only speak when something is actually going to be waited on: a
+        // silent terminal that might sit there for seconds is the complaint
+        // this line answers.
+        if crate::config::any_remote_cache_due(&project_lock, Some(crate::config::REMOTE_CACHE_TTL))
+            || crate::config::any_remote_cache_due(
+                &global_lock,
+                Some(crate::config::REMOTE_CACHE_TTL),
+            )
+        {
+            eprintln!("Refreshing remote source caches…");
+        }
+        // An announced refresh must not fail silently: say which caches are
+        // still stale, then proceed on their cached contents.
+        let mut problems = crate::config::refresh_remote_caches(&project_lock);
+        problems.extend(crate::config::refresh_remote_caches(&global_lock));
+        for problem in problems {
+            eprintln!("{}", cache_problem_warning(&problem));
+        }
     }
 
     let prev_harnesses: HashSet<String> = installed
@@ -642,6 +658,26 @@ fn open_remove_source_confirm(
         body,
         super::render::theme::STATUS_DANGER,
     ));
+}
+
+/// The warning line for a cache the announced refresh could not update.
+///
+/// Every field goes through the check report's own scrub: a source may carry
+/// `user:token@` in its userinfo, and this line lands in terminal scrollback
+/// and captured logs exactly like the report does.
+fn cache_problem_warning(problem: &crate::config::RemoteCacheProblem) -> String {
+    let detail = match &problem.kind {
+        crate::config::RemoteCacheProblemKind::Failing { cause, .. } => cause
+            .map_or("the refresh did not complete", |cause| cause.describe())
+            .to_string(),
+        crate::config::RemoteCacheProblemKind::Unwritable { reason }
+        | crate::config::RemoteCacheProblemKind::Refused { reason } => reason.clone(),
+    };
+    format!(
+        "Warning: source {} cache is not up to date ({}) — using cached content",
+        crate::commands::check::display_text(&problem.source),
+        crate::commands::check::display_text(&detail)
+    )
 }
 
 fn repo_dialog_remove_cursor(state: &mut FlowState) -> Result<Option<InstallFlowResult>> {
@@ -2472,6 +2508,21 @@ mod tests {
 
     fn key(code: KeyCode) -> crossterm::event::KeyEvent {
         crossterm::event::KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn the_refresh_warning_never_prints_a_credential() {
+        let problem = crate::config::RemoteCacheProblem {
+            source: "https://user:ghp_secrettoken@github.com/owner/repo".into(),
+            kind: crate::config::RemoteCacheProblemKind::Unwritable {
+                reason: "cache directory is read-only".into(),
+            },
+        };
+        let line = cache_problem_warning(&problem);
+        assert!(!line.contains("ghp_secrettoken"), "{line}");
+        assert!(line.contains("<redacted>"), "{line}");
+        assert!(line.contains("github.com/owner/repo"), "{line}");
+        assert!(line.contains("read-only"), "{line}");
     }
 
     fn agent_fixture(name: &str) -> Agent {

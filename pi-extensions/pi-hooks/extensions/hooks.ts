@@ -5,6 +5,7 @@ import { isBareCd, runPreCommitCheck } from "./bash-guards.js";
 import { refusalReason, repoCopyRefusal } from "./repo-copy-guard.js";
 import { invalidateClippyCache } from "./cargo.js";
 import { getBool, getNumber, readConfig, recordProjectTrust } from "./config.js";
+import { deliverDrift, runDriftCheck } from "./drift-check.js";
 import { clippyIssuesForFile, workspaceClippyErrors } from "./lint-hooks.js";
 
 const INSTALL_SYMBOL = Symbol.for("vstack.pi-hooks.installed");
@@ -27,6 +28,28 @@ export default function piHooks(pi: ExtensionAPI): void {
 	pi.on("turn_start", () => {
 		turn = freshTurnState();
 		invalidateClippyCache();
+	});
+
+	// Pi port of hooks/session-drift-check.sh. Fresh starts only: a resumed
+	// session already carries the report and a reload re-runs extensions in
+	// place. Fire-and-forget — an informational check never gates startup.
+	pi.on("session_start", (event, ctx: ExtensionContext) => {
+		recordProjectTrust(ctx);
+		if (event.reason === "reload" || event.reason === "resume") return;
+		const cfg = readConfig(ctx.cwd);
+		if (!getBool(cfg, "enabled") || !getBool(cfg, "sessionDriftCheck")) return;
+
+		void deliverDrift(
+			runDriftCheck(ctx.cwd, {
+				includeAvailable: getBool(cfg, "sessionDriftAvailable"),
+				timeoutMs: getNumber(cfg, "driftCheckTimeoutMs"),
+			}),
+			(message) =>
+				pi.sendMessage(
+					{ customType: "vstack-drift", content: message, display: true },
+					{ triggerTurn: false },
+				),
+		);
 	});
 
 	pi.on("tool_call", async (event, ctx: ExtensionContext) => {

@@ -56,45 +56,11 @@ pub fn write_source_index(global: bool, index: &SourceIndex) -> Result<()> {
     Ok(())
 }
 
-/// Inspect a Pi `settings.json` packages array and return the entries that
-/// resolve to npm specifiers (`npm:<name>` or `npm:<name>@<version>`).
-/// Returns the bare package name (without version tag).
-pub fn list_npm_packages(global: bool) -> Result<Vec<String>> {
-    let settings_path = crate::config::pi_settings_path(global);
-    if !settings_path.exists() {
-        return Ok(Vec::new());
-    }
-    let raw = std::fs::read_to_string(&settings_path)
-        .with_context(|| format!("reading {}", settings_path.display()))?;
-    let parsed: serde_json::Value = serde_json::from_str(&raw)
-        .with_context(|| format!("parsing {}", settings_path.display()))?;
-    let packages = parsed
-        .get("packages")
-        .and_then(|p| p.as_array())
-        .cloned()
-        .unwrap_or_default();
-    let mut out = Vec::new();
-    for entry in packages {
-        if let Some(s) = entry.as_str()
-            && let Some(rest) = s.strip_prefix("npm:")
-        {
-            // Strip version tag (`pkg@1.2.3` or `@scope/pkg@1.2.3`).
-            let bare = if let Some(rest_no_scope) = rest.strip_prefix('@') {
-                // Scoped: keep `@scope/pkg`, drop trailing `@<version>` if any.
-                match rest_no_scope.find('@') {
-                    Some(idx) => format!("@{}", &rest_no_scope[..idx]),
-                    None => format!("@{}", rest_no_scope),
-                }
-            } else {
-                rest.split('@').next().unwrap_or(rest).to_string()
-            };
-            if !bare.is_empty() {
-                out.push(bare);
-            }
-        }
-    }
-    Ok(out)
-}
+mod settings;
+
+pub use settings::list_npm_packages;
+pub(crate) use settings::{PackageRegistration, package_is_registered, package_registration};
+use settings::{register_in_pi_settings, unregister_from_pi_settings};
 
 /// List vstack-copied packages installed in the chosen scope by reading the
 /// packages directory. These are directories with a `package.json` (npm-style)
@@ -275,7 +241,7 @@ pub fn discover_pi_extensions(dir: &Path) -> Result<Vec<PiExtension>> {
 /// could be published to npm without colliding with unrelated unscoped names.
 /// Stale locks pre-dating the move still key on the unscoped names, so each
 /// scoped name lists its unscoped predecessor (and any earlier aliases).
-const PI_EXTENSION_RENAMES: &[(&str, &[&str])] = &[
+pub(crate) const PI_EXTENSION_RENAMES: &[(&str, &[&str])] = &[
     (
         "@vanillagreen/pi-agents-tmux",
         &["pi-agents-tmux", "pi-subagents-tmux", "pi-subagents"],
@@ -320,16 +286,9 @@ pub fn legacy_names_for(name: &str) -> &'static [&'static str] {
 }
 
 fn validate_safe_component(kind: &str, value: &str) -> Result<()> {
-    if value.is_empty()
-        || value == "."
-        || value == ".."
-        || value.contains('/')
-        || value.contains('\\')
-        || value.starts_with('-')
-        || !value
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '~'))
-    {
+    // One rule, shared with `check`/`verify`'s classification predicate, so a
+    // name this accepts can never be reported as an unsafe lock entry.
+    if !crate::path_safety::is_safe_component(value) {
         anyhow::bail!("invalid {kind} `{value}`");
     }
     Ok(())
@@ -406,36 +365,18 @@ pub fn is_pi_extension_installed(name: &str, global: bool) -> bool {
     let Ok(dest) = checked_pi_package_path(name, global) else {
         return false;
     };
-    dest.exists()
-        || dest.is_symlink()
-        || settings_references_package(name, &dest, global).unwrap_or(false)
+    dest.exists() || dest.is_symlink() || package_is_registered(name, global)
 }
 
 /// Whether the package is both deployed and registered — what Pi needs to
-/// actually load it. `exists()` traverses symlinks, so a dangling link is not
-/// deployed. [`is_pi_extension_installed`] answers the looser "any trace of
-/// an install" question repair flows ask.
+/// actually load it. Deployed means a DIRECTORY, and `is_dir` traverses
+/// symlinks, so neither a regular file nor a dangling link is deployed.
+/// [`is_pi_extension_installed`] answers the looser "any trace" question.
 pub fn is_pi_extension_operational(name: &str, global: bool) -> bool {
     let Ok(dest) = checked_pi_package_path(name, global) else {
         return false;
     };
-    dest.exists() && settings_references_package(name, &dest, global).unwrap_or(false)
-}
-
-fn settings_references_package(name: &str, dest: &Path, global: bool) -> Result<bool> {
-    let settings_path = crate::config::pi_settings_path(global);
-    if !settings_path.exists() {
-        return Ok(false);
-    }
-    let settings = load_or_init_settings(&settings_path)?;
-    Ok(settings
-        .get("packages")
-        .and_then(|p| p.as_array())
-        .is_some_and(|packages| {
-            packages
-                .iter()
-                .any(|e| entry_matches_package(e, name, dest))
-        }))
+    dest.is_dir() && package_is_registered(name, global)
 }
 
 fn remove_same_scope_legacy_packages(name: &str, global: bool) -> Result<()> {
@@ -524,7 +465,7 @@ fn install_pi_extension_inner(
             "  Skip pi-package {} ({this_label} install): already installed at {other_label} scope. Run `vstack remove {}{}` first to switch.",
             ext.name,
             if !global { "--global " } else { "" },
-            ext.name,
+            crate::display::command_arg(&ext.name),
         );
         return Ok(None);
     }
@@ -537,9 +478,10 @@ fn install_pi_extension_inner(
             let this_label = if global { "global" } else { "project" };
             let other_label = if global { "project" } else { "global" };
             eprintln!(
-                "  Skip pi-package {} ({this_label} install): legacy package {legacy} is installed at {other_label} scope and registers the same resources. Run `vstack remove {}{legacy}` first.",
+                "  Skip pi-package {} ({this_label} install): legacy package {legacy} is installed at {other_label} scope and registers the same resources. Run `vstack remove {}{}` first.",
                 ext.name,
                 if !global { "--global " } else { "" },
+                crate::display::command_arg(legacy),
             );
             return Ok(None);
         }
@@ -558,7 +500,7 @@ fn install_pi_extension_inner(
     let append_system_action = append_system_install_action(ext, &dest)?;
     install_bin_links(ext, &dest, global)?;
     crate::path_safety::ensure_file_write_target_safe(&append_system_path(global))?;
-    register_in_pi_settings(&ext.name, &dest, global)?;
+    register_in_pi_settings(&ext.name, global)?;
     apply_append_system_action(&ext.name, append_system_action, global)?;
     let _ = update_source_index(ext, global);
 
@@ -680,7 +622,7 @@ pub fn remove_pi_extension(name: &str, global: bool) -> Result<Vec<PathBuf>> {
     if clear_path(&dest)? {
         removed.push(dest.clone());
     }
-    if unregister_from_pi_settings(name, &dest, global)? {
+    if unregister_from_pi_settings(name, global)? {
         removed.push(crate::config::pi_settings_path(global));
     }
     match apply_append_system_remove_plan(&append_path, append_plan).with_context(|| {
@@ -724,132 +666,6 @@ fn install_bin_links(ext: &PiExtension, package_dest: &Path, global: bool) -> Re
         std::os::unix::fs::symlink(&target, &link)
             .with_context(|| format!("symlinking bin {} → {}", link.display(), target.display()))?;
     }
-    Ok(())
-}
-
-/// The canonical `packages` entry vstack writes for a given package name.
-fn relative_settings_entry(name: &str) -> String {
-    format!("./packages/{}", name)
-}
-
-/// True if a `packages` entry refers to our package — matches:
-/// - the canonical relative form (`./packages/<name>`)
-/// - the legacy absolute path we used to write
-/// - either form wrapped in a `{ "source": ... }` object
-fn entry_matches_package(entry: &serde_json::Value, name: &str, absolute_dest: &Path) -> bool {
-    let canonical = relative_settings_entry(name);
-    let absolute = absolute_dest.to_string_lossy();
-    let matches_str = |s: &str| s == canonical || s == absolute.as_ref();
-    match entry {
-        serde_json::Value::String(s) => matches_str(s),
-        serde_json::Value::Object(obj) => obj
-            .get("source")
-            .and_then(|v| v.as_str())
-            .is_some_and(matches_str),
-        _ => false,
-    }
-}
-
-/// Add a relative `./packages/<name>` entry to the `packages` array of Pi's
-/// `settings.json` for the scope, preserving every other entry.
-///
-/// Dedupe also recognizes the absolute-path form previously written by
-/// vstack so re-installs don't leave a stale duplicate behind.
-fn register_in_pi_settings(name: &str, dest: &Path, global: bool) -> Result<()> {
-    let settings_path = crate::config::pi_settings_path(global);
-    if let Some(parent) = settings_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
-    let mut settings = load_or_init_settings(&settings_path)?;
-    let entry = relative_settings_entry(name);
-
-    let map = settings
-        .as_object_mut()
-        .context("Pi settings.json is not a JSON object")?;
-    if !map.contains_key("packages") {
-        map.insert("packages".into(), serde_json::json!([]));
-    }
-    let packages = map
-        .get_mut("packages")
-        .and_then(|p| p.as_array_mut())
-        .context("Pi settings.json `packages` is not an array")?;
-
-    // Replace any existing entry for this package in place so reinstalling a
-    // package does not change Pi extension load order. This matters when two
-    // packages both customize the same UI surface (for example the editor).
-    // Dedupe also recognizes legacy absolute-path entries and object forms.
-    let mut replacement_index = None;
-    let mut next_packages = Vec::with_capacity(packages.len() + 1);
-    for existing in packages.drain(..) {
-        if entry_matches_package(&existing, name, dest) {
-            if replacement_index.is_none() {
-                replacement_index = Some(next_packages.len());
-            }
-            continue;
-        }
-        next_packages.push(existing);
-    }
-
-    let replacement = serde_json::Value::String(entry);
-    if let Some(index) = replacement_index {
-        next_packages.insert(index, replacement);
-    } else {
-        next_packages.push(replacement);
-    }
-    *packages = next_packages;
-
-    write_settings(&settings_path, &settings)
-}
-
-/// Remove the settings entry for `name` (matches relative or absolute form).
-/// Returns true when `settings.json` changed.
-fn unregister_from_pi_settings(name: &str, dest: &Path, global: bool) -> Result<bool> {
-    let settings_path = crate::config::pi_settings_path(global);
-    if !settings_path.exists() {
-        return Ok(false);
-    }
-    let mut settings = load_or_init_settings(&settings_path)?;
-    let Some(map) = settings.as_object_mut() else {
-        return Ok(false);
-    };
-
-    let mut changed = false;
-    if let Some(packages) = map.get_mut("packages").and_then(|p| p.as_array_mut()) {
-        let before = packages.len();
-        packages.retain(|entry| !entry_matches_package(entry, name, dest));
-        changed = packages.len() != before;
-        if packages.is_empty() {
-            map.remove("packages");
-            changed = true;
-        }
-    }
-
-    if changed {
-        write_settings(&settings_path, &settings)?;
-    }
-    Ok(changed)
-}
-
-fn load_or_init_settings(path: &Path) -> Result<serde_json::Value> {
-    if !path.exists() {
-        return Ok(serde_json::json!({}));
-    }
-    let content =
-        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    if content.trim().is_empty() {
-        return Ok(serde_json::json!({}));
-    }
-    serde_json::from_str(&content)
-        .with_context(|| format!("parsing Pi settings {}", path.display()))
-}
-
-fn write_settings(path: &Path, value: &serde_json::Value) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let pretty = crate::config::to_json_pretty(value)?;
-    std::fs::write(path, pretty)?;
     Ok(())
 }
 
@@ -932,15 +748,10 @@ fn package_declares_runtime_dependencies(package_dir: &Path) -> Result<bool> {
         || manifest_object_field_non_empty(&parsed, "optionalDependencies"))
 }
 
-fn shell_quote_path(path: &Path) -> String {
-    let raw = path.to_string_lossy();
-    format!("'{}'", raw.replace('\'', "'\\''"))
-}
-
 fn npm_production_install_command(package_dir: &Path) -> String {
     format!(
         "cd {} && npm {}",
-        shell_quote_path(package_dir),
+        crate::display::shell_arg_path(package_dir),
         NPM_PRODUCTION_INSTALL_ARGS.join(" ")
     )
 }
@@ -1404,15 +1215,6 @@ mod tests {
     }
 
     #[test]
-    fn relative_settings_entry_format() {
-        assert_eq!(
-            relative_settings_entry("pi-session-bridge"),
-            "./packages/pi-session-bridge"
-        );
-        assert_eq!(relative_settings_entry("pi-qol"), "./packages/pi-qol");
-    }
-
-    #[test]
     fn prompt_stash_rename_has_legacy_name() {
         assert_eq!(
             legacy_names_for("@vanillagreen/pi-prompt-stash"),
@@ -1426,37 +1228,6 @@ mod tests {
             legacy_names_for("@vanillagreen/pi-claude-bridge"),
             &["pi-claude-bridge"]
         );
-    }
-
-    #[test]
-    fn entry_matches_package_for_relative_and_absolute_legacy() {
-        let dest = Path::new("/var/tmp/scope/packages/pi-session-bridge");
-
-        // Relative canonical form
-        let rel = serde_json::Value::String("./packages/pi-session-bridge".into());
-        assert!(entry_matches_package(&rel, "pi-session-bridge", dest));
-
-        // Legacy absolute form
-        let abs = serde_json::Value::String("/var/tmp/scope/packages/pi-session-bridge".into());
-        assert!(entry_matches_package(&abs, "pi-session-bridge", dest));
-
-        // Object form wrapping the absolute path
-        let obj = serde_json::json!({
-            "source": "/var/tmp/scope/packages/pi-session-bridge",
-            "extensions": []
-        });
-        assert!(entry_matches_package(&obj, "pi-session-bridge", dest));
-
-        // Unrelated entries don't match
-        let other = serde_json::Value::String("npm:@foo/bar".into());
-        assert!(!entry_matches_package(&other, "pi-session-bridge", dest));
-
-        let other_pkg = serde_json::Value::String("./packages/pi-qol".into());
-        assert!(!entry_matches_package(
-            &other_pkg,
-            "pi-session-bridge",
-            dest
-        ));
     }
 
     use crate::test_util::with_pi_dir;
@@ -1494,7 +1265,7 @@ printf '\n' >> "$log"
 mkdir -p node_modules/left-pad
 printf 'module.exports = 1;\n' > node_modules/left-pad/index.js
 "#,
-                log = shell_quote_path(log_path)
+                log = crate::display::shell_arg_path(log_path)
             ),
         )
         .unwrap();
@@ -1591,7 +1362,7 @@ printf 'module.exports = 1;\n' > node_modules/left-pad/index.js
                 .and_then(|p| p.as_array())
                 .expect("packages array");
             // We write the canonical relative form, not the absolute path
-            let want = relative_settings_entry("pi-mini");
+            let want = "./packages/pi-mini".to_string();
             assert!(
                 pkgs.iter()
                     .any(|e| matches!(e, serde_json::Value::String(s) if s == &want)),

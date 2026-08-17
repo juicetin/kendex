@@ -54,6 +54,8 @@ nix run github:vanillagreencom/vstack -- add vanillagreencom/vstack
 
 That opens an interactive installer where you pick which agents, skills, hooks, and Pi extensions to bring in, and which tools to install them into.
 
+A source you name on the command line is fetched before anything is read from it, interactive or not — naming it is asking for that repo as it is now. Only the installer's own source browsing serves a cached copy while it is fresh, so switching repos in the picker never waits on an unreachable remote; `vstack check` reports a cache that has fallen behind.
+
 ## How It Works
 
 A source repo is a package registry. vstack discovers what's there, asks which pieces you want, then writes the right files for each tool.
@@ -81,7 +83,9 @@ pi_extensions = ["pkgs/plugins/pi-*", "pkgs/plugins/a-specific-extension"]
 extras = ["theme-packs"]
 ```
 
-Each path is relative to the source repo. A path may point at a container directory; skills, Pi extensions, and extras may name one specific item directory, while agents and hooks may also name one specific `.md` or `.sh` file. `*` is supported on the final path segment only. Omitted keys keep the default directory for that item kind.
+Each path is relative to the source repo. A path may point at a container directory; skills, Pi extensions, and extras may name one specific item directory, while agents and hooks may also name one specific `.md` or `.sh` file. `*` is supported on the final path segment only. Omitted keys keep the default directory for that item kind, and an empty list (`skills = []`) declares that the source ships no items of that kind.
+
+`vstack check` only calls an installed item removed upstream when every configured root for its kind is there, is the right kind of thing, and every item under it was readable. A configured root that has gone missing is reported as a source layout problem to investigate, never as a `vstack remove` to run — and so is one that exists but is the wrong sort of entry, named with what was found there. Every root is judged by that rule, whether the path was written out, matched by a `*`, or defaulted: a regular file where a container belongs, a globbed parent that is not a directory, and a glob match of the wrong entry type are one answer.
 
 ### Customizing With `vstack.toml`
 
@@ -153,6 +157,20 @@ Key rules:
 - **Custom safety hooks (`[[custom-hooks]]`)** follow the same pattern. Direct edits to generated agent or skill files are also picked up where possible.
 
 > **v3 migration:** legacy shared `[agent-frontmatter]` and `tools` allowlists are no longer read. Move overrides into `[agent-frontmatter.<harness>]` and switch allowlists to `deny-tools`.
+
+### Checking For Drift
+
+`vstack check` compares every installed scope against its source and reports outdated items, items removed upstream, skills on disk but missing from the lock, lock entries whose install is incomplete — the files are missing, or the harness never registered them and so would never run or load them (agents, skills, hooks and Pi packages; extras record no single install path) — agents referencing uninstalled skills, and sources it cannot resolve, inventory, or fully read. An install whose evidence is itself unreadable — a Pi `settings.json`, a Claude `settings.json`, a Codex `hooks.json`/`config.toml`, an OpenCode `opencode.json`/`opencode.jsonc`, or a Codex agent file that will not parse, or that holds a value where vstack reads one of another shape — gets its own section naming the file and what was wrong with it, never a reinstall for an item that may be fine. `vstack add` and `vstack remove` refuse those files rather than rewriting them, so no vstack command can quietly discard the other settings and registrations they hold; fix the file by hand and rerun. An install that is complete and switched off gets a third section, because its remedy is neither: Claude's `disableAllHooks`, Codex's `[features] hooks`, or a Cursor safety rule whose `alwaysApply` is no longer `true` leave every artifact in place while the harness runs none of it, so the report names the setting and the file holding it instead of prescribing a reinstall that would change nothing. Pi's hook toggles are deliberately not reported: they live in vstack's own extension-manager UI, which already shows their state. A source's malformed asset is reported only for the kinds that scope installs from it — the same limit the suggestions below already apply — so a broken Pi package in a source a project draws only skills from is not that project's drift. A source whose cache another vstack process is refreshing while the check runs is listed as not checked this run: its items are measured against nothing rather than against a tree being rewritten, so none of them is reported outdated or removed, and the next check reports them normally — this is not drift. It also lists items a source ships that the scope never installed (only kinds the scope already uses are offered) — a suggestion, not drift. Its exit code is the contract: `0` clean, `1` drift found, `2` the check itself could not run. Suggestions alone exit `0`. Every remediation command it prints is scoped to the section it sits under — a global finding prints `vstack remove -g <name>` and `vstack add -g …`, since `add` and `remove` default to project scope — so a printed command always acts on the install it was printed for. `vstack refresh` is the exception and stays unflagged: it reinstalls at every scope an item is locked at.
+
+```bash
+vstack check                 # human report; also looks up the latest CLI version
+vstack check --quiet         # prints nothing when clean — what the session-drift-check hook runs
+vstack check --json          # machine-readable report on stdout
+vstack check --offline       # no network at all
+vstack check --no-available  # skip the available-but-not-installed suggestions
+```
+
+`check` never touches the project's git state and never blocks on the network: the verdict comes from the lock, the source trees, and each cache's recorded refresh outcome. The human report additionally looks up the latest CLI version, which `--quiet` and `--offline` skip — so the session-start path (`--quiet`) is fully local and works offline. Remote source caches under `~/.vstack/cache/` are vstack's own clones: one older than six hours is refreshed in the background (never with `--offline`), so cache news lands at the next session rather than costing this one. A single failed refresh is a footnote — working offline stays quiet — but a cache that has been failing for more than two refresh windows, or one vstack cannot write to at all, counts as drift so a permanently broken remote cannot read as clean forever; the report names the cause and points at `vstack refresh`. No vstack git invocation ever stops to ask a human anything — terminal prompts are disabled and ssh runs in batch mode — so a private source needs a configured git credential helper or ssh key rather than a typed password. `vstack refresh` applies updates; `check` itself never installs or removes anything. A command that installs from a cached source waits for any refresh already running against that cache and then refuses rather than installing from a tree being rewritten — rerun it once the refresh finishes. `--quiet` is bounded by construction: each section lists at most ten items and closes with `… and M more (run `vstack check` for the full report)`, and the report as a whole has a line budget AND a byte budget — item names are unrestricted in length, so counting lines alone bounded nothing — spent on drift before suggestions and closing with one line naming what it left out. Section headers keep the true counts — the full listing is always one `vstack check` away.
 
 ### Runtime Settings
 
@@ -247,7 +265,8 @@ Windows: CLI runs natively; symlink mode falls back to copy.
 | `block-repo-copy` | `PreToolUse` | Refuses a recursive copy (`cp -r`/`-R`/`-a`, recursive or archive `rsync`, local `git clone`, `tar` create-to-extract pipe) when the source carries repository history or a build tree AND the destination resolves under a temp/scratch root. Temp roots are commonly RAM-backed tmpfs, where such a copy fills the filesystem and every process writing there fails with ENOSPC. |
 | `pre-commit-check` | `PreToolUse` | Validates formatting and lint before commits. Rust Clippy lane is scoped to staged packages and configurable via `VSTACK_PRE_COMMIT_RUST_CLIPPY` (custom command or `off`). |
 | `post-edit-lint` | `PostToolUse` | Runs lint checks after source edits. |
-| `task-completed-check` | `TaskCompleted` | Runs final lint checks before marking work complete. Claude-Code-only — codex has no clean equivalent event. |
+| `task-completed-check` | `TaskCompleted` | Runs final lint checks before marking work complete. Scoped to Claude Code with `harnesses:` — it is the one harness that runs the event natively. |
+| `session-drift-check` | `SessionStart` | On a fresh session start (not resume or compact) runs `vstack check --quiet` and hands the agent the drift report — outdated items (`vstack refresh`), items removed upstream (`vstack remove <name>`, `-g` in a global section), unreachable sources — plus, alongside drift, items available but not installed (`vstack add --<kind> <name>`, pending your approval). Prints nothing when the install is current; one line when `vstack` is not on `PATH`, the project directory is unreadable, or the check fails unexpectedly. Never waits on the network: a stale source cache is refreshed in the background and reported at the next session. Never installs or removes anything and never touches the project's git; vstack's own source caches under `~/.vstack/cache` may be fetched at most once per TTL. `VSTACK_DRIFT_HOOK=off` disables it, `VSTACK_DRIFT_HOOK_AVAILABLE=off` hides the available-item suggestions. Claude Code and Codex only (native `SessionStart`); Pi gets the same report from `pi-hooks`. |
 
 #### Hook execution contract
 
@@ -276,20 +295,45 @@ every harness it is locked at, and each advisory artifact carries
 refused at install: no harness column could be filled in for it.
 
 A level is a claim about what vstack installed and what the harness does with
-it, downgraded to `unsupported` when the artifact behind it is gone, the
-`harnesses:` allowlist excludes the harness, or Pi's carrier package is not
-installed. It is not a probe of harness runtime state — whether Codex has been
+it, downgraded to `unsupported` when any artifact behind it is gone, the
+`harnesses:` allowlist excludes the harness, Pi's carrier package is not
+installed, or the harness is configured not to run it — `disableAllHooks`,
+`[features] hooks`, a rule's `alwaysApply`. The level names the same fault in
+the same words `check` and `verify` report, off the same readers, so the three
+commands cannot disagree about one install. It is not a probe of harness
+runtime state — whether Codex has been
 told to trust the project's `.codex/` layer, or which hooks are toggled on in
 pi-extension-manager, is the harness's to answer. `vstack verify` re-checks
-every installed artifact against its source.
+every installed artifact against its source and names the exact gap.
 
-Where the artifacts land:
+Where the artifacts land, and what `check`/`verify` require of each:
 
-- **Claude Code** — script under `<scope>/.claude/hooks/`, registered in `settings.json` plus the owning agent's frontmatter. Project scope anchors on `$CLAUDE_PROJECT_DIR`; global scope on the installed absolute path.
-- **Codex** — script under `<scope>/.codex/hooks/`, entry merged into `<scope>/.codex/hooks.json`, and `[features] hooks = true` ensured in `config.toml`. Codex sets no project-root variable and runs the command from the session cwd, so the registered command carries the install-time absolute path and resolves in projects that are not git repositories.
-- **Cursor** — advisory `.mdc` under `<scope>/.cursor/rules/`.
-- **OpenCode** — permission rule + advisory instruction file referenced from `opencode.json`.
-- **Pi** — no per-hook artifact. The behaviors ship as `@vanillagreen/pi-hooks`, which listens on Pi's `tool_call`/`tool_result`/`turn_end` events and uses `{block: true, reason}` to short-circuit unsafe tool calls; each is independently toggleable from the pi-extension-manager settings panel. Without that package installed, Pi enforces nothing, and `vstack list` says so.
+- **Claude Code** — script under `<scope>/.claude/hooks/`, registered in `settings.json` plus the owning agent's frontmatter. Project scope anchors on `$CLAUDE_PROJECT_DIR`; global scope on the installed absolute path. Both artifacts are required — a script whose registration was deleted, or one registered under a different event or matcher, is drift, because Claude Code would never run it at the time the hook declares. A registration you keep in `settings.local.json` instead counts: Claude Code merges it, so it runs. `disableAllHooks` is reported on its own: every artifact is there and Claude Code runs none of them, so the remedy is that setting, not a reinstall.
+- **Codex** — script under `<scope>/.codex/hooks/`, entry merged into `<scope>/.codex/hooks.json`, and `[features] hooks = true` ensured in `config.toml`. Codex sets no project-root variable and runs the command from the session cwd, so the registered command carries the install-time absolute path and resolves in projects that are not git repositories. All three are required — a script whose registration was deleted, and a scope with the `hooks` feature switched off, are each reported with their own remedy.
+- **Cursor** — advisory `.mdc` under `<scope>/.cursor/rules/`. The rule's own `alwaysApply: true` is what makes Cursor attach it to every request; a rule edited down to description-matching is reported as switched off, because "the model may judge it relevant" is not the same as attached.
+- **OpenCode** — permission rule + advisory instruction file referenced from `opencode.json` (or `opencode.jsonc`, whichever your project keeps; the global config and `$OPENCODE_CONFIG` are resolved the same way). Both are required — an instruction file no `instructions` entry names is prose OpenCode never loads. Any spelling of the path that still resolves to the same file counts, so a hand-edited entry keeps working. OpenCode reads its config as JSONC, and so does vstack: comments and trailing commas are a working config, and an install or removal edits only its own entries — your comments, blank lines and key order come back exactly as you wrote them.
+- **Pi** — no per-hook artifact. The behaviors ship as `@vanillagreen/pi-hooks`, which listens on Pi's `session_start`/`tool_call`/`tool_result`/`turn_end` events and uses `{block: true, reason}` to short-circuit unsafe tool calls; each is independently toggleable from the pi-extension-manager settings panel. That package IS the artifact a Pi hook runs from, so `check` and `verify` require it exactly as they require a Codex registration: a hook locked for Pi with the package missing, or deployed and not registered in Pi's `settings.json`, is drift naming which of the two to fix. Pi loads packages from both scopes, so a global install backs a project-locked hook. A `settings.json` that cannot be read is reported as unverifiable naming the file — never as a missing package.
+
+A Claude Code or Codex registration counts only when the recorded command would
+actually RUN the script: the command itself, or the operand of a shell or an
+`env`/`timeout`-style prefix that execs it — so you can wrap the command by hand
+(`env FOO=1 bash <script> --strict`) and keep it. A command that merely mentions
+the path somewhere in another program's arguments is reported as drift, because
+nothing there runs the hook. A configuration file that exists and cannot be
+parsed is never read as "not registered": vstack reports it unverifiable, names
+the file, and refuses to rewrite what it could not understand.
+
+Two faults can be true at once, and the report names the one to clear FIRST. A
+missing artifact prescribes `vstack add` — and that command refuses the very
+config it would have to write when it cannot parse it, so a missing script
+beside an unparseable `settings.json` is reported under "repair the file named
+below", naming the file AND the missing artifact rather than prescribing a
+reinstall that could not run. The same holds wherever a repair gates a
+reinstall: a `.agents` path that is not this checkout's own directory, Pi
+settings that block a carrier install, and a source cache whose stamp cannot be
+written (reported ahead of whatever fetch failure that frozen stamp still
+records). Both faults appear in the one note, so a repair is never followed by a
+second surprise.
 
 The commit path is guarded separately and for every tool: an installed
 [`growth-guards`](skills/growth-guards/) skill arms real `.git/hooks`
@@ -305,6 +349,8 @@ Install [`pi-extension-manager`](pi-extensions/pi-extension-manager/README.md) t
 Extensions can ship an `instructions.md` (declared via `pi.appendSystem` in `package.json`); on install, vstack mirrors it into the scope's `APPEND_SYSTEM.md` (`<project>/.pi/APPEND_SYSTEM.md` or `~/.pi/agent/APPEND_SYSTEM.md`) so Pi loads tool-usage guidance into the system prompt. Removed/disabled extensions strip their block automatically.
 
 If a Pi extension declares production dependencies (`dependencies` or `optionalDependencies`), vstack installs them inside the deployed package directory with `npm install --omit=dev --package-lock=false --legacy-peer-deps --no-audit --no-fund` before registering the package with Pi. The installed `node_modules/` stays local to the Pi scope and is ignored by vstack source hashing/verify drift checks.
+
+Installing a package writes two artifacts: the copy under `<scope>/packages/<name>` and its entry in the scope's Pi `settings.json` `packages` array. Both are what `check`/`verify` require — a copied package whose entry was deleted, or whose entry points at another package's directory, is drift, because Pi would never load it. Any spelling of the path that still resolves to the same directory counts, so a hand-edited entry keeps working.
 
 | Extension | Purpose |
 |---|---|

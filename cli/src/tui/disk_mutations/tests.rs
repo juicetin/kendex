@@ -1631,7 +1631,7 @@ fn inline_update_of_an_agent_refuses_an_unselected_uncovered_hook() {
                 &agent,
                 false,
                 &[],
-                &[installed_rogue.clone()],
+                std::slice::from_ref(&installed_rogue),
                 &crate::agent::AgentExtras::default(),
             )
             .unwrap();

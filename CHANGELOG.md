@@ -2,6 +2,168 @@
 
 ## Unreleased
 
+- cli: A shared config is read with the parser its OWN harness uses, never the
+  one its file extension suggests. OpenCode hands `opencode.json`,
+  `opencode.jsonc`, its global config and whatever `$OPENCODE_CONFIG` names to
+  one JSONC parser, so comments and trailing commas are a working OpenCode
+  config; vstack was reading all of them strictly, which reported a perfectly
+  live hook install as unverifiable and made `add` and `remove` refuse to touch
+  the file. Claude's `settings.json`, Codex's `hooks.json` and Pi's
+  `settings.json` stay strict, because their harnesses are — a comment in one
+  of those really is a file the harness drops. The relaxation is exactly what
+  OpenCode's parser takes and no more: a single-quoted string, an unquoted key
+  or a hex number is still a config OpenCode ignores, so vstack still refuses
+  it rather than rewriting a file the harness is not loading.
+  Writes preserve what they did not author. A JSONC config is edited through a
+  syntax tree, the way Codex's `config.toml` is edited through `toml_edit`, so
+  installing or removing a hook changes only its own entries and every comment,
+  blank line, indent and key order comes back byte-for-byte. Serializing the
+  parsed value back over the file would have deleted every comment in it on the
+  first `vstack add`. OpenCode's GLOBAL config is now resolved by the spelling
+  that is actually on disk too, so a user who keeps `opencode.jsonc` gets the
+  registration written into the file they use instead of a second one beside
+  it.
+
+- cli: `vstack check` is a process contract a session can branch on — exit `0`
+  clean, `1` drift, `2` the check itself failed, `--quiet` silent when clean,
+  `--json` on stdout, `--offline` skipping every network call. Items a source
+  ships but the scope never installed are suggestions and never drift. The
+  verdict is computed from disk alone: a remote source cache older than six
+  hours is refreshed by a detached `vstack cache-refresh` nobody waits on, and
+  its outcome is reported at the next session, so a session start never blocks
+  on the network — a cache that has been failing to refresh for more than two
+  refresh windows, or that vstack cannot write to at all, is drift, and each
+  report names the cause rather than a generic staleness. A source vstack
+  REFUSED is reported as refused by `check`, `verify` and `refresh` alike,
+  with the refusal's own remedy instead of a `vstack add` that would refuse
+  again. A new `session-drift-check` hook (Claude Code and Codex) and the Pi
+  `pi-hooks` `sessionDriftCheck` setting relay the quiet report at session
+  start; both are thin adapters over `check --quiet`, whose output is bounded
+  by construction — every section is capped, every displayed name is rendered
+  through the bounded renderer, AND the quiet report as a whole has both a
+  line budget and a byte budget (item name length is unrestricted, so counting
+  lines alone bounded nothing), spent on drift before suggestions and closing
+  with one line naming what it left out; a copy-paste command argument stays
+  complete, since an elided argument is a command that cannot work. A
+  config file vstack shares with a harness — a Claude `settings.json`, a Codex
+  `hooks.json` or `config.toml`, an OpenCode `opencode.json`, Pi's
+  `settings.json` — that EXISTS and cannot be read is reported as unverifiable
+  naming the file and what was wrong with it, never as a missing hook or an
+  unregistered package whose printed remedy is `vstack add`; and every writer
+  refuses such a file instead of parsing it as a default and rewriting it, so
+  no vstack command can discard the settings and registrations it holds.
+  "Cannot be read" is now the WHOLE shape vstack depends on, declared once and
+  validated at the reader: invalid JSON, but also an event value that is not
+  an array, an entry, handler list, handler or command of another shape, a Pi
+  `packages` that is not an array, an `opencode.json` `instructions` or
+  `permission` of another type. Each of those used to read as "nothing
+  registered here" while the matching writer replaced the offending value with
+  an empty default, crashed on it, or refused it — leaving the user with a
+  destroyed setting or a drift the printed remedy could never clear. A Codex
+  agent file the prose fallback could not read is reported the same way rather
+  than as a missing safety block. A command that installs from a cached source
+  (`add`, `refresh`, the wizard) now waits for an in-flight refresh of that
+  cache and then refuses, instead of discovering, hashing and copying out of a
+  tree another process is running `reset --hard` on; only the detached
+  background refresh treats a busy cache as a no-op. A READ-ONLY reader —
+  `check`, `verify`, hook attribution, source-identity recovery — neither
+  waits nor takes that lock: it probes it, and a source whose cache is being
+  rewritten is reported as not checked this run instead of measured against a
+  half-written tree. That is neither drift nor clean, it costs a session
+  start nothing, and the next run reports the source normally; before it,
+  `check` could call a live entry REMOVED and print `vstack remove` beside it.
+  The initial clone — the one cache write no lock can cover, since the lock
+  lives inside a `.git` that does not exist yet — is published into its entry
+  by rename, so a clone that did not finish is never visible under the entry's
+  own name. Where the platform has no `flock` to release the lock for it, a
+  holder records its liveness for as long as the lock is HELD rather than only
+  while its fetch runs, so a lease kept across discovery, hashing, copying or
+  an interactive selection is no longer read as a crashed process's leftover
+  and taken over mid-read; a holder that really is gone stops recording, and
+  its lock is still taken over once it goes stale, so no cache wedges.
+  Codex's safety-prose
+  fallback is located by one predicate scoped to the agent's
+  `developer_instructions`, so marker text in a comment or another field can
+  no longer make the install skip the block and the presence read call it
+  installed — and the block counts only while it still carries the hook's
+  action line, so a heading whose body was deleted is reported rather than
+  reported installed, and a reinstall rewrites the section instead of skipping
+  it. An install that is COMPLETE and switched off is a third report with a
+  third remedy: Claude's `disableAllHooks` (read through the declared schema,
+  over claude's own settings precedence, and never from a
+  `~/.claude/settings.local.json` claude does not load), Codex's
+  `[features] hooks`, and a Cursor safety rule whose `alwaysApply` is no longer
+  `true` each leave every artifact in place while the harness runs none of it —
+  now named with the setting and the file holding it, instead of reported as a
+  missing install whose printed remedy is a reinstall that changes nothing.
+  OpenCode exposes no such switch; Pi's live in vstack's own extension-manager
+  UI and stay out of the report (VST-258).
+- cli: every structured file vstack reads is now read by a parser rather than
+  matched as text, so the answers no longer depend on how a value was spelled.
+  A Cursor rule's `alwaysApply` is a YAML boolean, so `alwaysApply: true # keep
+  enabled` is the same "on" to vstack that it is to Cursor, and a rule whose
+  frontmatter does not parse — or whose `alwaysApply` is a value Cursor itself
+  would not honor — is unverifiable naming the file rather than silently off. A
+  Codex agent's `developer_instructions` is located by parsing the TOML, so the
+  assignment text quoted inside another field, or a `developer_instructions`
+  belonging to a different table, is no longer spliced into or cut out of; an
+  agent file that is not TOML vstack can read is refused by name and never
+  rewritten, by install, removal or the presence read. A registered hook
+  command is split into the words a shell would run, so a `bash '/path with
+  spaces/hook.sh'` — the command vstack itself writes for any install path
+  containing a space — reads back as registered instead of as permanent drift
+  no reinstall could clear; a command whose words cannot be settled still reads
+  as unregistered. The `session-drift-check` hook reads the session's start
+  reason from the payload's top-level `source` via `jq` where it is available,
+  so a nested key or a matching string elsewhere in the payload no longer
+  decides whether the report is printed. Source picker rows and the scope
+  summary now label a GitHub remote by the repository it names, so every
+  spelling of one repository is one row. An installed agent's declared
+  skills are read as parsed YAML — a block sequence and a value carrying a
+  trailing comment both count, where before either read as declaring none
+  and every skill the agent named went unchecked. Removing a hook from
+  `opencode.json` deletes the entry that RESOLVES to vstack's own instruction
+  file, through the same predicate the registration read accepts it with; it
+  used to split the hook's name on `-` and drop any entry whose text held
+  every fragment, so removing one hook deleted the user's own unrelated
+  instructions, and a `vstack-hook-` substring anywhere in a path kept the
+  bash restriction alive after the last vstack hook was gone. Whether any
+  vstack hook still needs the shared bash rule is decided by that same
+  predicate; a file-name glob over the entry text answered it separately, so a
+  hook registered under an equivalent spelling counted as installed for
+  `check` and as nothing at all for removal — removing a sibling took the rule
+  out from under it and left a partial uninstall no command reported
+  (VST-258).
+- cli: every command vstack PRINTS for you to paste is built from one helper,
+  which POSIX-quotes each argument, so a source, an item name or a package
+  spelled with shell syntax is passed literally instead of executed — a
+  recorded source of the shape `https://host/team/$(id).git` produced a
+  restoration command that ran the substitution. The same helper owns the
+  credential redaction, the terminal-escape scrub and the length bound every
+  displayed string gets, and the two places that quote for EXECUTION rather
+  than display — a harness's `settings.json` hook command and
+  `GIT_SSH_COMMAND` — stay separate so they carry a path byte for byte.
+  Diagnostics are no longer scrubbed as if each were a single source URL: a
+  message's `?` is a question mark, not a query string, so a refusal is no
+  longer cut off mid-sentence and given a `<redacted>` naming nothing. Neither
+  is a local source path: `?` and `#` are a URL's query and fragment but
+  ordinary characters in a directory name, so a local source is now shown as
+  itself — still terminal-escaped and still quoted inside a command — and only
+  a remote-shaped source goes through the credential and query redaction, as
+  classified by the resolver itself. A local source directory spelled with
+  either character used to render as `/path/source?<redacted>`, and the
+  restore and add-item commands built from it named a directory that does not
+  exist. A
+  subprocess's output and a lock file's names are displayed text and get a
+  displayed string's treatment. A hook locked for Pi is only installed when
+  the `@vanillagreen/pi-hooks` carrier is deployed AND registered in a scope
+  Pi loads — its absence is drift naming the carrier and the remedy, an
+  unregistered copy is drift naming the registration, and an unreadable Pi
+  `settings.json` is unverifiable naming the file; `check`, `verify` and the
+  enforcement level `list` prints all read one probe, so they cannot disagree.
+  An owning checkout's lock file that exists and cannot be parsed no longer
+  reads as absent: unknown ownership is not permission to clear another
+  checkout's recovery marker (VST-258).
 - pi-agents-tmux: Monitor tree task rows show elapsed/total run-time instead
   of a jumpy local `HH:MM` clock (`updatedAt` is no longer a time source);
   detail-pane timestamps render local human time instead of UTC ISO, and the
@@ -120,6 +282,16 @@
 - hooks: `vstack add` checks every selected hook's event against the contract
   before its first write, so a refused event leaves no lock, agent, settings
   or config behind (VST-283).
+- hooks: one predicate per harness decides which registered command is
+  vstack's, and install, removal and every presence report ask it. A Claude
+  Code or Codex command you reshaped by hand around vstack's script — an
+  `env`/`timeout` prefix, extra flags, a different quoting of the same path —
+  was already counted as installed, but `vstack remove` matched the literal
+  string only and left it registered, so the harness kept running a hook the
+  lock no longer knew about. The enforcement level `list` and `check` print
+  now comes from the same reader `verify` reports the gap from, so a hook
+  cannot read `enforced` on one command and drifted on another (VST-258,
+  VST-283).
 
 - second-opinion settings example: the `SECOND_OPINION_CURRENT_MODEL` block
   announced "three cases, and only the third makes a project file usable at

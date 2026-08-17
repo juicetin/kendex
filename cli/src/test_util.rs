@@ -133,9 +133,7 @@ const DRIVEN: &str = "VSTACK_TEST_DRIVEN";
 /// leave the helper asserting nothing, reporting `1 passed`, and the guard
 /// disarmed.
 pub(crate) fn helper_fixture(name: &str) -> Option<String> {
-    if std::env::var_os(DRIVEN).is_none() {
-        return None;
-    }
+    std::env::var_os(DRIVEN)?;
     Some(
         std::env::var(name)
             .unwrap_or_else(|_| panic!("{name} was not supplied by the driver that started this")),
