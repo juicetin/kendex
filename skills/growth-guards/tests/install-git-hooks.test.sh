@@ -961,5 +961,107 @@ case "$OUT" in
   *) bad "skip states preflight not installed" "out=$OUT" ;;
 esac
 
+
+echo "=== a repo-local size-ratchet replacement without --staged is a stated skip ==="
+R31="$(new_repo forkchain)"
+# new_repo links size-ratchet to the REAL skill; replace the link with a real
+# directory so the fork fixture cannot write through it.
+rm "$R31/.agents/skills/size-ratchet"
+mkdir -p "$R31/.agents/skills/size-ratchet/scripts"
+cat >"$R31/.agents/skills/size-ratchet/scripts/size-ratchet" <<'FORK'
+#!/usr/bin/env bash
+# A consumer's own gate: usage text names size-ratchet, no --staged mode.
+case "${1:-}" in
+  --help) echo "size-ratchet — repo-local gate. Usage: size-ratchet [--update]"; exit 0 ;;
+  --staged) echo "size-ratchet: unknown argument '--staged' (see --help)" >&2; exit 2 ;;
+esac
+exit 0
+FORK
+chmod 0755 "$R31/.agents/skills/size-ratchet/scripts/size-ratchet"
+install_in "$R31"
+printf 'hello\n' >"$R31/ok.txt"
+git -C "$R31" add ok.txt
+commit_in "$R31" "feat: add ok"
+[ "$RC" -eq 0 ] && ok "a fork without --staged does not block the commit" || bad "fork commit proceeds" "rc=$RC out=$OUT"
+case "$OUT" in
+  *"rejects --staged"*"repo-local replacement"*) ok "the skip states the fork and its ownership" ;;
+  *) bad "fork skip stated" "out=$OUT" ;;
+esac
+
+echo "=== a fork whose --help NAMES --staged but rejects it still skips ==="
+cat >"$R31/.agents/skills/size-ratchet/scripts/size-ratchet" <<'NEGHELP'
+#!/usr/bin/env bash
+case "${1:-}" in
+  --help) echo "size-ratchet — repo-local gate. Usage: size-ratchet [--update]. This build does not support --staged."; exit 0 ;;
+  --staged) echo "size-ratchet: unknown argument '--staged' (see --help)" >&2; exit 2 ;;
+esac
+exit 0
+NEGHELP
+chmod 0755 "$R31/.agents/skills/size-ratchet/scripts/size-ratchet"
+printf 'neg\n' >"$R31/b.txt"
+git -C "$R31" add b.txt
+commit_in "$R31" "feat: add b"
+[ "$RC" -eq 0 ] && ok "a help-names-it-but-rejects-it fork does not block" || bad "negative-phrase fork proceeds" "rc=$RC out=$OUT"
+case "$OUT" in
+  *"rejects --staged"*"repo-local replacement"*) ok "the runtime rejection is stated as the skip" ;;
+  *) bad "runtime rejection stated" "out=$OUT" ;;
+esac
+
+echo "=== a config-error diagnostic that mentions --staged is not a rejection ==="
+cat >"$R31/.agents/skills/size-ratchet/scripts/size-ratchet" <<'CFGERR'
+#!/usr/bin/env bash
+case "${1:-}" in
+  --help) echo "size-ratchet — gate. Usage: size-ratchet [--staged] [--update]"; exit 0 ;;
+esac
+echo "::error::size-ratchet: SIZE_RATCHET_THRESHOLD must be a positive integer (see --help; applies to --staged runs too)" >&2
+exit 2
+CFGERR
+chmod 0755 "$R31/.agents/skills/size-ratchet/scripts/size-ratchet"
+printf 'cfg\n' >"$R31/e.txt"
+git -C "$R31" add e.txt
+commit_in "$R31" "feat: add e"
+[ "$RC" -ne 0 ] && ok "a config error mentioning --staged still blocks" || bad "config error blocks" "rc=$RC out=$OUT"
+case "$OUT" in
+  *"did not complete"*) ok "the block is the did-not-complete error, never the replacement skip" ;;
+  *) bad "config error named" "out=$OUT" ;;
+esac
+git -C "$R31" rm -q --cached e.txt 2>/dev/null; rm -f "$R31/e.txt"
+
+echo "=== an echoed rejection phrase inside a config diagnostic is not a rejection ==="
+cat >"$R31/.agents/skills/size-ratchet/scripts/size-ratchet" <<'ECHOED'
+#!/usr/bin/env bash
+case "${1:-}" in
+  --help) echo "size-ratchet — gate. Usage: size-ratchet [--staged] [--update]"; exit 0 ;;
+esac
+echo "::error::size-ratchet: SIZE_RATCHET_THRESHOLD must be a positive integer, got 'unknown argument '--staged''" >&2
+exit 2
+ECHOED
+chmod 0755 "$R31/.agents/skills/size-ratchet/scripts/size-ratchet"
+printf 'echoed\n' >"$R31/f.txt"
+git -C "$R31" add f.txt
+commit_in "$R31" "feat: add f"
+[ "$RC" -ne 0 ] && ok "an echoed phrase in a config diagnostic still blocks" || bad "echoed phrase blocks" "rc=$RC out=$OUT"
+case "$OUT" in
+  *"did not complete"*) ok "the echoed-phrase block is did-not-complete, never the replacement skip" ;;
+  *) bad "echoed phrase named" "out=$OUT" ;;
+esac
+git -C "$R31" rm -q --cached f.txt 2>/dev/null; rm -f "$R31/f.txt"
+
+echo "=== a broken script erroring at run time blocks, never skips ==="
+cat >"$R31/.agents/skills/size-ratchet/scripts/size-ratchet" <<'BROKEN'
+#!/usr/bin/env bash
+echo "size-ratchet: cannot source lib/settings.sh" >&2
+exit 2
+BROKEN
+chmod 0755 "$R31/.agents/skills/size-ratchet/scripts/size-ratchet"
+printf 'more\n' >"$R31/d.txt"
+git -C "$R31" add d.txt
+commit_in "$R31" "feat: add d"
+[ "$RC" -ne 0 ] && ok "a broken script blocks the commit" || bad "broken script blocks" "rc=$RC out=$OUT"
+case "$OUT" in
+  *"did not complete"*) ok "the block is did-not-complete, never a replacement skip" ;;
+  *) bad "broken install named" "out=$OUT" ;;
+esac
+
 printf '\n%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

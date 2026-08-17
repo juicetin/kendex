@@ -65,7 +65,11 @@ staged content, and tracked configuration read from the index, so an unstaged
 edit cannot switch a check off for content the commit keeps: `size-ratchet
 --staged` and `preflight --staged` when those skills are installed beside
 this one (a repository's first commit skips preflight with a note — nothing
-to diff against), then the `growth-guards` batch over the staged content,
+to diff against; a size-ratchet that rejects `--staged` in its own
+first-line parser diagnostic is a repo-local replacement — stated skip, that
+repo's own wiring owns the gate — while any other failure blocks as a guard
+that could not run), then
+the `growth-guards` batch over the staged content,
 then the repo-local entry named by `GROWTH_GUARDS_PRE_COMMIT_LOCAL`
 (repo-root-relative executable; empty means none). `commit-msg` runs `scripts/commit-msg` on git's message file.
 Every step runs before the verdict, so one attempt reports every blocker.
