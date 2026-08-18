@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+- size-ratchet: three fail-closed fixes, each with its own regression pin.
+  `--seed` stays bootstrap-only against the COMMITTED baseline too: its
+  existence probe read the index alone, so staging the baseline's deletion
+  (or a truncation) hid a live ratchet and the mode reseeded every row at
+  today's sizes — growth laundered into a fresh freeze at exit 0. HEAD is
+  probed as well, and a failing index query is a loud exit 2 rather than a
+  green light to reseed.
+  Staged settings resolution fails closed on a broken `git`: the
+  tracked-source probe read EVERY nonzero status as "untracked", so an
+  operational failure silently dropped a committed threshold back to the
+  built-in default and passed staged content the commit does not authorize.
+  Only `--error-unmatch`'s "no such path" now means untracked.
+  `SIZE_RATCHET_SETTINGS_FILE=/dev/null` selects no settings source at all.
+  It named only the settings file, so `.env.local` and `.env` kept deciding
+  and a caller asking for built-in defaults got whatever the repository's
+  env files said; the dotenv layers are skipped with it now, leaving
+  explicit environment variables and the defaults.
+
+- growth-guards: the same two settings fixes, which its vendored copy of the
+  loader carried. A hook lane resolving tracked settings from the index no
+  longer reads a broken `git` as "untracked" — a committed commit-type list
+  or ceiling silently reverted to the built-in one and admitted a commit its
+  own configuration rejects — and
+  `GROWTH_GUARDS_SETTINGS_FILE=/dev/null` selects no settings source at all
+  rather than leaving `.env.local` and `.env` deciding.
+
+- review-gate: the `/dev/null` force-defaults handle is answered in
+  `rg_setting`, ahead of every source, rather than through an exemption in
+  the source-shape check. Behavior is unchanged there — the loader has no
+  dotenv layers to leak — and the copies vendored from it now answer the
+  sentinel through the same construct.
+
 - size-ratchet: seven fixes absorbed from the forked copy drovr has been
   running (DRO-201), each with its own regression pin.
   `--update` converges in ONE run: the baseline's own row is reconciled

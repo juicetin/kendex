@@ -13,9 +13,13 @@
 #   2. .env.local (KEY=value, quotes optional — parsed, never sourced);
 #   3. .vstack/settings.toml, then the repo's committed vstack.settings.toml
 #      (sole uncommented `KEY = "value"` assignment; an explicit
-#      GROWTH_GUARDS_SETTINGS_FILE consults only itself, e.g. /dev/null);
+#      GROWTH_GUARDS_SETTINGS_FILE consults only itself);
 #   4. .env (same shape);
 #   5. the built-in default passed by the caller.
+#
+# GROWTH_GUARDS_SETTINGS_FILE=/dev/null is the force-defaults handle and means
+# NO settings source at all: layers 2-4 are skipped whole, leaving explicit
+# environment variables and the built-in defaults.
 #
 # The parser reads flat single-line basic-string TOML assignments only —
 # exactly the shape vstack.settings.toml [env] blocks use.
@@ -78,10 +82,10 @@ gg_dotenv_value() { # RAW — value on stdout; nonzero on an unsupported shape
 # something else — directory, FIFO, socket, device — fails -f exactly like
 # an absent one, and a symlink that does not resolve fails -e as well as -f,
 # so -L is what sees it at all: either shape would skip a configured source
-# with nothing said and let a lower-precedence value decide. /dev/null is
-# the documented force-defaults handle and stays exempt.
+# with nothing said and let a lower-precedence value decide. The /dev/null
+# force-defaults handle never reaches here — gg_setting answers it before any
+# source is consulted.
 gg_settings_usable() { # PATH — 0 = readable-shaped or absent; 1 + ::error otherwise
-  [ "$1" != "/dev/null" ] || return 0
   { [ -e "$1" ] || [ -L "$1" ]; } || return 0
   [ ! -f "$1" ] || return 0
   if [ ! -e "$1" ]; then
@@ -92,6 +96,33 @@ gg_settings_usable() { # PATH — 0 = readable-shaped or absent; 1 + ::error oth
   return 1
 }
 
+# Lexically normalize a repo-relative path: drop empty and `.` segments, and
+# let `..` pop the segment before it. Pure string surgery — no symlink
+# resolution, Bash 3.2-safe. The index records canonical paths, so a source
+# named `sub/../vstack.settings.toml` is the same entry as
+# `vstack.settings.toml` and has to probe, and materialize, as that one. A
+# `..` with nothing left to pop ACCUMULATES rather than vanishing, so a path
+# that really does leave the repository stays visible as one to the caller.
+gg_settings_normalize_path() { # PATH — normalized path on stdout ("" when it cancels out)
+  local rest="$1" out="" seg
+  while [ -n "$rest" ]; do
+    seg="${rest%%/*}"
+    if [ "$seg" = "$rest" ]; then rest=""; else rest="${rest#*/}"; fi
+    case "$seg" in
+      "" | ".") ;;
+      "..")
+        case "$out" in
+          "" | ".." | */..) out="${out:+$out/}.." ;;
+          */*) out="${out%/*}" ;;
+          *) out="" ;;
+        esac
+        ;;
+      *) out="${out:+$out/}$seg" ;;
+    esac
+  done
+  printf '%s' "$out"
+}
+
 # With GG_SETTINGS_FROM_INDEX=1 a TRACKED settings source is read from the
 # INDEX, a source staged for DELETION governs as absent, and an untracked one
 # (a personal .env.local) is the worktree copy, which is all there is. A
@@ -99,20 +130,68 @@ gg_settings_usable() { # PATH — 0 = readable-shaped or absent; 1 + ::error oth
 # and parsing that would resolve every key to its built-in default.
 # GG_SETTINGS_INDEX_DIR holds the materialized copies; the caller owns it.
 gg_settings_source() { # FILE — the path to actually read; nonzero + ::error on failure
-  local file="$1" copy=""
+  local file="$1" copy="" status=0 entry="" norm=""
   if [ "${GG_SETTINGS_FROM_INDEX:-0}" != "1" ] || [ -z "${GG_SETTINGS_INDEX_DIR:-}" ]; then
     printf '%s' "$file"
     return 0
   fi
-  if ! git ls-files --error-unmatch -- "$file" >/dev/null 2>&1; then
-    if git cat-file -e "HEAD:$file" 2>/dev/null; then
-      printf '%s' "$GG_SETTINGS_INDEX_DIR/settings.absent"
+  # An ABSOLUTE path is never an index entry, and git refuses such a pathspec
+  # with the same 128 an operational failure returns — so it is answered here,
+  # before the probes below: the worktree copy is all it ever has.
+  case "$file" in
+    /*)
+      printf '%s' "$file"
       return 0
-    fi
-    printf '%s' "$file"
-    return 0
+      ;;
+  esac
+  # Everything else is judged by what it NORMALIZES to, not by whether it
+  # spells a `..`: `sub/../vstack.settings.toml` is the committed settings
+  # file, and treating any `..` as an escape read it from the worktree — the
+  # unstaged-edit bypass the hook lane exists to close. Only a path that still
+  # leaves the repository once normalized (or cancels out to nothing) keeps
+  # the worktree copy, and it keeps the ORIGINAL spelling, which is what the
+  # caller's own file tests and diagnostics name.
+  norm="$(gg_settings_normalize_path "$file")"
+  case "$norm" in
+    "" | ".." | "../"*)
+      printf '%s' "$file"
+      return 0
+      ;;
+  esac
+  file="$norm"
+  # --error-unmatch reserves exit 1 for the one expected answer, "the index
+  # has no such path"; every other nonzero status is a FAILING git, not a
+  # measurement. Reading them alike let an operational failure pass for
+  # "untracked", which resolved the key from the worktree copy or the
+  # built-in default — a committed policy silently swapped for a looser one,
+  # admitting a commit its own configuration rejects.
+  git ls-files --error-unmatch -- ":(literal)$file" >/dev/null 2>&1 || status=$?
+  case "$status" in
+    0) ;;
+    1)
+      if git cat-file -e "HEAD:$file" 2>/dev/null; then
+        printf '%s' "$GG_SETTINGS_INDEX_DIR/settings.absent"
+        return 0
+      fi
+      printf '%s' "$file"
+      return 0
+      ;;
+    *)
+      echo "::error::$file: could not query the index while resolving a setting (git ls-files exit $status); refusing to treat it as untracked" >&2
+      return 1
+      ;;
+  esac
+  # `ls-files -s` exits 0 whether or not the path matches, so a nonzero status
+  # is a failing invocation and gets the same refusal — an unread mode would
+  # let the symlink shape below through to the silent resolve-to-default it
+  # exists to prevent.
+  status=0
+  entry="$(git ls-files -s -- ":(literal)$file" 2>/dev/null)" || status=$?
+  if [ "$status" -ne 0 ]; then
+    echo "::error::$file: could not read its index mode while resolving a setting (git ls-files exit $status)" >&2
+    return 1
   fi
-  case "$(git ls-files -s -- "$file" 2>/dev/null | cut -d' ' -f1)" in
+  case "${entry%% *}" in
     120000)
       echo "::error::$file: tracked as a symlink; staged settings resolution cannot read through it" >&2
       return 1
@@ -183,6 +262,15 @@ gg_setting() { # NAME DEFAULT — resolved value on stdout; nonzero + ::error on
   # ${!name+x} tests set-ness of the variable NAMED by $name (Bash 3.2-safe).
   if [ -n "${!name+x}" ]; then
     printf '%s' "${!name}"
+    return 0
+  fi
+  # /dev/null is the force-defaults handle: it selects NO settings source at
+  # all, so the dotenv layers around the settings file are skipped with it.
+  # Skipping only the TOML layer left .env.local and .env still deciding, so
+  # a caller asking for built-in defaults got whatever the repository's env
+  # files happened to say.
+  if [ "${GROWTH_GUARDS_SETTINGS_FILE:-}" = "/dev/null" ]; then
+    printf '%s' "$default"
     return 0
   fi
   # Standard project layering: .env.local beats the committed settings, .env
