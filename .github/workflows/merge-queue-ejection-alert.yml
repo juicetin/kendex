@@ -10,6 +10,12 @@
 #      GH→Linear creation sync mirrors it) instead of vanishing.
 # One issue per PR per ejection run id; re-runs and duplicate deliveries
 # de-duplicate against the existing open issue.
+#
+# The intake issue is REASON-AWARE: MANUAL is a deliberate dequeue (the
+# dequeue-push-rearm flow) and MERGE_CONFLICT is routine queue re-evaluation
+# after a sibling merged — both get the PR comment (the dropped arm is still
+# real) but no tracker issue. Only failure-shaped reasons (CI_FAILURE and
+# anything unrecognized, fail-closed) enter the triage queue.
 name: Merge queue ejection alert
 
 # pull_request_target, not pull_request: a fork PR's dequeue would hand a
@@ -171,12 +177,31 @@ jobs:
           BODY
           gh pr comment "$PR_NUMBER" --body-file "$body_file"
 
-          # Intake issue (deduped per PR + ejection run).
+          # Intake issue (deduped per PR + ejection run), failure-shaped
+          # reasons only: a deliberate dequeue or a routine queue
+          # re-evaluation is not triage work. Guarded by a flag, not an
+          # early exit, so steps appended later still run for every reason.
+          create_intake_issue=1
+          case "${DEQUEUE_REASON}" in
+            MANUAL|MERGE_CONFLICT)
+              echo "reason ${DEQUEUE_REASON}: deliberate dequeue / queue re-evaluation — comment posted, no intake issue"
+              create_intake_issue=0
+              ;;
+          esac
           # An unidentified ejecting run must not collapse successive
           # ejections into one marker: fall back to this alert run's own id.
           marker="ejection-alert:pr-${PR_NUMBER}:run-${run_id:-alert-${GITHUB_RUN_ID}}"
-          existing="$(gh issue list --search "\"$marker\" in:body" --state open --json number --jq 'length')"
-          if [ "$existing" = "0" ]; then
+          # The dedupe lookup runs only when an issue could be created: a
+          # transient Issues API failure must not kill a deliberately
+          # non-intake run under set -e.
+          if [ "$create_intake_issue" = "1" ]; then
+            existing="$(gh issue list --search "\"$marker\" in:body" --state open --json number --jq 'length')"
+            if [ "$existing" != "0" ]; then
+              echo "intake issue for $marker already open; skipping create"
+              create_intake_issue=0
+            fi
+          fi
+          if [ "$create_intake_issue" = "1" ]; then
             issue_file="$(mktemp)"
             cat > "$issue_file" <<BODY
           PR #${PR_NUMBER} was ejected from the merge queue (reason: \`${DEQUEUE_REASON}\`); its auto-merge arm is dropped and it will sit unmerged until re-armed.
@@ -193,6 +218,4 @@ jobs:
             gh issue create \
               --title "merge-queue ejection: PR #${PR_NUMBER} — ${run_name:-failing required check}" \
               --body-file "$issue_file"
-          else
-            echo "intake issue for $marker already open; skipping create"
           fi
