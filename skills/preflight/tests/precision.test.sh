@@ -254,6 +254,36 @@ run_pf
 fires "the same fixture staged reads the same way (trap)" "scripts/inerttrap.sh:5: [mktemp-trap]"
 case "$OUT" in *"tests/fresh.test.sh"*) bad "the staged workflow wires the staged suite" "$OUT" ;; *) ok "the staged workflow wires the staged suite" ;; esac
 
+echo "=== a temp-path literal is a finding only in a creation call's hands ==="
+seed tmppath
+mkdir -p "$R/src"
+# Value shapes: a config field, fixture strings, a message. None create.
+printf '{\n  "upload_dir": "/tmp/uploads",\n  "scratch": "/var/tmp/scratch"\n}\n' >"$R/data/paths.json"
+printf 'FIXTURES = ["/tmp/data/input.csv", "/tmp/data/output.csv"]\n' >"$R/src/fixtures.py"
+printf 'const DEFAULT_SOCK = "/tmp/app.sock/ctl";\n' >"$R/src/config.js"
+printf '#!/usr/bin/env bash\nset -euo pipefail\necho "logs land under /tmp/app by default"\n' >"$R/scripts/msg.sh"
+# Accessor shapes: the platform temp accessor, TMPDIR and its fallback form.
+printf 'const os = require("os");\nconst fs = require("fs");\nconst d = fs.mkdtempSync(require("path").join(os.tmpdir(), "app-"));\n' >"$R/src/accessor.js"
+printf 'import tempfile\nd = tempfile.mkdtemp(prefix="app-")\n' >"$R/src/accessor.py"
+printf '#!/usr/bin/env bash\nset -euo pipefail\nmkdir -p "$TMPDIR/work"\nmkdir -p "${TMPDIR:-/tmp}/work"\n' >"$R/scripts/accessor.sh"
+# Commented-out calls run nothing — line and block comment forms alike.
+printf 'import os\n# os.makedirs("%s/x")\n' /tmp >"$R/src/commented.py"
+printf '// fs.mkdirSync("%s/x");\nmodule.exports = {};\n' /tmp >"$R/src/commented.js"
+printf '/* fs.mkdirSync("%s/x"); */\n * fs.mkdirSync("%s/y");\nmodule.exports = {};\n' /tmp /tmp >"$R/src/blockcommented.js"
+# The bare root is not the leak shape: creating /tmp itself is a no-op on
+# every real system, and the leak is a run-scoped SUBDIRECTORY outliving
+# the run.
+printf 'import os\nos.makedirs("%s", exist_ok=True)\n' /tmp >"$R/src/bareroot.py"
+git -C "$R" add -A
+run_pf
+clean "temp-path literals as config values, fixture strings, messages, TMPDIR-accessor creations, commented-out calls (line and block), and bare-root creation are nobody's finding"
+
+echo "=== control: a real creation beside those values still fails ==="
+printf 'import os\nos.makedirs("%s/real")\n' /tmp >"$R/src/creates.py"
+git -C "$R" add -A
+run_pf
+fires "the benign temp-path fixture was not clean because nothing ran" "src/creates.py:2: [hardcoded-temp-path]"
+
 echo "=== violations on lines this diff did not touch stay invisible ==="
 seed untouched
 printf '# Legacy\n\nTODO: ancient and unreferenced.\n\nA new paragraph.\n' >"$R/docs/legacy.md"
