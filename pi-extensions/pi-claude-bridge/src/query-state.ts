@@ -37,6 +37,16 @@ export function summarizeDroppedUserMessages(site: string, dropped: DeferredUser
 
 export interface PendingToolCall {
 	toolName: string;
+	/** The MCP invocation's schema-validated arguments. The SDK hands the handler
+	 *  the COMPLETE input, so this is the authoritative copy — the grace-timer
+	 *  finalize settles a still-partial streamed block from here instead of from
+	 *  its truncated partial JSON (vstack#1469: a `{}` settle made Pi execute
+	 *  empty-argument calls). */
+	args: Record<string, unknown>;
+	/** `QueryContext.callbackGeneration` at registration. A handler from an older
+	 *  generation whose id was never forwarded to Pi can never be answered — see
+	 *  drainStrandedToolCalls. */
+	generation: number;
 	resolve: (result: McpResult) => void;
 }
 
@@ -80,6 +90,74 @@ export function drainPendingToolCalls(queryCtx: QueryContext, cause: ToolCallDra
 	for (const pending of queryCtx.pendingToolCalls.values()) pending.resolve(result);
 	queryCtx.pendingToolCalls.clear();
 	return drained;
+}
+
+/** The error a stranded handler resolves with: its call never reached Pi and
+ *  the forward paths have marked it dead, so no result can ever arrive and the
+ *  call is guaranteed not to have executed on the Pi side. */
+export function strandedToolCallResult(): McpResult {
+	return {
+		content: [{ type: "text", text: "Claude bridge: this tool call was never forwarded to Pi before its turn ended, so it did not execute and no result can arrive. Re-run the tool." }],
+		isError: true,
+	};
+}
+
+/** Fail ONE waiting handler whose call never reached Pi. No-op when the id was
+ *  forwarded (Pi owes it a result — steer-split deliveries arrive turns later)
+ *  or nothing is waiting. Marks the id dead so a lagging stream replay can
+ *  never forward it AFTER the model was told it failed — that late forward
+ *  would execute the call a second time behind the model's back (vstack#1469).
+ *  Returns true when a handler was failed. */
+export function failStrandedToolCall(queryCtx: QueryContext, id: string): boolean {
+	if (queryCtx.forwardedToolCallIds.has(id)) return false;
+	const pending = queryCtx.pendingToolCalls.get(id);
+	if (!pending) return false;
+	queryCtx.pendingToolCalls.delete(id);
+	queryCtx.deadToolCallIds.add(id);
+	pending.resolve(strandedToolCallResult());
+	return true;
+}
+
+/** Fail every waiting handler that provably can never be answered: registered
+ *  before the CURRENT provider callback (older `generation`) with an id Pi was
+ *  never told about. Runs at the delivery site, where a fresh callback proves
+ *  the previous turn is settled. Handlers whose id WAS forwarded stay waiting —
+ *  Pi may deliver their result in a later callback (steer-split batches).
+ *  Handlers from the current generation stay untouched: their turn is still
+ *  streaming and the forward may simply not have happened yet. Failed ids are
+ *  marked dead exactly like failStrandedToolCall. */
+export function drainStrandedToolCalls(queryCtx: QueryContext): Array<{ id: string; toolName: string }> {
+	const stranded: Array<{ id: string; toolName: string }> = [];
+	for (const [id, pending] of queryCtx.pendingToolCalls) {
+		if (pending.generation >= queryCtx.callbackGeneration) continue;
+		if (queryCtx.forwardedToolCallIds.has(id)) continue;
+		stranded.push({ id, toolName: pending.toolName });
+	}
+	for (const { id } of stranded) {
+		const pending = queryCtx.pendingToolCalls.get(id)!;
+		queryCtx.pendingToolCalls.delete(id);
+		queryCtx.deadToolCallIds.add(id);
+		pending.resolve(strandedToolCallResult());
+	}
+	return stranded;
+}
+
+/** Consume a result waiting for `id`, checking the live queue first and the
+ *  reap-parked store second. Late handlers land here: Pi delivers every result
+ *  of a turn in one callback, while the SDK staggers handler invocations, so a
+ *  handler can fire after a message boundary already parked its result. */
+export function takeQueuedOrParkedResult(queryCtx: QueryContext, id: string): McpResult | undefined {
+	const queued = queryCtx.pendingResults.get(id);
+	if (queued !== undefined) {
+		queryCtx.pendingResults.delete(id);
+		return queued;
+	}
+	const parked = queryCtx.reapedResults.get(id);
+	if (parked !== undefined) {
+		queryCtx.reapedResults.delete(id);
+		return parked;
+	}
+	return undefined;
 }
 
 /** One connector call's audit state for the life of a query. `recorded` means an
@@ -174,6 +252,33 @@ export class QueryContext {
 	latestCursor = 0;
 	pendingToolCalls = new Map<string, PendingToolCall>();
 	pendingResults = new Map<string, McpResult>();
+	/** Results a message-boundary reap moved OUT of pendingResults so they stop
+	 *  poisoning mismatch reports, kept CONSUMABLE for a handler that fires later.
+	 *  The 2026-08-17 deadlock session showed the reap's "no consumer will ever
+	 *  come" assumption failing routinely: Pi delivers a turn's results in one
+	 *  callback while the SDK staggers handler invocations past the next message
+	 *  boundary. Query-scoped, bounded by the query's tool-call count. */
+	reapedResults = new Map<string, McpResult>();
+	/** Every tool-call id this query has handed to Pi inside an ENDED turn — the
+	 *  set endToolUseTurn stamps from the turn's content. A forwarded id is one Pi
+	 *  will execute and answer; it must never be emitted again (a lagging stream
+	 *  replays the same tool_use into the NEXT turn, and per-message turnBlocks
+	 *  dedup cannot see across turns — vstack#1469's duplicate executions), and a
+	 *  handler waiting on it must be left waiting at the stranded-handler drains.
+	 *  Query-scoped, never reset per message. */
+	forwardedToolCallIds = new Set<string>();
+	/** Ids whose waiting handler was resolved with strandedToolCallResult. The
+	 *  model has been told these calls failed; forwarding one later would execute
+	 *  it behind the model's back, so every forward path skips them. */
+	deadToolCallIds = new Set<string>();
+	/** Streamed block indexes suppressed as duplicate or dead tool_use blocks —
+	 *  their deltas and stops must be ignored the same way child-executed indexes
+	 *  are. Per message; reset by resetToolTracking. */
+	suppressedStreamIndexes = new Set<number>();
+	/** Bumped at every provider callback for this query. Stamped onto handlers at
+	 *  registration so the stranded-handler drain can tell "registered before this
+	 *  callback, provably settled" from "racing this callback's own stream". */
+	callbackGeneration = 0;
 	turnToolCallIds: string[] = [];
 	turnToolCalls: TurnToolCallRecord[] = [];
 	/**
@@ -186,6 +291,12 @@ export class QueryContext {
 	 * showed. Bounded by the number of tool calls in one query.
 	 */
 	queryToolNames = new Map<string, string>();
+	/** id → last-known arguments, query-scoped like queryToolNames and for the
+	 *  same reason: a late handler firing after resetToolTracking wiped the
+	 *  per-message records must still be able to exact-match the parked/queued
+	 *  result of ITS OWN call — without stored args the only fallback is
+	 *  sole-same-name, which can hand it a LIVE sibling's id (vstack#1469). */
+	queryToolArgs = new Map<string, Record<string, unknown>>();
 	claimedToolCallIds = new Set<string>();
 	deliveredToolResultIds = new Set<string>();
 	resolvedToolResultIds = new Set<string>();
@@ -335,6 +446,7 @@ export class QueryContext {
 		this.reportedToolResultMismatch = false;
 		this.childExecutedToolCalls.clear();
 		this.childExecutedStreamIndexes.clear();
+		this.suppressedStreamIndexes.clear();
 	}
 
 	/** Note a tool_use the child runs itself. `streamIndex` is present only on the
@@ -372,6 +484,7 @@ export class QueryContext {
 	recordToolCall(id: string | undefined, toolName: string, args: Record<string, unknown> = {}): void {
 		if (!id) return;
 		this.queryToolNames.set(id, toolName);
+		this.queryToolArgs.set(id, args);
 		if (!this.turnToolCallIds.includes(id)) this.turnToolCallIds.push(id);
 		const existing = this.turnToolCalls.find((call) => call.id === id);
 		if (existing) {
@@ -384,6 +497,7 @@ export class QueryContext {
 
 	updateToolCallArgs(id: string | undefined, args: Record<string, unknown>): void {
 		if (!id) return;
+		this.queryToolArgs.set(id, args);
 		const existing = this.turnToolCalls.find((call) => call.id === id);
 		if (existing) existing.arguments = args;
 	}
@@ -400,6 +514,27 @@ export class QueryContext {
 		const unclaimed = this.turnToolCalls.filter((call) => !this.claimedToolCallIds.has(call.id));
 		const byName = unclaimed.filter((call) => call.toolName === toolName);
 		const exact = byName.filter((call) => sameArgs(call.arguments, args));
+		// Ids whose RESULT already sits queued or parked. A handler can fire after
+		// the message boundary wiped the per-message records — by then Pi has
+		// executed its call and only these query-scoped stores still know it
+		// (vstack#1469: the boundary reap used to make such a handler error out
+		// and the model re-run an already-executed side-effectful call). An
+		// exact-args match here outranks the live sole-same-name fallback below,
+		// so a late handler can never steal a live sibling's id while its own
+		// result waits; without an exact match it is only a last resort.
+		const resultBacked = [...new Set([...this.pendingResults.keys(), ...this.reapedResults.keys()])]
+			.filter((id) => !this.claimedToolCallIds.has(id) && this.queryToolNames.get(id) === toolName);
+		const backedExact = resultBacked.filter((id) => sameArgs(this.queryToolArgs.get(id), args));
+		const claimBacked = (id: string, viaExact: boolean): ClaimedToolCall => {
+			this.claimedToolCallIds.add(id);
+			return {
+				toolCallId: id,
+				match: viaExact ? "tool-args" : "tool-name",
+				ambiguous: viaExact && backedExact.length > 1,
+				available: unclaimed.length,
+				...(!viaExact && hasRecordedArgs(this.queryToolArgs.get(id)) ? { argsMismatch: true } : {}),
+			};
+		};
 		let chosen: TurnToolCallRecord | undefined;
 		let match: ClaimedToolCall["match"] = "none";
 		let ambiguous = false;
@@ -409,6 +544,8 @@ export class QueryContext {
 			chosen = exact[0];
 			match = "tool-args";
 			ambiguous = exact.length > 1;
+		} else if (backedExact.length > 0) {
+			return claimBacked(backedExact[0], true);
 		} else if (byName.length === 1) {
 			// A single unclaimed call of this tool type is the only call this
 			// handler can possibly belong to, so claim it even when the recorded
@@ -430,29 +567,36 @@ export class QueryContext {
 			argsMismatch = hasRecordedArgs(byName[0].arguments);
 		}
 
+		// Last resort: nothing live matched and no exact result-backed pairing —
+		// a sole result-backed same-name id is still this handler's only possible
+		// owner, same reasoning as the live sole-candidate fallback above.
+		if (!chosen && resultBacked.length === 1) return claimBacked(resultBacked[0], false);
+
 		if (!chosen) return { match: "none", ambiguous: false, available: unclaimed.length };
 		this.claimedToolCallIds.add(chosen.id);
 		return { toolCallId: chosen.id, match, ambiguous, available: unclaimed.length, ...(argsMismatch ? { argsMismatch } : {}) };
 	}
 
 	/**
-	 * Drain results still queued in `pendingResults` and report what was dropped.
+	 * Move results still queued in `pendingResults` into the parked store and
+	 * report what moved.
 	 *
 	 * Called at a child MESSAGE boundary (message_start / the no-stream-events
-	 * assistant fallback): by then the child has necessarily received every tool
-	 * result for the previous message — a handler that matched resolved its result
-	 * directly or from this queue, and one that never matched already returned an
-	 * error. Whatever is still queued therefore belongs to a call whose handler
-	 * gave up, and no consumer will ever come for it. Left in place, each entry
-	 * poisons every later mismatch report for the whole query (queued>0 with 0/0
-	 * counters and no tool names) and forces a session rebuild per turn.
+	 * assistant fallback). Left in pendingResults, each entry poisons every later
+	 * mismatch report for the whole query (queued>0 with 0/0 counters and no tool
+	 * names) and forces a session rebuild per turn. But the boundary does NOT
+	 * prove the handler gave up — the SDK staggers handler invocations, and the
+	 * 2026-08-17 deadlock session (vstack#1469) had three of five parallel
+	 * handlers fire after this reap destroyed their results. So the reap parks
+	 * instead of dropping: reports stay clean, and a late handler still gets its
+	 * real result through takeQueuedOrParkedResult.
 	 */
 	takeStaleQueuedResults(): Array<{ id: string; toolName: string }> {
 		if (this.pendingResults.size === 0) return [];
-		const stale = [...this.pendingResults.keys()].map((id) => ({
-			id,
-			toolName: this.queryToolNames.get(id) ?? "unknown",
-		}));
+		const stale = [...this.pendingResults.entries()].map(([id, result]) => {
+			this.reapedResults.set(id, result);
+			return { id, toolName: this.queryToolNames.get(id) ?? "unknown" };
+		});
 		this.pendingResults.clear();
 		return stale;
 	}

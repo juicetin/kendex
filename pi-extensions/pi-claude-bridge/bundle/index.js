@@ -28170,6 +28170,49 @@ function drainPendingToolCalls(queryCtx, cause) {
   queryCtx.pendingToolCalls.clear();
   return drained;
 }
+function strandedToolCallResult() {
+  return {
+    content: [{ type: "text", text: "Claude bridge: this tool call was never forwarded to Pi before its turn ended, so it did not execute and no result can arrive. Re-run the tool." }],
+    isError: true
+  };
+}
+function failStrandedToolCall(queryCtx, id) {
+  if (queryCtx.forwardedToolCallIds.has(id)) return false;
+  const pending = queryCtx.pendingToolCalls.get(id);
+  if (!pending) return false;
+  queryCtx.pendingToolCalls.delete(id);
+  queryCtx.deadToolCallIds.add(id);
+  pending.resolve(strandedToolCallResult());
+  return true;
+}
+function drainStrandedToolCalls(queryCtx) {
+  const stranded = [];
+  for (const [id, pending] of queryCtx.pendingToolCalls) {
+    if (pending.generation >= queryCtx.callbackGeneration) continue;
+    if (queryCtx.forwardedToolCallIds.has(id)) continue;
+    stranded.push({ id, toolName: pending.toolName });
+  }
+  for (const { id } of stranded) {
+    const pending = queryCtx.pendingToolCalls.get(id);
+    queryCtx.pendingToolCalls.delete(id);
+    queryCtx.deadToolCallIds.add(id);
+    pending.resolve(strandedToolCallResult());
+  }
+  return stranded;
+}
+function takeQueuedOrParkedResult(queryCtx, id) {
+  const queued = queryCtx.pendingResults.get(id);
+  if (queued !== void 0) {
+    queryCtx.pendingResults.delete(id);
+    return queued;
+  }
+  const parked = queryCtx.reapedResults.get(id);
+  if (parked !== void 0) {
+    queryCtx.reapedResults.delete(id);
+    return parked;
+  }
+  return void 0;
+}
 function normalizeForCompare(value) {
   if (Array.isArray(value)) return value.map(normalizeForCompare);
   if (value && typeof value === "object") {
@@ -28208,6 +28251,33 @@ var QueryContext = class {
   latestCursor = 0;
   pendingToolCalls = /* @__PURE__ */ new Map();
   pendingResults = /* @__PURE__ */ new Map();
+  /** Results a message-boundary reap moved OUT of pendingResults so they stop
+   *  poisoning mismatch reports, kept CONSUMABLE for a handler that fires later.
+   *  The 2026-08-17 deadlock session showed the reap's "no consumer will ever
+   *  come" assumption failing routinely: Pi delivers a turn's results in one
+   *  callback while the SDK staggers handler invocations past the next message
+   *  boundary. Query-scoped, bounded by the query's tool-call count. */
+  reapedResults = /* @__PURE__ */ new Map();
+  /** Every tool-call id this query has handed to Pi inside an ENDED turn — the
+   *  set endToolUseTurn stamps from the turn's content. A forwarded id is one Pi
+   *  will execute and answer; it must never be emitted again (a lagging stream
+   *  replays the same tool_use into the NEXT turn, and per-message turnBlocks
+   *  dedup cannot see across turns — vstack#1469's duplicate executions), and a
+   *  handler waiting on it must be left waiting at the stranded-handler drains.
+   *  Query-scoped, never reset per message. */
+  forwardedToolCallIds = /* @__PURE__ */ new Set();
+  /** Ids whose waiting handler was resolved with strandedToolCallResult. The
+   *  model has been told these calls failed; forwarding one later would execute
+   *  it behind the model's back, so every forward path skips them. */
+  deadToolCallIds = /* @__PURE__ */ new Set();
+  /** Streamed block indexes suppressed as duplicate or dead tool_use blocks —
+   *  their deltas and stops must be ignored the same way child-executed indexes
+   *  are. Per message; reset by resetToolTracking. */
+  suppressedStreamIndexes = /* @__PURE__ */ new Set();
+  /** Bumped at every provider callback for this query. Stamped onto handlers at
+   *  registration so the stranded-handler drain can tell "registered before this
+   *  callback, provably settled" from "racing this callback's own stream". */
+  callbackGeneration = 0;
   turnToolCallIds = [];
   turnToolCalls = [];
   /**
@@ -28220,6 +28290,12 @@ var QueryContext = class {
    * showed. Bounded by the number of tool calls in one query.
    */
   queryToolNames = /* @__PURE__ */ new Map();
+  /** id → last-known arguments, query-scoped like queryToolNames and for the
+   *  same reason: a late handler firing after resetToolTracking wiped the
+   *  per-message records must still be able to exact-match the parked/queued
+   *  result of ITS OWN call — without stored args the only fallback is
+   *  sole-same-name, which can hand it a LIVE sibling's id (vstack#1469). */
+  queryToolArgs = /* @__PURE__ */ new Map();
   claimedToolCallIds = /* @__PURE__ */ new Set();
   deliveredToolResultIds = /* @__PURE__ */ new Set();
   resolvedToolResultIds = /* @__PURE__ */ new Set();
@@ -28365,6 +28441,7 @@ var QueryContext = class {
     this.reportedToolResultMismatch = false;
     this.childExecutedToolCalls.clear();
     this.childExecutedStreamIndexes.clear();
+    this.suppressedStreamIndexes.clear();
   }
   /** Note a tool_use the child runs itself. `streamIndex` is present only on the
    *  streamed path, where later deltas/stops for that block must be skipped —
@@ -28391,6 +28468,7 @@ var QueryContext = class {
   recordToolCall(id, toolName, args = {}) {
     if (!id) return;
     this.queryToolNames.set(id, toolName);
+    this.queryToolArgs.set(id, args);
     if (!this.turnToolCallIds.includes(id)) this.turnToolCallIds.push(id);
     const existing = this.turnToolCalls.find((call) => call.id === id);
     if (existing) {
@@ -28402,6 +28480,7 @@ var QueryContext = class {
   }
   updateToolCallArgs(id, args) {
     if (!id) return;
+    this.queryToolArgs.set(id, args);
     const existing = this.turnToolCalls.find((call) => call.id === id);
     if (existing) existing.arguments = args;
   }
@@ -28415,6 +28494,18 @@ var QueryContext = class {
     const unclaimed = this.turnToolCalls.filter((call) => !this.claimedToolCallIds.has(call.id));
     const byName = unclaimed.filter((call) => call.toolName === toolName);
     const exact = byName.filter((call) => sameArgs(call.arguments, args));
+    const resultBacked = [.../* @__PURE__ */ new Set([...this.pendingResults.keys(), ...this.reapedResults.keys()])].filter((id) => !this.claimedToolCallIds.has(id) && this.queryToolNames.get(id) === toolName);
+    const backedExact = resultBacked.filter((id) => sameArgs(this.queryToolArgs.get(id), args));
+    const claimBacked = (id, viaExact) => {
+      this.claimedToolCallIds.add(id);
+      return {
+        toolCallId: id,
+        match: viaExact ? "tool-args" : "tool-name",
+        ambiguous: viaExact && backedExact.length > 1,
+        available: unclaimed.length,
+        ...!viaExact && hasRecordedArgs(this.queryToolArgs.get(id)) ? { argsMismatch: true } : {}
+      };
+    };
     let chosen;
     let match = "none";
     let ambiguous = false;
@@ -28423,33 +28514,38 @@ var QueryContext = class {
       chosen = exact[0];
       match = "tool-args";
       ambiguous = exact.length > 1;
+    } else if (backedExact.length > 0) {
+      return claimBacked(backedExact[0], true);
     } else if (byName.length === 1) {
       chosen = byName[0];
       match = "tool-name";
       argsMismatch = hasRecordedArgs(byName[0].arguments);
     }
+    if (!chosen && resultBacked.length === 1) return claimBacked(resultBacked[0], false);
     if (!chosen) return { match: "none", ambiguous: false, available: unclaimed.length };
     this.claimedToolCallIds.add(chosen.id);
     return { toolCallId: chosen.id, match, ambiguous, available: unclaimed.length, ...argsMismatch ? { argsMismatch } : {} };
   }
   /**
-   * Drain results still queued in `pendingResults` and report what was dropped.
+   * Move results still queued in `pendingResults` into the parked store and
+   * report what moved.
    *
    * Called at a child MESSAGE boundary (message_start / the no-stream-events
-   * assistant fallback): by then the child has necessarily received every tool
-   * result for the previous message — a handler that matched resolved its result
-   * directly or from this queue, and one that never matched already returned an
-   * error. Whatever is still queued therefore belongs to a call whose handler
-   * gave up, and no consumer will ever come for it. Left in place, each entry
-   * poisons every later mismatch report for the whole query (queued>0 with 0/0
-   * counters and no tool names) and forces a session rebuild per turn.
+   * assistant fallback). Left in pendingResults, each entry poisons every later
+   * mismatch report for the whole query (queued>0 with 0/0 counters and no tool
+   * names) and forces a session rebuild per turn. But the boundary does NOT
+   * prove the handler gave up — the SDK staggers handler invocations, and the
+   * 2026-08-17 deadlock session (vstack#1469) had three of five parallel
+   * handlers fire after this reap destroyed their results. So the reap parks
+   * instead of dropping: reports stay clean, and a late handler still gets its
+   * real result through takeQueuedOrParkedResult.
    */
   takeStaleQueuedResults() {
     if (this.pendingResults.size === 0) return [];
-    const stale = [...this.pendingResults.keys()].map((id) => ({
-      id,
-      toolName: this.queryToolNames.get(id) ?? "unknown"
-    }));
+    const stale = [...this.pendingResults.entries()].map(([id, result]) => {
+      this.reapedResults.set(id, result);
+      return { id, toolName: this.queryToolNames.get(id) ?? "unknown" };
+    });
     this.pendingResults.clear();
     return stale;
   }
@@ -45240,6 +45336,17 @@ var TOOL_USE_END_GRACE_MS = 1500;
 function endToolUseTurn(c) {
   if (!c.currentPiStream || !c.turnOutput) return;
   cancelScheduledToolUseEnd(c);
+  const partial2 = c.turnOutput.content.filter((b) => b?.type === "toolCall" && "partialJson" in b);
+  if (partial2.length > 0) {
+    const calls = partial2.map((b) => ({ id: b.id, name: b.name }));
+    debug(`endToolUseTurn: pruning ${partial2.length} still-partial tool call(s) \u2014 truncated arguments never execute:`, calls.map((entry) => `${entry.name} [${entry.id}]`).join(", "));
+    diagDump("partial_tool_calls_pruned", { count: partial2.length, calls });
+    appendIntegrityEntry("partial_tool_calls_pruned", { count: partial2.length, calls });
+    c.turnOutput.content = c.turnOutput.content.filter((b) => !(b?.type === "toolCall" && "partialJson" in b));
+  }
+  for (const block of c.turnOutput.content) {
+    if (block?.type === "toolCall" && typeof block.id === "string") c.forwardedToolCallIds.add(block.id);
+  }
   c.turnOutput.stopReason = "toolUse";
   c.currentPiStream.push({ type: "done", reason: "toolUse", message: c.turnOutput });
   c.currentPiStream.end();
@@ -45268,11 +45375,11 @@ function reapStaleQueuedResults(c) {
   const stale = c.takeStaleQueuedResults();
   if (stale.length === 0) return;
   const names = stale.map((entry) => entry.toolName);
-  debug(`reapStaleQueuedResults: dropping ${stale.length} queued tool result(s) with no possible consumer:`, names.join(", "));
-  diagDump("stale_queued_tool_results_dropped", { count: stale.length, stale });
-  appendIntegrityEntry("stale_queued_tool_results_dropped", { count: stale.length, stale });
+  debug(`reapStaleQueuedResults: parked ${stale.length} early tool result(s) awaiting a late handler:`, names.join(", "));
+  diagDump("stale_queued_tool_results_parked", { count: stale.length, stale });
+  appendIntegrityEntry("stale_queued_tool_results_parked", { count: stale.length, stale });
   safeNotify(
-    `Claude bridge: dropped ${stale.length} tool result(s) whose handler never matched (${names.slice(0, 6).join(", ")}${names.length > 6 ? ", \u2026" : ""}). The model saw an error for these calls and may retry them.`,
+    `Claude bridge: parked ${stale.length} early tool result(s) whose handler has not arrived (${names.slice(0, 6).join(", ")}${names.length > 6 ? ", \u2026" : ""}). A late handler can still consume them.`,
     "warning"
   );
 }
@@ -45282,24 +45389,60 @@ function updateTurnOutputModel(modelId, c = ctx()) {
   debug(`provider: active Claude model changed ${c.turnOutput.model} -> ${modelId}`);
   c.turnOutput.model = modelId;
 }
-function finalizeToolUseTurnFromMcpInvocation(queryCtx, toolCallId, toolName, mappedArgs) {
-  if (!queryCtx.currentPiStream || !queryCtx.turnOutput) return;
+var FINALIZE_MAX_REARMS = 3;
+function finalizeToolUseTurnFromMcpInvocation(queryCtx, toolCallId, toolName, mappedArgs, rearmCount = 0) {
+  if (!queryCtx.currentPiStream || !queryCtx.turnOutput) {
+    if (failStrandedToolCall(queryCtx, toolCallId)) {
+      debug(`mcp handler: ${toolName} [${toolCallId}] stranded \u2014 turn ended before its call reached Pi; resolved with error`);
+      diagDump("tool_handler_stranded", { toolCallId, toolName, site: "finalize-no-stream" });
+      appendIntegrityEntry("tool_handler_stranded", { toolCallId, toolName, site: "finalize-no-stream" });
+    }
+    return;
+  }
   let idx = queryCtx.turnBlocks.findIndex((b) => b.type === "toolCall" && b.id === toolCallId);
   if (idx >= 0) {
     const block = queryCtx.turnBlocks[idx];
     if ("partialJson" in block) {
-      block.arguments = mapToolArgs(block.name, parsePartialJson(block.partialJson, block.arguments));
+      block.arguments = mappedArgs;
       queryCtx.updateToolCallArgs(block.id, block.arguments);
       delete block.partialJson;
       delete block.index;
       queryCtx.currentPiStream.push({ type: "toolcall_end", contentIndex: idx, toolCall: block, partial: queryCtx.turnOutput });
     }
+  } else if (queryCtx.forwardedToolCallIds.has(toolCallId) || queryCtx.deadToolCallIds.has(toolCallId)) {
+    debug(`mcp handler: ${toolName} [${toolCallId}] already ${queryCtx.forwardedToolCallIds.has(toolCallId) ? "forwarded" : "dead"} \u2014 not re-emitting`);
   } else {
     queryCtx.turnBlocks.push({ type: "toolCall", id: toolCallId, name: toolName, arguments: mappedArgs });
     idx = queryCtx.turnBlocks.length - 1;
     const block = queryCtx.turnBlocks[idx];
     queryCtx.currentPiStream.push({ type: "toolcall_start", contentIndex: idx, partial: queryCtx.turnOutput });
     queryCtx.currentPiStream.push({ type: "toolcall_end", contentIndex: idx, toolCall: block, partial: queryCtx.turnOutput });
+  }
+  for (let i = 0; i < queryCtx.turnBlocks.length; i++) {
+    const sibling = queryCtx.turnBlocks[i];
+    if (sibling.type !== "toolCall" || !("partialJson" in sibling)) continue;
+    const waiting = queryCtx.pendingToolCalls.get(sibling.id);
+    if (!waiting) continue;
+    sibling.arguments = waiting.args;
+    queryCtx.updateToolCallArgs(sibling.id, sibling.arguments);
+    delete sibling.partialJson;
+    delete sibling.index;
+    queryCtx.currentPiStream.push({ type: "toolcall_end", contentIndex: i, toolCall: sibling, partial: queryCtx.turnOutput });
+  }
+  const unsettled = queryCtx.turnBlocks.filter((b) => b.type === "toolCall" && "partialJson" in b);
+  if (unsettled.length > 0 && rearmCount < FINALIZE_MAX_REARMS) {
+    debug(`mcp handler: ${unsettled.length} sibling tool call(s) still streaming \u2014 re-arming grace (${rearmCount + 1}/${FINALIZE_MAX_REARMS})`);
+    scheduleToolUseTurnEnd(
+      queryCtx,
+      () => finalizeToolUseTurnFromMcpInvocation(queryCtx, toolCallId, toolName, mappedArgs, rearmCount + 1),
+      `finalize-rearm:${toolName}`
+    );
+    return;
+  }
+  const executable = queryCtx.turnBlocks.some((b) => b.type === "toolCall" && !("partialJson" in b));
+  if (!executable) {
+    debug(`mcp handler: nothing executable in this turn after suppression \u2014 leaving the stream to its own terminal events (${toolName} [${toolCallId}])`);
+    return;
   }
   queryCtx.turnSawToolCall = true;
   debug(`mcp handler: finalizing tool_use turn from MCP invocation [${toolCallId}] (${toolName}) \u2014 terminal stream events never arrived`);
@@ -45325,6 +45468,7 @@ function processStreamEvent(message, customToolNameToPi, model, c = ctx()) {
     c.turnSawStreamEvent = true;
     ensureTurnStarted(c);
     c.childExecutedStreamIndexes.delete(event.index);
+    c.suppressedStreamIndexes.delete(event.index);
     if (event.content_block?.type === "tool_use" && isChildExecutedTool(event.content_block.name)) {
       c.noteChildExecutedToolCall(event.content_block.id, event.content_block.name, event.index);
       debug(`processStreamEvent: child-executed tool ${event.content_block.name} [${event.content_block.id}] \u2014 not mirrored as a Pi tool call`);
@@ -45337,6 +45481,17 @@ function processStreamEvent(message, customToolNameToPi, model, c = ctx()) {
       c.turnBlocks.push({ type: "thinking", thinking: "", thinkingSignature: "", index: event.index });
       c.currentPiStream.push({ type: "thinking_start", contentIndex: c.turnBlocks.length - 1, partial: c.turnOutput });
     } else if (event.content_block?.type === "tool_use") {
+      const streamedId = event.content_block.id;
+      if (typeof streamedId === "string" && (c.forwardedToolCallIds.has(streamedId) || c.deadToolCallIds.has(streamedId))) {
+        c.suppressedStreamIndexes.add(event.index);
+        debug(`processStreamEvent: tool_use ${streamedId} already ${c.forwardedToolCallIds.has(streamedId) ? "forwarded" : "dead"} \u2014 suppressing duplicate stream block`);
+        return;
+      }
+      if (typeof streamedId === "string" && c.turnBlocks.some((b) => b.type === "toolCall" && b.id === streamedId)) {
+        c.suppressedStreamIndexes.add(event.index);
+        debug(`processStreamEvent: tool_use ${streamedId} already recorded in this turn \u2014 suppressing duplicate stream block`);
+        return;
+      }
       c.turnSawToolCall = true;
       const mappedName = mapToolName(event.content_block.name, customToolNameToPi);
       c.recordToolCall(event.content_block.id, mappedName, {});
@@ -45355,7 +45510,7 @@ function processStreamEvent(message, customToolNameToPi, model, c = ctx()) {
     return;
   }
   if (event?.type === "content_block_delta") {
-    if (c.childExecutedStreamIndexes.has(event.index)) {
+    if (c.childExecutedStreamIndexes.has(event.index) || c.suppressedStreamIndexes.has(event.index)) {
       c.turnSawStreamEvent = true;
       return;
     }
@@ -45384,7 +45539,7 @@ function processStreamEvent(message, customToolNameToPi, model, c = ctx()) {
     return;
   }
   if (event?.type === "content_block_stop") {
-    if (c.childExecutedStreamIndexes.has(event.index)) {
+    if (c.childExecutedStreamIndexes.has(event.index) || c.suppressedStreamIndexes.has(event.index)) {
       c.turnSawStreamEvent = true;
       return;
     }
@@ -45427,6 +45582,7 @@ function processStreamEvent(message, customToolNameToPi, model, c = ctx()) {
 }
 function appendMissingToolUsesFromAssistant(assistantMsg, model, customToolNameToPi, c) {
   if (!assistantMsg?.content) return false;
+  const streamLive = Boolean(c.currentPiStream && c.turnOutput);
   let sawToolUse = false;
   for (const block of assistantMsg.content) {
     if (block.type !== "tool_use") continue;
@@ -45435,11 +45591,16 @@ function appendMissingToolUsesFromAssistant(assistantMsg, model, customToolNameT
       debug(`assistant message: child-executed tool ${block.name} [${block.id}] \u2014 not mirrored as a Pi tool call`);
       continue;
     }
-    sawToolUse = true;
     const existingIdx = c.turnBlocks.findIndex((b) => b.type === "toolCall" && b.id === block.id);
+    if (existingIdx < 0 && (c.forwardedToolCallIds.has(block.id) || c.deadToolCallIds.has(block.id))) {
+      debug(`assistant message: tool_use ${block.id} already ${c.forwardedToolCallIds.has(block.id) ? "forwarded" : "dead"} \u2014 skipping duplicate`);
+      continue;
+    }
+    sawToolUse = true;
     const name = mapToolName(block.name, customToolNameToPi);
     const mappedArgs = mapToolArgs(name, block.input);
     c.recordToolCall(block.id, name, mappedArgs);
+    if (!streamLive) continue;
     if (existingIdx >= 0) {
       const existing = c.turnBlocks[existingIdx];
       existing.name = name;
@@ -45521,6 +45682,10 @@ function processAssistantMessage(message, model, customToolNameToPi, c = ctx()) 
       if (isChildExecutedTool(block.name)) {
         c.noteChildExecutedToolCall(block.id, block.name);
         debug(`processAssistantMessage fallback: child-executed tool ${block.name} [${block.id}] \u2014 not mirrored as a Pi tool call`);
+        continue;
+      }
+      if (!c.turnBlocks.some((b) => b.type === "toolCall" && b.id === block.id) && (c.forwardedToolCallIds.has(block.id) || c.deadToolCallIds.has(block.id))) {
+        debug(`processAssistantMessage fallback: tool_use ${block.id} already ${c.forwardedToolCallIds.has(block.id) ? "forwarded" : "dead"} \u2014 skipping duplicate`);
         continue;
       }
       ensureTurnStarted(c);
@@ -46315,12 +46480,11 @@ function buildMcpServers(tools, queryCtx) {
       } else if (claim.match !== "tool-args" || claim.ambiguous) {
         debug(`mcp handler: ${tool.name} [${toolCallId}] claimed by ${claim.match}${claim.ambiguous ? " (ambiguous)" : ""}`);
       }
-      if (toolCallId && queryCtx.pendingResults.has(toolCallId)) {
-        const result = queryCtx.pendingResults.get(toolCallId);
-        queryCtx.pendingResults.delete(toolCallId);
+      const earlyResult = toolCallId ? takeQueuedOrParkedResult(queryCtx, toolCallId) : void 0;
+      if (earlyResult !== void 0) {
         queryCtx.markToolResultResolved(toolCallId);
-        debug(`mcp handler: ${tool.name} [${toolCallId}] \u2192 resolved from queue (${queryCtx.pendingResults.size} remaining)`);
-        return result;
+        debug(`mcp handler: ${tool.name} [${toolCallId}] \u2192 resolved from queue/parked (${queryCtx.pendingResults.size} queued, ${queryCtx.reapedResults.size} parked remaining)`);
+        return earlyResult;
       }
       debug(`mcp handler: ${tool.name} [${toolCallId}] \u2192 waiting`);
       scheduleToolUseTurnEnd(
@@ -46331,6 +46495,8 @@ function buildMcpServers(tools, queryCtx) {
       return new Promise((resolve5) => {
         queryCtx.pendingToolCalls.set(toolCallId, {
           toolName: tool.name,
+          args: mappedArgs,
+          generation: queryCtx.callbackGeneration,
           resolve: (result) => {
             queryCtx.markToolResultResolved(toolCallId);
             resolve5(result);
@@ -46422,13 +46588,14 @@ function streamClaudeAgentSdkInLane(model, context, options) {
     const queryCtx = ctx();
     queryCtx.currentPiStream = stream;
     queryCtx.resetTurnState(model);
+    queryCtx.callbackGeneration += 1;
     activeStreamIdleWatchdogs.get(queryCtx)?.refresh();
     const allResults = extractAllToolResults2(context);
     debug(`provider: tool results, ${allResults.length} results, ${queryCtx.pendingToolCalls.size} waiting handlers, ctx.msgs=${context.messages.length}`);
     const unmatchedResultIds = [];
     for (const result of allResults) {
       const id = result.toolCallId;
-      if (id && !queryCtx.hasRecordedToolCall(id)) {
+      if (id && !queryCtx.hasRecordedToolCall(id) && !queryCtx.forwardedToolCallIds.has(id)) {
         queryCtx.markToolResultUnmatched(id);
         unmatchedResultIds.push(id);
         debug(`ERROR: tool result [${id}] has no registered tool_call id; refusing to queue or deliver`);
@@ -46447,7 +46614,7 @@ function streamClaudeAgentSdkInLane(model, context, options) {
         debug(`WARNING: tool result without toolCallId, cannot match`);
       }
       if (queryCtx.pendingToolCalls.size > 0 && queryCtx.pendingResults.size > 0) {
-        debug(`BUG: both maps non-empty! handlers=${queryCtx.pendingToolCalls.size} results=${queryCtx.pendingResults.size}`);
+        debug(`note: handlers and queued results coexist: handlers=${queryCtx.pendingToolCalls.size} results=${queryCtx.pendingResults.size}`);
       }
     }
     if (unmatchedResultIds.length > 0) {
@@ -46455,13 +46622,26 @@ function streamClaudeAgentSdkInLane(model, context, options) {
         content: [{ type: "text", text: `Claude bridge internal error: ${unmatchedResultIds.length} tool result(s) did not match any registered tool_call id. The turn was stopped to avoid delivering tool output to the wrong call. Unmatched ids: ${unmatchedResultIds.slice(0, 8).join(", ")}${unmatchedResultIds.length > 8 ? ", ..." : ""}` }],
         isError: true
       };
-      for (const pending of queryCtx.pendingToolCalls.values()) pending.resolve(errorResult);
+      for (const [pendingId, pending] of queryCtx.pendingToolCalls) {
+        if (!queryCtx.forwardedToolCallIds.has(pendingId)) queryCtx.deadToolCallIds.add(pendingId);
+        pending.resolve(errorResult);
+      }
       queryCtx.pendingToolCalls.clear();
       reportToolResultMismatch(queryCtx, "unmatched tool result", cwd);
     }
     if (queryCtx.pendingToolCalls.size > 0) {
-      debug(`WARNING: ${queryCtx.pendingToolCalls.size} MCP handlers still waiting after delivering ${allResults.length} results`);
-      safeNotify(`Claude bridge: ${queryCtx.pendingToolCalls.size} tool handler(s) still waiting \u2014 provider may be stuck`, "warning");
+      const stranded = drainStrandedToolCalls(queryCtx);
+      if (stranded.length > 0) {
+        const names = stranded.map((entry) => entry.toolName).join(", ");
+        debug(`provider: failed ${stranded.length} stranded MCP handler(s) never forwarded to Pi: ${names}`);
+        diagDump("tool_handlers_stranded", { count: stranded.length, stranded });
+        appendIntegrityEntry("tool_handlers_stranded", { count: stranded.length, stranded });
+        safeNotify(`Claude bridge: failed ${stranded.length} tool call(s) that never reached Pi before their turn ended (${names}). The model saw a retryable error.`, "warning");
+      }
+      if (queryCtx.pendingToolCalls.size > 0) {
+        debug(`WARNING: ${queryCtx.pendingToolCalls.size} MCP handlers still waiting after delivering ${allResults.length} results`);
+        safeNotify(`Claude bridge: ${queryCtx.pendingToolCalls.size} tool handler(s) still waiting \u2014 provider may be stuck`, "warning");
+      }
     }
     let capturedThrough = context.messages.length;
     if (lastMsgRole === "user") {
@@ -46538,6 +46718,10 @@ function streamClaudeAgentSdkInLane(model, context, options) {
   ctx().currentPiStream = stream;
   ctx().pendingToolCalls.clear();
   ctx().pendingResults.clear();
+  ctx().reapedResults.clear();
+  ctx().forwardedToolCallIds.clear();
+  ctx().deadToolCallIds.clear();
+  ctx().callbackGeneration = 0;
   ctx().deferredUserMessages = [];
   ctx().resetTurnState(model);
   ctx().resetToolTracking();
