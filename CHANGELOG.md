@@ -90,6 +90,14 @@
   owns instead of the shared temp namespace, which flaked under concurrency
   (#1501).
 - growth-guards: a green suite run prints nothing (#1503).
+- growth-guards: `install-git-hooks --check` reports `armed` only when it has
+  verified the shims really gate — entry point and helper compared by location
+  and bytes against this install, the interpreter against a trusted list, and
+  the command spelling required to survive shell evaluation. Anything it cannot
+  verify is exit `2`, never a verdict, and `install` refuses what `--check`
+  could not vouch for. Previously a lookalike path, a copied helper, a fake
+  interpreter or an expandable path all read as `armed` while commits bypassed
+  every guard (#1509).
 - preflight: installed-artifact subtrees are out of scope for every lane that
   judges how a file is authored, not just `docs-cited-paths` — the finding
   named an upstream choice the consuming repo cannot fix (#1498, VST-312).

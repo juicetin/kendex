@@ -13,11 +13,13 @@
 #
 # Exit codes: 0 shims in place (or deliberately skipped, stated on stdout);
 # 1 one or more shims could not be installed; 2 usage error. --check is
-# read-only: 0 armed, 1 drifted/absent/dormant, 2 could not determine.
+# read-only: 0 armed — in .git/hooks, or in the directory core.hooksPath
+# redirects to — 1 drifted/absent/dormant, 2 could not determine.
 set -euo pipefail
 
 HELPER_NAME="vstack-guards"
 HELPER_MARKER="vstack growth-guards git hooks"
+GG_HT="$(printf '\t')"
 # Trailing marker on our hook line; only this installer ever writes it, so a
 # foreign hook that merely mentions the helper by name is not mistaken for an
 # install that is already current.
@@ -50,7 +52,10 @@ consumer's own hook untouched.
 1 not armed (drifted, absent, or dormant behind a core.hooksPath that
 redirects git away from them), 2 the question could not be answered — an
 unreadable hooks directory is 2, because failure to measure is not a clean
-measurement. The verdict line on stdout names what is wrong and the remedy.
+measurement. Under core.hooksPath the redirected directory is what decides:
+hooks there that run this skill's pre-commit and commit-msg are armed, and
+anything else is 1. The verdict line on stdout names what is wrong and the
+remedy.
 
 Prints one summary line on stdout; warnings go to stderr.
 
@@ -145,29 +150,18 @@ fi
 # scripts directory first, then rediscovers one from the MAIN checkout (linked
 # worktrees share this hooks directory and may carry no skills of their own),
 # so a moved or re-installed checkout repairs itself.
-write_helper() { # PATH
-  local helper="$1" tmp=""
-  # Non-destructive even against a name collision: never write through a
-  # symlink, never replace a non-regular file, never overwrite content
-  # missing our marker.
-  if [ -L "$helper" ] || { [ -e "$helper" ] && [ ! -f "$helper" ]; }; then
-    warn "$helper exists and is not a regular file; refusing to replace it"
-    return 1
-  fi
-  if [ -f "$helper" ] && ! grep -qF -- "$HELPER_MARKER" "$helper" 2>/dev/null; then
-    warn "$helper exists but was not written by this installer; refusing to overwrite it"
-    return 1
-  fi
-  tmp="$(mktemp "$helper.tmp.XXXXXX")" || return 1
-  # Single-quote the baked path for the generated sh, escaping any quote in it.
+# The exact bytes this installer writes as the helper. Generating and
+# VERIFYING both go through here, so a checker cannot drift from a writer
+# and start blessing a helper that only resembles one.
+helper_body() { # -> the helper this installer would write, on stdout
   local sq="'" escaped=""
   escaped="${SCRIPT_DIR//$sq/$sq\\$sq$sq}"
-  cat >"$tmp" <<HELPER_HEAD || { rm -f -- "$tmp"; return 1; }
+  cat <<HELPER_HEAD
 #!/bin/sh
 # Scripts directory of the install that wrote this file.
 installed_scripts='$escaped'
 HELPER_HEAD
-  cat >>"$tmp" <<'HELPER' || { rm -f -- "$tmp"; return 1; }
+  cat <<'HELPER'
 # vstack growth-guards git hooks. Managed by the growth-guards skill and
 # rewritten on every install — do not edit.
 #
@@ -216,6 +210,25 @@ for root in "$main" "$top"; do
 done
 fail "no executable growth-guards $mode script at $installed_scripts, nor under $main or $top ($skill_roots)"
 HELPER
+}
+write_helper() { # PATH
+  local helper="$1" tmp=""
+  # Non-destructive even against a name collision: never write through a
+  # symlink, never replace a non-regular file, never overwrite content
+  # missing our marker.
+  if [ -L "$helper" ] || { [ -e "$helper" ] && [ ! -f "$helper" ]; }; then
+    warn "$helper exists and is not a regular file; refusing to replace it"
+    return 1
+  fi
+  if [ -f "$helper" ] && ! grep -qF -- "$HELPER_MARKER" "$helper" 2>/dev/null; then
+    warn "$helper exists but was not written by this installer; refusing to overwrite it"
+    return 1
+  fi
+  tmp="$(mktemp "$helper.tmp.XXXXXX")" || return 1
+  # Single-quote the baked path for the generated sh, escaping any quote in it.
+  local sq="'" escaped=""
+  escaped="${SCRIPT_DIR//$sq/$sq\\$sq$sq}"
+  helper_body >"$tmp" || { rm -f -- "$tmp"; return 1; }
   # mktemp creates 0600; a hook must be readable and executable by whoever
   # git runs as, which on a shared repository is not only its owner.
   chmod 0755 "$tmp" 2>/dev/null && mv -f -- "$tmp" "$helper" || {
@@ -290,6 +303,14 @@ install_hook() { # HOOK
   # shebang.
   if ! head -n 1 "$path" | grep -qE "$SH_SHEBANG_RE"; then
     hook_warn "$path is not a POSIX-shell script; not modifying it — the $hook guard is NOT installed"
+    return 0
+  fi
+  # The SAME predicate --check applies. Installing under a shebang the check
+  # cannot vouch for would report a successful install that the very next
+  # `vstack check` calls unverifiable, so the guard is not inserted at all
+  # and the reason says which interpreter to use.
+  if ! gg_trusted_interpreter "$(head -n 1 "$path")"; then
+    hook_warn "$path runs under an interpreter that cannot be verified ($(head -n 1 "$path")); not modifying it — the $hook guard is NOT installed. Use a #! naming a shell in /bin or /usr/bin directly."
     return 0
   fi
   # Idempotence keys on the EXACT delegate AT ITS POSITION — line 2, straight
@@ -545,8 +566,8 @@ add_reason() { # MESSAGE
   fi
 }
 
-check_helper() { # -> 0 armed, 1 not armed, 2 could not determine
-  local helper="$HOOKS_DIR/$HELPER_NAME" status=0
+check_helper() { # DIR -> 0 armed, 1 not armed, 3 unverifiable
+  local helper="$1/$HELPER_NAME" status=0
   if [ ! -e "$helper" ] && [ ! -L "$helper" ]; then
     add_reason "helper $HELPER_NAME is missing"
     return 1
@@ -568,11 +589,255 @@ check_helper() { # -> 0 armed, 1 not armed, 2 could not determine
     add_reason "helper $HELPER_NAME is not executable (commits are blocked, not guarded)"
     return 1
   fi
+  # The marker is a comment, and anything can carry one: an executable
+  # `# vstack growth-guards git hooks` plus `exit 0` passes every test above
+  # while bypassing every guard. That holds in `.git/hooks` too — `--check`
+  # is READ-ONLY, so "the installer rewrites this file" is not something it
+  # gets to assume about the copy sitting there right now. Only the bytes
+  # settle what the helper does, so they are compared wherever it lives.
+  if ! helper_body 2>/dev/null | cmp -s - "$helper"; then
+    add_reason "helper $HELPER_NAME is not the one this installer generates, so what it runs cannot be verified"
+    return 3
+  fi
   return 0
 }
 
-check_hook() { # HOOK -> 0 armed, 1 not armed, 2 could not determine
-  local hook="$1" path="$HOOKS_DIR/$1" line="" second=""
+# The one shape the stand-down message prescribes for a core.hooksPath
+# directory, matched as a WHOLE FILE rather than searched for line by line:
+# a POSIX-sh shebang, then exactly one command, and that command is this
+# skill's entry point for the hook (optionally through `exec`, optionally
+# quoted, arguments allowed). Blank lines and comments are ignored.
+#
+# A scan that accepted the entry point ANYWHERE executable-looking kept
+# finding new ways to be wrong — `if false; then … fi`, an uncalled function
+# body, a heredoc whose terminator is indented — each reporting `armed` for a
+# clone whose commits git does not gate at all. Deciding reachability needs a
+# shell parser, and a verifier that guesses at it fails OPEN, which is the
+# one direction this answer must never fail in. So the grammar is closed: a
+# hook this function cannot recognize is reported as UNVERIFIABLE by its
+# caller, never as armed and never as ungated.
+# A shebang that hands the interpreter an option can stop the body running at
+# all: `#!/bin/sh -n` syntax-checks and exits 0, so an otherwise perfect hook
+# executes no guard and every commit passes. The shared shebang check accepts
+# options because a repo's own hooks may legitimately carry them; a hook this
+# tool is about to call ARMED may not.
+# Canonical directory of a path: symlinked parents resolve, so an install
+# reached through `.agents/` or any other link compares equal to itself.
+canonical_dir() { # PATH -> physical directory on stdout, nonzero if unreachable
+  local d
+  d="$(dirname -- "$1")" || return 1
+  (cd -- "$d" 2>/dev/null && pwd -P) || return 1
+}
+
+# The interpreter a hand-wired hook may run, by FULL PATH. A basename is not
+# an identity here either: `#!/tmp/fake/sh` can be a copy of /bin/true, and
+# then git runs true, ignores the body, and the hook gates nothing. An `env`
+# form resolves through PATH, which is no more knowable, so it is not on the
+# list — such a hook is unverifiable rather than armed.
+gg_trusted_interpreter() { # SHEBANG-LINE -> 0 trusted
+  local rest="$1"
+  rest="${rest#\#!}"
+  rest="${rest#"${rest%%[![:blank:]]*}"}"
+  rest="${rest%"${rest##*[![:blank:]]}"}"
+  case "$rest" in
+    /bin/sh | /bin/bash | /bin/dash | /bin/ksh | /bin/zsh) ;;
+    /usr/bin/sh | /usr/bin/bash | /usr/bin/dash | /usr/bin/ksh | /usr/bin/zsh) ;;
+    *) return 1 ;;
+  esac
+  # On the list is not on the disk. `/bin/dash` and `/bin/ksh` are absent
+  # from plenty of hosts, and git answers `cannot exec` for every commit —
+  # clean ones included — rather than running the hook.
+  [ -f "$rest" ] && [ -x "$rest" ]
+}
+
+hook_runs_entry_point() { # HOOK PATH -> 0 yes, 1 no (recognizably), 3 unrecognized
+  local hook="$1" path="$2" line="" body="" cmd="" tail="" rest="" cmd_dir="" own_dir="" shebang=""
+  local quoting="" seen=0 matched=0 named=0 opaque=0
+  [ -r "$path" ] || return 2
+  own_dir="$(canonical_dir "$SCRIPT_DIR/$hook")" || return 2
+  while IFS= read -r line || [ -n "$line" ]; do
+    # Blanks, not all whitespace: the shell separates tokens on blanks, so a
+    # line starting with CR runs a command named `\rexec`, not `exec`.
+    body="${line%%[![:blank:]]*}"
+    body="${line#"$body"}"
+    case "$body" in
+      "" | "#"*) continue ;;
+    esac
+    # An executable line, whatever it turns out to be. Counted BEFORE any
+    # classification: a line this function cannot read still runs, and one
+    # skipped without counting left a later entry point looking like the only
+    # command in the file.
+    seen=$((seen + 1))
+    # `[:cntrl:]` includes TAB, which is an ordinary separator — `exit<TAB>0`
+    # is a normal command. Only control characters the shell keeps inside a
+    # word make a line unreadable, so tabs are neutralized before the test.
+    case "${body//"$GG_HT"/ }" in
+      *[[:cntrl:]]*) opaque=1; continue ;;
+    esac
+    rest="$body"
+    case "$rest" in
+      exec[[:blank:]]*)
+        rest="${rest#exec}"
+        rest="${rest#"${rest%%[![:blank:]]*}"}"
+        # `exec -a NAME cmd` runs cmd under another argv[0]. The command word
+        # is then two tokens further along, and reading the option as the
+        # command would report a hook that gates correctly as not gated.
+        case "$rest" in
+          -*)
+            opaque=1
+            continue
+            ;;
+        esac
+        ;;
+    esac
+    # Split off the command word, honouring one layer of quoting so a path
+    # containing a space stays one word.
+    # `NAME=value cmd` runs cmd with an env prefix, so the command word is
+    # further along. Reading the assignment as the command reported a hook
+    # that gates as NOT gated, so the shape is unverifiable instead.
+    case "$rest" in
+      [A-Za-z_]*=*)
+        case "${rest%%=*}" in
+          *[!A-Za-z0-9_]*) ;;
+          *) opaque=1; continue ;;
+        esac
+        ;;
+    esac
+    quoting=none
+    case "$rest" in
+      \"*)
+        quoting=double
+        cmd="${rest#\"}"
+        cmd="${cmd%%\"*}"
+        tail="${rest#\"$cmd\"}"
+        ;;
+      \'*)
+        quoting=single
+        cmd="${rest#\'}"
+        cmd="${cmd%%\'*}"
+        tail="${rest#\'$cmd\'}"
+        ;;
+      *)
+        cmd="${rest%%[[:blank:]]*}"
+        tail="${rest#"$cmd"}"
+        ;;
+    esac
+    # The word the SHELL runs, not the one written down. A spelling that
+    # survives evaluation unchanged is the only one this check can compare
+    # against a file on disk: single quotes make everything literal, double
+    # quotes still expand $ and backticks and honour backslashes, and an
+    # unquoted word additionally globs and expands ~. A checkout path that
+    # literally contains `$slot` passed every file test here while /bin/sh
+    # ran whatever `slot` pointed at.
+    case "$quoting" in
+      single) ;;
+      double)
+        case "$cmd" in
+          *'$'* | *'`'* | *'\\'*) opaque=1; continue ;;
+        esac
+        ;;
+      *)
+        case "$cmd" in
+          *'$'* | *'`'* | *'\\'* | *'*'* | *'?'* | *'['* | *']'* | *'{'* | *'}'* | *'~'*)
+            opaque=1
+            continue
+            ;;
+        esac
+        ;;
+    esac
+    # A tail has to be SEPARATED from the command by a real blank. The shell
+    # concatenates `"…/commit-msg""$1"` into one word, so accepting it as
+    # command-plus-tail describes a hook that names something git cannot run
+    # and fails every commit rather than judging it.
+    case "$tail" in
+      "" | [[:blank:]]*) ;;
+      *) continue ;;
+    esac
+    # A path is not an identity. `growth-guards/scripts/pre-commit` is a
+    # NAME, and an executable copy of /bin/true can wear it — passing every
+    # file test while gating nothing. The only thing that settles it is
+    # WHICH FILE this resolves to, so the candidate is compared against this
+    # install's own entry point by physical location.
+    case "$cmd" in
+      */"$hook") ;;
+      *) continue ;;
+    esac
+    if [ ! -f "$cmd" ] || [ ! -x "$cmd" ]; then
+      continue
+    fi
+    # A symlinked final component points wherever it likes; the parent may
+    # still be a link to the real install, which resolves below.
+    if [ -L "$cmd" ]; then
+      named=1
+      continue
+    fi
+    cmd_dir="$(canonical_dir "$cmd")" || { named=1; continue; }
+    if [ "$cmd_dir" != "$own_dir" ]; then
+      continue
+    fi
+    named=1
+    # The command word is the entry point; the TAIL decides whether running
+    # it can still fail the commit. `--help` returns 0 without checking
+    # anything and `|| true` throws the status away, so both leave the entry
+    # point named on a line that gates nothing.
+    #
+    # The accepted arguments differ PER HOOK, and swapping them does not
+    # merely weaken the gate, it breaks it: `pre-commit` takes none and exits
+    # 2 on any, so `pre-commit "$1"` fails every commit with "takes no
+    # arguments"; `commit-msg` needs git's message-file path, so a bare
+    # `commit-msg` reads inherited stdin and rejects every commit — valid
+    # ones included — as an empty message. Either way nothing is validated
+    # and `armed` would be a false description of both.
+    # Blanks only. `[[:space:]]` would also trim a trailing CR or vertical
+    # whitespace, which the shell keeps as part of the word — so a CRLF hook
+    # would be accepted for a tail the shell never sees.
+    tail="${tail#"${tail%%[![:blank:]]*}"}"
+    tail="${tail%"${tail##*[![:blank:]]}"}"
+    # `?` is a one-character wildcard in this pattern, so an unescaped one
+    # also strips `|| exit $#` — which for pre-commit, where git supplies no
+    # arguments, is `exit 0` and swallows every failure.
+    tail="${tail% || exit \$\?}"
+    case "$hook" in
+      pre-commit)
+        case "$tail" in
+          "" | '"$@"') matched=1 ;;
+        esac
+        ;;
+      *)
+        case "$tail" in
+          '"$1"' | '"$@"') matched=1 ;;
+        esac
+        ;;
+    esac
+  done <"$path"
+  # The verdict waits for the whole file. Deciding on the first command
+  # instead would call a hook that runs `set -e` before the entry point
+  # ungated, which is the false-negative mirror of the bug this closes.
+  if [ "$seen" -eq 1 ] && [ "$matched" -eq 1 ] && [ "$opaque" -eq 0 ]; then
+    return 0
+  fi
+  # The entry point IS the command and only its argument list is outside the
+  # allowlist — a trailing comment, an extra argument. That may well gate;
+  # this tool cannot say, so it says so, rather than calling it ungated.
+  if [ "$named" -eq 1 ] || [ "$opaque" -eq 1 ]; then
+    return 3
+  fi
+  # Exactly one command, and it is not our entry point at all: recognizable,
+  # and recognizably not a guard. Everything else — several commands, or
+  # none — is a shape whose reachability this tool does not get to guess at.
+  if [ "$seen" -le 1 ]; then
+    return 1
+  fi
+  return 3
+}
+
+# Set by a hook outside $HOOKS_DIR that carries the delegating line instead of
+# naming an entry point: that line resolves its helper with `git rev-parse
+# --git-path hooks`, which under core.hooksPath is the hook's own directory.
+CHECK_NEEDS_HELPER=0
+
+check_hook() { # DIR HOOK -> 0 armed, 1 not armed, 2 could not determine
+  local dir="$1" hook="$2" path="$1/$2" line="" second="" shebang="" status=0
   line="$(call_line "$hook")"
   if [ ! -e "$path" ] && [ ! -L "$path" ]; then
     add_reason "$hook is missing"
@@ -592,9 +857,59 @@ check_hook() { # HOOK -> 0 armed, 1 not armed, 2 could not determine
     add_reason "$hook is not a POSIX-shell script, so the guard line cannot run"
     return 1
   fi
-  if [ "$second" != "$line" ]; then
+  # The interpreter decides whether the body runs AT ALL, so it is judged the
+  # same way in .git/hooks as in a hand-wired directory. `#!/bin/sh -n` reads
+  # the guard line and executes nothing; a control character or a path that
+  # is not on this host means git cannot exec the hook. `--check` writes
+  # nothing, so the shims it is looking at are not assumed to be the ones the
+  # installer last wrote.
+  shebang="$(head -n 1 "$path" 2>/dev/null)" || { add_reason "$hook could not be read"; return 2; }
+  case "$shebang" in
+    *[[:cntrl:]]*)
+      add_reason "$hook has a control character in its shebang, so git cannot exec it"
+      return 1
+      ;;
+  esac
+  if ! gg_trusted_interpreter "$shebang"; then
+    add_reason "$hook runs under an interpreter this check cannot vouch for ($shebang)"
+    return 2
+  fi
+  if [ "$second" = "$line" ]; then
+    if [ "$dir" != "$HOOKS_DIR" ]; then
+      CHECK_NEEDS_HELPER=1
+    fi
+  elif [ "$dir" = "$HOOKS_DIR" ]; then
+    # The installer writes the guard line at line 2, but --check writes
+    # nothing and does not get to assume the shim in front of it is the one
+    # the installer last wrote. A shim carrying that line SOMEWHERE still
+    # gates; where exactly is beyond what this reads, so it is unverifiable
+    # rather than a "not gated" verdict about a repository that is gated.
+    if grep -qF -- "$line" "$path" 2>/dev/null; then
+      add_reason "$hook carries the guard line, but not at line 2 where this check can confirm it runs"
+      return 2
+    fi
     add_reason "$hook does not carry the guard line at line 2"
     return 1
+  else
+    status=0
+    hook_runs_entry_point "$hook" "$path" || status=$?
+    case "$status" in
+      0) ;;
+      2)
+        add_reason "$hook could not be read"
+        return 2
+        ;;
+      3)
+        # It may gate perfectly well; this tool cannot tell, and guessing is
+        # what produced every false "armed" this predicate has had.
+        add_reason "$hook is wired to something this check cannot verify (it recognizes a single command that is $SCRIPT_DIR/$hook, optionally through exec) — inspect it by hand, or reduce it to that shape"
+        return 2
+        ;;
+      *)
+        add_reason "$hook does not run this skill's $hook"
+        return 1
+        ;;
+    esac
   fi
   if [ ! -x "$path" ]; then
     add_reason "$hook is not executable, so git ignores it"
@@ -606,31 +921,44 @@ check_hook() { # HOOK -> 0 armed, 1 not armed, 2 could not determine
 # The armed predicate over every artifact. Definitive drift outranks a
 # component that could not be measured — "some shim is provably gone" already
 # answers the question — while unmeasured-only stays "could not determine".
-check_shims() { # -> 0 armed, 1 not armed, 2 could not determine
-  local drifted=0 unknown=0 status=0
-  if [ ! -e "$HOOKS_DIR" ]; then
-    add_reason "$HOOKS_DIR does not exist"
+check_hooks_dir() { # DIR -> 0 armed, 1 not armed, 2 could not determine
+  local dir="$1" drifted=0 unknown=0 status=0
+  if [ ! -e "$dir" ]; then
+    add_reason "$dir does not exist"
     return 1
   fi
-  if [ ! -d "$HOOKS_DIR" ]; then
-    add_reason "$HOOKS_DIR is not a directory"
+  if [ ! -d "$dir" ]; then
+    add_reason "$dir is not a directory"
     return 1
   fi
   # An unsearchable directory makes every probe below read as absent, which
   # would misreport failure-to-measure as drift.
-  if [ ! -r "$HOOKS_DIR" ] || [ ! -x "$HOOKS_DIR" ]; then
-    add_reason "$HOOKS_DIR cannot be read"
+  if [ ! -r "$dir" ] || [ ! -x "$dir" ]; then
+    add_reason "$dir cannot be read"
     return 2
   fi
+  # The helper is part of this installer's own install, so its absence from
+  # $HOOKS_DIR is drift. A hand-wired directory only needs one when a hook
+  # there delegates through it.
+  if [ "$dir" = "$HOOKS_DIR" ]; then
+    status=0
+    check_helper "$dir" || status=$?
+    case "$status" in 1) drifted=1 ;; 2 | 3) unknown=1 ;; esac
+  fi
+  CHECK_NEEDS_HELPER=0
   status=0
-  check_helper || status=$?
+  check_hook "$dir" pre-commit || status=$?
   case "$status" in 1) drifted=1 ;; 2) unknown=1 ;; esac
   status=0
-  check_hook pre-commit || status=$?
+  check_hook "$dir" commit-msg || status=$?
   case "$status" in 1) drifted=1 ;; 2) unknown=1 ;; esac
-  status=0
-  check_hook commit-msg || status=$?
-  case "$status" in 1) drifted=1 ;; 2) unknown=1 ;; esac
+  if [ "$CHECK_NEEDS_HELPER" -eq 1 ]; then
+    status=0
+    check_helper "$dir" || status=$?
+    # 3 is the copied helper this installer cannot vouch for: unknown, never
+    # drift, and never a pass.
+    case "$status" in 1) drifted=1 ;; 2 | 3) unknown=1 ;; esac
+  fi
   [ "$drifted" -eq 0 ] || return 1
   [ "$unknown" -eq 0 ] || return 2
   return 0
@@ -638,12 +966,46 @@ check_shims() { # -> 0 armed, 1 not armed, 2 could not determine
 
 if [ "$MODE" = "check" ]; then
   VERDICT=0
-  check_shims || VERDICT=$?
   if [ "$HOOKS_PATH_SET" -eq 1 ]; then
-    # Armed-but-dormant is neither armed nor drifted, but it exits 1 like
-    # drift: git reads hooks from core.hooksPath, so the next commit runs no
-    # guard, and the safe failure direction for an ungated commit is a
-    # failing check. The wording carries the distinction and the remedy.
+    # git owns the resolution of core.hooksPath — absolute, ~-prefixed, or
+    # relative to the work-tree root where hooks run — and answers relative
+    # to the directory it was invoked in, so that is what it is absolutized
+    # against.
+    REDIRECT_DIR="$(git -C "$REPO_ABS" rev-parse --git-path hooks 2>/dev/null || true)"
+    if [ -n "$REDIRECT_DIR" ]; then
+      case "$REDIRECT_DIR" in
+        /*) ;;
+        *) REDIRECT_DIR="$REPO_ABS/$REDIRECT_DIR" ;;
+      esac
+      # git answers relative to the invocation directory, so from a
+      # subdirectory the path carries traversal; the directory names itself.
+      if REDIRECT_RESOLVED="$(cd "$REDIRECT_DIR" 2>/dev/null && pwd)"; then
+        REDIRECT_DIR="$REDIRECT_RESOLVED"
+      fi
+      REDIRECT_VERDICT=0
+      check_hooks_dir "$REDIRECT_DIR" || REDIRECT_VERDICT=$?
+      if [ "$REDIRECT_VERDICT" -eq 0 ]; then
+        echo "growth-guards git hooks: armed — pre-commit and commit-msg gate commits in $REDIRECT_DIR, where core.hooksPath ('$CUSTOM_HOOKS') sends git"
+        exit 0
+      fi
+      # The redirected directory decides, so a redirect that could not be
+      # measured leaves the question open — never the dormant verdict, whose
+      # remedy would tell the user to wire a directory that may already be
+      # wired and merely unreadable.
+      if [ "$REDIRECT_VERDICT" -eq 2 ]; then
+        echo "growth-guards git hooks: could not determine whether the shims are armed — core.hooksPath ('$CUSTOM_HOOKS') sends git to $REDIRECT_DIR, and $CHECK_REASONS"
+        exit 2
+      fi
+    else
+      echo "growth-guards git hooks: could not determine whether the shims are armed — core.hooksPath ('$CUSTOM_HOOKS') is set and git could not resolve the directory it names"
+      exit 2
+    fi
+    # Nothing in the redirected directory gates a commit, so the shims in
+    # $HOOKS_DIR only decide the wording. Armed-but-dormant is neither armed
+    # nor drifted, and exits 1 like drift: the next commit runs no guard, and
+    # the safe failure direction for an ungated commit is a failing check.
+    CHECK_REASONS=""
+    check_hooks_dir "$HOOKS_DIR" || VERDICT=$?
     if [ "$VERDICT" -eq 0 ]; then
       echo "growth-guards git hooks: dormant — core.hooksPath ('$CUSTOM_HOOKS') redirects git away from $HOOKS_DIR, so commits are NOT gated; wire that directory's hooks to $SCRIPT_DIR, or unset core.hooksPath"
     else
@@ -651,6 +1013,7 @@ if [ "$MODE" = "check" ]; then
     fi
     exit 1
   fi
+  check_hooks_dir "$HOOKS_DIR" || VERDICT=$?
   case "$VERDICT" in
     0) echo "growth-guards git hooks: armed — pre-commit and commit-msg gate commits in $HOOKS_DIR" ;;
     1) echo "growth-guards git hooks: NOT armed — $CHECK_REASONS ($HOOKS_DIR); run 'vstack refresh' (or this installer) to re-arm" ;;

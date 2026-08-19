@@ -1163,6 +1163,693 @@ case "$OUT" in
   *) bad "redirect and missing shims stated" "out=$OUT" ;;
 esac
 
+echo "=== --check probes the directory core.hooksPath redirects to ==="
+# The wiring the installer's own stand-down message prescribes.
+wire_hooks_dir() { # REPO DIR
+  local scripts="$1/.agents/skills/growth-guards/scripts"
+  mkdir -p "$2"
+  printf '#!/bin/sh\nexec %s/pre-commit "$@"\n' "$scripts" >"$2/pre-commit"
+  printf '#!/bin/sh\nexec %s/commit-msg "$1"\n' "$scripts" >"$2/commit-msg"
+  chmod +x "$2/pre-commit" "$2/commit-msg"
+}
+check_from() { # REPO CWD — --check with no --repo, run from CWD
+  local installer="$1/.agents/skills/growth-guards/scripts/install-git-hooks"
+  [ -x "$installer" ] || installer="$INSTALL"
+  OUT=""
+  RC=0
+  OUT="$(cd "$2" && "$installer" --check 2>&1)" || RC=$?
+}
+
+R35="$(new_repo checkhookspathwired)"
+install_in "$R35"
+wire_hooks_dir "$R35" "$R35/customhooks"
+git -C "$R35" config core.hooksPath customhooks
+check_in "$R35"
+[ "$RC" -eq 0 ] && ok "a hand-wired core.hooksPath directory checks 0" \
+  || bad "hand-wired hooksPath checks 0" "rc=$RC out=$OUT"
+case "$OUT" in
+  *"NOT gated"* | *"NOT armed"* | *dormant*) bad "a wired redirect is never called ungated" "out=$OUT" ;;
+  *) ok "a wired redirect is never called ungated" ;;
+esac
+case "$OUT" in
+  *armed*"$R35/customhooks"*core.hooksPath*) ok "and the verdict names the directory the gating comes from" ;;
+  *) bad "wired redirect names its directory" "out=$OUT" ;;
+esac
+
+# The verdict is only true if commits really are gated there.
+printf 'ok\n' >"$R35/w.txt"
+git -C "$R35" add w.txt
+commit_in "$R35" "feat: add w"
+[ "$RC" -eq 0 ] && ok "control: a clean commit passes through the hand-wired directory" \
+  || bad "hand-wired clean commit passes" "rc=$RC out=$OUT"
+printf '# %s: finish this\n' "$TD" >"$R35/w.py"
+git -C "$R35" add w.py
+commit_in "$R35" "feat: add w.py"
+[ "$RC" -ne 0 ] && ok "and a violation is really blocked through the hand-wired directory" \
+  || bad "hand-wired directory blocks" "rc=$RC out=$OUT"
+git -C "$R35" rm -q --cached w.py
+rm -f "$R35/w.py"
+
+git -C "$R35" config core.hooksPath nosuchdir
+check_in "$R35"
+[ "$RC" -eq 1 ] && ok "a core.hooksPath directory that does not exist checks 1" \
+  || bad "absent hooksPath dir checks 1" "rc=$RC out=$OUT"
+case "$OUT" in
+  *"wire that directory's hooks"*) ok "and the hand-wiring remedy is still stated" ;;
+  *) bad "remedy stated for absent hooksPath dir" "out=$OUT" ;;
+esac
+
+mkdir -p "$R35/barehooks"
+git -C "$R35" config core.hooksPath barehooks
+check_in "$R35"
+[ "$RC" -eq 1 ] && ok "a core.hooksPath directory with no shims checks 1" \
+  || bad "unwired hooksPath dir checks 1" "rc=$RC out=$OUT"
+
+mkdir -p "$R35/foreignhooks"
+printf '#!/bin/sh\nexec "$(git rev-parse --show-toplevel)/tools/other-tool" "$@"\n' >"$R35/foreignhooks/pre-commit"
+printf '#!/bin/sh\nexec "$(git rev-parse --show-toplevel)/tools/other-tool" "$1"\n' >"$R35/foreignhooks/commit-msg"
+chmod +x "$R35/foreignhooks/pre-commit" "$R35/foreignhooks/commit-msg"
+git -C "$R35" config core.hooksPath foreignhooks
+check_in "$R35"
+# The command is a substitution, so what it runs is not knowable from the
+# text — including the claim that it is another tool. Unverifiable, not a
+# verdict either way; both are non-zero and both fail a verify command.
+[ "$RC" -eq 2 ] && ok "a core.hooksPath directory wired through a substitution checks 2" \
+  || bad "foreign hooksPath dir checks 2" "rc=$RC out=$OUT"
+case "$OUT" in
+  *"could not determine"*) ok "and it is called unverifiable rather than judged" ;;
+  *) bad "foreign hooksPath dir called unverifiable" "out=$OUT" ;;
+esac
+
+wire_hooks_dir "$R35" "$R35/halfhooks"
+rm -f "$R35/halfhooks/commit-msg"
+git -C "$R35" config core.hooksPath halfhooks
+check_in "$R35"
+[ "$RC" -eq 1 ] && ok "a core.hooksPath directory with only pre-commit wired checks 1" \
+  || bad "half-wired hooksPath dir checks 1" "rc=$RC out=$OUT"
+wire_hooks_dir "$R35" "$R35/halfhooks"
+rm -f "$R35/halfhooks/pre-commit"
+check_in "$R35"
+[ "$RC" -eq 1 ] && ok "a core.hooksPath directory with only commit-msg wired checks 1" \
+  || bad "half-wired hooksPath dir checks 1 (other half)" "rc=$RC out=$OUT"
+
+wire_hooks_dir "$R35" "$R35/nonexechooks"
+chmod -x "$R35/nonexechooks/pre-commit"
+git -C "$R35" config core.hooksPath nonexechooks
+check_in "$R35"
+[ "$RC" -eq 1 ] && ok "a wired core.hooksPath hook git cannot execute checks 1" \
+  || bad "non-executable hooksPath hook checks 1" "rc=$RC out=$OUT"
+chmod +x "$R35/nonexechooks/pre-commit"
+check_in "$R35"
+[ "$RC" -eq 0 ] && ok "control: restoring the executable bit checks 0 again" \
+  || bad "control: exec bit restored checks 0" "rc=$RC out=$OUT"
+
+echo "=== --check reads only EXECUTABLE wiring in a core.hooksPath directory ==="
+# A mention of the entry point that no commit ever runs — a comment, a heredoc
+# body, an argument, anything past an unconditional exit — must never read as
+# gated: a verification tool that fails open is worse than one that fails shut.
+R38="$(new_repo checkhookspathshapes)"
+install_in "$R38"
+SC38="$R38/.agents/skills/growth-guards/scripts"
+mkdir -p "$R38/shapehooks"
+git -C "$R38" config core.hooksPath shapehooks
+arm_pair() { # PRE_FORMAT MSG_FORMAT — printf formats taking the scripts dir
+  printf "$1" "$SC38" >"$R38/shapehooks/pre-commit"
+  printf "$2" "$SC38" >"$R38/shapehooks/commit-msg"
+  chmod +x "$R38/shapehooks/pre-commit" "$R38/shapehooks/commit-msg"
+}
+# The invariant every shape below is judged against: exit 0 is claimed ONLY
+# where a commit is really gated. A shape the grammar does not recognize is
+# exit 2 — "could not determine" — never exit 0, and never exit 1 either,
+# because calling a hook that does gate "NOT gated" is the same tool telling
+# the same lie in the other direction.
+must_fail_shape() { # LABEL — recognizably not ours: exit 1, stated as ungated
+  check_in "$R38"
+  [ "$RC" -eq 1 ] && ok "must-fail: $1 is not armed" || bad "must-fail: $1 is not armed" "rc=$RC out=$OUT"
+  case "$OUT" in
+    *"NOT gated"* | *"NOT armed"*) ok "and $1 is stated as ungated" ;;
+    *) bad "$1 stated as ungated" "out=$OUT" ;;
+  esac
+}
+unverifiable_shape() { # LABEL — outside the grammar: exit 2, never a verdict
+  check_in "$R38"
+  [ "$RC" -eq 2 ] && ok "must-fail: $1 is not armed (unverifiable)" \
+    || bad "must-fail: $1 is not armed (unverifiable)" "rc=$RC out=$OUT"
+  case "$OUT" in
+    *"could not determine"*) ok "and $1 is stated as unverifiable, not as a verdict" ;;
+    *) bad "$1 stated as unverifiable" "out=$OUT" ;;
+  esac
+}
+
+arm_pair '#!/bin/sh\n# see %s/pre-commit for what this used to do\nexit 0\n' \
+  '#!/bin/sh\n# see %s/commit-msg\nexit 0\n'
+must_fail_shape "the entry point named only in a line-2 comment"
+
+arm_pair '#!/bin/sh\nexit 0\nexec %s/pre-commit "$@"\n' \
+  '#!/bin/sh\nexit 0\nexec %s/commit-msg "$1"\n'
+unverifiable_shape "wiring left unreachable after an unconditional exit"
+
+arm_pair '#!/bin/sh\ncat <<EOF\nexec %s/pre-commit "$@"\nEOF\nexit 0\n' \
+  '#!/bin/sh\ncat <<EOF\nexec %s/commit-msg "$1"\nEOF\nexit 0\n'
+unverifiable_shape "the entry point inside a heredoc body"
+
+arm_pair '#!/bin/sh\necho "%s/pre-commit"\nexit 0\n' \
+  '#!/bin/sh\necho "%s/commit-msg"\nexit 0\n'
+unverifiable_shape "the entry point as a quoted argument to another command"
+
+arm_pair '#!/bin/sh\n#%s/pre-commit\n' '#!/bin/sh\n#%s/commit-msg\n'
+must_fail_shape "a hook whose only content is the commented entry point"
+
+# The command word being the entry point is not enough: the TAIL decides
+# whether running it can still fail the commit. Each of these names the entry
+# point in command position and gates nothing.
+arm_pair '#!/bin/sh\nexec "%s/pre-commit" --help\n' '#!/bin/sh\nexec "%s/commit-msg" --help\n'
+unverifiable_shape "the entry point invoked with --help"
+
+arm_pair '#!/bin/sh\n%s/pre-commit "$@" || true\n' '#!/bin/sh\n%s/commit-msg "$1" || true\n'
+unverifiable_shape "the entry point with its status thrown away by || true"
+
+arm_pair '#!/bin/sh\n%s/pre-commit "$@" &\n' '#!/bin/sh\n%s/commit-msg "$1" &\n'
+unverifiable_shape "the entry point backgrounded, so its status never lands"
+
+# The two hooks do not take the same arguments, and swapping them breaks the
+# gate rather than loosening it: pre-commit exits 2 on any argument, and a
+# bare commit-msg reads inherited stdin and calls every message empty. Both
+# reject valid commits while validating nothing, so "armed" describes neither.
+arm_pair '#!/bin/sh\nexec %s/pre-commit "$1"\n' '#!/bin/sh\nexec %s/commit-msg "$1"\n'
+unverifiable_shape "pre-commit handed an argument it refuses"
+
+arm_pair '#!/bin/sh\nexec %s/pre-commit "$@"\n' '#!/bin/sh\nexec %s/commit-msg\n'
+unverifiable_shape "commit-msg without git's message-file argument"
+
+# A path SHAPE is not an entry point. A moved or removed install leaves a
+# hook whose command resolves to nothing: git answers every commit, clean
+# ones included, with command-not-found instead of a verdict.
+mkdir -p "$R38/gone/growth-guards/scripts"
+arm_pair "#!/bin/sh\nexec $R38/gone/growth-guards/scripts/pre-commit \"\$@\"\n" \
+  "#!/bin/sh\nexec $R38/gone/growth-guards/scripts/commit-msg \"\$1\"\n"
+must_fail_shape "an entry-point path with nothing at it"
+
+: >"$R38/gone/growth-guards/scripts/pre-commit"
+: >"$R38/gone/growth-guards/scripts/commit-msg"
+arm_pair "#!/bin/sh\nexec $R38/gone/growth-guards/scripts/pre-commit \"\$@\"\n" \
+  "#!/bin/sh\nexec $R38/gone/growth-guards/scripts/commit-msg \"\$1\"\n"
+must_fail_shape "an entry-point path that is not executable"
+
+# A shebang option can stop the body running at all: `sh -n` syntax-checks
+# and exits 0, so the hook executes no guard and passes every commit.
+arm_pair '#!/bin/sh -n\nexec %s/pre-commit "$@"\n' '#!/bin/sh -n\nexec %s/commit-msg "$1"\n'
+unverifiable_shape "a shebang whose option stops the body running"
+
+# The tail rule cuts both ways, and this is the case that proves `2` is not a
+# synonym for ungated: a trailing comment leaves the tail outside the
+# allowlist, but the hook runs the entry point and really does gate.
+arm_pair '#!/bin/sh\nexec %s/pre-commit "$@" # run the guard\n' \
+  '#!/bin/sh\nexec %s/commit-msg "$1" # run the guard\n'
+unverifiable_shape "a gating hook whose tail carries a trailing comment"
+printf '# %s: finish this\n' "$TD" >"$R38/t.py"
+git -C "$R38" add t.py
+commit_in "$R38" "feat: add t"
+[ "$RC" -ne 0 ] && ok "and that unverifiable hook really does gate, so 2 is not 'ungated'" \
+  || bad "trailing-comment hook gates" "rc=$RC out=$OUT"
+git -C "$R38" rm -q --cached t.py
+rm -f "$R38/t.py"
+
+# The accepted-tail comparison is a shell PATTERN, so its metacharacters have
+# to be escaped or it matches more than it names: an unescaped `?` made
+# `|| exit $#` pass for `|| exit $?`, and git gives pre-commit no arguments,
+# so `$#` is 0 and the wrapper swallowed every pre-commit failure.
+arm_pair '#!/bin/sh\n%s/pre-commit "$@" || exit $#\n' '#!/bin/sh\n%s/commit-msg "$1" || exit $#\n'
+unverifiable_shape "a tail that only resembles || exit \$? under globbing"
+
+arm_pair '#!/bin/sh\n%s/pre-commit "$@" || exit 0\n' '#!/bin/sh\n%s/commit-msg "$1" || exit 0\n'
+unverifiable_shape "a tail that exits 0 on failure"
+
+# A path ending in growth-guards/scripts/<hook> identifies the guard only
+# while that last component IS the guard: a symlink there passes -f and -x
+# while running anything at all.
+mkdir -p "$R38/fake/growth-guards/scripts"
+ln -sf /bin/true "$R38/fake/growth-guards/scripts/pre-commit"
+ln -sf /bin/true "$R38/fake/growth-guards/scripts/commit-msg"
+arm_pair "#!/bin/sh\nexec $R38/fake/growth-guards/scripts/pre-commit \"\$@\"\n" \
+  "#!/bin/sh\nexec $R38/fake/growth-guards/scripts/commit-msg \"\$1\"\n"
+unverifiable_shape "an entry-point path that is a symlink to another program"
+
+# And the same name worn by a REGULAR executable. A path is a name, not an
+# identity: this one passes every file test and is not a symlink either.
+rm -f "$R38/fake/growth-guards/scripts/pre-commit" "$R38/fake/growth-guards/scripts/commit-msg"
+cp /bin/true "$R38/fake/growth-guards/scripts/pre-commit"
+cp /bin/true "$R38/fake/growth-guards/scripts/commit-msg"
+chmod +x "$R38/fake/growth-guards/scripts/pre-commit" "$R38/fake/growth-guards/scripts/commit-msg"
+arm_pair "#!/bin/sh\nexec $R38/fake/growth-guards/scripts/pre-commit \"\$@\"\n" \
+  "#!/bin/sh\nexec $R38/fake/growth-guards/scripts/commit-msg \"\$1\"\n"
+must_fail_shape "another program wearing the entry point's name"
+printf '# %s: finish this\n' "$TD" >"$R38/im.py"
+git -C "$R38" add im.py
+commit_in "$R38" "feat: add im"
+[ "$RC" -eq 0 ] && ok "and that impostor really does let a violation through" \
+  || bad "impostor bypasses" "rc=$RC out=$OUT"
+git -C "$R38" rm -q --cached im.py
+rm -f "$R38/im.py"
+printf '# %s: finish this\n' "$TD" >"$R38/sl.py"
+git -C "$R38" add sl.py
+commit_in "$R38" "feat: add sl"
+[ "$RC" -eq 0 ] && ok "and that wiring really does bypass the guard, which is why it is never armed" \
+  || bad "symlinked entry point bypasses" "rc=$RC out=$OUT"
+git -C "$R38" rm -q --cached sl.py
+rm -f "$R38/sl.py"
+
+# A tail must be SEPARATED from the command by a real blank. The shell
+# concatenates `"…/commit-msg""$1"` into one word, so reading it as
+# command-plus-tail describes a hook git cannot run at all.
+arm_pair '#!/bin/sh\nexec "%s/pre-commit""$@"\n' '#!/bin/sh\nexec "%s/commit-msg""$1"\n'
+must_fail_shape "a quoted command with no separator before its tail"
+
+# Only blanks are trimmed. `[[:space:]]` would eat a trailing CR that the
+# shell keeps as part of the word, so a CRLF hook would be accepted for a
+# tail the shell never sees.
+arm_pair '#!/bin/sh\nexec %s/pre-commit "$@"\r\n' '#!/bin/sh\nexec %s/commit-msg "$1"\r\n'
+unverifiable_shape "a hook whose command line ends in a carriage return"
+
+# `exec -a NAME cmd` runs cmd under another argv[0]: the command word is two
+# tokens further along, and reading the option as the command would report a
+# hook that gates perfectly well as NOT gated — the false negative this
+# grammar reserves exit 2 for.
+# `#!/bin/bash` deliberately: `exec -a` is a bash extension, and /bin/sh is
+# dash on the CI runner, where this hook would fail to run at all rather than
+# demonstrate the case.
+arm_pair '#!/bin/bash\nexec -a guard %s/pre-commit "$@"\n' '#!/bin/bash\nexec -a guard %s/commit-msg "$1"\n'
+unverifiable_shape "wiring behind an exec option"
+printf 'clean\n' >"$R38/ea.txt"
+git -C "$R38" add ea.txt
+commit_in "$R38" "feat: add ea"
+[ "$RC" -eq 0 ] && ok "and that hook really does gate, so it is not called ungated" \
+  || bad "exec -a hook gates" "rc=$RC out=$OUT"
+git -C "$R38" rm -q --cached ea.txt
+rm -f "$R38/ea.txt"
+
+# A carriage return in the SHEBANG is not trailing whitespace: the kernel
+# looks for an interpreter named `/bin/sh\r`, and git cannot run the hook at
+# all — a clean commit dies with "cannot exec".
+arm_pair '#!/bin/sh\r\nexec %s/pre-commit "$@"\n' '#!/bin/sh\r\nexec %s/commit-msg "$1"\n'
+must_fail_shape "a shebang line ending in a carriage return"
+
+# The interpreter is identified by FULL PATH, not by basename: an executable
+# named `sh` anywhere at all can be a copy of /bin/true, and then git runs
+# true, ignores the hook body, and nothing is gated.
+mkdir -p "$R38/fakebin"
+cp /bin/true "$R38/fakebin/sh"
+chmod +x "$R38/fakebin/sh"
+arm_pair "#!$R38/fakebin/sh\nexec %s/pre-commit \"\$@\"\n" \
+  "#!$R38/fakebin/sh\nexec %s/commit-msg \"\$1\"\n"
+unverifiable_shape "a shebang naming an untrusted interpreter"
+printf '# %s: finish this\n' "$TD" >"$R38/fi.py"
+git -C "$R38" add fi.py
+commit_in "$R38" "feat: add fi"
+[ "$RC" -eq 0 ] && ok "and that interpreter really does swallow the hook body" \
+  || bad "fake interpreter bypasses" "rc=$RC out=$OUT"
+git -C "$R38" rm -q --cached fi.py
+rm -f "$R38/fi.py"
+
+# `env` resolves the interpreter through PATH, which is no more knowable than
+# a custom path — unverifiable, even though such a hook usually does gate.
+arm_pair '#!/usr/bin/env bash\nexec %s/pre-commit "$@"\n' '#!/usr/bin/env bash\nexec %s/commit-msg "$1"\n'
+unverifiable_shape "a shebang resolving its interpreter through env"
+
+# The delegating shape resolves its helper in the redirected directory, and
+# outside the installer-owned hooks directory that helper is a copy someone
+# made. The marker is a comment anyone can type.
+cp "$R38/.git/hooks/pre-commit" "$R38/.git/hooks/commit-msg" "$R38/shapehooks/"
+printf '#!/bin/sh\n# vstack growth-guards git hooks\nexit 0\n' >"$R38/shapehooks/vstack-guards"
+chmod +x "$R38/shapehooks/vstack-guards"
+unverifiable_shape "a helper carrying the marker but none of the behaviour"
+printf '# %s: finish this\n' "$TD" >"$R38/fh.py"
+git -C "$R38" add fh.py
+commit_in "$R38" "feat: add fh"
+[ "$RC" -eq 0 ] && ok "and that helper really does bypass every guard" \
+  || bad "fake helper bypasses" "rc=$RC out=$OUT"
+git -C "$R38" rm -q --cached fh.py
+rm -f "$R38/fh.py"
+# Control: the helper this installer actually wrote, copied across, is armed.
+cp "$R38/.git/hooks/vstack-guards" "$R38/shapehooks/"
+check_in "$R38"
+[ "$RC" -eq 0 ] && ok "control: the installer's own helper, copied across, is armed" \
+  || bad "copied real helper armed" "rc=$RC out=$OUT"
+rm -f "$R38/shapehooks/vstack-guards" "$R38/shapehooks/pre-commit" "$R38/shapehooks/commit-msg"
+
+# On the trusted list is not on the disk. Pick whichever listed shell this
+# host lacks; if it has all of them the case cannot arise here and is
+# reported as skipped rather than silently dropped.
+GG_ABSENT_SH=""
+for gg_c in /bin/dash /bin/ksh /bin/zsh /usr/bin/dash /usr/bin/ksh; do
+  if [ ! -x "$gg_c" ]; then GG_ABSENT_SH="$gg_c"; break; fi
+done
+if [ -n "$GG_ABSENT_SH" ]; then
+  arm_pair "#!$GG_ABSENT_SH\nexec %s/pre-commit \"\$@\"\n" "#!$GG_ABSENT_SH\nexec %s/commit-msg \"\$1\"\n"
+  unverifiable_shape "a trusted interpreter path that is absent on this host"
+  printf 'clean\n' >"$R38/ai.txt"
+  git -C "$R38" add ai.txt
+  commit_in "$R38" "feat: add ai"
+  [ "$RC" -ne 0 ] && ok "and git really cannot exec that hook, so even a clean commit fails" \
+    || bad "absent interpreter blocks" "rc=$RC out=$OUT"
+  git -C "$R38" rm -q --cached ai.txt
+  rm -f "$R38/ai.txt"
+else
+  printf '  skip  a trusted interpreter path that is absent on this host (all are installed)\n'
+fi
+
+# The word the SHELL runs, not the one written down. A checkout path that
+# literally contains `$slot` passes every file test while /bin/sh expands it
+# at commit time — so the same bytes name a different program.
+mkdir -p "$R38/dollar/\$slot"
+# A LINK to the real install, so the physical-location test still resolves
+# and the only thing under examination is the spelling.
+ln -s "$SC38" "$R38/dollar/\$slot/scripts"
+arm_pair "#!/bin/sh\nexec \"$R38/dollar/\$slot/scripts/pre-commit\" \"\$@\"\n" \
+  "#!/bin/sh\nexec \"$R38/dollar/\$slot/scripts/commit-msg\" \"\$1\"\n"
+unverifiable_shape "a double-quoted command that the shell would expand"
+
+# Control: the SAME literal path, single-quoted, survives evaluation
+# unchanged — so it is verifiable and stays armed.
+arm_pair "#!/bin/sh\nexec '$R38/dollar/\$slot/scripts/pre-commit' \"\$@\"\n" \
+  "#!/bin/sh\nexec '$R38/dollar/\$slot/scripts/commit-msg' \"\$1\"\n"
+check_in "$R38"
+[ "$RC" -eq 0 ] && ok "control: single-quoting the same path keeps it verifiable" \
+  || bad "single-quoted dollar path armed" "rc=$RC out=$OUT"
+
+# An unquoted word globs as well, so a glob character is unverifiable too.
+arm_pair '#!/bin/sh\nexec %s/pre-comm?t "$@"\n' '#!/bin/sh\nexec %s/commit-ms? "$1"\n'
+unverifiable_shape "an unquoted command carrying a glob character"
+
+# Indentation is BLANKS. A line starting with CR runs a command named
+# `\rexec`, so normalizing it away would accept a hook that git cannot run.
+arm_pair '#!/bin/sh\n\rexec %s/pre-commit "$@"\n' '#!/bin/sh\n\rexec %s/commit-msg "$1"\n'
+unverifiable_shape "a command line beginning with a carriage return"
+
+# A line this function cannot read still RUNS. Counting it only after
+# classification let an unreadable line be skipped silently, leaving a later
+# entry point looking like the only command in the file.
+arm_pair "#!/bin/sh\nexit\t0\nexec %s/pre-commit \"\$@\"\n" "#!/bin/sh\nexit\t0\nexec %s/commit-msg \"\$1\"\n"
+unverifiable_shape "an unreadable line before the entry point"
+printf '# %s: finish this\n' "$TD" >"$R38/tb.py"
+git -C "$R38" add tb.py
+commit_in "$R38" "feat: add tb"
+[ "$RC" -eq 0 ] && ok "and that hook really does exit before the guard runs" \
+  || bad "tab-exit hook bypasses" "rc=$RC out=$OUT"
+git -C "$R38" rm -q --cached tb.py
+rm -f "$R38/tb.py"
+
+# Control: a TAB is an ordinary separator, not a control character — this
+# hook gates, and must not be swept up by the rule above.
+arm_pair '#!/bin/sh\nexec\t%s/pre-commit "$@"\n' '#!/bin/sh\nexec\t%s/commit-msg "$1"\n'
+check_in "$R38"
+[ "$RC" -eq 0 ] && ok "control: a tab between exec and the entry point is armed" \
+  || bad "tab-separated entry point armed" "rc=$RC out=$OUT"
+
+# `NAME=value cmd` really runs cmd; reading the assignment as the command
+# reported a gating hook as NOT gated.
+arm_pair '#!/bin/sh\nFLAG=1 %s/pre-commit "$@"\n' '#!/bin/sh\nFLAG=1 %s/commit-msg "$1"\n'
+unverifiable_shape "an environment assignment before the entry point"
+printf 'clean\n' >"$R38/ap.txt"
+git -C "$R38" add ap.txt
+commit_in "$R38" "feat: add ap"
+[ "$RC" -eq 0 ] && ok "and that hook really does gate, so it is not called ungated" \
+  || bad "assignment-prefixed hook gates" "rc=$RC out=$OUT"
+git -C "$R38" rm -q --cached ap.txt
+rm -f "$R38/ap.txt"
+
+# One passing control per shape the check does accept.
+arm_pair '#!/bin/sh\n%s/pre-commit "$@" || exit $?\n' \
+  '#!/bin/sh\n%s/commit-msg "$1" || exit $?\n'
+check_in "$R38"
+[ "$RC" -eq 0 ] && ok "control: a bare invocation of the entry point is armed" \
+  || bad "bare invocation armed" "rc=$RC out=$OUT"
+
+arm_pair '#!/bin/sh\nexec "%s/pre-commit" "$@"\n' '#!/bin/sh\nexec "%s/commit-msg" "$1"\n'
+check_in "$R38"
+[ "$RC" -eq 0 ] && ok "control: a quoted exec of the entry point is armed" \
+  || bad "quoted exec armed" "rc=$RC out=$OUT"
+
+# Reachability is the line this tool does not cross. These three all run the
+# entry point in a shell, and a lexical reader cannot separate the two that
+# never execute from the one that does — so none of them is answered.
+arm_pair '#!/bin/sh\nif false; then\nexec %s/pre-commit "$@"\nfi\nexit 0\n' \
+  '#!/bin/sh\nif false; then\nexec %s/commit-msg "$1"\nfi\nexit 0\n'
+unverifiable_shape "wiring guarded by a condition that is never true"
+
+arm_pair '#!/bin/sh\nunused() {\nexec %s/pre-commit "$@"\n}\nexit 0\n' \
+  '#!/bin/sh\nunused() {\nexec %s/commit-msg "$1"\n}\nexit 0\n'
+unverifiable_shape "wiring inside a function nothing calls"
+
+arm_pair '#!/bin/sh\ncat <<-EOF\n\t%s/pre-commit\n\tEOF\nexit 0\n' \
+  '#!/bin/sh\ncat <<-EOF\n\t%s/commit-msg\n\tEOF\nexit 0\n'
+unverifiable_shape "the entry point in a <<- heredoc with an indented terminator"
+
+# And the same answer for a hook that DOES gate but says more than the one
+# command: unverifiable is not a synonym for ungated.
+arm_pair '#!/bin/sh\nset -e\nexec %s/pre-commit "$@"\n' \
+  '#!/bin/sh\nset -e\nexec %s/commit-msg "$1"\n'
+unverifiable_shape "a hook that gates but runs another command first"
+check_in "$R38"
+printf '# %s: finish this\n' "$TD" >"$R38/s.py"
+git -C "$R38" add s.py
+commit_in "$R38" "feat: add s"
+[ "$RC" -ne 0 ] && ok "and that unverifiable hook really does gate, which is why it is not called ungated" \
+  || bad "unverifiable-but-gating hook blocks" "rc=$RC out=$OUT"
+git -C "$R38" rm -q --cached s.py
+rm -f "$R38/s.py"
+
+# A second install elsewhere on disk: the generic entry-point shape, wired to
+# scripts that really run, so "armed" is proved against an actual commit.
+mkdir -p "$TMP/elsewhere/growth-guards"
+ln -s "$SC38" "$TMP/elsewhere/growth-guards/scripts"
+printf '#!/bin/sh\nexec %s/elsewhere/growth-guards/scripts/pre-commit "$@"\n' "$TMP" >"$R38/shapehooks/pre-commit"
+printf '#!/bin/sh\nexec %s/elsewhere/growth-guards/scripts/commit-msg "$1"\n' "$TMP" >"$R38/shapehooks/commit-msg"
+chmod +x "$R38/shapehooks/pre-commit" "$R38/shapehooks/commit-msg"
+check_in "$R38"
+[ "$RC" -eq 0 ] && ok "control: an entry point from another install on disk is armed" \
+  || bad "other-install entry point armed" "rc=$RC out=$OUT"
+printf '# %s: finish this\n' "$TD" >"$R38/s.py"
+git -C "$R38" add s.py
+commit_in "$R38" "feat: add s"
+[ "$RC" -ne 0 ] && ok "and a violation is really blocked through it" || bad "other-install wiring blocks" "rc=$RC out=$OUT"
+git -C "$R38" rm -q --cached s.py
+rm -f "$R38/s.py"
+# Armed has to mean the gate JUDGES, not that it refuses everything: a
+# mis-wired hook blocks a clean commit too, and only this half tells them
+# apart.
+printf 'clean\n' >"$R38/clean.txt"
+git -C "$R38" add clean.txt
+commit_in "$R38" "feat: add a clean file"
+[ "$RC" -eq 0 ] && ok "and a clean commit still passes through it" \
+  || bad "clean commit passes armed wiring" "rc=$RC out=$OUT"
+
+# The delegating line resolves its helper with `git rev-parse --git-path
+# hooks`, which under core.hooksPath is this directory — so the helper has to
+# be here, and a copy without it is not gated.
+cp "$R38/.git/hooks/pre-commit" "$R38/.git/hooks/commit-msg" "$R38/.git/hooks/vstack-guards" "$R38/shapehooks/"
+check_in "$R38"
+[ "$RC" -eq 0 ] && ok "control: the delegating line beside its helper is armed" \
+  || bad "delegating line with helper armed" "rc=$RC out=$OUT"
+rm -f "$R38/shapehooks/vstack-guards"
+check_in "$R38"
+[ "$RC" -eq 1 ] && ok "must-fail: the delegating line without its helper is not armed" \
+  || bad "delegating line without helper" "rc=$RC out=$OUT"
+
+echo "=== install refuses what --check could not vouch for ==="
+# Installing under a shebang the check calls unverifiable would report a
+# successful install that the very next `vstack check` contradicts.
+R43="$(new_repo installshebangparity)"
+mkdir -p "$R43/.git/hooks"
+printf '#!/usr/bin/env bash\necho existing\n' >"$R43/.git/hooks/pre-commit"
+chmod +x "$R43/.git/hooks/pre-commit"
+install_in "$R43"
+case "$OUT" in
+  *"cannot be verified"*) ok "install says why it did not wire the hook" ;;
+  *) bad "install refuses unverifiable shebang" "out=$OUT" ;;
+esac
+[ "$(sed -n '2p' "$R43/.git/hooks/pre-commit")" = "echo existing" ] \
+  && ok "and it left the consumer's hook untouched" \
+  || bad "install left the hook untouched" "line2=$(sed -n '2p' "$R43/.git/hooks/pre-commit")"
+check_in "$R43"
+[ "$RC" -ne 0 ] && ok "and --check agrees rather than contradicting the install" \
+  || bad "check agrees with install" "rc=$RC out=$OUT"
+
+echo "=== a shim carrying the guard line elsewhere is unverifiable, not ungated ==="
+# --check writes nothing, so it does not get to assume the shim in front of
+# it is the one the installer last wrote. A shim that still gates must never
+# be reported as NOT gated — the same false answer, pointing the other way.
+R42="$(new_repo checkshimguardline)"
+install_in "$R42"
+python3 - "$R42/.git/hooks/pre-commit" <<'PYMOVE'
+import sys
+p = sys.argv[1]
+lines = open(p).read().split("\n")
+lines.insert(1, "# a comment someone added")
+open(p, "w").write("\n".join(lines))
+PYMOVE
+check_in "$R42"
+[ "$RC" -eq 2 ] && ok "a shim whose guard line moved is unverifiable" \
+  || bad "moved guard line unverifiable" "rc=$RC out=$OUT"
+printf '# %s: finish this\n' "$TD" >"$R42/gl.py"
+git -C "$R42" add gl.py
+commit_in "$R42" "feat: add gl"
+[ "$RC" -ne 0 ] && ok "and that shim really does still gate, so 2 is not 'ungated'" \
+  || bad "moved guard line still gates" "rc=$RC out=$OUT"
+git -C "$R42" rm -q --cached gl.py
+rm -f "$R42/gl.py"
+# Control: with the guard line gone entirely, it is a verdict again.
+python3 - "$R42/.git/hooks/pre-commit" <<'PYDEL'
+import sys
+p = sys.argv[1]
+lines = [l for l in open(p).read().split("\n") if "vstack_gg_h" not in l]
+open(p, "w").write("\n".join(lines))
+PYDEL
+check_in "$R42"
+[ "$RC" -eq 1 ] && ok "control: with the guard line gone it is not armed" \
+  || bad "absent guard line not armed" "rc=$RC out=$OUT"
+
+echo "=== a tampered shebang in the DEFAULT hooks directory is not armed ==="
+# The interpreter decides whether the guard line runs at all, and --check
+# writes nothing, so the shim it is reading is not assumed to be the one the
+# installer last wrote.
+R41="$(new_repo checkshimshebang)"
+install_in "$R41"
+tail -n +2 "$R41/.git/hooks/pre-commit" >"$TMP/shimbody"
+reshebang() { # LINE1
+  { printf '%s\n' "$1"; cat "$TMP/shimbody"; } >"$R41/.git/hooks/pre-commit"
+  chmod +x "$R41/.git/hooks/pre-commit"
+}
+check_in "$R41"
+[ "$RC" -eq 0 ] && ok "control: the intact shim is armed" || bad "intact shim armed" "rc=$RC out=$OUT"
+
+reshebang '#!/bin/sh -n'
+check_in "$R41"
+[ "$RC" -eq 2 ] && ok "a shim whose shebang stops the body running is not armed" \
+  || bad "shim -n not armed" "rc=$RC out=$OUT"
+printf '# %s: finish this\n' "$TD" >"$R41/sn.py"
+git -C "$R41" add sn.py
+commit_in "$R41" "feat: add sn"
+[ "$RC" -eq 0 ] && ok "and that shim really does let a violation through" \
+  || bad "shim -n bypasses" "rc=$RC out=$OUT"
+git -C "$R41" rm -q --cached sn.py
+rm -f "$R41/sn.py"
+
+reshebang '#!/nonexistent/sh'
+check_in "$R41"
+[ "$RC" -eq 2 ] && ok "a shim naming an interpreter that is not here is not armed" \
+  || bad "shim absent interpreter" "rc=$RC out=$OUT"
+
+reshebang "$(printf '#!/bin/sh\r')"
+check_in "$R41"
+[ "$RC" -eq 1 ] && ok "a shim with a CR shebang is not armed" \
+  || bad "shim CR shebang" "rc=$RC out=$OUT"
+
+reshebang '#!/bin/sh'
+check_in "$R41"
+[ "$RC" -eq 0 ] && ok "control: restoring the shebang makes it armed again" \
+  || bad "shim restored armed" "rc=$RC out=$OUT"
+
+echo "=== a tampered helper in the DEFAULT hooks directory is not armed ==="
+# --check is read-only, so "the installer rewrites this file" says nothing
+# about the copy sitting there now. The marker is a comment anything can
+# carry, and this is the ordinary, non-redirected install.
+R40="$(new_repo checkhelperbytes)"
+install_in "$R40"
+check_in "$R40"
+[ "$RC" -eq 0 ] && ok "control: the intact install is armed" \
+  || bad "intact install armed" "rc=$RC out=$OUT"
+printf '#!/bin/sh\n# vstack growth-guards git hooks\nexit 0\n' >"$R40/.git/hooks/vstack-guards"
+chmod +x "$R40/.git/hooks/vstack-guards"
+check_in "$R40"
+[ "$RC" -eq 2 ] && ok "a helper replaced by a marker-carrying stub is not armed" \
+  || bad "tampered helper not armed" "rc=$RC out=$OUT"
+case "$OUT" in
+  *"not the one this installer generates"*) ok "and the verdict names what it could not verify" ;;
+  *) bad "tampered helper verdict names the cause" "out=$OUT" ;;
+esac
+printf '# %s: finish this\n' "$TD" >"$R40/th.py"
+git -C "$R40" add th.py
+commit_in "$R40" "feat: add th"
+[ "$RC" -eq 0 ] && ok "and that stub really does bypass every guard" \
+  || bad "tampered helper bypasses" "rc=$RC out=$OUT"
+
+echo "=== a core.hooksPath directory that cannot be read is 'could not determine' ==="
+R39="$(new_repo checkhookspathunreadable)"
+install_in "$R39"
+wire_hooks_dir "$R39" "$R39/customhooks"
+git -C "$R39" config core.hooksPath customhooks
+if [ "$(id -u)" != "0" ]; then
+  chmod 000 "$R39/customhooks"
+  check_in "$R39"
+  chmod 755 "$R39/customhooks"
+  [ "$RC" -eq 2 ] && ok "an unreadable core.hooksPath directory checks 2, never a verdict" \
+    || bad "unreadable redirect checks 2" "rc=$RC out=$OUT"
+  case "$OUT" in
+    *"could not determine"*"$R39/customhooks"*) ok "and the verdict names the directory it could not read" ;;
+    *) bad "unreadable redirect named" "out=$OUT" ;;
+  esac
+  case "$OUT" in
+    *"wire that directory's hooks"*) bad "an unreadable redirect is not given the hand-wiring remedy" "out=$OUT" ;;
+    *) ok "an unreadable redirect is not given the hand-wiring remedy" ;;
+  esac
+else
+  ok "unreadable redirect case skipped (running as root)"
+  ok "unreadable redirect wording skipped (running as root)"
+  ok "unreadable redirect remedy skipped (running as root)"
+fi
+check_in "$R39"
+[ "$RC" -eq 0 ] && ok "control: the same directory readable again checks 0" \
+  || bad "control: readable redirect checks 0" "rc=$RC out=$OUT"
+
+echo "=== --check resolves core.hooksPath the way git does ==="
+R36="$(new_repo checkhookspathabs)"
+install_in "$R36"
+ABS_HOOKS="$TMP/abs-hooks"
+wire_hooks_dir "$R36" "$ABS_HOOKS"
+git -C "$R36" config core.hooksPath "$ABS_HOOKS"
+check_in "$R36"
+[ "$RC" -eq 0 ] && ok "an absolute core.hooksPath resolves and checks 0" \
+  || bad "absolute hooksPath checks 0" "rc=$RC out=$OUT"
+case "$OUT" in
+  *armed*"$ABS_HOOKS"*) ok "and the verdict names the absolute directory" ;;
+  *) bad "absolute hooksPath named" "out=$OUT" ;;
+esac
+rm -f "$ABS_HOOKS/pre-commit"
+check_in "$R36"
+[ "$RC" -eq 1 ] && ok "control: unwiring the absolute directory checks 1" \
+  || bad "control: unwired absolute hooksPath checks 1" "rc=$RC out=$OUT"
+
+# git resolves a relative core.hooksPath against the work-tree root, where it
+# runs hooks — never against the caller's directory.
+R37="$(new_repo checkhookspathsubdir)"
+install_in "$R37"
+wire_hooks_dir "$R37" "$R37/customhooks"
+git -C "$R37" config core.hooksPath customhooks
+mkdir -p "$R37/deep/nested"
+check_from "$R37" "$R37/deep/nested"
+[ "$RC" -eq 0 ] && ok "a relative core.hooksPath resolves from a subdirectory too" \
+  || bad "relative hooksPath from subdir checks 0" "rc=$RC out=$OUT"
+case "$OUT" in
+  *"$R37/customhooks"*) ok "and it names the work-tree-rooted directory, not one under the subdirectory" ;;
+  *) bad "subdir resolution names the work-tree-rooted directory" "out=$OUT" ;;
+esac
+# A decoy at the naive resolution the caller's directory would produce.
+mkdir -p "$R37/deep/nested/customhooks"
+printf '#!/bin/sh\nexit 0\n' >"$R37/deep/nested/customhooks/pre-commit"
+printf '#!/bin/sh\nexit 0\n' >"$R37/deep/nested/customhooks/commit-msg"
+chmod +x "$R37/deep/nested/customhooks/pre-commit" "$R37/deep/nested/customhooks/commit-msg"
+rm -f "$R37/customhooks/pre-commit"
+check_from "$R37" "$R37/deep/nested"
+[ "$RC" -eq 1 ] && ok "must-fail: a decoy directory beside the caller cannot answer for the redirect" \
+  || bad "decoy directory answers the redirect" "rc=$RC out=$OUT"
+ABS_SUB="$TMP/abs-hooks-sub"
+wire_hooks_dir "$R37" "$ABS_SUB"
+git -C "$R37" config core.hooksPath "$ABS_SUB"
+check_from "$R37" "$R37/deep/nested"
+[ "$RC" -eq 0 ] && ok "an absolute core.hooksPath resolves from a subdirectory too" \
+  || bad "absolute hooksPath from subdir checks 0" "rc=$RC out=$OUT"
+
 echo "=== --check usage lanes ==="
 OUT=""; RC=0; OUT="$("$INSTALL" --check --uninstall 2>&1)" || RC=$?
 [ "$RC" -eq 2 ] && ok "--check with --uninstall is exit 2" || bad "check+uninstall is exit 2" "rc=$RC out=$OUT"

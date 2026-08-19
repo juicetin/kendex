@@ -86,14 +86,108 @@ fails, so removing the skill never leaves hooks that block every commit.
 hooks directory — and answers whether the shims are armed. `0`: the helper
 and both hooks pass the same predicate an install trusts (regular file, our
 marker or exact line at its position, POSIX-sh shebang, executable). `1`:
-some shim is drifted or absent, or every shim is intact but a
-`core.hooksPath` redirects git away from them — armed-but-dormant, reported
-with its own wording and remedy, and still `1` because no commit runs a
-guard right now. `2`: the question could not be answered (an unreadable
-hooks directory, a hook file that cannot be read); failure to measure is
-never a pass, and definitive drift outranks an unmeasured component. The
-one stdout line carries every component finding, and `vstack check` folds
-it in for projects with the skill installed.
+some shim is drifted or absent. `2`: the question could not be answered (an
+unreadable hooks directory, a hook file that cannot be read); failure to
+measure is never a pass, and definitive drift outranks an unmeasured
+component. The one stdout line carries every component finding, and `vstack
+check` folds it in for projects with the skill installed.
+
+Under `core.hooksPath` the redirected directory is what `--check` probes,
+because it is the only one git reads. The target is resolved with `git
+rev-parse --git-path hooks` — git's own hook resolver, so an absolute, a
+`~`-prefixed and a work-tree-relative value all land where git lands, from a
+subdirectory as well as from the root. Its `pre-commit` and `commit-msg` are
+armed in exactly two shapes, matched over the WHOLE FILE rather than
+searched for: the delegating line this installer writes, beside a helper in
+that same directory — that line resolves its helper through git, which under
+`core.hooksPath` answers with this directory and not `.git/hooks` — or a
+hook that is a shebang, comments, and exactly ONE command, and that command
+is this skill's entry point for the hook (optionally through `exec`,
+optionally quoted). The argument list is checked as well, and it differs
+per hook: `pre-commit` takes none, so empty or `"$@"`; `commit-msg` needs
+git's message-file path, so `"$1"` or `"$@"`. Either may be followed by
+`|| exit $?`. A tail outside that set is what makes `exec …/pre-commit
+--help` and `…/pre-commit "$@" || true` gate nothing while naming the entry
+point in command position — and swapping the two hooks' forms is worse than
+loose: `pre-commit "$1"` exits 2 on the argument it refuses, and a bare
+`commit-msg` reads inherited stdin and calls every message empty, so both
+reject valid commits while validating nothing.
+
+Two more conditions before `armed`: the entry point must resolve to a real
+executable file, because a path merely SHAPED like one leaves git answering
+every commit with command-not-found; and the hook's shebang must carry no
+interpreter option, because `#!/bin/sh -n` syntax-checks the body and exits
+0, running no guard at all. The shared shebang check stays permissive for a
+repo's own hooks; this one does not.
+
+When the command IS the entry point and only the argument list falls outside
+the allowlist — a trailing comment, an extra argument — the answer is `2`,
+not `1`. Such a hook may gate perfectly well, and `1` would state the
+opposite. `1` is reserved for a hook whose single command is not the entry
+point at all, or whose entry-point path resolves to nothing.
+
+An entry-point path whose FINAL COMPONENT is a symlink is `2` as well. The
+path suffix identifies the guard only while that component is the guard, and
+a link to `/bin/true` passes every file test while gating nothing. Only the
+final component is tested, so a symlinked parent directory still resolves to
+a real installation, because the candidate is compared by PHYSICAL LOCATION
+against this install's own entry point, not by the shape of its path. A path
+is a name and any executable can wear it: a copy of `/bin/true` at
+`…/growth-guards/scripts/pre-commit` passes every file test and gates
+nothing. The INTERPRETER is identified the same way — by full path against a
+short trusted list (`/bin` and `/usr/bin` shells) — because an executable
+named `sh` anywhere can be a copy of `/bin/true`, and git then runs it and
+ignores the hook body entirely. An `env` shebang resolves through PATH, so
+it is unverifiable rather than armed, and a listed path that does not exist
+on this host is unverifiable too — git cannot exec such a hook at all. The delegating shape's helper is
+compared BYTE FOR BYTE against what this installer generates whenever it
+sits outside the installer-owned hooks directory, because there the marker
+is only a comment; `helper_body` is the single definition both the writer
+and the verifier use. The comparison runs in `.git/hooks` as well: `--check`
+writes nothing, so it cannot assume the installer has just refreshed the
+copy it is looking at.
+
+The command's SPELLING is checked too: only a word that survives shell
+evaluation unchanged can be compared against a file on disk. Single-quoted
+paths qualify; `$`, a backtick or a backslash under double quotes does not,
+and an unquoted word additionally globs and expands `~`. A checkout path
+literally containing `$slot` passed every file test while `/bin/sh` ran
+whatever `slot` pointed at.
+
+Everywhere this grammar treats whitespace, it means BLANKS — space and tab —
+never `[[:space:]]`. The shell separates tokens on blanks and keeps every
+other whitespace character as part of the word, so treating them alike
+silently repairs a hook that git cannot run. It matters in three places, and
+the reasoning is the same in all three:
+
+- the TAIL — a tail counts only when a blank separates it from the command,
+  because `"…/commit-msg""$1"` is a single word git cannot run, and a line
+  ending in CR is unverifiable rather than accepted for a tail the shell
+  never sees;
+- the SHEBANG — `#!/bin/sh` followed by CR makes the kernel look for an
+  interpreter named `/bin/sh\r`;
+- the INDENTATION — a line beginning with CR runs a command named `\rexec`,
+  so stripping it as leading whitespace would accept a hook that fails every
+  commit.
+
+A control character anywhere in a command line makes the shape unverifiable
+outright, for the same reason.
+
+The grammar is closed on purpose. Accepting the entry point anywhere it
+looks executable means ruling on reachability, which needs a shell parser:
+`if false; then … fi`, a function body nothing calls, and a `<<-` heredoc
+with an indented terminator all put the entry point on a line that reads as
+a command and never runs. Guessing there fails OPEN — it reports gating that
+no commit gets — so a hook outside the grammar is answered `2`, `could not
+determine`, naming the shape that is recognized. Never `0`, and never `1`
+either: a hook that runs `set -e` before the entry point does gate, and
+calling it ungated is the same false answer pointing the other way.
+
+A recognizable hook that is simply not ours — one command, and it is some
+other tool — is `1` with the hand-wiring remedy, as is a missing or
+non-executable one. A target that cannot be read is `2`. Every shim in
+`.git/hooks` intact but dormant behind the redirect stays `1` with its own
+wording, because no commit runs a guard right now.
 
 ## The pre-commit chain
 
