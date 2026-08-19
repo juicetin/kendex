@@ -42,9 +42,25 @@ qa_review="$SKILL_DIR/workflows/qa-review.md"
 
 require_pattern "$skill" '^## Mutation-Stability Pairing' 'canonical Mutation-Stability Pairing section'
 require_fixed "$skill" 'then reverting' 'mutation is reverted before reporting'
+# The whole clause, not fragments: the version this replaced contained both
+# `git archive` and a shared-tree prohibition while reading "a mutation that
+# cannot be runs on a copy", which does not parse — and an instruction that
+# cannot be parsed cannot be followed. Pin the two halves that carry the rule.
+require_fixed "$skill" 'Plant and revert a mutation inside a single tool call' 'the default: plant and revert in one call'
+require_fixed "$skill" 'when that is not possible, run it on a `git archive [SHA]` copy outside the worktree' 'the fallback names what to do and where'
+require_fixed "$skill" 'never in the shared tree' 'the shared worktree is named as off limits'
 require_fixed "$skill" 'default N=10' 'default repeat count'
 require_fixed "$skill" '--test-threads' 'concrete elevated-parallelism example'
 require_fixed "$skill" 'mutation: killed X/X; stability: Y/N at T threads' 'fixed two-number report format'
+
+# The rule that PRODUCES the citation has to name the carrier the gate SCOPES
+# to, or a reviewer following the pairing rule writes its own numbers into the
+# finding they validate — where they are read as quoted evidence and never
+# checked. That is the original incident shape reading green by placement.
+require_fixed "$skill" "artifact's \`summary\`" 'pairing citation is required in the summary'
+require_fixed "$skill" 'is not checked' 'pairing rule says a finding-only citation is unchecked'
+require_fixed "$SKILL_DIR/schemas/review-finding.md" 'Mutation-Stability Pairing' 'schema doc points back at the producing rule'
+require_fixed "$SKILL_DIR/schemas/review-finding.md" 'belongs in `.summary`' 'schema doc names the carrier for the pairing citation'
 require_fixed "$skill" 'concurrency-sensitive' 'finding classification for stability failures'
 require_fixed "$skill" 'never a pass' 'stability-fail-is-a-finding rule'
 

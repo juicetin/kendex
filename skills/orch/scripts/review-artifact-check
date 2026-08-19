@@ -36,170 +36,141 @@ when the optional delegated_at_epoch is supplied it ALSO applies glob mode's
 freshness gate against filesystem mtime.
 
 Both modes print JSON:
-  {ok: bool, path: string|null,
-   reason: "valid"|"missing"|"stale"|"invalid"|"no_review"|"incomplete"}
+  {ok: bool, path: string|null, reason: <see below>}
+
+reason when ok=true:
+  valid              accepted
+  valid_undermeasured accepted, but the artifact declares an instrument that
+             produced nothing (see `measurement_failed` below). Distinct on
+             purpose: a caller branching on reason cannot record an
+             undermeasured domain as a clean one.
 
 reason meanings when ok=false:
   missing    no matching artifact found (glob) / file does not exist (--file)
   stale      artifact mtime < delegated_at_epoch (glob mode, or --file when the
              optional boundary is supplied)
-  invalid    artifact fails `jq -e '.verdict'`
+  invalid    artifact fails `jq -e '.verdict'`, OR a content gate could not
+             run at all (a torn read of a non-atomically written artifact, a
+             broken jq) — `detail` carries jq's own diagnostic. A gate that
+             could not answer is never reported as "nothing found".
   no_review  artifact self-reports that no review was performed
              (qa_metadata.review_performed == false, or qa_metadata.reason is a
              no-scope/no-review admission) — rejected regardless of verdict.
              Artifacts without qa_metadata are unaffected.
   incomplete artifact declares the qa/second-opinion shape (a qa_metadata
              object is present) but its findings are unusable — either
-             blockers[]/suggestions[] are missing or not arrays (the arrays
-             were lost in the write), OR a present blockers[]/suggestions[]
+             blockers[]/suggestions[] are absent or not arrays, OR a present
              item is missing a required review-finding field so the
-             orchestrator cannot route it. The `detail` field names the first
-             offending item and field. Artifacts without qa_metadata are
-             unaffected.
+             orchestrator cannot route it. `detail` names the array and what it
+             was, or the first offending item and field. Artifacts without
+             qa_metadata are unaffected.
 
-When ok=false with reason=incomplete because of a malformed item, an extra
-`detail` string field is included identifying the array, index, and missing
-or invalid fields (e.g. "suggestions[0]: missing/invalid category, description").
-The {ok, path, reason} fields are always present and unchanged; `detail` is
-additive.
+  zero_sample artifact reports a measurement that produced no samples — a
+             mutation/stability citation whose SAMPLE COUNT (denominator) or
+             thread count is zero, or a perf_qa payload whose percentiles carry
+             no numeric value above zero. A zero RESULT is not a zero sample:
+             `stability: 0/10` is ten measured runs that all failed and stays
+             valid. Only `.summary` and `.qa_metadata` are scanned — see
+             CARRIERS below. `detail` names the offending citation.
+  invalid_declaration
+             a top-level `measurement_failed` is present but says nothing a
+             reader could act on (wrong type, blank, a null token such as n/a
+             or none, bare punctuation, or too short/too few words). `detail`
+             names what a declaration has to contain.
+
+`measurement_suppressed`: what the declaration silenced, when it silenced
+something. One declaration covers whatever the measurement gate would have said
+— including a perf payload the named instrument has nothing to do with — so the
+finding is recorded rather than dropped. Silencing a measurement is allowed;
+silencing it invisibly is not.
+
+`measurement_failed`: a TOP-LEVEL string declaring an instrument that produced
+nothing, naming the instrument and what it did. The zero_sample gate still runs
+for that artifact; what changes is the outcome — anything it finds is recorded
+as `measurement_suppressed` instead of rejecting, so the reviewer keeps its
+numbers as evidence instead of deleting them to get past a rejection. The
+result's reason becomes `valid_undermeasured` and the declaration is echoed as
+an additive `measurement_failed` field.
+Top-level rather than inside qa_metadata for two reasons: reaching it must not
+require adopting the qa shape and its finding-array contract, and it must stay
+outside the citation scan so a declaration naming the zeros it observed cannot
+trip the gate it exists to release.
+
+CARRIERS: the zero_sample scan reads `.summary` and `.qa_metadata` only — where
+an artifact states its OWN measurements. blockers[]/suggestions[]/questions[]
+describe the code under review, so a reviewer quoting a fixture, a log line, or
+another tool's zeroed run puts it there and the gate stays out of its way.
+
+WHEN AN OLDER SIBLING MAY ANSWER (glob mode): a rejection that is the
+artifact's SELF-REPORT ABOUT THIS RUN ends the search — no earlier file answers
+"did this review happen, did it measure anything, are these findings routable",
+and the prescribed self-check boundary of 0 makes every prior artifact fresh.
+Only a rejection that could be a TORN OR TRUNCATED WRITE falls back, and after
+measurement the single content rejection on that side is a gate that could not
+run: a truncated JSON object is not a JSON object, so every torn or partial
+write fails the `.verdict` parse before any content gate sees it. Each gate
+states its own disposition, and an unset one is treated as terminal so a gate
+added later fails closed; see lib/review-artifact-gates.sh. `stale` and a
+missing `.verdict` describe one write and fall back.
+
+Every ok=false result carries a `detail` naming its cause — including `missing`
+(the glob or path that matched nothing) and `stale` (the artifact mtime against
+the boundary), which are the two an agent reads BEFORE it knows what it did
+wrong. A reason with no cause is a dead end for the agent that has to fix it,
+and review-pr.md § 3.1 spends its one permitted re-delegation relaying that
+text. The {ok, path,
+reason} fields are always present; `detail`, `measurement_failed` and
+`measurement_suppressed` are additive.
+
+When the check cannot run at all — jq missing or broken, or mktemp unable to
+create the gates' error channel — every mode still prints a parseable rejection
+({"ok":false,...,"reason":"invalid"}) rather than exiting empty. Exit 1 is the
+status a legitimate rejection uses, so an empty stdout beside it would read as
+"artifact rejected" to a caller checking only the status.
 
 Exit 0 when a valid artifact was found, 1 otherwise, 2 on usage error.
 EOF
 }
 
+# A declared instrument failure rides along on every result the artifact is
+# ACCEPTED on, which is what `valid_undermeasured` names — the orchestrator has
+# to see that the review it is about to record ran on a broken instrument. A
+# rejected artifact carries no declaration: the gates reset the field and only
+# populate it on the accepting path, and a rejection sends the reviewer back to
+# rewrite the artifact anyway.
 emit() {
   local ok="$1" path="$2" reason="$3" detail="${4:-}"
-  jq -n --argjson ok "$ok" --arg path "$path" --arg reason "$reason" \
-    --arg detail "$detail" \
+  local measurement_failed="${review_artifact_measurement_failed:-}" out
+  local measurement_suppressed="${review_artifact_measurement_suppressed:-}"
+  if out="$(jq -n --argjson ok "$ok" --arg path "$path" --arg reason "$reason" \
+    --arg detail "$detail" --arg measurement_failed "$measurement_failed" \
+    --arg measurement_suppressed "$measurement_suppressed" \
     '{ok: $ok, path: (if $path == "" then null else $path end), reason: $reason}
-     + (if $detail == "" then {} else {detail: $detail} end)'
+     + (if $detail == "" then {} else {detail: $detail} end)
+     + (if $measurement_failed == "" then {}
+        else {measurement_failed: $measurement_failed} end)
+     + (if $measurement_suppressed == "" then {}
+        else {measurement_suppressed: $measurement_suppressed} end)' 2>/dev/null)"; then
+    printf '%s\n' "$out"
+    return 0
+  fi
+  # The result could not be formatted, so what lands on stdout is a rejection,
+  # not the answer the caller asked for. Say so in the status: an accept path
+  # that printed a refusal must not also report success — that is this issue's
+  # own defect class, and every caller that branches on exit status (orch's
+  # waiters, review-pr.md § 3.1, submit-pr.md § 1, the reviewer self-check)
+  # would read the 0 as "artifact accepted".
+  emit_unavailable "review-artifact-check could not run jq, so no artifact could be validated"
+  return 1
 }
 
 file_mtime() {
   stat -c %Y "$1" 2>/dev/null || stat -f %m "$1"
 }
 
-# vstack#652: a schema-valid artifact can carry verdict "pass" while its
-# qa_metadata admits no review happened (external second-opinion invoked with
-# no scope). Such a self-reported no-review is rejected regardless of verdict.
-# Artifacts without qa_metadata (internal reviewers) are unaffected.
-self_reports_no_review() {
-  jq -e '
-    (.qa_metadata? // {}) as $qa
-    | (($qa | type) == "object")
-      and (($qa.review_performed == false)
-           or ((($qa.reason // "") | tostring)
-               | test("no[ _-]?(scope|review)|not[ _-]?reviewed"; "i")))
-  ' "$1" >/dev/null 2>&1
-}
-
-# vstack#678: a truncated write can produce an artifact whose verdict/summary
-# survived while the finding arrays were silently lost — schema-valid on the
-# `.verdict` gate, but the actual blockers/suggestions are gone. Artifacts
-# that DECLARE the qa/second-opinion shape (a qa_metadata object — the
-# second-opinion producer always emits one, and QA reviewers are contractually
-# required to per reviewer qa-review.md) must therefore also carry blockers[]
-# and suggestions[]. Artifacts WITHOUT qa_metadata (internal reviewers,
-# pre-existing tolerance documented in reviewer review-finding.md) validate as
-# before. questions[] is not required here: it is PR-comment-triage-only and
-# the QA standard fields omit it.
-qa_shaped_incomplete() {
-  jq -e '
-    ((.qa_metadata? | type) == "object")
-      and (((.blockers? | type) != "array")
-           or ((.suggestions? | type) != "array"))
-  ' "$1" >/dev/null 2>&1
-}
-
-# vstack#810: qa_shaped_incomplete only catches arrays that were lost wholesale.
-# An artifact can instead carry present, non-empty blockers[]/suggestions[]
-# whose ITEMS omit the required review-finding fields — e.g. {title, location,
-# detail, severity} instead of the schema's {id, title, location, description,
-# recommendation, priority, estimate[, category]}. Such an item is present in
-# prose but unroutable: the orchestrator routes suggestions on `category`
-# (fix -> dev, issue -> audit), so a category-less item matches neither filter
-# and every finding is silently dropped. The required set is derived from
-# reviewer/schemas/review-finding.md § "Item Fields (blockers/suggestions)"
-# (all seven marked Required=Yes for both arrays; `category` additionally
-# Required for suggestions, and constrained to {fix,issue} because routing keys
-# on it; `priority` must be a number in 1..4 and `estimate` a number in 1..5
-# per the schema's field table, so a present-but-out-of-range value is caught
-# too). Gated on the qa_metadata declaration for parity with
-# qa_shaped_incomplete: artifacts without qa_metadata keep the pre-existing
-# tolerance documented in reviewer review-finding.md. Empty arrays carry no
-# items and stay valid. Prints the first offending item's diagnostic on stdout
-# (array[index] + the missing/invalid fields), empty string when every item is
-# well-formed or the artifact is not qa-shaped.
-finding_item_detail() {
-  jq -r '
-    if ((.qa_metadata? | type) == "object") then
-      ( ["id","title","location","description","recommendation","priority","estimate"]
-        as $base
-      | ( [ (.blockers?    | if type == "array" then . else [] end
-              | to_entries[] | {arr: "blockers",    i: .key, item: .value}),
-            (.suggestions? | if type == "array" then . else [] end
-              | to_entries[] | {arr: "suggestions", i: .key, item: .value}) ]
-          | map(
-              .arr as $arr | .i as $i | .item as $item
-              # category:issue items additionally require a non-empty `impact` —
-              # the one-line who-hits-this statement the filing bar adjudicates.
-              # An issue candidate without it is unroutable at the audit gate.
-              | ($base
-                 + (if $arr == "suggestions" then ["category"] else [] end)
-                 + (if $arr == "suggestions" and (($item | type) == "object")
-                       and ($item.category == "issue")
-                    then ["impact"] else [] end))
-                as $req
-              | [ $req[] | select((($item | type) != "object") or ($item[.] == null)) ]
-                as $missing
-              | ( if ($arr == "suggestions")
-                     and (($item | type) == "object")
-                     and ($item.category != null)
-                     and ((["fix","issue"] | index($item.category | tostring)) == null)
-                  then ["category(not fix|issue)"] else [] end )
-                as $badcat
-              # A present-but-blank impact is as unroutable as a missing one:
-              # the filing bar adjudicates its text.
-              | ( if ($arr == "suggestions")
-                     and (($item | type) == "object")
-                     and ($item.category == "issue")
-                     and ($item.impact != null)
-                     and ((($item.impact | type) != "string") or (($item.impact | tostring | gsub("\\s";"")) == ""))
-                  then ["impact(blank)"] else [] end )
-                as $blankimpact
-              # priority in 1..4, estimate in 1..5 per review-finding.md — a present
-              # but non-numeric or out-of-range value is unusable, not just the
-              # null case $missing already covers (vstack#810). Only checked when
-              # the field is present (a null value already falls under $missing)
-              # and the item is an object (a non-object is fully flagged there too).
-              | ( if (($item | type) == "object")
-                  then ( [ {f:"priority", v:$item.priority, lo:1, hi:4},
-                           {f:"estimate", v:$item.estimate, lo:1, hi:5} ]
-                         | map(select(.v != null
-                             and (((.v | type) != "number") or (.v < .lo) or (.v > .hi))))
-                         | map("\(.f)(not \(.lo)..\(.hi))") )
-                  else [] end )
-                as $badnum
-              | ($missing + $badcat + $blankimpact + $badnum) as $problems
-              # Name the expected set, not just what is wrong. The rejection is
-              # relayed verbatim to the agent that has to redo the artifact, and
-              # a bare "missing id, description, estimate, category" does not
-              # tell it that `detail` should have been `description` or that
-              # priority stops at 4 — so the same agent reaches for `priority: 5`
-              # or a plausible-but-wrong field name again (vstack#885).
-              | if ($problems | length) > 0
-                then "\($arr)[\($i)]: missing/invalid \($problems | join(", "))"
-                     + " — every blockers[]/suggestions[] item requires:"
-                     + " id, title, location (path plus symbol, no line numbers),"
-                     + " description, recommendation, priority (integer 1-4),"
-                     + " estimate (1-5); suggestions also category (fix|issue),"
-                     + " and category:issue also impact (who hits this, on what real path)"
-                else empty end
-            )
-          | (first(.[]) // "") ) )
-    else "" end
-  ' "$1" 2>/dev/null
-}
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/review-artifact-gates.sh
+source "$SCRIPT_DIR/lib/review-artifact-gates.sh"
 
 # --- Path mode: print the canonical artifact path for an agent ---
 if [[ "${1:-}" == "--path" ]]; then
@@ -243,35 +214,39 @@ if [[ "${1:-}" == "--file" ]]; then
     exit 2
   fi
   if [[ ! -f "$file" ]]; then
-    emit false "" "missing"
+    emit false "" "missing" "no file at $file"
     exit 1
   fi
   if [[ -n "$delegated_at" ]]; then
     mtime="$(file_mtime "$file")"
     if (( mtime < delegated_at )); then
-      emit false "$file" "stale"
+      emit false "$file" "stale" "artifact mtime $mtime predates the boundary $delegated_at, so it is an earlier round's file"
       exit 1
     fi
   fi
-  if ! jq -e '.verdict' "$file" >/dev/null 2>&1; then
-    emit false "$file" "invalid"
+  verdict_rc=0
+  jq -e '.verdict' "$file" >/dev/null 2>"$review_artifact_gate_err" || verdict_rc=$?
+  if [[ "$verdict_rc" -ne 0 ]]; then
+    review_artifact_measurement_failed=""
+    review_artifact_measurement_suppressed=""
+    if [[ "$verdict_rc" -eq 1 ]]; then
+      emit false "$file" "invalid" "the artifact has no .verdict field (or it is null) — every review artifact must carry verdict: pass or action_required"
+    else
+      emit false "$file" "invalid" "$(gate_failure_detail "$verdict_rc")"
+    fi
     exit 1
   fi
-  if self_reports_no_review "$file"; then
-    emit false "$file" "no_review"
-    exit 1
+  if artifact_content_gates "$file"; then
+    # An acceptance that could not be emitted is not an acceptance. Written
+    # explicitly rather than left to errexit: the status is the contract every
+    # caller branches on, and it must not depend on a shell option that a later
+    # refactor into a masking context (a command substitution, an `if`) would
+    # quietly suspend — which is exactly why --wait needs its own output guard.
+    emit true "$file" "$review_artifact_reason" || exit 1
+    exit 0
   fi
-  if qa_shaped_incomplete "$file"; then
-    emit false "$file" "incomplete"
-    exit 1
-  fi
-  detail="$(finding_item_detail "$file")"
-  if [[ -n "$detail" ]]; then
-    emit false "$file" "incomplete" "$detail"
-    exit 1
-  fi
-  emit true "$file" "valid"
-  exit 0
+  emit false "$file" "$review_artifact_reason" "$review_artifact_detail"
+  exit 1
 fi
 
 wait_secs=0
@@ -308,10 +283,16 @@ if ! [[ "$delegated_at" =~ ^[0-9]+$ ]]; then
   exit 2
 fi
 
+# Whether an older sibling may answer a rejection is decided by the gate that
+# rejected, not by this loop matching reason names — see the disposition rule in
+# lib/review-artifact-gates.sh. Anything a gate did not mark `torn_write` stops
+# the search here. `stale` and a missing `.verdict` are judged below and are
+# per-file by nature: they describe THIS write, and an intact sibling is a
+# legitimate answer to them.
 glob_check() {
 reason="missing"
 fail_path=""
-fail_detail=""
+fail_detail="no artifact matched $worktree/tmp/review-$agent-*.json"
 
 while IFS= read -r file; do
   [[ -n "$file" ]] || continue
@@ -320,43 +301,45 @@ while IFS= read -r file; do
     if [[ -z "$fail_path" ]]; then
       fail_path="$file"
       reason="stale"
+      fail_detail="artifact mtime $mtime predates the boundary $delegated_at, so it is an earlier round's file"
     fi
     continue
   fi
-  if ! jq -e '.verdict' "$file" >/dev/null 2>&1; then
+  verdict_rc=0
+  jq -e '.verdict' "$file" >/dev/null 2>"$review_artifact_gate_err" || verdict_rc=$?
+  if [[ "$verdict_rc" -ne 0 ]]; then
     if [[ -z "$fail_path" ]]; then
       fail_path="$file"
       reason="invalid"
+      if [[ "$verdict_rc" -eq 1 ]]; then
+        fail_detail="the artifact has no .verdict field (or it is null) — every review artifact must carry verdict: pass or action_required"
+      else
+        fail_detail="$(gate_failure_detail "$verdict_rc")"
+      fi
     fi
     continue
   fi
-  if self_reports_no_review "$file"; then
-    if [[ -z "$fail_path" ]]; then
-      fail_path="$file"
-      reason="no_review"
-    fi
-    continue
+  if artifact_content_gates "$file"; then
+    # Same rule as --file mode, and the reason this one is explicit is visible
+    # two callers up: --wait reads this function through a command substitution,
+    # where errexit is suspended for the outer command.
+    emit true "$file" "$review_artifact_reason" || return 1
+    return 0
   fi
-  if qa_shaped_incomplete "$file"; then
-    if [[ -z "$fail_path" ]]; then
-      fail_path="$file"
-      reason="incomplete"
-    fi
-    continue
+  if ! disposition_allows_fallback; then
+    emit false "$file" "$review_artifact_reason" "$review_artifact_detail"
+    return 1
   fi
-  detail="$(finding_item_detail "$file")"
-  if [[ -n "$detail" ]]; then
-    if [[ -z "$fail_path" ]]; then
-      fail_path="$file"
-      reason="incomplete"
-      fail_detail="$detail"
-    fi
-    continue
+  if [[ -z "$fail_path" ]]; then
+    fail_path="$file"
+    reason="$review_artifact_reason"
+    fail_detail="$review_artifact_detail"
   fi
-  emit true "$file" "valid"
-  return 0
 done < <(ls -1t "$worktree/tmp/review-$agent-"*.json 2>/dev/null)
 
+# No artifact was accepted, so no artifact's declaration is being reported on.
+review_artifact_measurement_failed=""
+review_artifact_measurement_suppressed=""
 emit false "$fail_path" "$reason" "$fail_detail"
 return 1
 }
@@ -377,6 +360,18 @@ if (( wait_secs > 0 )); then
   while :; do
     rc=0
     out="$(glob_check)" || rc=$?
+    # Capturing glob_check's stdout suspends errexit for its whole body, so a
+    # path that failed part-way still returns with unusable output. BOTH
+    # directions are covered: an accept is only an accept when a well-formed
+    # ok=true came with it, and a rejection still has to be a parseable result
+    # rather than whatever happened to be on stdout.
+    if ! jq -e 'has("ok")' <<<"$out" >/dev/null 2>&1 \
+       || { [[ "$rc" == "0" ]] && ! jq -e '.ok == true' <<<"$out" >/dev/null 2>&1; }; then
+      review_artifact_measurement_failed=""
+      review_artifact_measurement_suppressed=""
+      emit false "" "invalid" "the artifact check produced no usable result: $(printf '%s' "$out" | tr '\n\t' '  ')"
+      exit 1
+    fi
     landed_reason="$(jq -r '.reason // ""' <<<"$out" 2>/dev/null || printf '')"
     if [[ "$rc" == "0" ]]; then
       printf '%s\n' "$out"
