@@ -114,6 +114,64 @@
   settings cache renames inline, because it answers a failure by returning 1
   for its caller to propagate rather than by the family's exit 2, and routing
   it through the helper would change that contract.
+- growth-guards: the test harness scrubs git configuration carried in the
+  ENVIRONMENT, not just on disk. A private `HOME`, `XDG_CONFIG_HOME` and
+  `GIT_CONFIG_NOSYSTEM` do not stop `GIT_CONFIG_PARAMETERS` or the
+  `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n` family: either
+  still sets `core.hooksPath` or `commit.gpgsign` for every fixture, and git
+  exports `GIT_CONFIG_PARAMETERS` into hooks whenever the caller used
+  `git -c` — which is exactly how a suite run from inside a hook inherits
+  them. Verified both shapes running a foreign `pre-commit` against a fixture
+  repo before the scrub, and neither reaching it after, with the unscrubbed
+  control alongside so the assertion cannot pass vacuously.
+  `install-git-hooks.test.sh`, the one suite that had isolated itself, is
+  migrated to the harness: it set `HOME`, `XDG_CONFIG_HOME` and
+  `GIT_CONFIG_NOSYSTEM` and was still not hermetic — under an injected
+  `GIT_CONFIG_COUNT` it exited 128 with a foreign `pre-commit` running twenty
+  times. The adoption pin now requires an actual `.` of the harness rather
+  than a grep for either token, which a comment satisfied.
+
+- growth-guards: a green suite run is silent (#1503). `todo-ban.test.sh`
+  redirected into `stagedx/tools/` before that directory existed and recovered
+  through a fallback, so every passing run printed a `No such file or
+  directory` line — the one message that would announce a genuine
+  fixture-setup failure, taught to readers and log scanners as noise. The
+  directory is created first, and the other suites were swept for the same
+  class: all now emit nothing on stdout beyond their assertions and nothing at
+  all on stderr, except `install-git-hooks.test.sh`, which passes real hook
+  output through.
+
+- growth-guards: `cleanup-scope.test.sh` asserts cleanup over a scratch root
+  the suite owns instead of counting entries in the shared temp namespace
+  (#1501). The old count compared `gg-todo-ban.*` entries in `$TMPDIR` before
+  and after the run, so any concurrent process creating or removing one moved
+  the number, and the `find` that took it exited nonzero when a sibling's
+  directory vanished mid-traversal — under `set -euo pipefail` that aborted
+  the run before it reached its own summary. Measured 18-up on a loaded
+  machine: 0, 6 and 0 of 18 runs passed before; 18, 18 and 18 after. The
+  harness now points `TMPDIR` inside each suite's own scratch root, which is
+  where the check under test creates its directory, and the count is a glob
+  over that root paired with a decoy control proving it can see one.
+
+- growth-guards: every test suite now runs against a neutralized git
+  configuration, from one shared `tests/lib/harness.bash` rather than four
+  lines repeated per file (#1500). Nine of the ten suites ran `git init` and
+  `git commit` against fixture repos while inheriting the caller's global and
+  system configuration, so a machine carrying `core.hooksPath` executed the
+  developer's own hooks against generated fixtures, `init.templateDir` seeded
+  them, and `commit.gpgsign` failed the commits outright — measured against a
+  hostile global config, `byte-ceiling`, `suppression-ban` and `commit-msg`
+  went red while nothing in the diff had changed. The harness points `HOME`,
+  `XDG_CONFIG_HOME`, `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM` at the
+  suite's own scratch dir, exports `GIT_CONFIG_NOSYSTEM`, and clears
+  `GIT_TEMPLATE_DIR`, the `GIT_AUTHOR_*`/`GIT_COMMITTER_*` family and the
+  repo-location variables (`GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE` and
+  siblings) that git exports into every hook — so a suite run from inside a
+  commit hook operates on its fixture, not on the committing repository.
+  Adoption is pinned by `tests/harness-adoption.test.sh`, which fails when a
+  suite neither sources the harness nor isolates itself: the tenth suite
+  cannot forget. The harness is `.bash`, not `.sh`, because runners and the
+  exec-bit lint glob `tests/*.sh` and git's pathspec matches nested paths.
 
 - CLI: a lock `source` recorded as a path inside `~/.vstack/cache/` now
   resolves as the remote that cache entry clones, instead of as an ordinary

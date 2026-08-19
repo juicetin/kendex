@@ -12,8 +12,7 @@ set -euo pipefail
 TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SKILL_DIR="$(cd "$TEST_DIR/.." && pwd)"
 TB="$SKILL_DIR/scripts/todo-ban"
-TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
+. "$TEST_DIR/lib/harness.bash"
 
 # Hermetic: a leaked setting would mask every case below.
 unset GROWTH_GUARDS_TODO_EXCLUDES GROWTH_GUARDS_SETTINGS_FILE 2>/dev/null || true
@@ -211,7 +210,8 @@ run_tb
 echo "=== the exclusion list is read from the index ==="
 new_repo stagedx
 printf '// %s: vendored\n' "$TD" >"$R/v.rs"
-printf 'v.rs\tvendored fixture\n' >"$R/tools/growth-guards-todo-excludes" 2>/dev/null || { mkdir -p "$R/tools"; printf 'v.rs\tvendored fixture\n' >"$R/tools/growth-guards-todo-excludes"; }
+mkdir -p "$R/tools"
+printf 'v.rs\tvendored fixture\n' >"$R/tools/growth-guards-todo-excludes"
 git -C "$R" add -A
 # Worktree copy now DROPS the exclusion; the staged copy must still govern.
 : >"$R/tools/growth-guards-todo-excludes"
