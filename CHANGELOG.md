@@ -57,6 +57,63 @@
   dropped key, two drifted unquoted defaults, a stripped SECURITY caveat and
   an absent skill template each fail. Against the previous suite the absent-root
   and unquoted-drift fixtures both exited 0.
+- growth-guards: a `git grep --cached` scan now refuses an UNMERGED index
+  instead of reporting it clean (#1510). `git grep --cached` skips unmerged
+  index entries entirely — no error status, no `error:` line on stderr — so
+  `gg_grep_guard` saw a complete scan and `conflict-markers` printed
+  `OK — no conflict markers in tracked files`, exit 0, over a work tree whose
+  files carried the marker trio. That is the exact state the check exists for,
+  and the state a developer or agent is in when they run a validation command
+  mid-resolution. Every `--cached` scan now asks `git ls-files --unmerged`
+  over the paths it is about to read and, finding any, exits 2 naming them and
+  the only remedy there is: finish or abort the merge. The guard is scoped to
+  the lane's own pathspec, so an unmerged path a lane does not scan leaves
+  that scan complete. `byte-ceiling`'s index modes refuse too, for a
+  different mechanism with the same shape: an add/add conflict is classified
+  `U`, `--diff-filter=A` drops that record, and the run reported
+  `OK — 0 staged addition(s) checked` — a file of any size past the ceiling. Same failure class as #1492 — a measurement that could
+  not be taken must never report as a clean measurement.
+
+- growth-guards: policy reads fail closed on a probe git could not answer, and
+  a configured policy path is matched literally (#1508). `gg_policy_content`
+  discarded the exit status of both its probes, so exit 1 ("no such path") and
+  exit 128 (unreadable index, corrupt object, not a repository) were
+  indistinguishable and both fell through — judging a commit against the
+  unstaged worktree copy of a policy file, or against no file at all, while
+  saying nothing. It now mirrors the classification `gg_settings_source`
+  already applies: exit 1 is the answer, anything else is `gg_collection_error`,
+  and HEAD is probed with `git ls-tree` rather than `cat-file -e`, which cannot
+  tell an absent path from a broken repository. Both probes now pass
+  `:(literal)`, so a policy path spelling a glob matches itself instead of
+  whatever the glob reaches — before, a configured `tools/ex?.tsv` resolved
+  `git show ":tools/ex?.tsv"` as a REVISION and loaded a commit diff as the
+  exclusion list. `suppression-ban`'s baseline read carried the same two
+  defects and gets the same treatment; a ratchet that cannot read its own
+  baseline must not fall through to a looser one. `gg_load_excludes` now
+  propagates the failure too: it reads the policy through a command
+  substitution, where a `gg_collection_error` dies in the subshell and
+  arrives as a bare status, so an unreadable list was becoming an EMPTY list
+  and the gate then returned a verdict — reporting as a violation the very
+  file the unread policy excluded.
+
+- growth-guards: policy writes land by same-directory rename (#1502). The
+  settings cache was materialized by redirecting straight onto its final path,
+  so an interrupt left a TRUNCATED cache that the next run read as the
+  complete staged copy — and a key resolving to an empty value means the check
+  it names runs nowhere while the chain still reports OK. `suppression-ban
+  --update` replaced the baseline with a `mv` from `$TMPDIR`, which degrades to
+  copy-then-unlink across filesystems, leaving a truncated RATCHET file that
+  silently loosens the gate rather than failing it. Both now write to a temp
+  file beside the destination and rename. The staging file is created by
+  `mktemp`, never at a name derived from the pid: it lands in a directory the
+  repository controls, `cp` writes THROUGH a symlink, and a planted
+  `.gg-install.<pid>.<name>` link would therefore redirect the write to any
+  path the user can reach. Either way the destination carries the complete new
+  bytes or the complete old ones, never a prefix of either.
+  `suppression-ban` goes through a shared `gg_install_file` helper; the
+  settings cache renames inline, because it answers a failure by returning 1
+  for its caller to propagate rather than by the family's exit 2, and routing
+  it through the helper would change that contract.
 
 - CLI: a lock `source` recorded as a path inside `~/.vstack/cache/` now
   resolves as the remote that cache entry clones, instead of as an ordinary
