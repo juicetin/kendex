@@ -3,9 +3,15 @@
 //! `add` is being run from.
 
 use super::ResolvedSource;
+mod cache_path;
+mod label;
+mod remembered;
 use crate::config::{self, CacheLease};
 use crate::resolve::{same_path, source_from_project_lock};
 use anyhow::{Context, Result};
+use cache_path::resolve_cache_path_source;
+pub(in crate::commands::add) use label::source_label;
+use remembered::resolve_remembered_source;
 use std::path::{Path, PathBuf};
 
 /// Whether `add` must fetch a cached remote source before reading it, or may
@@ -75,88 +81,12 @@ impl LeasedSourceDir {
     }
 }
 
-/// How a source is shown to a human — the scope summary and the TUI source
-/// selector both print this. Display only: selection and installation carry
-/// the raw source, and this string is credential-scrubbed because a
-/// `https://user:token@host/…` remote would otherwise print its token into
-/// terminal scrollback and captured logs.
-pub(super) fn source_label(source: &str) -> String {
-    if Path::new(source).exists() {
-        // A lock-recorded local path is untrusted text like any other: a
-        // matching directory whose name carries an escape would put it on the
-        // picker row. Through the same redacting display as every other source
-        // diagnostic — a credential-looking string can name a real path.
-        return format!(
-            "local: {}",
-            crate::refresh_sources::remote_source_display(source)
-        );
-    }
-
-    // The repository a GitHub remote NAMES, through the one parser that
-    // answers that question. The prefix trimming this replaces knew three
-    // spellings and left every other one long, so an `ssh://` remote and an
-    // `https://` one for the same repository sat on two differently labelled
-    // rows. A slug is charset-gated where it is minted, so nothing a
-    // credential or a terminal acts on can reach a picker row through it.
-    if let Some(slug) = crate::config::parse_github_slug(source) {
-        return slug;
-    }
-
-    // Not GitHub, so there is no identity to render — the recorded spelling,
-    // minus what names no part of the repository. A registry or lock written
-    // by an earlier vstack can still hold a credential URL; a picker row is
-    // one of the places that would print it.
-    let display = crate::refresh_sources::remote_source_display(source);
-    let trimmed = display.trim_end_matches('/');
-    trimmed.strip_suffix(".git").unwrap_or(trimmed).to_string()
-}
-
-/// Resolve a source the project remembered — the registry's selection, or the
-/// one its lock records — for the fallback chain.
-///
-/// `Ok(None)` is the one outcome that may walk on: a local candidate that names
-/// nothing. A remote that is refused, an unowned cache entry or a failed clone
-/// is an ERROR, because continuing past it installs items from a different
-/// source over the ones already installed — the same refused-is-not-absent
-/// fail-open the refresh side closed.
-fn resolve_remembered_source(source: &str, fetch: SourceFetch) -> Result<Option<LeasedSourceDir>> {
-    // Ordered as `refresh` orders it: an absolute path that is a source
-    // DIRECTORY is that path, then the remote reading, then a relative one. A
-    // remote-shaped spelling that ALSO names a directory under the current
-    // working directory is the remote — otherwise a project holding an
-    // `owner/repo` subdirectory would silently install from it.
-    //
-    // A directory, not merely something that exists: a source is a tree items
-    // are read out of, so a regular file at a remembered path is a local
-    // candidate that names nothing — the one outcome that may walk on.
-    let path = Path::new(source);
-    if path.is_absolute() && path.is_dir() {
-        return Ok(Some(LeasedSourceDir::local(std::fs::canonicalize(source)?)));
-    }
-    if crate::refresh_sources::looks_like_remote_source(source) {
-        return clone_or_update(source, fetch).map(Some).with_context(|| {
-            format!(
-                "resolving the source this project is set to use ({})",
-                crate::refresh_sources::remote_source_display(source)
-            )
-        });
-    }
-    if path.is_dir() {
-        return Ok(Some(LeasedSourceDir::local(std::fs::canonicalize(source)?)));
-    }
-    // A spelling that opens with a scheme is an attempt at a URL, so it names
-    // something even when the strict parser cannot read it. Walking on would
-    // install from whatever source the chain reaches next.
-    if crate::refresh_sources::names_a_transport(source) {
-        anyhow::bail!(
-            "the source this project is set to use is not a usable URL: {}",
-            crate::refresh_sources::remote_source_display(source)
-        );
-    }
-    Ok(None)
-}
-
 fn resolve_source(source: Option<&str>, fetch: SourceFetch) -> Result<LeasedSourceDir> {
+    if let Some(source) = source
+        && let Some(resolved) = resolve_cache_path_source(source, fetch)
+    {
+        return resolved.map(|(leased, _)| leased);
+    }
     match source {
         Some(path) if Path::new(path).is_dir() => {
             Ok(LeasedSourceDir::local(std::fs::canonicalize(path)?))
@@ -200,7 +130,7 @@ fn clone_or_update(source: &str, fetch: SourceFetch) -> Result<LeasedSourceDir> 
         .ok_or_else(|| anyhow::anyhow!("Source not found: {source}"))?;
     let display = &remote.display;
 
-    let lease = if crate::refresh_sources::cache_entry_present(&remote) {
+    let lease = if crate::refresh_sources::cache_entry_present(&remote)? {
         // Update existing clone (handles force-pushed histories). A refusal —
         // the entry is not vstack's own clone — is an error; a failed fetch
         // keeps the stale clone.
@@ -212,6 +142,11 @@ fn clone_or_update(source: &str, fetch: SourceFetch) -> Result<LeasedSourceDir> 
         }
         crate::refresh_sources::update_cached_repo_bounded(&remote, max_age, bound)?
     } else {
+        // A directory in the way is a local fact, so it is raised before the
+        // access hint below rather than under it — that hint is about reaching
+        // the remote, and pointing it at a stale folder sent users to check
+        // credentials about their own disk.
+        crate::refresh_sources::ensure_cache_dir_is_clonable(&remote)?;
         // Fresh shallow clone
         eprintln!("Cloning {display}...");
         let lease = crate::refresh_sources::clone_cached_repo(&remote).with_context(|| {
@@ -260,6 +195,19 @@ pub(super) fn resolve_source_for_app(
     project_root: &Path,
     fetch: SourceFetch,
 ) -> Result<ResolvedSource> {
+    if let Some(named) = source
+        && let Some(resolved) = resolve_cache_path_source(named, fetch)
+    {
+        let (leased, recorded) = resolved?;
+        return Ok(ResolvedSource {
+            source_repo: config::source_repo_for_source(Some(&leased.dir), &recorded),
+            label: source_label(&recorded),
+            source: recorded,
+            dir: leased.dir,
+            persist: true,
+            lease: leased.lease,
+        });
+    }
     match source {
         // A local source is a DIRECTORY. Anything else that happens to exist
         // at that path names no source, and reading a catalog out of it yields
@@ -301,13 +249,16 @@ pub(super) fn resolve_source_for_app(
             // intentionally project-scoped: choosing a repo while working in
             // one project must not silently change the source used by another.
             if let Some(current) = registry.current_for_project(project_root)
-                && let Some(resolved) = resolve_remembered_source(current, fetch)?
+                && let Some((resolved, recorded)) = resolve_remembered_source(current, fetch)?
                 && usable(&resolved.dir)
             {
+                // `recorded`, never `current`: the two differ exactly when the
+                // remembered string is a cache path, and what goes in the lock
+                // has to be the source the install was read from.
                 return Ok(ResolvedSource {
-                    source: current.to_string(),
-                    source_repo: config::source_repo_for_source(Some(&resolved.dir), current),
-                    label: source_label(current),
+                    source_repo: config::source_repo_for_source(Some(&resolved.dir), &recorded),
+                    label: source_label(&recorded),
+                    source: recorded,
                     dir: resolved.dir,
                     persist: true,
                     lease: resolved.lease,
@@ -318,13 +269,13 @@ pub(super) fn resolve_source_for_app(
             // lock file. Use that before any global/default source so a
             // project's repo choice remains stable across invocations.
             if let Some(current) = source_from_project_lock(project_root)
-                && let Some(resolved) = resolve_remembered_source(&current, fetch)?
+                && let Some((resolved, recorded)) = resolve_remembered_source(&current, fetch)?
                 && usable(&resolved.dir)
             {
                 return Ok(ResolvedSource {
-                    label: source_label(&current),
-                    source_repo: config::source_repo_for_source(Some(&resolved.dir), &current),
-                    source: current,
+                    source_repo: config::source_repo_for_source(Some(&resolved.dir), &recorded),
+                    label: source_label(&recorded),
+                    source: recorded,
                     dir: resolved.dir,
                     persist: true,
                     lease: resolved.lease,

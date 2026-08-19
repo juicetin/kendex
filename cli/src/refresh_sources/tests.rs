@@ -4,7 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 /// A throwaway directory for one test, shared with the records tests next
 /// door — both halves build their fixtures under the same root name.
-pub(super) fn tmpdir(label: &str) -> PathBuf {
+pub(crate) fn tmpdir(label: &str) -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system clock before epoch")
@@ -21,7 +21,7 @@ pub(super) fn tmpdir(label: &str) -> PathBuf {
 
 /// Test-side git: unhardened with respect to the ownership checks under
 /// test, but never redirected by an inherited location override.
-fn git(repo: &Path, args: &[&str]) {
+pub(crate) fn git(repo: &Path, args: &[&str]) {
     let mut command = std::process::Command::new("git");
     for key in GIT_INHERITED_ENV_VARS.iter().chain(GIT_CACHE_ONLY_ENV_VARS) {
         command.env_remove(key);
@@ -34,7 +34,7 @@ fn git(repo: &Path, args: &[&str]) {
     );
 }
 
-fn git_stdout(repo: &Path, args: &[&str]) -> String {
+pub(crate) fn git_stdout(repo: &Path, args: &[&str]) -> String {
     let mut command = std::process::Command::new("git");
     for key in GIT_INHERITED_ENV_VARS.iter().chain(GIT_CACHE_ONLY_ENV_VARS) {
         command.env_remove(key);
@@ -45,7 +45,7 @@ fn git_stdout(repo: &Path, args: &[&str]) -> String {
 }
 
 /// A committed repository at `dir` with `README.md` tracked.
-fn init_git_repo(dir: &Path) {
+pub(crate) fn init_git_repo(dir: &Path) {
     std::fs::create_dir_all(dir).unwrap();
     git(dir, &["init", "-q", "-b", "main"]);
     git(dir, &["config", "user.email", "test@example.com"]);
@@ -56,12 +56,12 @@ fn init_git_repo(dir: &Path) {
     git(dir, &["commit", "-q", "-m", "init"]);
 }
 
-fn file_url(path: &Path) -> String {
+pub(crate) fn file_url(path: &Path) -> String {
     format!("file://{}", path.display())
 }
 
 /// A remote whose clone lives at `cache` and whose origin is `origin`.
-fn remote_at(cache: &Path, origin: &Path) -> RemoteSource {
+pub(crate) fn remote_at(cache: &Path, origin: &Path) -> RemoteSource {
     RemoteSource {
         display: "owner/repo".to_string(),
         git_url: file_url(origin),
@@ -71,7 +71,7 @@ fn remote_at(cache: &Path, origin: &Path) -> RemoteSource {
 }
 
 /// Clone `origin` into `cache` the way vstack would have.
-fn clone_into(origin: &Path, cache: &Path) {
+pub(crate) fn clone_into(origin: &Path, cache: &Path) {
     std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
     git(
         cache.parent().unwrap(),
@@ -2108,7 +2108,7 @@ fn a_shorthand_carrying_a_query_never_becomes_a_github_url() {
         "owner/repo?access_token=ghp_SECRET.git",
         "owner/repo#ghp_SECRET",
     ] {
-        let reason = absent_source_reason(source);
+        let reason = absent_source_note(source, None, false);
         assert!(!reason.contains("ghp_SECRET"), "{source}: {reason}");
     }
     // The shapes GitHub really uses are untouched.
@@ -2137,72 +2137,6 @@ fn one_sources_warning_cannot_suppress_another_sources() {
     // A genuine repeat is still printed once.
     assert!(!warn_once_is_new(first.0, first.1));
     assert!(!warn_once_is_new(second.0, second.1));
-}
-
-/// A credential URL malformed enough to evade `parse_remote_url` is
-/// classified as a local path, and that fallback used to print it
-/// verbatim — so `check`, `verify` and `refresh` leaked legacy lock-file
-/// secrets to their logs.
-#[test]
-fn a_malformed_credential_source_is_redacted_when_reported_missing() {
-    for source in [
-        "https:/user:ghp_SECRET@github.com/owner/repo",
-        "user:ghp_SECRET@github.com/owner/repo",
-        "/srv/user:ghp_SECRET@host/repo",
-    ] {
-        let reason = absent_source_reason(source);
-        assert!(!reason.contains("ghp_SECRET"), "{source}: {reason}");
-        assert!(reason.contains("<redacted>"), "{source}: {reason}");
-    }
-    // A plain missing path is still named in full.
-    assert_eq!(
-        absent_source_reason("/srv/vstack"),
-        "source not found: /srv/vstack"
-    );
-}
-
-/// The restoration command is meant to be PASTED, so the source arrives in it
-/// as a shell word. `RemoteSource` accepts a URL whose path carries shell
-/// syntax, and interpolating its display form handed the reader a command that
-/// ran the substitution instead of naming the repository.
-#[test]
-fn a_restoration_command_passes_its_source_literally() {
-    let hostile = "https://host.example/team/$(id).git";
-    let reason = absent_source_reason(hostile);
-    assert!(
-        looks_like_remote_source(hostile),
-        "the fixture must take the remote branch"
-    );
-    assert!(
-        reason.contains(&format!("`vstack add '{hostile}'`")),
-        "the argument must be single-quoted and inert: {reason}"
-    );
-    // And it really is one inert argument to a real shell.
-    let arg = crate::display::command_arg(hostile);
-    let out = std::process::Command::new("sh")
-        .arg("-c")
-        .arg(format!("printf '%s' {arg}"))
-        .output()
-        .expect("sh runs");
-    assert_eq!(String::from_utf8_lossy(&out.stdout), hostile);
-
-    // Control: the same source's PROSE mention is still scrubbed, and long
-    // prose still truncates while the command never does.
-    let long = format!("https://host.example/team/{}.git", "a".repeat(400));
-    assert!(
-        crate::display::display_text(&long).ends_with('…'),
-        "prose truncates"
-    );
-    assert!(
-        absent_source_reason(&long).contains(&long),
-        "a command argument is never elided"
-    );
-
-    // Control: an ordinary source renders unquoted, exactly as before.
-    assert_eq!(
-        absent_source_reason("https://github.com/owner/repo"),
-        "remote cache not present — run `vstack add https://github.com/owner/repo`"
-    );
 }
 
 /// A remembered source that opens with a scheme is an attempt at a URL, so it
@@ -2671,79 +2605,6 @@ fn git_output_summary_redacts_an_scp_like_remote() {
     for token in ["fatal:", "error:", "2026-08-16T04:51:03Z", "a:b"] {
         assert_eq!(redact_token(token), token, "{token}");
     }
-}
-
-/// `git clone` follows a symlink at its destination, so the clone path had
-/// to prove the entry is vstack's own directory before running git — every
-/// other write path already does.
-#[cfg(unix)]
-#[test]
-fn clone_refuses_a_cache_entry_that_is_not_an_empty_directory_of_its_own() {
-    let root = tmpdir("clone-destination");
-    let origin = root.join("origin");
-    init_git_repo(&origin);
-    let outside = root.join("user-checkout");
-    std::fs::create_dir_all(&outside).unwrap();
-    std::fs::write(outside.join("precious.txt"), "precious\n").unwrap();
-    let home = root.join("home");
-
-    crate::test_util::with_home_and_config(&home, &home.join(".config"), || {
-        let remote = remote_at(&remote_cache_root().join("owner_repo"), &origin);
-        std::fs::create_dir_all(remote.cache_dir.parent().unwrap()).unwrap();
-        std::os::unix::fs::symlink(&outside, &remote.cache_dir).unwrap();
-
-        let err = clone_cached_repo(&remote).unwrap_err().to_string();
-        assert!(
-            err.contains("not a directory vstack can clone into"),
-            "{err}"
-        );
-        assert!(
-            !outside.join(".git").exists(),
-            "the clone was written into the link target"
-        );
-        assert_eq!(
-            std::fs::read_to_string(outside.join("precious.txt")).unwrap(),
-            "precious\n"
-        );
-        std::fs::remove_file(&remote.cache_dir).unwrap();
-
-        // A directory holding someone else's files is refused too; an
-        // empty one is what a fresh clone lands in.
-        std::fs::create_dir_all(&remote.cache_dir).unwrap();
-        std::fs::write(remote.cache_dir.join("stray.txt"), "x\n").unwrap();
-        let err = clone_cached_repo(&remote).unwrap_err().to_string();
-        assert!(err.contains("not an empty directory"), "{err}");
-        std::fs::remove_file(remote.cache_dir.join("stray.txt")).unwrap();
-        drop(clone_cached_repo(&remote).unwrap());
-        assert!(remote.cache_dir.join(".git").is_dir());
-    });
-    let _ = std::fs::remove_dir_all(root);
-}
-
-#[test]
-fn clone_cached_repo_makes_a_shallow_clone_in_the_cache_root() {
-    let root = tmpdir("clone");
-    let origin = root.join("origin");
-    init_git_repo(&origin);
-    std::fs::write(origin.join("README.md"), "second\n").unwrap();
-    git(&origin, &["commit", "-q", "-am", "second"]);
-    let home = root.join("home");
-    crate::test_util::with_home_and_config(&home, &home.join(".config"), || {
-        let cache = remote_cache_root().join("owner_repo");
-        assert!(!cache.exists());
-        drop(clone_cached_repo(&remote_at(&cache, &origin)).unwrap());
-        assert_eq!(
-            std::fs::read_to_string(cache.join("README.md")).unwrap(),
-            "second\n"
-        );
-        assert_eq!(
-            git_stdout(&cache, &["rev-parse", "--is-shallow-repository"]),
-            "true"
-        );
-        // The fresh clone is owned and updatable.
-        drop(update_cached_repo(&remote_at(&cache, &origin)).unwrap());
-    });
-    let _ = std::fs::remove_dir_all(root);
 }
 
 /// The whole-lock best-effort refresh the TUI runs at startup uses the same

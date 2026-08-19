@@ -201,10 +201,53 @@ pub(crate) fn reject_credential_bearing_git_url(url: &str) -> Result<()> {
 /// Replace a URL query/fragment with a marker. Git clone URLs have no
 /// legitimate use for either, and both are places a token gets carried.
 fn redact_remote_query(url: &str) -> String {
+    // A local PATH has no query and no fragment: `?` and `#` are ordinary
+    // characters in one, and redacting them corrupted the path rather than
+    // protecting anything — a remedy command then named a directory that does
+    // not exist. Every other spelling can carry a token there, including the
+    // ones no parser accepts, which is why this asks about the shape and not
+    // about whether a parser succeeded.
+    if spelling_is_a_local_path(url) {
+        return url.to_string();
+    }
     match url.find(['?', '#']) {
         Some(index) => format!("{}<redacted>", &url[..=index]),
         None => url.to_string(),
     }
+}
+
+/// The spellings that name a filesystem path and therefore carry no query:
+/// absolute for the running platform, `~`-tilde, or relative — explicitly
+/// (`.`, `./…`, `../…`) or as a bare name.
+///
+/// The relative half asks the resolver's own predicates rather than a private
+/// prefix list, so the shapes exempted here and the shapes
+/// [`super::resolve_recorded_local_source`] resolves cannot drift apart. A
+/// hand-written list had already drifted: it omitted the bare spelling, and a
+/// source directory named `cat?x` was cut to `cat?<redacted>` — offered as a
+/// pasteable command naming a directory that does not exist, on an otherwise
+/// healthy source.
+///
+/// Deliberately NOT a blanket "no scheme" exemption:
+/// [`is_bare_local_source`] refuses anything with a separator, which is what
+/// keeps `owner/repo?token=…` redacted.
+///
+/// The URL check leads because it is the one that must not recurse.
+/// [`is_bare_local_source`] asks `looks_like_remote_source`, which parses —
+/// and parsing builds a display through this very function. A scp-like
+/// spelling carries no separator, so it would reach that question and come
+/// back here forever; answering it from [`parse_remote_url`], which parses
+/// nothing further, settles it first. It costs no accuracy: a spelling that is
+/// URL-shaped was never a path.
+fn spelling_is_a_local_path(source: &str) -> bool {
+    if parse_remote_url(source).is_some() {
+        return false;
+    }
+    std::path::Path::new(source).is_absolute()
+        || source.starts_with('/')
+        || source.starts_with('~')
+        || super::is_explicit_relative_local_source(source)
+        || super::is_bare_local_source(source)
 }
 
 /// One parse of the remote-URL grammar, for every question asked about a

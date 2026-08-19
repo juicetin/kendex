@@ -63,8 +63,12 @@ impl Item {
 pub struct AvailableItem {
     pub name: String,
     pub kind: ItemKind,
-    /// The lock `source` string the item was found in.
+    /// The lock `source` string the item was found in, as it may be SHOWN.
     pub source: String,
+    /// The same source as a `vstack add` argument, or `None` when it cannot be
+    /// one. Decided from the raw string, because `source` above is already
+    /// redacted for display and a redacted spelling names nothing.
+    pub add_argument: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -84,9 +88,15 @@ pub enum SourceProblem {
     ///
     /// `reason` comes from resolution itself, so `check`, `verify` and
     /// `refresh` name the same cause and the same remedy for the same state.
+    ///
+    /// `restore` is the argument `vstack add` must be given to bring it back,
+    /// and is `None` when nothing can: a path into vstack's own cache names a
+    /// clone vstack mints rather than a source a user keeps, so re-adding the
+    /// PATH fails outright — which is what the report used to print.
     Unresolvable {
         entries: Vec<String>,
         reason: String,
+        restore: Option<String>,
     },
     /// The source resolves but cannot be inventoried: its catalog
     /// configuration is unusable, or a whole kind root is missing. `refresh`
@@ -104,6 +114,12 @@ pub enum SourceProblem {
     Unverifiable {
         entries: Vec<String>,
         reason: String,
+        /// The argument `vstack add` must be given to clear it, `None` when
+        /// re-adding refuses again — which most refusals do, and which is why
+        /// this branch used to offer nothing at all. The redirect shapes are
+        /// the exception: they have a genuine one-command repair, and staying
+        /// silent about it left a permanent exit 1.
+        restore: Option<String>,
     },
 }
 
@@ -290,3 +306,6 @@ impl CheckReport {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

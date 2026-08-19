@@ -15,41 +15,6 @@ use anyhow::Result;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-/// Result counts from one invocation of [`refresh_items_in_scope`].
-#[derive(Default)]
-pub struct RefreshStats {
-    pub agents_refreshed: usize,
-    pub skills_refreshed: usize,
-    pub hooks_refreshed: usize,
-    pub pi_refreshed: usize,
-    pub successful_items: HashSet<String>,
-    pub failures: Vec<RefreshFailure>,
-    /// Map of agent_name → (full merged required-skills list, newly added skill names).
-    pub upstream_skill_updates: HashMap<String, (Vec<String>, Vec<String>)>,
-    /// Names of items whose generated/installed on-disk content actually
-    /// changed during this refresh. Distinct from source-hash equality: an
-    /// agent re-renders when the installed skill set (or injected project
-    /// instructions) changes even though the agent's own source hash is
-    /// unchanged, and a rendered skill can differ from its source via injected
-    /// instructions/notice. Tracked for agents and skills (the artifacts that
-    /// derive from external state); hooks and Pi packages rely on source-hash
-    /// equality alone.
-    pub content_changed: HashSet<String>,
-    /// Canonical project-owned skills managed through `[skill-instructions]`
-    /// despite having no vstack lock entry or upstream package source.
-    pub project_owned_skills: HashSet<String>,
-    /// Locked items that could not be refreshed because their source is gone
-    /// or no longer carries the asset, mapped to the reason. Tracked
-    /// separately from [`Self::failures`] (a failed install attempt) so the
-    /// report can never fall through to "unchanged" with the stored hash —
-    /// that silently masked an entry whose source had stopped providing it.
-    pub missing: BTreeMap<String, String>,
-    /// What source resolution refused, and whether it ran. Handed in once by
-    /// the caller so an entry backed by a refused source is reported as
-    /// refused rather than as absent.
-    refused_sources: crate::refresh_sources::SourceRefusals,
-}
-
 /// A locked hook the run could not read, and why. Every agent installed for
 /// one of its harnesses is left exactly as installed rather than regenerated
 /// without it.
@@ -66,104 +31,6 @@ pub struct RefreshFailure {
     pub error: String,
 }
 
-impl RefreshStats {
-    /// Persist any required-skill upstream additions back to the project's
-    /// `vstack.toml`. No-op for global scope (no project config).
-    pub fn persist_upstream(&self, project_root: &Path) {
-        if !self.upstream_skill_updates.is_empty() {
-            let merged: HashMap<String, Vec<String>> = self
-                .upstream_skill_updates
-                .iter()
-                .map(|(k, (list, _))| (k.clone(), list.clone()))
-                .collect();
-            crate::project_config::merge_upstream_agent_skills(project_root, &merged);
-        }
-    }
-
-    fn mark_success(&mut self, name: &str) {
-        self.successful_items.insert(name.to_string());
-    }
-
-    fn mark_content_changed(&mut self, name: &str) {
-        self.content_changed.insert(name.to_string());
-    }
-
-    fn fail(&mut self, item: &str, harness: Option<Harness>, err: impl std::fmt::Display) {
-        self.failures.push(RefreshFailure {
-            item: item.to_string(),
-            harness: harness.map(|harness| harness.name().to_string()),
-            error: err.to_string(),
-        });
-    }
-
-    /// Record that `item` was left exactly as installed because this run could
-    /// not determine what to write. Reported like a missing item — the run
-    /// exits non-zero naming it — because the installed file no longer matches
-    /// what a successful refresh would produce.
-    fn mark_undetermined(&mut self, item: &str, reason: String) {
-        self.missing.insert(item.to_string(), reason);
-    }
-
-    /// Record that `item` has no asset to refresh from: its source resolved
-    /// to `root` but does not carry the asset.
-    fn mark_missing(&mut self, item: &str, root: &Path) {
-        self.missing.insert(
-            item.to_string(),
-            format!("not found in source {}", root.display()),
-        );
-    }
-
-    /// Record that `item`'s recorded source did not resolve to any loaded
-    /// source.
-    fn mark_source_missing(&mut self, item: &str, recorded_source: &str) {
-        let reason = self.unresolved_source_reason(recorded_source);
-        self.missing.insert(item.to_string(), reason);
-    }
-
-    /// Why a recorded source produced nothing. A refused source and a remote
-    /// whose clone is not on this machine are both sources that exist — saying
-    /// "source not found" for either is the wrong cause, and it is the cause
-    /// that tells the user whether to clear a cache entry or run `vstack add`.
-    fn unresolved_source_reason(&self, recorded_source: &str) -> String {
-        if let Some(refusal) = self.refused_sources.reason(recorded_source) {
-            return refusal.to_string();
-        }
-        crate::refresh_sources::absent_source_reason(recorded_source)
-    }
-
-    pub fn has_failures(&self) -> bool {
-        !self.failures.is_empty()
-    }
-
-    pub fn has_missing(&self) -> bool {
-        !self.missing.is_empty()
-    }
-
-    /// Record an entry whose harness list produced no install attempt at all
-    /// (empty list, or ids this binary does not recognize / the hook does not
-    /// apply to). Without this the entry fell through its refresh pass with no
-    /// success, no failure, and no missing state, and the summary echoed the
-    /// recorded source hash as both old and new — "(unchanged)" for an entry
-    /// that was never re-copied from its source (VST-134).
-    fn fail_no_installable_harness(&mut self, item: &str, harnesses: &[String], global: bool) {
-        let arg = crate::display::command_arg(item);
-        let remove_cmd = if global {
-            format!("vstack remove {arg} --global")
-        } else {
-            format!("vstack remove {arg}")
-        };
-        self.fail(
-            item,
-            None,
-            format!(
-                "no installable harness (recorded harnesses: [{}]); \
-                 re-add the item or run `{remove_cmd}` to drop the stale entry",
-                harnesses.join(", ")
-            ),
-        );
-    }
-}
-
 /// Content hash of an installed skill directory, resolving a symlinked install
 /// dir to its canonical target and skipping the volatile `.vstack-refreshed`
 /// marker (its per-process PID payload changes every run). Returned value is
@@ -177,38 +44,6 @@ fn hash_installed_skill_dir(path: &Path) -> u64 {
 fn same_path(a: &Path, b: &Path) -> bool {
     a.canonicalize().unwrap_or_else(|_| a.to_path_buf())
         == b.canonicalize().unwrap_or_else(|_| b.to_path_buf())
-}
-
-fn observed_source_repo_for_lock_entry(
-    source_records: &[ResolvedSource],
-    entry: &config::LockEntry,
-) -> Option<Option<String>> {
-    if let Some(record) = source_records.iter().find(|source| {
-        source.aliases.iter().any(|alias| alias == &entry.source)
-            || (Path::new(&entry.source).is_absolute()
-                && same_path(&source.root, Path::new(&entry.source)))
-    }) {
-        return Some(record.source_repo.clone());
-    }
-    if let Some(source_root) = config::resolve_source_path(&entry.source) {
-        return Some(config::source_repo_for_source(
-            Some(&source_root),
-            &entry.source,
-        ));
-    }
-    config::parse_github_slug(&entry.source).map(Some)
-}
-
-/// Record the durable repo identity of the source `entry` was just refreshed
-/// from — its own source, never whichever source a caller happened to have
-/// selected.
-pub(crate) fn sync_lock_entry_source_repo(
-    source_records: &[ResolvedSource],
-    entry: &mut config::LockEntry,
-) {
-    if let Some(source_repo) = observed_source_repo_for_lock_entry(source_records, entry) {
-        entry.source_repo = source_repo;
-    }
 }
 
 /// Generic upstream-merge: starts with `project_list` if present, else
@@ -299,6 +134,7 @@ pub fn refresh_items_in_scope(
 ) -> RefreshStats {
     let mut stats = RefreshStats {
         refused_sources: refused_sources.clone(),
+        global,
         ..RefreshStats::default()
     };
     let pass = |name: &str| name_filter.is_none_or(|f| f.iter().any(|n| n == name));
@@ -389,7 +225,7 @@ pub fn refresh_items_in_scope(
             // middle one used to be reported as the last, telling the operator
             // a source no longer carries a hook that it plainly does.
             reason: match config::resolve_source_path(&entry.source) {
-                None => stats.unresolved_source_reason(&entry.source),
+                None => stats.unresolved_source_reason(&entry.source, entry.source_repo.as_deref()),
                 Some(root)
                     if !sources
                         .iter()
@@ -420,7 +256,7 @@ pub fn refresh_items_in_scope(
             continue;
         }
         let Some(source) = refresh_source_for_entry(sources, entry) else {
-            stats.mark_source_missing(name, &entry.source);
+            stats.mark_source_missing(name, entry);
             continue;
         };
         let Some(agent) = source.agents.iter().find(|a| &a.name == name) else {
@@ -566,7 +402,7 @@ pub fn refresh_items_in_scope(
         .filter(|(n, _)| pass(n))
     {
         let Some(source) = refresh_source_for_entry(sources, entry) else {
-            stats.mark_source_missing(name, &entry.source);
+            stats.mark_source_missing(name, entry);
             continue;
         };
         let Some(skill) = source.skills.iter().find(|s| &s.name == name) else {
@@ -642,7 +478,7 @@ pub fn refresh_items_in_scope(
         .filter(|(n, _)| pass(n))
     {
         let Some(source) = refresh_source_for_entry(sources, entry) else {
-            stats.mark_source_missing(name, &entry.source);
+            stats.mark_source_missing(name, entry);
             continue;
         };
         let Some(hook) = source.hooks.iter().find(|hook| hook.name == entry.name) else {
@@ -681,7 +517,7 @@ pub fn refresh_items_in_scope(
         .filter(|(n, _)| pass(n))
     {
         let Some(source) = refresh_source_for_entry(sources, entry) else {
-            stats.mark_source_missing(name, &entry.source);
+            stats.mark_source_missing(name, entry);
             continue;
         };
         let Some(ext) = source_pi_extension_for_lock_name(&source.pi_extensions, name) else {
@@ -1504,7 +1340,7 @@ fn run_one(global: bool, verbose: bool) -> Result<()> {
         }
         let old_hash = entry.source_hash.clone();
         if stats.successful_items.contains(&entry.name) {
-            sync_lock_entry_source_repo(&source_records, entry);
+            sync_lock_entry_source(&source_records, entry);
             entry.installed_at = now.clone();
             entry.source_hash = config::compute_source_hash(entry);
         }
@@ -1677,5 +1513,13 @@ fn run_one(global: bool, verbose: bool) -> Result<()> {
     Ok(())
 }
 
+mod lock_repair;
+mod stats;
+pub(crate) use lock_repair::*;
+pub use stats::RefreshStats;
+
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod unresolved_source_tests;

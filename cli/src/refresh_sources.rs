@@ -2,9 +2,15 @@ use crate::config::{self, CacheLease};
 use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
 
+mod cache_entry;
+mod clone;
 mod records;
 mod url;
 
+pub(crate) use cache_entry::*;
+#[cfg(test)]
+pub(crate) use clone::cache_clone_command;
+pub(crate) use clone::*;
 pub(crate) use records::*;
 pub(crate) use url::*;
 
@@ -55,8 +61,20 @@ fn resolve_single_source_with(
     update_remote: bool,
     require_vstack_source: bool,
 ) -> LeasedResolution {
-    // Absolute local path that exists.
     let p = std::path::Path::new(source);
+
+    // A path anywhere inside vstack's own cache is a remote source spelled as
+    // a path, and is resolved as one BEFORE the local-directory branch below.
+    // The cache is state vstack fetches and `reset --hard`s on a TTL, not a
+    // checkout a user maintains, so reading one as an ordinary local directory
+    // took the entry out of the fetch, the TTL, the lease, the ownership
+    // proofs and every drift report at once — silently, because the stale tree
+    // it read still matched what had been installed from it.
+    if let Some((entry, below)) = remote_cache_entry_for_path(p) {
+        return resolve_cache_path_source(&entry, &below, update_remote);
+    }
+
+    // Absolute local path that exists.
     if p.is_absolute()
         && p.is_dir()
         && (!require_vstack_source || crate::resolve::is_vstack_source(p))
@@ -93,41 +111,7 @@ fn resolve_single_source_with(
         Ok(None) => return SourceResolution::Absent.into(),
         Err(err) => return SourceResolution::refused(&err).into(),
     };
-    if !cache_entry_present(&remote) {
-        return SourceResolution::Absent.into();
-    }
-    if update_remote {
-        eprintln!("Updating cached repo {}...", remote.display);
-        // The update path runs the filesystem checks itself, on its way to the
-        // git-level ones that guard `reset --hard`.
-        return match update_cached_repo(&remote) {
-            // The lease travels with the directory it protects: whoever reads
-            // this root holds it until the read is done.
-            Ok(lease) => LeasedResolution {
-                resolution: SourceResolution::Resolved(remote.cache_dir),
-                lease,
-            },
-            Err(err) => SourceResolution::refused(&err).into(),
-        };
-    } else if config::remote_cache_fetch_in_flight(&remote.cache_dir) {
-        // Read-only, and another process is mid-fetch: this tree is being
-        // `reset --hard` right now, so every question asked of it — which
-        // assets it ships, what they hash to, even which repository its
-        // `.git/config` names — can be answered wrongly rather than not at
-        // all. Probed, never waited on: the session-start check runs this path
-        // and must stay local, so the answer is "not this run" rather than a
-        // lease taken out from under an install.
-        return SourceResolution::Busy.into();
-    } else if let Err(err) = ensure_cache_entry_is_owned(&remote) {
-        // The same question the update path asks, because reading an entry is
-        // how its content becomes the installed asset: a symlinked entry or a
-        // redirected `.git` is some other checkout, and an entry whose origin
-        // is a different repository would be installed as this source. Every
-        // check is a read; only the fetch and reset the update path adds are
-        // not.
-        return SourceResolution::refused(&err).into();
-    }
-    SourceResolution::Resolved(remote.cache_dir).into()
+    resolve_remote_source(remote, update_remote)
 }
 
 /// Best-effort update of every remote source's cache entry named by a lock.
@@ -143,7 +127,7 @@ pub(crate) fn refresh_remote_caches(lock: &config::LockFile) {
         if !seen.insert(entry.source.clone()) {
             continue;
         }
-        let remote = match RemoteSource::parse(&entry.source) {
+        let remote = match remote_for_source(&entry.source) {
             Ok(Some(remote)) => remote,
             Ok(None) => continue,
             Err(err) => {
@@ -151,8 +135,13 @@ pub(crate) fn refresh_remote_caches(lock: &config::LockFile) {
                 continue;
             }
         };
-        if !cache_entry_present(&remote) {
-            continue;
+        match cache_entry_present(&remote) {
+            Ok(true) => {}
+            Ok(false) => continue,
+            Err(err) => {
+                warn_once(&entry.source, &format!("{err:#}"));
+                continue;
+            }
         }
         if let Err(err) = update_cached_repo(&remote) {
             warn_once(&entry.source, &format!("{err:#}"));
@@ -198,7 +187,11 @@ fn is_bare_local_source(source: &str) -> bool {
         && !looks_like_remote_source(source)
 }
 
-fn resolve_recorded_local_source(source: &str) -> Option<PathBuf> {
+/// A recorded relative or bare source, resolved the way every READER resolves
+/// one — joined to the project root. `add` resolves a remembered source
+/// through this too, so the tree it installs from is the tree later commands
+/// find under the same string.
+pub(crate) fn resolve_recorded_local_source(source: &str) -> Option<PathBuf> {
     if !is_explicit_relative_local_source(source) && !is_bare_local_source(source) {
         return None;
     }
@@ -436,15 +429,6 @@ fn cache_key_for_identity(identity: &str) -> String {
         "" => digest,
         prefix => format!("{prefix}-{digest}"),
     }
-}
-
-/// Whether `remote`'s clone is on this machine.
-///
-/// A cache entry written by an earlier vstack under a different key is not
-/// reused: the key derives from the repository identity now, and re-cloning is
-/// one `vstack add` away. Every caller reports the absence with that command.
-pub(crate) fn cache_entry_present(remote: &RemoteSource) -> bool {
-    remote.cache_dir.join(".git").exists()
 }
 
 // ---------------------------------------------------------------------------
@@ -742,18 +726,6 @@ fn split_program_token(command: &str) -> (&str, &str) {
         _ => command.find(char::is_whitespace).unwrap_or(command.len()),
     };
     command.split_at(end)
-}
-
-/// The `git clone` that mints a fresh cache entry. The destination is named on
-/// the command line, so this one runs from the cache root.
-/// `dest` is the directory git writes into, which is the staging path rather
-/// than the entry itself — see [`clone_cached_repo`].
-fn cache_clone_command(remote: &RemoteSource, dest: &Path) -> Result<std::process::Command> {
-    let mut command = hardened_git_network_command(&remote_cache_root())?;
-    // `--` so a URL is never read as an option, whatever it starts with.
-    command.args(["clone", "--depth", "1", "--", &remote.git_url]);
-    command.arg(dest);
-    Ok(command)
 }
 
 /// The remediation every refusal ends with. The redacted display and the
@@ -1222,97 +1194,6 @@ pub(crate) fn update_cached_repo_bounded(
     Ok(lease)
 }
 
-/// Shallow-clone the remote into its cache entry, and lease it: the caller
-/// reads what was cloned, and a concurrent `add` or `refresh` would otherwise
-/// be free to fetch and `reset --hard` it mid-read.
-///
-/// The clone lands in a staging directory and is RENAMED into the entry, so
-/// the entry itself appears whole or not at all. It is the one cache write no
-/// lock can cover — the lock lives inside a `.git` that does not exist yet —
-/// and a reader looks for exactly that `.git` to decide the cache is present.
-/// Cloning in place therefore published a half-checked-out tree to every
-/// concurrent reader, which is the same false "removed" a mid-`reset` tree
-/// produces, with the same `vstack remove` printed beside it.
-pub(crate) fn clone_cached_repo(remote: &RemoteSource) -> Result<CacheLease> {
-    let root = remote_cache_root();
-    std::fs::create_dir_all(&root)
-        .with_context(|| format!("creating source cache {}", root.display()))?;
-    // `git clone` FOLLOWS a symlink at its destination, writing the repository
-    // into the link target — outside the cache root — and `add` then installs
-    // from there, with the ownership refusal only arriving on a later refresh.
-    // Every other write path proves the entry is vstack's own directory before
-    // touching it; this is the one that did not.
-    match std::fs::symlink_metadata(&remote.cache_dir) {
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-        Err(err) => {
-            return Err(refusal(
-                remote,
-                &format!("its cache entry could not be inspected: {err}"),
-            ));
-        }
-        Ok(meta) if meta.is_dir() => {
-            let empty = std::fs::read_dir(&remote.cache_dir)
-                .map(|mut entries| entries.next().is_none())
-                .unwrap_or(false);
-            if !empty {
-                return Err(refusal(
-                    remote,
-                    "its cache entry already exists and is not an empty directory",
-                ));
-            }
-        }
-        Ok(_) => {
-            return Err(refusal(
-                remote,
-                "its cache entry is not a directory vstack can clone into",
-            ));
-        }
-    }
-    // Dot-prefixed, so it can never be read as a cache key: every consumer of
-    // the cache root skips dot entries, and a partial clone must not be one
-    // any lookup can land on even by name. Keyed by pid as well, so two
-    // processes cloning the same remote stage into different directories and
-    // neither can delete the other's work in progress — and so a path left
-    // behind by a killed clone is reclaimed rather than accumulating.
-    let staging = root.join(format!(
-        ".staging-{}-{}",
-        remote.cache_key,
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&staging);
-    let output = cache_clone_command(remote, &staging)?
-        .stdout(std::process::Stdio::null())
-        .output()
-        .context("failed to run git clone — is git installed?")?;
-    if !output.status.success() {
-        let _ = std::fs::remove_dir_all(&staging);
-        bail!(
-            "git clone failed for {}: {}",
-            remote.display,
-            git_output_summary(&output)
-        );
-    }
-    // The publish. `rename` onto a path that does not exist — or onto the
-    // empty directory tolerated above — is atomic, so no reader ever sees the
-    // entry in a state the clone was still building. A rename that fails means
-    // somebody else published one first, and installing from a tree this run
-    // did not clone is exactly what the ownership proofs exist to prevent.
-    if let Err(err) = std::fs::rename(&staging, &remote.cache_dir) {
-        let _ = std::fs::remove_dir_all(&staging);
-        return Err(refusal(
-            remote,
-            &format!(
-                "its cache entry could not be published ({err}); retry once no other vstack process is adding it"
-            ),
-        ));
-    }
-    // Nothing to fetch — the clone IS the newest revision — and everything to
-    // hold: the caller discovers, hashes and copies out of this tree next.
-    let (attempt, lease) = config::lease_cached_source(remote)?;
-    attempt.report(remote);
-    Ok(lease)
-}
-
 fn git_output_summary(output: &std::process::Output) -> String {
     git_error_summary(&output.stderr, &output.stdout)
 }
@@ -1368,4 +1249,4 @@ fn redact_token(token: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

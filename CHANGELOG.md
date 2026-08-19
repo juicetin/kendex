@@ -2,6 +2,138 @@
 
 ## Unreleased
 
+- CLI: a lock `source` recorded as a path inside `~/.vstack/cache/` now
+  resolves as the remote that cache entry clones, instead of as an ordinary
+  local checkout (#1495). vstack's cache is its own TTL-managed state, but
+  the resolver could not tell one of its entries from a user's stable
+  directory, so a single misclassification took the entry out of every
+  freshness mechanism at once: `refresh` skipped the fetch and copied stale
+  bytes, `cache-refresh` had nothing listed to fetch, and `check` and
+  `verify` compared the install against those same stale bytes and printed
+  `✓`. Every command reported success while propagation had stopped — one
+  machine sat nine hours behind `origin/main` with sixteen globally
+  installed Pi packages pinned to it and nothing reporting drift. The remote
+  is read from the entry's own `origin`, never reverse-engineered from the
+  directory name: a cache key is derived from the repository identity and is
+  not reversible, and one machine holds `vanillagreencom_vstack` beside
+  `vanillagreencom_vstack-ff0070a84862081c` for a single repository. It stays
+  PINNED to the entry the lock named, so the fetch, the lease and the drift
+  comparison all act on the tree the items were installed from. An entry
+  whose remote cannot be established fails closed — `check` reports the
+  entries as unverifiable, naming the file and the reason, and never counts
+  them clean — and one that is simply not on disk is reported absent, as it
+  always was. `vstack add` takes the same branch, so a cache path is fetched,
+  leased and proved vstack's own there too rather than installed as whatever
+  bytes were sitting in it — and an entry `check` refuses is an error in
+  `add` as well, instead of `add` exiting 0 having installed from the entry
+  `check` had just told the user to re-add. `vstack cache-refresh` reports a
+  source it cannot map and exits nonzero, where it printed nothing and
+  exited 0 on the same state.
+
+  Membership is the whole cache SUBTREE, not its top row: a source recorded
+  as `<cache>/<entry>/<subdir>` — what `vstack add` writes for a repository
+  whose catalog is nested — resolves through its entry, which is fetched and
+  leased before the subdirectory is read out of it.
+
+  `refresh` migrates the recorded source onto the remote spec in the same
+  pass that repairs `source_repo` — but only where the recorded path IS the
+  directory that spec resolves to. Then resolution, the fetch, the hash and
+  the spec all name one tree, and the lease resolution already holds covers
+  the whole of it. A path naming a DIFFERENT clone of the same repository —
+  every pre-`-<digest>` entry on disk is one — keeps its path, which costs it
+  nothing now that it resolves through its own entry and is fetched on every
+  refresh; `vstack add` is what moves it, and given that path it records the
+  remote spec. Rewriting it instead would commit the lock to a clone the
+  install did not come from, closable only by a second unbounded fetch run
+  inside the lock-write loop, once per entry, on an answer that reports `Ok`
+  for a fetch that failed and for a cache it could not write. A source naming
+  a subdirectory is never migrated either: a remote spec names a repository
+  and cannot carry one.
+
+  `add` and `check` agree on every path under the cache root, and every
+  command `check` prints works when pasted. A directory in the cache root
+  that is not one of vstack's clones — no `.git`, from a half-deleted entry
+  or a hand-made one — is refused everywhere, where `add` used to install it
+  and exit 0 while every other command called the same string absent: the
+  `vstack add <path>` `check` prescribed then re-ran that same no-op forever,
+  and only `vstack remove` broke out. A cache entry that has VANISHED is
+  answered from the identity the lock still records — `vstack add
+  <owner/repo>` — because re-adding a dead cache path cannot work, and under
+  the same-tree rule a wiped cache is the durable steady state for every
+  legacy-key entry. When the lock records no identity, no `add` is offered
+  rather than one that fails.
+
+  The remembered-source chain records the tree it READ rather than the string
+  it started from. A remembered legacy-key path resolves through the remote
+  its entry clones, so recording the remembered string put one clone in the
+  lock beside a `source_hash` taken against the other — `check` and `verify`
+  then disagreed about one state — and announced a fetched remote as
+  `local: <path>`.
+
+  The remedy is offered only where it is true. A wiped entry beneath a source
+  recorded at `<entry>/<subdir>` is NOT offered the repository identity: an
+  identity names the repository, not a directory inside it, and installing the
+  root over the recorded subtree either fails outright or — where the root
+  carries a same-named item — exits 0, rewrites `source` to the repository and
+  reports green with the item propagating from a subtree nobody chose. A
+  refusal that a re-add provably clears now names it: an entry redirecting
+  elsewhere still yields a remote, and `vstack add <that path>` installs from
+  the remote's own entry instead, where the report used to say nothing and
+  leave a permanent exit 1. And a clone that cannot be READ is reported as
+  that — `Path::exists` answers false for a permission error exactly as for a
+  missing file, so an unreadable entry was refused as "not one of its clones"
+  with advice to delete it. That probe is now the only one: the sibling
+  answering the same question for URL-recorded sources still collapsed the two,
+  so one directory with one permission bit read as unreadable or as absent
+  depending only on how the lock spelled it — and the absent spelling
+  prescribed a `vstack add` that failed by telling the user to delete a valid
+  clone, pointing a local permission problem at their credentials.
+
+  `add` resolves a remembered relative source against the PROJECT ROOT, which
+  is where every reader resolves one. Bound to the process CWD, running from a
+  subdirectory that held a same-named source installed one tree and hashed
+  another with every surface green. The rule the recorded string follows is
+  stated where it lives now: it must name the tree that was read, resolved the
+  way later readers will resolve it — recording the spelling is what that
+  requires for a local source, not the rule itself.
+
+  `check`, `verify` and `refresh` name the same command for the same state.
+  Only `check` used to name one; the cause and the remedy are separate pieces
+  now, composed by each surface, so `check` also stopped printing the same
+  `vstack add` twice in one line. No command is offered where none can be both
+  correct and safe: a source whose display has to redact part of itself is
+  never handed back as a pasteable argument, and a lock that recorded no
+  source at all is not offered `vstack add ''`. That filter lives in
+  `restore_source_argument`, so it holds for the report `check` builds as well
+  as the lines `verify` and `refresh` print — `check` composed its own argument
+  and leaked a token the other two withheld. The redactor behind it stopped
+  asking whether a PARSER can use a spelling, which is not the same question as
+  whether one carries a secret: `https:/TOKEN@host/repo` parses as neither URL
+  nor scp-like, so it fell to bare escaping and reached a report header and a
+  paste-ready command in full while the same string rendered redacted two
+  clauses away. A local path keeps its `?` and `#`, which are ordinary
+  characters there and were being redacted into a directory that does not
+  exist — the bare relative spelling included, which the gate asks the
+  resolver's own predicates about so the two cannot drift. Every surface that
+  prints a `vstack add` now takes its argument from the one place that decides
+  whether a string may be one: the offer to install an available item was
+  composing its own, so a healthy source directory named `cat?x` was offered as
+  `vstack add 'cat?<redacted>'` — a paste-ready command naming a directory that
+  does not exist.
+
+  The command every surface prints carries the scope it repairs. Pasted from a
+  global entry's `verify` or `refresh` output, a remedy without `-g` installs
+  into the PROJECT scope, exits 0, and leaves the entry exactly as broken.
+
+  Two diagnoses stopped pointing at the wrong thing. A cache entry a clone
+  cannot be written into is refused as what it is — a directory in the way with
+  no `.git` — rather than under `add`'s private-repo access hint, which sent
+  users to check `gh auth login` about a folder on their own disk. And a
+  remembered source no reader can resolve (`a/b/c`, which only `./…`, `../…`,
+  `.` and bare names are recorded resolvably as) is named instead of walked
+  past: silently reaching the next source installed from one the project never
+  chose and failed with an error naming it.
+
 - preflight: new `hardcoded-temp-path` lane — an added directory-creating
   call taking a literal `/tmp/…` or `/var/tmp/…` as (part of) its first
   argument fails. A literal absolute temp path escapes TMPDIR redirection
