@@ -53,7 +53,9 @@ function row(overrides: Partial<UpdateRow>): UpdateRow {
 // loops run, the first refusal would leave the set half updated — some
 // places current, one untouched — from a click that never offered to do
 // part of it.
-describe("a bulk update where one place has unsaved customization", () => {
+// A hold that failed is a reason not to write anywhere else either. The
+// follower loop reaches its command directly, so nothing but this stops it.
+describe("a bulk update whose first place fails", () => {
   const acme = { scope: "project", root: "/home/x/acme" } as const;
   const shop = { scope: "project", root: "/home/x/shop" } as const;
 
@@ -66,77 +68,6 @@ describe("a bulk update where one place has unsaved customization", () => {
       held: {},
     });
     vi.clearAllMocks();
-  });
-
-  it("updates none of them", async () => {
-    useEditorStore.setState({
-      held: {
-        [shop.root]: {
-          scope: shop,
-          draft: { schema: 1, install: {} },
-          base: "read-earlier",
-        },
-      },
-    });
-    await useUpdatesStore
-      .getState()
-      .updateRows([
-        row({ name: "gh", scope: acme, pinned: true }),
-        row({ name: "lint", scope: shop }),
-      ]);
-    expect(commands.packageSetRev).not.toHaveBeenCalled();
-    expect(commands.applyPlan).not.toHaveBeenCalled();
-    expect(useUpdatesStore.getState().busy).toBe(false);
-  });
-});
-
-// The preflight speaks for the set as it stood when the button was
-// pressed. Every await after it is a window someone can type in, and the
-// place still to be written is the one their typing is about.
-describe("typing that arrives while a bulk update is running", () => {
-  const acme = { scope: "project", root: "/home/x/acme" } as const;
-  const shop = { scope: "project", root: "/home/x/shop" } as const;
-
-  beforeEach(() => {
-    useUpdatesStore.setState({ rows: [], busy: false, loaded: false });
-    useEditorStore.setState({
-      scope: acme,
-      draft: null,
-      dirty: false,
-      held: {},
-    });
-    vi.clearAllMocks();
-  });
-
-  it("stops before writing the place it is about", async () => {
-    const view = {
-      scope: acme,
-      drift: [],
-      plan: [],
-      notes: [],
-      warnings: [],
-      safety: [],
-      heldBack: [],
-      queued: [],
-    };
-    // The first place is written; someone types about the second while it
-    // is in flight.
-    vi.mocked(commands.packageSetRev).mockImplementation(async () => {
-      useEditorStore.setState({
-        held: {
-          [shop.root]: {
-            scope: shop,
-            draft: { schema: 1, install: {} },
-            base: "read-earlier",
-          },
-        },
-      });
-      return { status: "ok", data: view };
-    });
-    vi.mocked(commands.applyPlan).mockResolvedValue({
-      status: "ok",
-      data: view,
-    });
     vi.mocked(commands.updatesOverview).mockResolvedValue({
       status: "ok",
       data: { rows: [], warnings: [] },
@@ -146,17 +77,67 @@ describe("typing that arrives while a bulk update is running", () => {
       data: { harnesses: [], items: [], missingProjects: [], warnings: [] },
     });
     vi.mocked(commands.auditAll).mockResolvedValue({ status: "ok", data: [] });
+  });
 
+  it("writes nowhere else", async () => {
+    vi.mocked(commands.packageSetRev).mockResolvedValue({
+      status: "error",
+      error: "the source would not answer",
+    });
     await useUpdatesStore
       .getState()
       .updateRows([
         row({ name: "gh", scope: acme, pinned: true }),
         row({ name: "lint", scope: shop }),
       ]);
-
-    // The first went, because nothing was unsaved when it was asked.
     expect(commands.packageSetRev).toHaveBeenCalledTimes(1);
-    // The second did not: its place is the one the typing is about.
     expect(commands.applyPlan).not.toHaveBeenCalled();
+    // The tables still re-read: stopping is not the same as saying nothing.
+    expect(commands.updatesOverview).toHaveBeenCalled();
+  });
+});
+
+// Busy is what holds every update control down. Cleared while the re-reads
+// are still running, the controls come back before the tables do and the
+// next thing pressed races this one's scan.
+describe("the busy flag when a bulk update stops early", () => {
+  const acme = { scope: "project", root: "/home/x/acme" } as const;
+
+  it("stays up until the tables have been re-read", async () => {
+    useUpdatesStore.setState({ rows: [], busy: false, loaded: false });
+    useEditorStore.setState({
+      scope: acme,
+      draft: null,
+      dirty: false,
+      held: {},
+    });
+    vi.clearAllMocks();
+    vi.mocked(commands.packageSetRev).mockResolvedValue({
+      status: "error",
+      error: "the source would not answer",
+    });
+    vi.mocked(commands.scanMachine).mockResolvedValue({
+      status: "ok",
+      data: { harnesses: [], items: [], missingProjects: [], warnings: [] },
+    });
+    vi.mocked(commands.auditAll).mockResolvedValue({ status: "ok", data: [] });
+
+    let busyDuringReRead: boolean | null = null;
+    vi.mocked(commands.updatesOverview).mockImplementation(async () => {
+      // Yield first. The command is invoked before the surrounding
+      // `finally` can run, so reading the flag here without yielding
+      // measures the moment before the question is even asked — and passes
+      // whether the cleanup is awaited or not.
+      await Promise.resolve();
+      busyDuringReRead = useUpdatesStore.getState().busy;
+      return { status: "ok", data: { rows: [], warnings: [] } };
+    });
+
+    await useUpdatesStore
+      .getState()
+      .updateRows([row({ name: "gh", scope: acme, pinned: true })]);
+
+    expect(busyDuringReRead).toBe(true);
+    expect(useUpdatesStore.getState().busy).toBe(false);
   });
 });

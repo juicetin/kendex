@@ -130,7 +130,14 @@ export const applyMany = async (wanted: UpdateRow[]): Promise<void> => {
     }
     // Whatever stopped the loop above stops this one too: a failure or a
     // refusal there is a reason not to write anywhere else either.
-    if (!ok) return finish(false);
+    if (!ok) {
+      // Awaited, not returned: `return finish(false)` hands back the
+      // promise and lets the `finally` below clear busy while the re-reads
+      // are still running, so the controls come back before the tables do
+      // and the next thing pressed races this one's scan.
+      await finish(false);
+      return;
+    }
     const scopes = new Map(
       rows
         .filter((row) => !row.pinned && !applied.has(scopeKey(row.scope)))
