@@ -1,4 +1,4 @@
-import type { HarnessId, Origin, Scope } from "@/bindings";
+import type { HarnessId, Origin } from "@/bindings";
 import { HarnessBadge } from "@/components/harness-badge";
 import { StatusDot } from "@/components/status-dot";
 import { TagBadges } from "@/components/tag-badge";
@@ -20,6 +20,7 @@ import {
   customizedPlaces,
   forkedPlaces,
   type PlaceStanding,
+  uncheckedPlaces,
 } from "@/lib/customized-places";
 import {
   type GroupStatus,
@@ -34,10 +35,21 @@ import {
   hookDisplayName,
   kindLabel,
   scopeName,
+  scopePath,
 } from "@/lib/labels";
 import { relativeTime } from "@/lib/relative-time";
 import { cn } from "@/lib/utils";
 import { originLabel, originTitle } from "@/stores/provenance";
+
+/** The mark sits inside a row that opens the package where it was
+ *  installed from; its own click means the place it names instead, so it
+ *  must never also fire the row's. */
+export const markClick =
+  (open: () => void) =>
+  (event: { stopPropagation: () => void }): void => {
+    event.stopPropagation();
+    open();
+  };
 
 const STATUS_TONES: Record<GroupStatus, "good" | "warning" | "critical"> = {
   active: "good",
@@ -57,8 +69,8 @@ export function InstalledRow({
   /** What is known about each place this package is installed in. */
   standings: PlaceStanding[];
   onOpen: () => void;
-  /** Opens this package at one place, on what you changed there. */
-  onOpenPlace: (scope: Scope) => void;
+  /** Opens the place the mark names, on what was changed there. */
+  onOpenPlace: () => void;
 }) {
   const Icon = kindIcon(group.kind);
   const displayName =
@@ -71,21 +83,19 @@ export function InstalledRow({
   // The full path, so two projects sharing a folder name stay apart, and
   // what is known about each — including that nothing is.
   const whereTitle = standings
-    .map((one) =>
-      placeStateLine(
-        one.scope.scope === "global" ? "Personal" : one.scope.root,
-        one.state,
-      ),
-    )
+    .map((one) => placeStateLine(scopePath(one.scope) ?? "Personal", one.state))
     .join("\n");
   const changed = customizedPlaces(standings);
   const forks = forkedPlaces(standings);
-  const unchecked = standings.filter((one) => one.state === "unknown").length;
   // The one thing the row says about your changes: which place, or how many
   // of them. Every other surface says it the same way.
   const mark =
     changed.length > 0
-      ? customizedPlacesLabel(changed.map(scopeName), scopes.length, unchecked)
+      ? customizedPlacesLabel(
+          changed.map((where) => scopeName(where, scopes)),
+          scopes.length,
+          uncheckedPlaces(standings),
+        )
       : null;
 
   return (
@@ -111,7 +121,9 @@ export function InstalledRow({
               {forks.length > 0 ? (
                 <Badge
                   variant="outline"
-                  title={forkedInLabel(forks.map(scopeName))}
+                  title={forkedInLabel(
+                    forks.map((where) => scopeName(where, scopes)),
+                  )}
                 >
                   {FORKED_BADGE_LABEL}
                 </Badge>
@@ -159,16 +171,14 @@ export function InstalledRow({
           <button
             type="button"
             className="max-w-[13rem] text-left whitespace-normal text-customized hover:underline"
-            onClick={(event) => {
-              event.stopPropagation();
-              onOpenPlace(changed[0]);
-            }}
+            onClick={markClick(onOpenPlace)}
           >
             {mark}
           </button>
         ) : (
           whereLabel
         )}
+        <span className="sr-only">{whereTitle}</span>
       </TableCell>
       <TableCell title={originTitle(origin)} className="text-muted-foreground">
         {originLabel(origin) || "—"}

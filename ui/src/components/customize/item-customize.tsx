@@ -20,7 +20,12 @@ import {
   WRITTEN_INTO,
 } from "@/lib/copy-customize";
 import { itemCustomization, sharedCustomization } from "@/lib/customization";
-import { placeStandings, usePlacesSource } from "@/lib/customized-places";
+import {
+  type PlaceStanding,
+  placeStandings,
+  standingIn,
+  usePlacesSource,
+} from "@/lib/customized-places";
 import { setInstruction } from "@/lib/editor-draft";
 import { scopeName } from "@/lib/labels";
 import { scopeKey } from "@/lib/scope";
@@ -47,6 +52,9 @@ export function ItemCustomize({
   // Which places already carry changes, so switching to one is an informed
   // click rather than something you find out after arriving.
   const standings = placeStandings(places, kind, name, scopes);
+  const stateLine = (standing: PlaceStanding) =>
+    placeStateLine(scopeName(standing.scope, scopes), standing.state);
+  const here = standingIn(standings, scope);
 
   const mine = itemCustomization(draft, kind, name);
   const shared = sharedCustomization(draft);
@@ -62,25 +70,31 @@ export function ItemCustomize({
         </StatusNote>
       ) : null}
       {scopes.length > 1 ? (
-        <div className="flex flex-wrap items-center gap-1.5">
-          {standings.map((standing) => (
-            <Pill
-              key={scopeKey(standing.scope)}
-              selected={scopeKey(standing.scope) === scopeKey(scope)}
-              disabled={dirty}
-              title={
-                dirty
-                  ? SAVE_FIRST
-                  : placeStateLine(scopeName(standing.scope), standing.state)
-              }
-              onClick={() => void setScope(standing.scope)}
-            >
-              {standing.state === "customized" ? (
-                <StatusDot tone="customized" />
-              ) : null}
-              {scopeName(standing.scope)}
-            </Pill>
-          ))}
+        <div className="flex flex-col gap-2">
+          <div className="flex flex-wrap items-center gap-1.5">
+            {standings.map((standing) => (
+              <Pill
+                key={scopeKey(standing.scope)}
+                selected={scopeKey(standing.scope) === scopeKey(scope)}
+                disabled={dirty}
+                title={dirty ? SAVE_FIRST : stateLine(standing)}
+                onClick={() => void setScope(standing.scope)}
+              >
+                {standing.state === "customized" ? (
+                  <StatusDot tone="customized" />
+                ) : null}
+                {scopeName(standing.scope, scopes)}
+                {/* The dot is the mark; these are its words, for anyone a
+                    colour and a hover never reach. */}
+                <span className="sr-only">{stateLine(standing)}</span>
+              </Pill>
+            ))}
+          </div>
+          {/* What the dot on the open chip means, said out loud — a hover
+              is not a channel a touch reader has. */}
+          {here ? (
+            <p className="text-xs text-muted-foreground">{stateLine(here)}</p>
+          ) : null}
         </div>
       ) : null}
       <Section title="Instructions" description={WRITTEN_INTO}>

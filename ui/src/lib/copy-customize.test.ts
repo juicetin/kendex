@@ -75,6 +75,8 @@ describe("per-place marks", () => {
     expect(placeStateLine("vg", "unknown")).toBe(
       "vg — not checked for your changes",
     );
+    // A read on its way has not failed, and must not be blamed as one.
+    expect(placeStateLine("vg", "checking")).toBe("vg — still being checked");
   });
 
   it("names the places a fork belongs to", () => {

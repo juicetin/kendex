@@ -1,4 +1,4 @@
-import type { ProvenanceRow } from "@/bindings";
+import type { ItemKind, ProvenanceRow } from "@/bindings";
 import { InstalledRow } from "@/components/library/installed-row";
 import { InstalledSkeleton } from "@/components/library/installed-skeleton";
 import { LibraryLegend } from "@/components/library/library-legend";
@@ -13,12 +13,29 @@ import {
 import { TAGS_ROW_LABEL } from "@/lib/copy";
 import {
   customizedPlaces,
+  markTarget,
+  type PlaceStanding,
   placeStandings,
   usePlacesSource,
 } from "@/lib/customized-places";
 import { groupScopes, type ItemGroup } from "@/lib/derive";
-import { useNavStore } from "@/stores/nav";
+import { type PackageRef, type PackageView, useNavStore } from "@/stores/nav";
 import { originFor } from "@/stores/provenance";
+
+/** Where the customized mark goes, as the two arguments the nav takes: the
+ *  place the mark names — never the row's own first install — and the
+ *  surface holding what was changed there. Null when nothing is changed. */
+export function markNav(
+  group: { kind: ItemKind; name: string },
+  standings: PlaceStanding[],
+): [PackageRef, PackageView | undefined] | null {
+  const target = markTarget(standings);
+  if (!target) return null;
+  return [
+    { kind: group.kind, name: group.name, scope: target.scope },
+    target.view,
+  ];
+}
 
 /** The Library's table: one row per package, each carrying what is known
  *  about every place it is installed in. */
@@ -90,12 +107,10 @@ export function InstalledTable({
                     scope: primary.scope,
                   });
                 }}
-                onOpenPlace={(scope) =>
-                  goToPackage(
-                    { kind: group.kind, name: group.name, scope },
-                    { mode: "customize" },
-                  )
-                }
+                onOpenPlace={() => {
+                  const nav = markNav(group, standings);
+                  if (nav) goToPackage(...nav);
+                }}
               />
             );
           })}

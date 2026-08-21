@@ -11,7 +11,6 @@ import {
 } from "@/lib/derive";
 import { PAGE_GUTTER, WIDE_CONTENT_WIDTH } from "@/lib/layout";
 import { cn } from "@/lib/utils";
-import { useEditorStore } from "@/stores/editor";
 import { useLibraryViewStore } from "@/stores/library-view";
 import { useNavStore } from "@/stores/nav";
 import {
@@ -50,12 +49,6 @@ export function InstalledView() {
   const setSearch = useNavStore((s) => s.setSearch);
   const projects = result ? projectScopes(result) : [];
   const scroller = useRef<HTMLDivElement | null>(null);
-  // Every scope's manifest, so a row can say where you have changed the
-  // package — not only in the scope last edited.
-  const loadAll = useEditorStore((s) => s.loadAll);
-  useEffect(() => {
-    void loadAll();
-  }, [loadAll]);
   // Re-joined whenever a scan lands, so an install or unsubscribe made
   // elsewhere shows its new origin without a manual refresh. Before the
   // first scan there are no rows to label, so there is nothing to join.

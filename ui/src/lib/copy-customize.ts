@@ -122,6 +122,7 @@ export const customizedPlacesLabel = (
 export const forkedInLabel = (places: string[]): string =>
   `Forked in ${places.join(", ")}`;
 export const NOT_CHECKED_STATE = "not checked for your changes";
+export const CHECKING_STATE = "still being checked";
 
 /** One line of the per-place breakdown behind a mark: what is known about
  *  this place, including that nothing is. */
@@ -129,6 +130,7 @@ export const placeStateLine = (place: string, state: PlaceState): string => {
   const said: Record<PlaceState, string> = {
     customized: "customized by you",
     "as-installed": "as the author wrote it",
+    checking: CHECKING_STATE,
     unknown: NOT_CHECKED_STATE,
   };
   return `${place} — ${said[state]}`;

@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
-import type { Scope } from "@/bindings";
 import { updateRow } from "@/components/updates-test-rows";
+import {
+  changed,
+  EVERYWHERE,
+  forkedHere,
+  HYPR,
+  source,
+  VG,
+} from "@/lib/places-test-source";
 import {
   customizedPlaces,
   forkedPlaces,
@@ -11,35 +18,6 @@ import {
   standingIn,
 } from "./customized-places";
 import { type Draft, emptyDraft } from "./editor-draft";
-
-const GLOBAL: Scope = { scope: "global" };
-const VG: Scope = { scope: "project", root: "/work/vg" };
-const HYPR: Scope = { scope: "project", root: "/work/hyprtrade" };
-const EVERYWHERE = [GLOBAL, VG, HYPR];
-
-const changed = (): Draft => ({
-  ...emptyDraft(),
-  "skill-instructions": { gh: "use the CLI" },
-});
-
-/** Every place readable and up to date, so each test names the one fact
- *  it is about. */
-const source = (over: Partial<PlacesSource> = {}): PlacesSource => ({
-  manifests: {
-    global: emptyDraft(),
-    "/work/vg": emptyDraft(),
-    "/work/hyprtrade": emptyDraft(),
-  },
-  rows: indexRows(
-    EVERYWHERE.map((scope) =>
-      updateRow("gh", scope.scope === "global" ? null : scope.root, {
-        updateAvailable: false,
-      }),
-    ),
-  ),
-  updatesLoaded: true,
-  ...over,
-});
 
 const states = (over: Partial<PlacesSource> = {}) =>
   placeStandings(source(over), "skill", "gh", EVERYWHERE).map(
@@ -88,12 +66,19 @@ describe("placeStandings", () => {
     ]);
   });
 
-  it("leaves every place unknown while the update standing is stale", () => {
+  it("says a place is still being checked while the reads are on their way", () => {
     expect(states({ updatesLoaded: false })).toEqual([
-      "unknown",
-      "unknown",
-      "unknown",
+      "checking",
+      "checking",
+      "checking",
     ]);
+    // A manifest nobody has asked for yet is not one that failed.
+    expect(
+      states({
+        manifests: { global: emptyDraft(), "/work/vg": emptyDraft() },
+        manifestsLoaded: false,
+      }),
+    ).toEqual(["as-installed", "as-installed", "checking"]);
   });
 
   it("leaves a place whose manifest could not be read unknown", () => {
@@ -136,14 +121,103 @@ describe("placeStandings", () => {
   });
 
   it("matches a fork to the place it belongs to", () => {
-    const rows = indexRows([
-      updateRow("gh", null, { updateAvailable: false }),
-      updateRow("gh", "/work/vg", { updateAvailable: false, forked: true }),
-      updateRow("gh", "/work/hyprtrade", { updateAvailable: false }),
+    const standings = placeStandings(
+      source({
+        manifests: {
+          global: emptyDraft(),
+          "/work/vg": forkedHere(),
+          "/work/hyprtrade": emptyDraft(),
+        },
+      }),
+      "skill",
+      "gh",
+      EVERYWHERE,
+    );
+    expect(forkedPlaces(standings)).toEqual([VG]);
+    expect(standingIn(standings, VG)?.state).toBe("customized");
+  });
+
+  it("knows a place is forked with no update standing to read", () => {
+    const standings = placeStandings(
+      source({
+        manifests: {
+          global: emptyDraft(),
+          "/work/vg": forkedHere(),
+          "/work/hyprtrade": emptyDraft(),
+        },
+        updatesLoaded: false,
+      }),
+      "skill",
+      "gh",
+      EVERYWHERE,
+    );
+    expect(forkedPlaces(standings)).toEqual([VG]);
+    expect(standingIn(standings, HYPR)?.forked).toBe(false);
+  });
+
+  it("sends a fork and a hand edit to the files, and an overlay to the settings", () => {
+    const change = (
+      manifests: Record<string, Draft>,
+      rows?: PlacesSource["rows"],
+    ) =>
+      placeStandings(
+        source({ manifests, ...(rows ? { rows } : {}) }),
+        "skill",
+        "gh",
+        EVERYWHERE,
+      ).map((one) => one.change);
+    const plain = {
+      global: emptyDraft(),
+      "/work/vg": emptyDraft(),
+      "/work/hyprtrade": emptyDraft(),
+    };
+    expect(change({ ...plain, "/work/vg": changed() })).toEqual([
+      null,
+      "settings",
+      null,
+    ]);
+    expect(change({ ...plain, "/work/vg": forkedHere() })).toEqual([
+      null,
+      "files",
+      null,
     ]);
     expect(
-      forkedPlaces(placeStandings(source({ rows }), "skill", "gh", EVERYWHERE)),
-    ).toEqual([VG]);
+      change(
+        plain,
+        indexRows([
+          updateRow("gh", null, { updateAvailable: false }),
+          updateRow("gh", "/work/vg", {
+            updateAvailable: false,
+            blockedByLocalEdit: true,
+          }),
+          updateRow("gh", "/work/hyprtrade", { updateAvailable: false }),
+        ]),
+      ),
+    ).toEqual([null, "files", null]);
+  });
+
+  it("leads a hand edit to the files even where an overlay is also set", () => {
+    const [, vg] = placeStandings(
+      source({
+        manifests: {
+          global: emptyDraft(),
+          "/work/vg": changed(),
+          "/work/hyprtrade": emptyDraft(),
+        },
+        rows: indexRows([
+          updateRow("gh", null, { updateAvailable: false }),
+          updateRow("gh", "/work/vg", {
+            updateAvailable: false,
+            blockedByLocalEdit: true,
+          }),
+          updateRow("gh", "/work/hyprtrade", { updateAvailable: false }),
+        ]),
+      }),
+      "skill",
+      "gh",
+      EVERYWHERE,
+    );
+    expect(vg.change).toBe("files");
   });
 
   it("reads another package's places as its own, never this one's", () => {

@@ -21,6 +21,7 @@ import {
   sortDecisions,
 } from "@/lib/decisions";
 import { harnessName, kindLabel, scopeName } from "@/lib/labels";
+import { scopeKey } from "@/lib/scope";
 import { useAuditStore } from "@/stores/audit";
 import { useProblemsStore } from "@/stores/problems";
 
@@ -118,7 +119,7 @@ export function RecordedDecisions() {
     >
       {view.errors.map((failed) => (
         <StatusNote
-          key={scopeName(failed.scope)}
+          key={scopeKey(failed.scope)}
           tone="critical"
           title={decisionsErrorTitle(scopeName(failed.scope))}
           className="mb-3"
@@ -128,7 +129,7 @@ export function RecordedDecisions() {
       ))}
       {rows.map((row) => (
         <SettingRow
-          key={`${scopeName(row.scope)}:${row.key}:${
+          key={`${scopeKey(row.scope)}:${row.key}:${
             row.record.kind === "dismissed" ? row.record.fingerprint : ""
           }`}
           label={rowTitle(row)}

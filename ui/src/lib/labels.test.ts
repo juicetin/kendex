@@ -37,6 +37,14 @@ describe("labels", () => {
     );
   });
 
+  it("tells two projects sharing a folder name apart", () => {
+    const work = { scope: "project", root: "/work/api" } as const;
+    const client = { scope: "project", root: "/clients/api" } as const;
+    expect(scopeName(work)).toBe("api");
+    expect(scopeName(work, [work, client])).toBe("work/api");
+    expect(scopeName(client, [work, client])).toBe("clients/api");
+  });
+
   it("keeps human copy free of internal jargon", () => {
     const copy = [
       ...Object.values(STATE_LABELS),

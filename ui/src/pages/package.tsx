@@ -20,8 +20,8 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { CUSTOMIZE_TAB, OVERVIEW_TAB } from "@/lib/copy-customize";
 import { canCustomize } from "@/lib/customization";
 import {
+  headerStanding,
   placeStandings,
-  standingIn,
   usePlacesSource,
 } from "@/lib/customized-places";
 import { groupItems, groupScopes } from "@/lib/derive";
@@ -59,9 +59,20 @@ export function PackagePage() {
   }, [initialView, clearPackageView]);
 
   // The manifest this package's own edits live in, loaded up front so the
-  // header can say whether there are any before the tab is opened.
+  // header can say whether there are any before the tab is opened. Until
+  // that lands the editor still points wherever the last package left it,
+  // so the marks read this page's own scope rather than that one.
+  const [pointed, setPointed] = useState(false);
   useEffect(() => {
-    if (ref) void openScope(ref.scope);
+    if (!ref) return;
+    let live = true;
+    setPointed(false);
+    void openScope(ref.scope).then(() => {
+      if (live) setPointed(true);
+    });
+    return () => {
+      live = false;
+    };
   }, [ref, openScope]);
 
   const group = useMemo(() => {
@@ -113,19 +124,18 @@ export function PackagePage() {
     updatesLoaded &&
     !edited;
   const customizable = canCustomize(group.kind);
+  const scopes = groupScopes(group);
   // Every mark in the header is about one place: the one the Customize tab
   // has open, or the one this page was opened at while it loads.
-  const standings = placeStandings(
-    places,
-    group.kind,
-    group.name,
-    groupScopes(group),
+  const standings = placeStandings(places, group.kind, group.name, scopes);
+  const selected = headerStanding(
+    standings,
+    ref.scope,
+    pointed ? editorScope : null,
   );
-  const selected =
-    standingIn(standings, editorScope) ?? standingIn(standings, ref.scope);
 
   const inEveryScope = async (act: (scope: Scope) => Promise<void>) => {
-    for (const scope of groupScopes(group)) await act(scope);
+    for (const scope of scopes) await act(scope);
   };
 
   const { switchTo, updateToLatest, follow } = packageVersionActions(
@@ -179,7 +189,7 @@ export function PackagePage() {
         description={group.description}
         forked={selected?.forked === true}
         customized={selected?.state === "customized"}
-        place={selected ? scopeName(selected.scope) : null}
+        place={selected ? scopeName(selected.scope, scopes) : null}
         action={
           <PackageActions
             scope={primary.scope}
@@ -209,7 +219,7 @@ export function PackagePage() {
                 <ItemCustomize
                   kind={group.kind}
                   name={group.name}
-                  scopes={groupScopes(group)}
+                  scopes={scopes}
                   harnesses={group.harnesses as HarnessId[]}
                 />
               </TabsContent>
@@ -232,7 +242,7 @@ export function PackagePage() {
         onOpenChange={setConfirmRemove}
         kind={group.kind}
         name={group.name}
-        scopes={groupScopes(group)}
+        scopes={scopes}
         onGone={back}
       />
     </div>

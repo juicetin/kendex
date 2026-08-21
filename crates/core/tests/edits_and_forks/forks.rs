@@ -192,3 +192,42 @@ fn forking_a_skill_whose_native_link_was_repointed_reads_the_managed_tree() {
     );
     assert!(foreign.join("secret.md").is_file());
 }
+
+#[test]
+#[allow(clippy::unwrap_used)]
+fn a_fork_edited_by_hand_says_so_instead_of_reading_as_untouched() {
+    let w = world();
+    write_skill(&w.upstream, "gh", "Upstream.");
+    commit(&w.upstream, "one");
+    declare(&w, "[skills.gh]\nsource = \"cat\"\n");
+    sync_and_apply(&w);
+    fs::write(
+        skill_file(&w),
+        "---\nname: gh\ndescription: mine\n---\nMy fork.\n",
+    )
+    .unwrap();
+    let plan = fork::fork(&w.env, &w.scope, ItemKind::Skill, "gh", HarnessId::Claude).unwrap();
+    apply::execute(&w.env, &plan, None).unwrap();
+    let report = audit(&w.env, &w.scope).unwrap();
+    apply::execute(&w.env, &report.plan, None).unwrap();
+
+    // A fork is the one local source that gets a row, so its row is the
+    // only place this fact can be told from.
+    let clean = kendex_core::package::updates::updates(&w.env, &w.scope)
+        .unwrap()
+        .rows;
+    let gh = clean.iter().find(|row| row.name == "gh").unwrap();
+    assert!(!gh.blocked_by_local_edit, "{gh:?}");
+
+    fs::write(skill_file(&w), "edited after forking").unwrap();
+    let rows = kendex_core::package::updates::updates(&w.env, &w.scope)
+        .unwrap()
+        .rows;
+    let gh = rows.iter().find(|row| row.name == "gh").unwrap();
+    assert!(gh.forked, "{gh:?}");
+    assert!(
+        gh.blocked_by_local_edit,
+        "an edited fork must not read as untouched: {gh:?}"
+    );
+    assert_eq!(gh.edited_harnesses, vec![HarnessId::Claude], "{gh:?}");
+}

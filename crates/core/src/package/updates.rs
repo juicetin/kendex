@@ -245,12 +245,15 @@ fn same_artifact(
 }
 
 /// A fork's row: no versions, no update — the Library still needs to
-/// know it is a fork.
+/// know it is a fork, and whether its files have been edited since. A fork
+/// is the one local source with a row, so a hardcoded "not edited" here
+/// would be the only place the measured edit is thrown away.
 fn fork_row(
     scope: &Scope,
     kind: ItemKind,
     name: &str,
     decl: &crate::manifest::ItemDecl,
+    edited_harnesses: Vec<HarnessId>,
 ) -> UpdateRow {
     UpdateRow {
         scope: scope.clone(),
@@ -265,8 +268,10 @@ fn fork_row(
         pinned: false,
         hold_owner: None,
         ignored: false,
-        blocked_by_local_edit: false,
-        edited_harnesses: Vec::new(),
+        blocked_by_local_edit: !edited_harnesses.is_empty(),
+        edited_harnesses,
+        // A fork is already the user's own copy: there is nothing to keep
+        // as one, and no source content to put back over the edit.
         forkable_harness: None,
         can_discard: false,
         can_take_latest: false,

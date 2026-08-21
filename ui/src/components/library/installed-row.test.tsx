@@ -1,5 +1,5 @@
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { ObservedItem, Scope } from "@/bindings";
 import { Table, TableBody } from "@/components/ui/table";
 import { updateRow } from "@/components/updates-test-rows";
@@ -10,7 +10,8 @@ import {
 } from "@/lib/customized-places";
 import { groupItems, groupScopes } from "@/lib/derive";
 import { emptyDraft } from "@/lib/editor-draft";
-import { InstalledRow } from "./installed-row";
+import { source } from "@/lib/places-test-source";
+import { InstalledRow, markClick } from "./installed-row";
 
 const ROOTS = ["/work/vg", "/work/hyprtrade"];
 
@@ -36,21 +37,6 @@ const group = () =>
     install({ scope: "global" }),
     ...ROOTS.map((root) => install({ scope: "project", root })),
   ])[0];
-
-const source = (over: Partial<PlacesSource> = {}): PlacesSource => ({
-  manifests: {
-    global: emptyDraft(),
-    "/work/vg": emptyDraft(),
-    "/work/hyprtrade": emptyDraft(),
-  },
-  rows: indexRows(
-    [null, ...ROOTS].map((root) =>
-      updateRow("gh", root, { updateAvailable: false }),
-    ),
-  ),
-  updatesLoaded: true,
-  ...over,
-});
 
 const render = (places: PlacesSource) => {
   const one = group();
@@ -88,8 +74,19 @@ describe("the Library row's customized mark", () => {
   it("counts the places rather than claiming the package is changed", () => {
     const html = render(changedIn("/work/vg"));
     expect(html).toContain("Customized in 1 of 3 places");
-    expect(html).toContain("vg — customized by you");
-    expect(html).toContain("hyprtrade — as the author wrote it");
+    // The full path, so two projects sharing a folder name stay apart.
+    expect(html).toContain("/work/vg — customized by you");
+    expect(html).toContain("/work/hyprtrade — as the author wrote it");
+  });
+
+  it("colours the icon exactly when a place is changed", () => {
+    expect(render(changedIn("/work/vg"))).toContain("text-customized");
+    expect(render(source())).not.toContain("text-customized");
+  });
+
+  it("makes the mark the way to the place, and plain text when there is none", () => {
+    expect(render(changedIn("/work/vg"))).toContain("<button");
+    expect(render(source())).not.toContain("<button");
   });
 
   it("says nothing at all when no place is changed", () => {
@@ -142,17 +139,29 @@ describe("the Library row's customized mark", () => {
   it("carries a fork mark only for the places that hold a fork", () => {
     const html = render(
       source({
-        rows: indexRows([
-          updateRow("gh", null, { updateAvailable: false }),
-          updateRow("gh", "/work/vg", { updateAvailable: false, forked: true }),
-          updateRow("gh", "/work/hyprtrade", { updateAvailable: false }),
-        ]),
+        manifests: {
+          global: emptyDraft(),
+          "/work/vg": {
+            ...emptyDraft(),
+            forks: { skill: { gh: { source: "cat", "forked-at": "2026" } } },
+          },
+          "/work/hyprtrade": emptyDraft(),
+        },
       }),
     );
     expect(html).toContain("Forked in vg");
+    expect(html).toContain("Customized in 1 of 3 places");
   });
 
   it("leaves the fork mark off when no place here holds one", () => {
     expect(render(source())).not.toContain("Forked");
+  });
+
+  it("opens the place it names, and never also the row's own", () => {
+    const open = vi.fn();
+    const stopPropagation = vi.fn();
+    markClick(open)({ stopPropagation });
+    expect(stopPropagation).toHaveBeenCalledOnce();
+    expect(open).toHaveBeenCalledOnce();
   });
 });

@@ -1,9 +1,10 @@
 // Customization is per place. A package installed at User level and in two
 // projects can be changed in one of them and untouched in the others, so
 // every mark the app draws is about one place — never about the package as
-// a whole. Two facts make a place yours: the manifest overlay that place's
-// Customize tab writes, and files edited by hand in that place. This joins
-// both, and says "unknown" rather than guessing when either is unreadable.
+// a whole. Three facts make a place yours: the manifest overlay that
+// place's Customize tab writes, files edited by hand there, and a fork,
+// which is that place's own copy of the package. This joins them, and says
+// how far a read got rather than guessing when a fact is not in hand.
 
 import { useMemo } from "react";
 import type { ItemKind, Scope, UpdateRow } from "@/bindings";
@@ -11,17 +12,29 @@ import { isCustomized, itemCustomization } from "@/lib/customization";
 import type { Draft } from "@/lib/editor-draft";
 import { sameScope, scopeKey } from "@/lib/scope";
 import { useEditorStore } from "@/stores/editor";
+import type { PackageView } from "@/stores/nav";
 import { useUpdatesStore } from "@/stores/updates";
 
 /** What is known about one place's copy of a package. `unknown` is a real
  *  answer, not a default: a path or local source gets no update row, so
- *  nothing can say whether its files were edited by hand. */
-export type PlaceState = "customized" | "as-installed" | "unknown";
+ *  nothing can say whether its files were edited by hand. `checking` is
+ *  the answer while a read is still on its way — a place nobody has asked
+ *  about yet has not been given up on. */
+export type PlaceState = "customized" | "as-installed" | "checking" | "unknown";
+
+/** What makes a place yours, and so where its mark leads: settings live on
+ *  the Customize tab, files on the overview beside the edited-files notice
+ *  that offers the decision. */
+export type PlaceChange = "files" | "settings";
 
 export interface PlaceStanding {
   scope: Scope;
   state: PlaceState;
-  /** This place's copy is a fork of what the catalog carries. */
+  /** What made it `customized`, or null when nothing did. */
+  change: PlaceChange | null;
+  /** This place's copy is a fork of what the catalog carries, read from
+   *  that place's own manifest — the same table `package_meta` reads, so
+   *  the fact never depends on an update check having succeeded. */
   forked: boolean;
 }
 
@@ -29,11 +42,14 @@ export interface PlaceStanding {
 export interface PlacesSource {
   /** Each place's manifest as it stands on screen, keyed by scope. */
   manifests: Record<string, Draft>;
-  /** Update rows keyed by {@link placeKey} — the per-place hand-edit and
-   *  fork facts, absent for the places the engine cannot speak about. */
+  /** Update rows keyed by {@link placeKey} — the per-place hand-edit fact,
+   *  absent for the places the engine cannot speak about. */
   rows: Map<string, UpdateRow>;
-  /** False while the update standing is stale — hand-edits are unknown. */
+  /** False while the update standing is stale — hand-edits are unread. */
   updatesLoaded: boolean;
+  /** False until every place's manifest has been read once, so a manifest
+   *  missing from {@link manifests} is told apart from one that failed. */
+  manifestsLoaded: boolean;
 }
 
 const placeKey = (kind: ItemKind, name: string, scope: Scope): string =>
@@ -54,15 +70,32 @@ export function placeStandings(
     const overlay = manifest
       ? isCustomized(itemCustomization(manifest, kind, name))
       : null;
-    const known = source.updatesLoaded && row != null;
-    const handEdited = known ? row.blockedByLocalEdit : null;
+    const handEdited = source.updatesLoaded
+      ? (row?.blockedByLocalEdit ?? null)
+      : null;
+    const forked = manifest?.forks?.[kind]?.[name] != null;
+    // A hand edit outranks an overlay: it is the one waiting on a decision.
+    // A fork is the same kind of fact — this place's own bytes.
+    const change: PlaceChange | null =
+      handEdited === true || forked
+        ? "files"
+        : overlay === true
+          ? "settings"
+          : null;
+    // A read still on its way is not a read that came back empty: saying
+    // "not checked" of a place nobody has asked about yet names the wrong
+    // cause, and this screen is the one that asks.
+    const stillReading =
+      (overlay === null && !source.manifestsLoaded) || !source.updatesLoaded;
     const state: PlaceState =
-      overlay === true || handEdited === true
+      change != null
         ? "customized"
-        : overlay === null || handEdited === null
-          ? "unknown"
-          : "as-installed";
-    return { scope, state, forked: known && row.forked };
+        : stillReading
+          ? "checking"
+          : overlay === null || handEdited === null
+            ? "unknown"
+            : "as-installed";
+    return { scope, state, change, forked };
   });
 }
 
@@ -72,11 +105,43 @@ export const customizedPlaces = (standings: PlaceStanding[]): Scope[] =>
 export const forkedPlaces = (standings: PlaceStanding[]): Scope[] =>
   standings.filter((one) => one.forked).map((one) => one.scope);
 
+/** How many places a count of customized ones must not speak for. A read
+ *  still on its way is as unsettled as one that came back unable to say:
+ *  the cause belongs on the per-place line, not in the tally. */
+export const uncheckedPlaces = (standings: PlaceStanding[]): number =>
+  standings.filter((one) => one.state === "unknown" || one.state === "checking")
+    .length;
+
 export const standingIn = (
   standings: PlaceStanding[],
   scope: Scope,
 ): PlaceStanding | null =>
   standings.find((one) => sameScope(one.scope, scope)) ?? null;
+
+/** The place a package page's header marks are about: the one the
+ *  Customize tab has open, once the editor is pointed at this package, and
+ *  the place the page was opened at until then — the editor carries over
+ *  the last package edited, which is not this one. */
+export const headerStanding = (
+  standings: PlaceStanding[],
+  opened: Scope,
+  editing: Scope | null,
+): PlaceStanding | null =>
+  (editing ? standingIn(standings, editing) : null) ??
+  standingIn(standings, opened);
+
+/** Where a mark leads: the first place carrying a change, and what the
+ *  package page opens showing — the surface that holds that change, not
+ *  whichever tab the page defaults to. Null when nothing is changed. */
+export function markTarget(
+  standings: PlaceStanding[],
+): { scope: Scope; view?: PackageView } | null {
+  const found = standings.find((one) => one.change != null);
+  if (!found) return null;
+  if (found.change === "settings")
+    return { scope: found.scope, view: { mode: "customize" } };
+  return { scope: found.scope };
+}
 
 /** Every place's manifest as it stands on screen: saved everywhere, and the
  *  draft in hand for the one place being edited — so a chip, a row, and the
@@ -100,10 +165,11 @@ export function usePlacesSource(): PlacesSource {
   const draft = useEditorStore((s) => s.draft);
   const rows = useUpdatesStore((s) => s.rows);
   const updatesLoaded = useUpdatesStore((s) => s.loaded);
+  const manifestsLoaded = useEditorStore((s) => s.manifestsLoaded);
   const manifests = useMemo(
     () => manifestsOnScreen(saved, scope, draft),
     [saved, scope, draft],
   );
   const indexed = useMemo(() => indexRows(rows), [rows]);
-  return { manifests, rows: indexed, updatesLoaded };
+  return { manifests, rows: indexed, updatesLoaded, manifestsLoaded };
 }

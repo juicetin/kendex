@@ -35,4 +35,8 @@ describe("the package header's marks", () => {
   it("names the place a fork belongs to", () => {
     expect(header({ forked: true })).toContain("Forked in vg");
   });
+
+  it("says nothing about a fork while the place is still being worked out", () => {
+    expect(header({ forked: true, place: null })).not.toContain("Forked");
+  });
 });

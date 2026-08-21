@@ -15,6 +15,10 @@ interface EditorState {
    *  Customize index read to mark what has been customized; `draft` above is
    *  the one copy being edited. */
   saved: Record<string, Draft>;
+  /** Whether {@link loadAll} has finished a pass. Until it has, a scope
+   *  missing from `saved` was never asked for; after it has, that scope's
+   *  manifest could not be read. */
+  manifestsLoaded: boolean;
   dirty: boolean;
   loading: boolean;
   saving: boolean;
@@ -30,8 +34,18 @@ interface EditorState {
 }
 
 export const useEditorStore = create<EditorState>((set, get) => {
+  // Which read the state on screen belongs to. Two place switches can be in
+  // flight at once — the chips are disabled while dirty, never while
+  // loading — and the slower one landing last would leave `draft` holding
+  // one place's manifest while `scope` names another. Every per-place mark
+  // reads that pair, and a save would write the wrong file.
+  let latest = 0;
+
   const load = async () => {
     const { scope } = get();
+    latest += 1;
+    const token = latest;
+    const current = () => token === latest;
     set({ loading: true });
     let manifest: Awaited<ReturnType<typeof commands.getManifest>>;
     let inventory: Awaited<ReturnType<typeof commands.editorInventory>>;
@@ -41,16 +55,22 @@ export const useEditorStore = create<EditorState>((set, get) => {
         commands.editorInventory(scope),
       ]);
     } finally {
-      set({ loading: false });
+      if (current()) set({ loading: false });
     }
     if (manifest.status === "error") {
-      set({ draft: null, dirty: false, error: manifest.error });
+      if (current()) set({ draft: null, dirty: false, error: manifest.error });
       return;
     }
     // With no manifest here yet the editor still opens, on an empty one:
     // asking someone to press "create" before they can type is a step that
     // decides nothing. Saving is what writes the file.
     const draft = manifest.data ? toDraft(manifest.data) : emptyDraft();
+    // A superseded read still knows its own place's manifest, so it keeps
+    // feeding the marks — it just never becomes the draft on screen.
+    if (!current()) {
+      set((state) => ({ saved: { ...state.saved, [scopeKey(scope)]: draft } }));
+      return;
+    }
     set((state) => ({
       draft,
       inventory: inventory.status === "ok" ? inventory.data : state.inventory,
@@ -60,8 +80,11 @@ export const useEditorStore = create<EditorState>((set, get) => {
     }));
   };
 
-  const write = async (draft: Draft) => {
-    const { scope } = get();
+  const write = async () => {
+    // Scope and draft are one value: read apart, a place switch between the
+    // two reads sends one place's manifest to another place's file.
+    const { scope, draft } = get();
+    if (!draft) return;
     set({ saving: true });
     let response: Awaited<ReturnType<typeof commands.updateManifest>>;
     try {
@@ -84,6 +107,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
     draft: null,
     inventory: null,
     saved: {},
+    manifestsLoaded: false,
     dirty: false,
     loading: false,
     saving: false,
@@ -122,7 +146,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
           ? toDraft(response.data)
           : emptyDraft();
       }
-      set({ saved });
+      set({ saved, manifestsLoaded: true });
     },
 
     edit: (change) => {
@@ -131,10 +155,6 @@ export const useEditorStore = create<EditorState>((set, get) => {
       set({ draft: change(draft), dirty: true });
     },
 
-    save: async () => {
-      const { draft } = get();
-      if (!draft) return;
-      await write(draft);
-    },
+    save: write,
   };
 });
