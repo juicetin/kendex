@@ -50,9 +50,7 @@ fn a_write_the_plan_brought_binds_to_the_copy_being_written() {
 
     // The editor read the file here.
     let (_, held) = manifest::read_for_mutation(&path).unwrap();
-    let base = Pre::HashIs {
-        hash: held.clone().unwrap(),
-    };
+    let base = Pre::from(&held);
 
     // Something else wrote it before the save reached the disk.
     write(&path, "schema = 5\n\n[forks.skill.gh]\nsource = \"cat\"\n");
@@ -83,12 +81,7 @@ fn the_same_write_lands_while_the_file_is_still_the_one_it_came_from() {
 
     let (_, held) = manifest::read_for_mutation(&path).unwrap();
     let mut plan = planned_by_the_engine(&scope, &path, Pre::Any);
-    plan.bind_writes(
-        &path,
-        &Pre::HashIs {
-            hash: held.unwrap(),
-        },
-    );
+    plan.bind_writes(&path, &Pre::from(&held));
 
     kendex_core::apply::execute(&env, &plan, None).unwrap();
     assert!(
@@ -110,7 +103,7 @@ fn a_first_write_refuses_a_file_that_appeared_in_between() {
     let path = manifest::manifest_path(&env, &scope);
 
     let (_, held) = manifest::read_for_mutation(&path).unwrap();
-    assert_eq!(held, None, "nothing to read yet");
+    assert_eq!(held, manifest::Base::absent(), "nothing to read yet");
     write(&path, "schema = 5\n\n[skills.gh]\nsource = \"cat\"\n");
 
     let mut plan = planned_by_the_engine(&scope, &path, Pre::Any);
@@ -118,4 +111,43 @@ fn a_first_write_refuses_a_file_that_appeared_in_between() {
 
     assert!(kendex_core::apply::execute(&env, &plan, None).is_err());
     assert!(fs::read_to_string(&path).unwrap().contains("skills.gh"));
+}
+
+/// What an apply hands back about the file it wrote, and when it is true.
+///
+/// A caller that writes a whole file and then reads the file back is
+/// pairing its own copy with whatever landed in between: the apply lets the
+/// scope go before that read, so the base it gets can already be somebody
+/// else's, and the next write carrying that pair is accepted over them. The
+/// apply reads it while it still owns the scope, which is the last moment
+/// the answer is provably its own.
+#[test]
+#[allow(clippy::unwrap_used)]
+fn the_apply_answers_for_the_file_it_left() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().canonicalize().unwrap();
+    let env = Env::fake(&home, FakeOs::Linux);
+    let scope = Scope::Global;
+    let path = manifest::manifest_path(&env, &scope);
+    write(&path, "schema = 5\n");
+
+    let (_, held) = manifest::read_for_mutation(&path).unwrap();
+    let mut plan = planned_by_the_engine(&scope, &path, Pre::Any);
+    plan.bind_writes(&path, &Pre::from(&held));
+    let outcome = kendex_core::apply::execute(&env, &plan, None).unwrap();
+
+    // The bytes this apply left, not a later reading of the path.
+    let (_, after) = manifest::read_for_mutation(&path).unwrap();
+    assert_eq!(outcome.manifest_base, after);
+
+    // Someone else writes, as they may the moment the scope is free. The
+    // base the apply handed back still describes what the apply wrote, so
+    // the next write carrying it is refused rather than landing on top.
+    write(&path, "schema = 5\n\n[forks.skill.gh]\nsource = \"cat\"\n");
+    assert!(manifest::check_base(&path, &outcome.manifest_base).is_err());
+
+    let mut next = planned_by_the_engine(&scope, &path, Pre::Any);
+    next.bind_writes(&path, &Pre::from(&outcome.manifest_base));
+    assert!(kendex_core::apply::execute(&env, &next, None).is_err());
+    assert!(fs::read_to_string(&path).unwrap().contains("forks"));
 }

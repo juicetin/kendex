@@ -26,10 +26,8 @@ pub struct ManifestRead {
     /// Absent where the place has no manifest yet — the editor still opens,
     /// on an empty one.
     pub manifest: Option<Manifest>,
-    /// `None` where nothing was there, which is itself a base: a write
-    /// carrying it says "there was no file", and is refused if there is
-    /// one now.
-    pub base: Option<String>,
+    /// The file these bytes came from, read with them and never apart.
+    pub base: manifest::Base,
 }
 
 /// Why a whole-manifest write did not happen. Refusing is a normal answer
@@ -60,7 +58,9 @@ impl From<String> for WriteRefused {
 #[serde(rename_all = "camelCase")]
 pub struct ManifestWritten {
     pub view: AuditView,
-    pub base: Option<String>,
+    /// What the file is now, as the apply that wrote it saw it before
+    /// letting the scope go — the base for the next write from this copy.
+    pub base: manifest::Base,
 }
 
 #[tauri::command(async)]
@@ -121,11 +121,11 @@ pub fn update_manifest(
 ) -> Result<ManifestWritten, WriteRefused> {
     let env = env()?;
     let path = manifest::manifest_path(&env, &scope);
-    let held = match &base {
-        Some(hash) => Pre::HashIs { hash: hash.clone() },
-        None => Pre::Absent,
-    };
-    if manifest::check_base(&path, base.as_deref()).is_err() {
+    // The bytes behind this base were read in the editor, so it arrives as
+    // a claim and is only ever compared, never believed.
+    let claimed = manifest::Base::claimed(base);
+    let held = Pre::from(&claimed);
+    if manifest::check_base(&path, &claimed).is_err() {
         return Err(WriteRefused::Stale);
     }
     let mut manifest = match manifest::load_for_mutation(&path).map_err(|e| e.to_string())? {
@@ -163,10 +163,13 @@ pub fn update_manifest(
     // the file was when the plan ran, which would accept a writer that
     // landed between the check above and here.
     report.plan.bind_writes(&path, &held);
-    apply::execute(&env, &report.plan, None).map_err(|e| e.to_string())?;
+    let outcome = apply::execute(&env, &report.plan, None).map_err(|e| e.to_string())?;
     Ok(ManifestWritten {
         view: view(&env, &scope),
-        base: manifest::base(&path).map_err(|e| e.to_string())?,
+        // From the apply, which read it before letting the scope go. Read
+        // here instead and the answer could already be somebody else's,
+        // handed back paired with the copy this write came from.
+        base: outcome.manifest_base,
     })
 }
 

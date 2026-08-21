@@ -278,13 +278,13 @@ lives in one capability table read by core and UI.
 - **A whole-manifest write carries the file it came from, and every other
   writer tells the editor.** A draft is a whole manifest, so a save landing
   after another writer puts the old file back. Two answers, failing
-  differently: `update_manifest` takes the `base` its copy was read at
-  (`manifest::check_base`) and refuses a write against a file that became
-  something else, needing nobody to have noticed — what holds for a writer
-  nobody wired up; `manifest-sync.ts` marks the place before it awaits
-  anything, so a save in that window never leaves the app, then measures
-  that mark against the base, since most of what calls it rewrites
-  installed files and never the manifest. One reload either way.
+  differently: `update_manifest` takes the `manifest::Base` its copy was
+  read at — one door in, the bytes, so no base describes content nobody
+  read with it — and refuses a write against a file that became something
+  else, needing nobody to have noticed, which is what holds for a writer
+  nobody wired up. `manifest-sync.ts` marks the place before it awaits, so
+  a save in that window never leaves the app, then measures that mark
+  against the base. One reload either way.
 - **Customization is per place, and every mark names its place.** One
   package can be changed in one project and untouched at user level, so
   "Customized" unqualified answers a question nobody asks.

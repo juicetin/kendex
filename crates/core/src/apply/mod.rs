@@ -8,9 +8,11 @@ use crate::model::Scope;
 mod common;
 pub mod journal;
 mod op;
+mod pre;
 
 pub use common::{common_key, execute_common, recover_common_journals};
-pub use op::{Op, Plan, PlannedOp, Pre, read_git_config};
+pub use op::{Op, Plan, PlannedOp, read_git_config};
+pub use pre::Pre;
 
 /// Filesystem-safe key naming a scope's journal dir and lock file. Keys off
 /// the canonical scope so two spellings of one root can never hold two
@@ -96,6 +98,13 @@ fn recover_key(env: &Env, key: &str) -> Result<bool> {
 pub struct ApplyOutcome {
     pub applied: usize,
     pub recovered_first: bool,
+    /// What this scope's manifest is now, read before the lock this apply
+    /// holds is let go. After that moment the answer can already be
+    /// somebody else's: a caller that writes a whole manifest and then
+    /// reads the file back is pairing its own copy with whatever landed in
+    /// between, and the next write carrying that pair is accepted over
+    /// that writer.
+    pub manifest_base: crate::manifest::Base,
 }
 
 /// Execute a plan transactionally. If recovery runs first, the plan
@@ -116,9 +125,23 @@ pub fn execute(env: &Env, plan: &Plan, fail_after: Option<usize>) -> Result<Appl
     if !plan.ops.is_empty() {
         let _ = crate::drift::snapshot::invalidate(env, &plan.scope);
     }
+    // Still under `_guard`: this is the last moment the file is provably
+    // the one this apply left.
+    let manifest_base = manifest_base(env, &plan.scope)?;
     Ok(ApplyOutcome {
         applied,
         recovered_first,
+        manifest_base,
+    })
+}
+
+/// The scope's manifest as it stands, for an apply that still holds the
+/// lock. Derived from the bytes read here, like every other base.
+pub(super) fn manifest_base(env: &Env, scope: &Scope) -> Result<crate::manifest::Base> {
+    let path = crate::manifest::manifest_path(env, scope);
+    Ok(match crate::fs::read_if_exists(&path)? {
+        Some(text) => crate::manifest::Base::of(&text),
+        None => crate::manifest::Base::absent(),
     })
 }
 

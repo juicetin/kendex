@@ -147,7 +147,7 @@ fn source_catalog_routes_install_state_to_a_sibling() {
 // that read the file may be gone, and a caller that never asked cannot be
 // made to.
 mod stale_writes {
-    use super::super::{base, check_base};
+    use super::super::{Base, check_base};
 
     #[allow(clippy::unwrap_used)]
     fn file(dir: &std::path::Path, text: &str) -> std::path::PathBuf {
@@ -164,7 +164,7 @@ mod stale_writes {
     #[test]
     #[allow(clippy::unwrap_used)]
     fn the_base_belongs_to_the_bytes_the_manifest_came_from() {
-        use super::super::{base, parse_with_base, read_for_mutation};
+        use super::super::{Base, parse_with_base, read_for_mutation};
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("kendex.toml");
         let text = "schema = 5\n";
@@ -172,8 +172,8 @@ mod stale_writes {
 
         let (parsed, paired) = parse_with_base(&path, text).unwrap();
         assert!(parsed.is_some());
-        // The same bytes, whether they came from the file or the caller.
-        assert_eq!(paired, base(&path).unwrap());
+        // The same bytes, whether the file or the caller handed them over.
+        assert_eq!(paired, Base::of(text));
         assert_eq!(read_for_mutation(&path).unwrap().1, paired);
 
         // Bytes that are not the file's answer for themselves, never for it.
@@ -186,10 +186,10 @@ mod stale_writes {
     fn a_copy_of_the_file_it_came_from_writes() {
         let tmp = tempfile::tempdir().unwrap();
         let path = file(tmp.path(), "schema = 5\n");
-        let held = base(&path).unwrap();
+        let (_, held) = super::super::read_for_mutation(&path).unwrap();
 
-        assert!(held.is_some(), "a file that is there has a base");
-        assert!(check_base(&path, held.as_deref()).is_ok());
+        assert_ne!(held, Base::absent(), "a file that is there has a base");
+        assert!(check_base(&path, &held).is_ok());
     }
 
     #[test]
@@ -197,14 +197,14 @@ mod stale_writes {
     fn a_copy_of_what_the_file_used_to_be_does_not() {
         let tmp = tempfile::tempdir().unwrap();
         let path = file(tmp.path(), "schema = 5\n");
-        let held = base(&path).unwrap();
+        let (_, held) = super::super::read_for_mutation(&path).unwrap();
         // Something else rewrote it — a fork, a hold, a dismissal.
         file(
             tmp.path(),
             "schema = 5\n\n[forks.skill.gh]\nsource = \"cat\"\n",
         );
 
-        assert!(check_base(&path, held.as_deref()).is_err());
+        assert!(check_base(&path, &held).is_err());
     }
 
     #[test]
@@ -213,8 +213,11 @@ mod stale_writes {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("kendex.toml");
 
-        assert_eq!(base(&path).unwrap(), None);
-        assert!(check_base(&path, None).is_ok());
+        assert_eq!(
+            super::super::read_for_mutation(&path).unwrap().1,
+            Base::absent()
+        );
+        assert!(check_base(&path, &Base::absent()).is_ok());
     }
 
     #[test]
@@ -222,10 +225,10 @@ mod stale_writes {
     fn nothing_read_but_something_there_now_does_not() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("kendex.toml");
-        let held = base(&path).unwrap();
+        let (_, held) = super::super::read_for_mutation(&path).unwrap();
         // Between the read and the write, the place got its first manifest.
         file(tmp.path(), "schema = 5\n");
 
-        assert!(check_base(&path, held.as_deref()).is_err());
+        assert!(check_base(&path, &held).is_err());
     }
 }

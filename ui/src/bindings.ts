@@ -458,6 +458,20 @@ export type AvailablePackage = {
 };
 
 /**
+ *  What a copy of a whole file remembers about the file it came from.
+ * 
+ *  There is one way to derive one — [`Base::of`], over the bytes it
+ *  describes — because the failure this exists to prevent is a base paired
+ *  with content nobody read together. Three of those reached review, each
+ *  a base taken by a read separate from the content it was meant to answer
+ *  for: a writer landing between the two hands a caller old content under
+ *  the new file's name, and the write that follows is accepted over that
+ *  writer. Nothing here takes a path and hands back a base, deliberately —
+ *  a path is not the bytes.
+ */
+export type Base = string | null;
+
+/**
  *  A curated set with per-member state. Partly-installed is the derived
  *  pair below, computed from the members on every call and stored nowhere.
  */
@@ -1572,12 +1586,8 @@ export type ManifestRead_Deserialize = {
 	 *  on an empty one.
 	 */
 	manifest: Manifest_Deserialize | null,
-	/**
-	 *  `None` where nothing was there, which is itself a base: a write
-	 *  carrying it says "there was no file", and is refused if there is
-	 *  one now.
-	 */
-	base: string | null,
+	/**  The file these bytes came from, read with them and never apart. */
+	base: Base,
 };
 
 /**
@@ -1591,12 +1601,8 @@ export type ManifestRead_Serialize = {
 	 *  on an empty one.
 	 */
 	manifest: Manifest_Serialize | null,
-	/**
-	 *  `None` where nothing was there, which is itself a base: a write
-	 *  carrying it says "there was no file", and is refused if there is
-	 *  one now.
-	 */
-	base: string | null,
+	/**  The file these bytes came from, read with them and never apart. */
+	base: Base,
 };
 
 /**
@@ -1613,7 +1619,11 @@ export type ManifestWritten = ManifestWritten_Serialize | ManifestWritten_Deseri
  */
 export type ManifestWritten_Deserialize = {
 	view: AuditView_Deserialize,
-	base: string | null,
+	/**
+	 *  What the file is now, as the apply that wrote it saw it before
+	 *  letting the scope go — the base for the next write from this copy.
+	 */
+	base: Base,
 };
 
 /**
@@ -1623,7 +1633,11 @@ export type ManifestWritten_Deserialize = {
  */
 export type ManifestWritten_Serialize = {
 	view: AuditView_Serialize,
-	base: string | null,
+	/**
+	 *  What the file is now, as the apply that wrote it saw it before
+	 *  letting the scope go — the base for the next write from this copy.
+	 */
+	base: Base,
 };
 
 export type Manifest_Deserialize = {

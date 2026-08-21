@@ -4,6 +4,9 @@
 
 use std::path::Path;
 
+use serde::{Deserialize, Serialize};
+use specta::Type;
+
 use crate::env::Env;
 use crate::error::{CoreError, Result};
 use crate::fs::{atomic_write, read_if_exists};
@@ -100,19 +103,49 @@ pub fn load_for_mutation(path: &Path) -> Result<Option<Manifest>> {
     }
 }
 
-/// What a copy read from these bytes remembers about the file it came
-/// from. Taken over the bytes themselves, never over the path a second
-/// time: the base and the manifest have to describe the same read.
-fn digest(text: &str) -> String {
-    crate::hash::hash_bytes(text.as_bytes())
-}
+/// What a copy of a whole file remembers about the file it came from.
+///
+/// There is one way to derive one — [`Base::of`], over the bytes it
+/// describes — because the failure this exists to prevent is a base paired
+/// with content nobody read together. Three of those reached review, each
+/// a base taken by a read separate from the content it was meant to answer
+/// for: a writer landing between the two hands a caller old content under
+/// the new file's name, and the write that follows is accepted over that
+/// writer. Nothing here takes a path and hands back a base, deliberately —
+/// a path is not the bytes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(transparent)]
+pub struct Base(Option<String>);
 
-/// What the file at this path is right now — `None` when nothing is there,
-/// which is itself an answer a copy can hold. A whole-manifest write from a
-/// copy someone is holding sends this back with it, and the write is
-/// refused if the file has become something else in between.
-pub fn base(path: &Path) -> Result<Option<String>> {
-    Ok(read_if_exists(path)?.as_deref().map(digest))
+impl Base {
+    /// The base of exactly these bytes.
+    pub fn of(text: &str) -> Base {
+        Base(Some(crate::hash::hash_bytes(text.as_bytes())))
+    }
+
+    /// Nothing was there, which is an answer a copy can hold: a write
+    /// carrying it says "there was no file", and is refused if there is
+    /// one now.
+    pub fn absent() -> Base {
+        Base(None)
+    }
+
+    /// What a caller in another process says its copy came from.
+    ///
+    /// The bytes are behind an IPC boundary, so they cannot be read here
+    /// and this is the one base not derived from content in hand. It is
+    /// never trusted: its only use is to be compared with a base this
+    /// process derived, and anything but equal refuses.
+    pub fn claimed(value: Option<String>) -> Base {
+        Base(value)
+    }
+
+    /// What it says, for the one thing inside this crate that has to spell
+    /// it out: the precondition a write binds to. Reading a base is safe —
+    /// deriving one is what is kept to a single door.
+    pub(crate) fn hash(&self) -> Option<&str> {
+        self.0.as_deref()
+    }
 }
 
 /// A manifest and the base of the file it came from, from one read.
@@ -122,18 +155,18 @@ pub fn base(path: &Path) -> Result<Option<String>> {
 /// file's name, and the write that follows is accepted over that writer —
 /// the one thing a base exists to prevent. So the text is read once and
 /// both answers come from it.
-pub fn read_for_mutation(path: &Path) -> Result<(Option<Manifest>, Option<String>)> {
+pub fn read_for_mutation(path: &Path) -> Result<(Option<Manifest>, Base)> {
     crate::rename::refuse_both_generations(path)?;
     let Some(text) = read_if_exists(path)? else {
-        return Ok((None, None));
+        return Ok((None, Base::absent()));
     };
     parse_with_base(path, &text)
 }
 
 /// [`read_for_mutation`] for text the caller already read, and where the
 /// pairing is provable: the base is taken over exactly these bytes.
-pub fn parse_with_base(path: &Path, text: &str) -> Result<(Option<Manifest>, Option<String>)> {
-    let base = Some(digest(text));
+pub fn parse_with_base(path: &Path, text: &str) -> Result<(Option<Manifest>, Base)> {
+    let base = Base::of(text);
     match parse_text(path, text)? {
         ManifestFile::Absent => Ok((None, base)),
         ManifestFile::Legacy { .. } => Err(CoreError::LegacyManifest {
@@ -150,8 +183,15 @@ pub fn parse_with_base(path: &Path, text: &str) -> Result<(Option<Manifest>, Opt
 /// there. Writing it would put the older content back over whatever
 /// replaced it, and the writer is the only place that can know: a caller
 /// can forget to ask, and forgetting is silent.
-pub fn check_base(path: &Path, held: Option<&str>) -> Result<()> {
-    match base(path)?.as_deref() == held {
+/// The file's own base is derived here and never handed back — a caller
+/// holding one would be holding a base for content it never read, which is
+/// the shape [`Base`] exists to keep unspellable.
+pub fn check_base(path: &Path, held: &Base) -> Result<()> {
+    let now = match read_if_exists(path)? {
+        Some(text) => Base::of(&text),
+        None => Base::absent(),
+    };
+    match now == *held {
         true => Ok(()),
         false => Err(CoreError::PlanStale {
             path: path.to_path_buf(),
