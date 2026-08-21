@@ -177,21 +177,29 @@ pub(super) fn plan_schema_upgrade(
     if !upgraded_text.is_empty() && !upgraded_text.ends_with('\n') {
         upgraded_text.push('\n');
     }
-    let op = match rewritten {
+    let mut expected = manifest.clone();
+    expected.schema = manifest::MANIFEST_SCHEMA;
+    // The surgical edit only earns its place when it reproduces the
+    // manifest this was asked to write. The caller's copy can carry edits
+    // of its own — a save in flight hands one in — and a text rewrite that
+    // only moves the schema line drops them; worse, the file write it
+    // emits is not one `persists_manifest` recognises, so the caller adds
+    // its own whole-file save and the two bind to the same bytes, the
+    // second failing after the first has moved them. One write, whichever
+    // shape it takes.
+    let reproduced =
+        rewritten && toml::from_str::<Manifest>(&upgraded_text).is_ok_and(|got| got == expected);
+    let op = match reproduced {
         true => Op::WriteFile {
             pre,
             path,
             bytes: upgraded_text.into_bytes(),
         },
-        false => {
-            let mut upgraded = manifest.clone();
-            upgraded.schema = manifest::MANIFEST_SCHEMA;
-            Op::WriteManifest {
-                pre,
-                path,
-                manifest: Box::new(upgraded),
-            }
-        }
+        false => Op::WriteManifest {
+            pre,
+            path,
+            manifest: Box::new(expected),
+        },
     };
     ops.push(PlannedOp { description, op });
     Ok(())
