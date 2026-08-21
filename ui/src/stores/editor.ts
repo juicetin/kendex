@@ -37,8 +37,12 @@ interface EditorState {
   setScope: (scope: Scope) => Promise<void>;
   /** Point the editor at a scope without discarding edits already in hand. */
   openScope: (scope: Scope) => Promise<void>;
-  /** Read one place's manifest — the open one, or the one named. */
-  load: (scope?: Scope) => Promise<void>;
+  /** Read one place's manifest — the open one, or the one named. Typing in
+   *  hand is never replaced: `discardEdits` is how a caller says it means
+   *  to, and {@link discard} is that caller. */
+  load: (scope?: Scope, opts?: { discardEdits?: boolean }) => Promise<void>;
+  /** Throw away the copy in hand and read the file again. */
+  discard: () => Promise<void>;
   /** Read every scope's manifest, for the marks drawn outside the editor. */
   loadAll: () => Promise<void>;
   edit: (change: (draft: Draft) => Draft) => void;
@@ -65,8 +69,14 @@ export const useEditorStore = create<EditorState>((set, get) => {
   let passes = 0;
   let latestPass = 0;
 
-  const load = async (target?: Scope) => {
+  const load = async (target?: Scope, opts?: { discardEdits?: boolean }) => {
     const scope = target ?? get().scope;
+    // Typing that arrives while this read is on its way is newer than the
+    // bytes it reads, so only a deliberate discard replaces it. Every other
+    // reader still feeds the marks from what it read, and leaves whatever
+    // outdated mark the place carries standing — so a save of the older
+    // copy is still refused rather than quietly winning.
+    const takes = () => opts?.discardEdits === true || !get().dirty;
     reads += 1;
     const token = reads;
     // A read answers for the editor only when it reads the place the editor
@@ -98,15 +108,18 @@ export const useEditorStore = create<EditorState>((set, get) => {
       if (onScreen())
         set({
           loading: false,
-          draft: null,
-          dirty: false,
           error: String(thrown),
+          ...(takes() ? { draft: null, dirty: false } : {}),
         });
       return;
     }
     if (onScreen()) set({ loading: false });
     if (manifest.status === "error") {
-      if (onScreen()) set({ draft: null, dirty: false, error: manifest.error });
+      if (onScreen())
+        set({
+          error: manifest.error,
+          ...(takes() ? { draft: null, dirty: false } : {}),
+        });
       return;
     }
     // With no manifest here yet the editor still opens, on an empty one:
@@ -114,9 +127,10 @@ export const useEditorStore = create<EditorState>((set, get) => {
     // decides nothing. Saving is what writes the file.
     const draft = manifest.data ? toDraft(manifest.data) : emptyDraft();
     const read: [string, Draft][] = [[scopeKey(scope), draft]];
-    // A read that no longer speaks for the screen still knows its own
-    // place's manifest, so it keeps feeding the marks.
-    if (!onScreen()) {
+    // A read that no longer speaks for the screen, and one that arrived to
+    // find typing it must not take, both still know their own place's
+    // manifest — so both keep feeding the marks and draw nothing.
+    if (!onScreen() || !takes()) {
       set((state) => ({ saved: fold(state.saved, read, token) }));
       return;
     }
@@ -160,6 +174,8 @@ export const useEditorStore = create<EditorState>((set, get) => {
     },
 
     load,
+
+    discard: () => load(get().scope, { discardEdits: true }),
 
     loadAll: async () => {
       reads += 1;

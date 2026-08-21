@@ -47,6 +47,7 @@ export function CustomizePage() {
     error,
     setScope,
     load,
+    discard,
     edit,
     save,
   } = useEditorStore();
@@ -151,7 +152,7 @@ export function CustomizePage() {
         <SaveBar
           saving={saving}
           onSave={() => void save()}
-          onDiscard={() => void load()}
+          onDiscard={() => void discard()}
         />
       ) : null}
     </div>

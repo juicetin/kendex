@@ -351,6 +351,8 @@ mod scope;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
+mod tests_exits;
+#[cfg(test)]
 mod tests_render;
 
 pub use render::render_plain;

@@ -101,7 +101,9 @@ changes carry a **Breaking** call-out with their migration note inline.
   Forked mark now belongs to the place it was made in instead of showing
   up on every copy. The page you land on is about that place too — its
   path, its open actions and its file list, not the first project the
-  package happens to be installed in. A place counts as customized whether
+  package happens to be installed in, and it stays that place while you look
+  at another one's settings on the Customize tab — the chips move the tab,
+  not the page. A place counts as customized whether
   you changed it on the Customize tab, edited its installed files by hand,
   or forked it, so a package you hand-edited is marked even when it is up
   to date, and a fork you have since edited says so. Text you are still
@@ -180,8 +182,10 @@ changes carry a **Breaking** call-out with their migration note inline.
   "discard the edits and go back to the copy you kept", `kendex check`
   prints `kendex refresh --discard-edits` as its fix, and that command does
   exactly what the line says. The offer disappears when the copy you kept can
-  no longer be re-rendered from — removed, replaced by a directory, or left
-  as a link where content belongs. Keeping the same package as your own twice is
+  no longer be re-rendered from — removed, replaced by a directory, left as a
+  link where content belongs, or grown past what kendex will read as one
+  package — and `kendex check` stops printing the command there too, saying
+  the copy cannot be read back instead of naming a fix that would refuse. Keeping the same package as your own twice is
   refused rather than quietly replacing the record of where it came from,
   which is kept nowhere else.
 - Review no longer files a package it cannot act on under "Ready to apply".
@@ -199,9 +203,11 @@ changes carry a **Breaking** call-out with their migration note inline.
   version, adopting, enabling and disabling, removing, applying, settling a
   safety finding or taking that back, and subscribing to or installing from
   a marketplace — including an install redirected into a project, which is
-  the project that hears about it. The Save bar stays down until the editor
-  has been told, so a save pressed the instant an action finishes cannot
-  slip through ahead of it.
+  the project that hears about it. The refusal goes up the moment such an
+  action starts and comes off only once the tab has caught up, so a save
+  pressed anywhere in between cannot slip through — and typing you start
+  while the tab is catching up is kept rather than replaced by the file it
+  read.
 - Keeping a fork or discarding edits is refused while you have unsaved
   changes on the Customize tab for that same project: saving them afterwards
   would have written the old settings back over the new fork, losing it

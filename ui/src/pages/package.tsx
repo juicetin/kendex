@@ -43,8 +43,7 @@ export function PackagePage() {
   const back = useNavStore((s) => s.back);
   const result = useScanStore((s) => s.result);
   const toggle = useAuditStore((s) => s.toggle);
-  const editorScope = useEditorStore((s) => s.scope);
-  const { dirty, saving, openScope, load, save } = useEditorStore();
+  const { dirty, saving, openScope, discard, save } = useEditorStore();
   const places = useEditingPlacesSource();
 
   const [view, setView] = useState<PackageView>(() => openingView(initialView));
@@ -56,21 +55,10 @@ export function PackagePage() {
     if (initialView) clearPackageView();
   }, [initialView, clearPackageView]);
 
-  // The manifest this package's own edits live in, loaded up front so the
-  // header can say whether there are any before the tab is opened. Until
-  // that lands the editor still points wherever the last package left it,
-  // so the marks read this page's own scope rather than that one.
-  const [pointed, setPointed] = useState(false);
+  // The Customize tab opens on the place this page is about; its chips move
+  // the editor from there, and nothing this page says follows them.
   useEffect(() => {
-    if (!ref) return;
-    let live = true;
-    setPointed(false);
-    void openScope(ref.scope).then(() => {
-      if (live) setPointed(true);
-    });
-    return () => {
-      live = false;
-    };
+    if (ref) void openScope(ref.scope);
   }, [ref, openScope]);
 
   const group = useMemo(() => {
@@ -89,7 +77,7 @@ export function PackagePage() {
   // edited-files notice.
   const { primary, selected, editedRow } =
     group && ref
-      ? packageMarks(places, group, ref.scope, pointed ? editorScope : null)
+      ? packageMarks(places, group, ref.scope)
       : { primary: null, selected: null, editedRow: null };
   const diff = usePackageDiff(
     ref,
@@ -222,7 +210,7 @@ export function PackagePage() {
           saving={saving}
           busy={mutating}
           onSave={() => void save()}
-          onDiscard={() => void load()}
+          onDiscard={() => void discard()}
         />
       ) : null}
       <RemoveDialog

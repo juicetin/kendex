@@ -11,18 +11,15 @@ import {
   type InstallItem,
   type Scope,
 } from "@/bindings";
-import { manifestRewritten } from "./manifest-sync";
 import { catalogReads } from "./marketplaces-reads";
 import {
   cachedRepoCatalogs,
   catalogKey,
   dropCatalogCaches,
-  dropSummariesHeldBy,
-  isRepoKey,
-  openLead,
   refreshDownstream,
   subscription,
 } from "./marketplaces-shared";
+import { subscriptionOps } from "./marketplaces-subscriptions";
 
 export {
   bundleKey,
@@ -113,81 +110,7 @@ export const useMarketplacesStore = create<MarketplacesState>((set, get) => ({
 
   ...catalogReads(set),
 
-  subscribe: async (scope, reference, name) => {
-    set({ busy: true });
-    let response: Awaited<ReturnType<typeof commands.marketplaceSubscribe>>;
-    try {
-      response = await commands.marketplaceSubscribe(scope, reference, name);
-    } finally {
-      set({ busy: false });
-    }
-    if (response.status === "error") {
-      // The dialog shows the refusal beside the input; no toast on top.
-      set({ error: response.error });
-      return false;
-    }
-    set({ error: null });
-    toast.success(`Subscribed to '${response.data.name}'`);
-    for (const note of response.data.notes) toast.message(note);
-    dropCatalogCaches(set);
-    // A repository page may now have a subscription to carry on as, under
-    // whatever spelling the dialog was submitted with — every repository
-    // summary re-reads, and only one such page can be open.
-    set((state) => ({
-      summaries: Object.fromEntries(
-        Object.entries(state.summaries).filter(([key]) => !isRepoKey(key)),
-      ),
-    }));
-    await get().load();
-    await manifestRewritten(scope);
-    if (response.data.lead) {
-      await openLead(scope, response.data.name, response.data.lead);
-    }
-    return true;
-  },
-
-  unsubscribe: async (scope, source, keep, discardEdits) => {
-    set({ busy: true });
-    let response: Awaited<ReturnType<typeof commands.marketplaceUnsubscribe>>;
-    try {
-      response = await commands.marketplaceUnsubscribe(
-        scope,
-        source,
-        keep,
-        discardEdits,
-      );
-    } finally {
-      set({ busy: false });
-    }
-    if (response.status === "error") {
-      set({ error: response.error });
-      return false;
-    }
-    set({ error: null });
-    toast.success(
-      keep
-        ? `Unsubscribed from '${source}' — its packages are yours now`
-        : `Unsubscribed from '${source}'`,
-    );
-    dropCatalogCaches(set);
-    // A page carried on as this subscription must stop pointing at it.
-    set({ summaries: {} });
-    await get().load();
-    await refreshDownstream(scope);
-    return true;
-  },
-
-  toggle: async (scope, source, enabled) => {
-    const response = await commands.sourceToggle(scope, source, enabled);
-    if (response.status === "error") {
-      toast.error(response.error);
-      return;
-    }
-    dropCatalogCaches(set);
-    dropSummariesHeldBy(set, get().rows, scope, source);
-    await get().load();
-    await refreshDownstream(scope);
-  },
+  ...subscriptionOps(set, get),
 
   checkForUpdates: async () => {
     set({ busy: true });

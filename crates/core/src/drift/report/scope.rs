@@ -220,28 +220,38 @@ impl ScopeCheck<'_> {
             // A fork has already been kept: the exit left is to put its own
             // copy back, which the engine holds in the local source. Naming
             // the fork exit there would name one that now refuses.
-            let (line, remedy) = if package.forked {
+            let (line, remedy) = if package.forked && !package.can_discard {
+                // The copy the discard would re-render from cannot be read
+                // back — emptied, replaced, or past what a catalog tree may
+                // be. Naming an exit that refuses is worse than naming none.
+                (
+                    format!(
+                        "{prefix}{kind} '{name}' was edited on disk since your fork was rendered, and its own copy can no longer be read back — nothing here can re-render it"
+                    ),
+                    None,
+                )
+            } else if package.forked {
                 (
                     format!(
                         "{prefix}{kind} '{name}' was edited on disk since your fork was rendered — refresh with edits discarded to re-render from your own copy"
                     ),
-                    Remedy::DiscardEdits {
+                    Some(Remedy::DiscardEdits {
                         global: self.global,
-                    },
+                    }),
                 )
             } else {
                 (
                     format!(
                         "{prefix}{kind} '{name}' was edited on disk — keep it as a fork, or refresh with edits discarded"
                     ),
-                    Remedy::Fork {
+                    Some(Remedy::Fork {
                         kind: package.kind,
                         name: package.name.clone(),
                         global: self.global,
-                    },
+                    }),
                 )
             };
-            sections.edited.push(drift(line, Some(remedy)));
+            sections.edited.push(drift(line, remedy));
         } else if package.removed_upstream {
             sections.removed.push(drift(
                 format!("{prefix}{kind} '{name}' is no longer offered by its source"),

@@ -250,21 +250,29 @@ fn same_artifact(
 /// know it is a fork, and whether its files have been edited since. A fork
 /// is the one local source with a row, so a hardcoded "not edited" here
 /// would be the only place the measured edit is thrown away.
-/// Whether a fork's own copy can still be re-rendered from. Discarding an
-/// edit reads the local source the way installing does, so the question is
-/// not whether a path is there but whether the artifact the catalog reads
-/// is: a skill directory emptied of its `SKILL.md`, an agent file replaced
-/// by a directory, and a symlink where content belongs all read as present
-/// and all refuse when the discard runs.
+/// Whether a fork's own copy can still be re-rendered from — asked of the
+/// sealed source, which is what the discard reads through. A path check
+/// answers a different question than the render does: a skill directory
+/// emptied of its `SKILL.md`, an agent file replaced by a directory, a
+/// symlink anywhere in the tree, a tree nested past the catalog depth or
+/// over its file and byte budgets all read as present and all refuse when
+/// the discard runs. Collecting the tree is the refusal, so it is the
+/// question — the fork's own tree, which this row already hashes to know
+/// it was edited.
 fn local_copy_resolves(env: &Env, scope: &Scope, kind: ItemKind, name: &str) -> bool {
     let root = crate::source::local_source_root(env, scope);
-    let artifact = match kind {
-        ItemKind::Skill => root.join("skills").join(name).join("SKILL.md"),
-        _ => root.join("agents").join(format!("{name}.md")),
+    let Ok(sealed) = crate::source_read::SealedSource::open(&root) else {
+        return false;
     };
-    // symlink_metadata, so a link is judged as a link rather than as
-    // whatever it points at — the source store holds content, not links.
-    std::fs::symlink_metadata(&artifact).is_ok_and(|meta| meta.is_file())
+    match kind {
+        ItemKind::Skill => {
+            let dir = root.join("skills").join(name);
+            sealed.is_file(&dir.join("SKILL.md")) && sealed.collect_skill_tree(&dir).is_ok()
+        }
+        _ => sealed
+            .read(&root.join("agents").join(format!("{name}.md")))
+            .is_ok(),
+    }
 }
 
 fn fork_row(

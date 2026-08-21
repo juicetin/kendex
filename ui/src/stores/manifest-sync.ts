@@ -5,20 +5,33 @@ import { useEditorStore } from "./editor";
 /** Tell the editor that something outside it rewrote a place's kendex.toml.
  *
  *  Nearly every mutation does: forking, discarding edits, moving a hold,
- *  adopting, toggling, subscribing, installing. The editor holds a whole
- *  manifest read at some earlier moment, and a save writes that whole copy
- *  back — so without this, the next save silently undoes whatever was just
- *  recorded, and the marks drawn from `saved` stay stale until a refocus.
+ *  adopting, toggling, subscribing, installing, settling a finding. The
+ *  editor holds a whole manifest read at some earlier moment, and a save
+ *  writes that whole copy back — so without this, the next save silently
+ *  undoes whatever was just recorded, and the marks drawn from `saved` stay
+ *  stale until a refocus.
  *
- *  The copy in hand is re-read when nothing is unsaved. When something is,
- *  it is kept and the place marked outdated, so the save refuses with its
- *  reason rather than this choosing between losing the typing and losing
- *  the record. */
+ *  Refusing comes first and re-reading second, so no caller can order this
+ *  wrong. The place is marked outdated before anything is awaited, which is
+ *  what refuses a save; the re-read below takes the mark off again, and only
+ *  when it lands on the same untouched draft it started from. A copy in hand
+ *  with typing in it is never replaced — that would choose losing the typing
+ *  over losing the record, and the mark makes the save say so instead. */
 export async function manifestRewritten(scope: Scope): Promise<void> {
   const editor = useEditorStore.getState();
+  if (sameScope(editor.scope, scope)) editor.outdate(scope);
   await editor.loadAll();
   const after = useEditorStore.getState();
   if (!sameScope(after.scope, scope)) return;
-  if (after.dirty) after.outdate(scope);
-  else await after.load(scope);
+  // Typing that arrived while the manifests were being read is newer than
+  // the file this is about, so it is kept and the mark stands.
+  if (after.dirty) {
+    after.outdate(scope);
+    return;
+  }
+  // Marked again before the re-read, since the editor may have moved here
+  // while the manifests were being read: typing that lands during this one
+  // finds the save already refused, and the read declines to replace it.
+  after.outdate(scope);
+  await after.load(scope);
 }

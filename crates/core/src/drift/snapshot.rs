@@ -15,7 +15,7 @@ use crate::model::{ItemKind, Scope};
 
 /// Bumped when the shape changes; an older or newer snapshot reads as
 /// absent, which the check reports as not-yet-evaluated.
-pub const SNAPSHOT_SCHEMA: u32 = 1;
+pub const SNAPSHOT_SCHEMA: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -58,6 +58,10 @@ pub struct PackageSnapshot {
     pub edited: bool,
     pub mixed: bool,
     pub forked: bool,
+    /// Whether the fork's own copy can still be re-rendered from. The report
+    /// names the discard exit only where it would run — measured by the same
+    /// read the discard does, never assumed from the fork.
+    pub can_discard: bool,
     /// Open findings on this package's installed content.
     pub open_findings: usize,
 }
@@ -142,6 +146,7 @@ pub fn record_with(
             edited: row.blocked_by_local_edit,
             mixed: row.mixed,
             forked: row.forked,
+            can_discard: row.can_discard,
             open_findings: open
                 .get(&(row.kind, row.name.clone()))
                 .copied()

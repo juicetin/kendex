@@ -34,7 +34,12 @@ export const saveManifest = async (): Promise<void> => {
       title: OUTDATED_DRAFT_TITLE,
       message: OUTDATED_DRAFT_BODY,
       actions: [
-        { label: RELOAD_SETTINGS_LABEL, onClick: () => void load(scope) },
+        {
+          label: RELOAD_SETTINGS_LABEL,
+          // Reloading is the deliberate act of taking the newer file over
+          // what is on screen; every other read here leaves typing alone.
+          onClick: () => void load(scope, { discardEdits: true }),
+        },
       ],
     });
     return;

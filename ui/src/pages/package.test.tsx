@@ -181,10 +181,15 @@ describe("what the package page is about", () => {
     );
   });
 
-  it("speaks for the place it was opened at, not the last one edited", () => {
-    // openScope has not landed in a static render, so the editor's scope —
-    // carried over from whatever package was open before — must not win.
+  it("speaks for the place it was opened at, whatever the chips have open", () => {
+    // The editor points somewhere else: the package last edited before this
+    // page opened, or the place a Customize chip was clicked. Either way the
+    // title names the place the installation, the actions and the notice
+    // below it are about, or the page says one thing and does another.
     expect((render().header.place as PlaceStanding).scope).toEqual(VG);
+    stub.editorScope = VG;
+    stub.scope = HYPR;
+    expect((render().header.place as PlaceStanding).scope).toEqual(HYPR);
   });
 
   it("reads its edited-files notice off the place it was opened at", () => {

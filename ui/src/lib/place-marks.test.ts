@@ -19,12 +19,7 @@ import {
   standingIn,
 } from "./customized-places";
 import { type Draft, emptyDraft } from "./editor-draft";
-import {
-  customizeNav,
-  headerStanding,
-  markTarget,
-  packageMarks,
-} from "./place-marks";
+import { customizeNav, markTarget, packageMarks } from "./place-marks";
 
 // Where a mark leads once it is drawn, and which place each of a package
 // page's own marks speaks for.
@@ -131,33 +126,6 @@ describe("markTarget", () => {
   });
 });
 
-describe("headerStanding", () => {
-  const standings = () =>
-    placeStandings(
-      source({
-        manifests: {
-          global: emptyDraft(),
-          "/work/vg": changed(),
-          "/work/hyprtrade": emptyDraft(),
-        },
-      }),
-      "skill",
-      "gh",
-      EVERYWHERE,
-    );
-
-  it("is the place this page was opened at until the editor points here", () => {
-    expect(headerStanding(standings(), HYPR, null)?.scope).toEqual(HYPR);
-    // The editor carries over the package last edited, so its scope is not
-    // this page's answer until it names a place this package lives in.
-    expect(headerStanding(standings(), HYPR, VG)?.scope).toEqual(VG);
-    expect(
-      headerStanding(standings(), HYPR, { scope: "project", root: "/nowhere" })
-        ?.scope,
-    ).toEqual(HYPR);
-  });
-});
-
 describe("customizeNav", () => {
   it("opens the tab that wrote what the index is listing", () => {
     // Every row on the Customize index is an overlay written on that tab,
@@ -177,7 +145,7 @@ describe("packageMarks", () => {
     observedItem({ name: "gh", scope: VG, path: "/work/vg/gh" }),
     observedItem({ name: "gh", scope: HYPR, path: "/work/hyprtrade/gh" }),
   ];
-  const marks = (opened: Scope, editing: Scope | null, items = installs) =>
+  const marks = (opened: Scope, items = installs) =>
     packageMarks(
       source({
         manifests: { ...plainManifests(), "/work/vg": forkedHere() },
@@ -192,28 +160,28 @@ describe("packageMarks", () => {
       }),
       groupItems(items)[0],
       opened,
-      editing,
     );
 
   it("is about the place the page was opened at, not the first install", () => {
-    expect(marks(HYPR, null).primary?.path).toBe("/work/hyprtrade/gh");
-    expect(marks(VG, null).primary?.path).toBe("/work/vg/gh");
+    expect(marks(HYPR).primary?.path).toBe("/work/hyprtrade/gh");
+    expect(marks(VG).primary?.path).toBe("/work/vg/gh");
   });
 
-  it("speaks for the place the page was opened at until the editor points here", () => {
-    expect(marks(HYPR, null).selected?.scope).toEqual(HYPR);
-    expect(marks(HYPR, VG).selected?.scope).toEqual(VG);
+  it("speaks for the place the page was opened at, and only that one", () => {
+    // Whatever the Customize tab has open, the header names the place the
+    // installation, the actions and the notice below it are about.
+    expect(marks(HYPR).selected?.scope).toEqual(HYPR);
+    expect(marks(VG).selected?.scope).toEqual(VG);
   });
 
   it("reads the hand edit off the place the page is about", () => {
-    // The notice is about the opened place, never the one the header names.
-    expect(marks(HYPR, VG).editedRow?.scope).toEqual(HYPR);
-    expect(marks(VG, HYPR).editedRow).toBe(null);
+    expect(marks(HYPR).editedRow?.scope).toEqual(HYPR);
+    expect(marks(VG).editedRow).toBe(null);
   });
 
   it("has no installation to speak for where the place holds none", () => {
     // The page's cue to leave the way the reader came, rather than
     // describing a location nobody asked about.
-    expect(marks(HYPR, null, installs.slice(0, 2)).primary).toBe(null);
+    expect(marks(HYPR, installs.slice(0, 2)).primary).toBe(null);
   });
 });

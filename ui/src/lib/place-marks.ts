@@ -14,18 +14,6 @@ import type { PackageRef, PackageView } from "@/stores/nav";
 // made the mark decides the destination — and every surface drawing one
 // asks here rather than deciding for itself.
 
-/** The place a package page's header marks are about: the one the
- *  Customize tab has open, once the editor is pointed at this package, and
- *  the place the page was opened at until then — the editor carries over
- *  the last package edited, which is not this one. */
-export const headerStanding = (
-  standings: PlaceStanding[],
-  opened: Scope,
-  editing: Scope | null,
-): PlaceStanding | null =>
-  (editing ? standingIn(standings, editing) : null) ??
-  standingIn(standings, opened);
-
 /** Where a mark leads: the first place carrying a change, and what the
  *  package page opens showing — the surface that holds that change, not
  *  whichever tab the page defaults to. Null when nothing is changed. */
@@ -67,13 +55,15 @@ export const customizeNav = (ref: PackageRef): [PackageRef, PackageView] => [
  *  row behind its edited-files notice. All three are about the place the
  *  page was opened at — which a customized mark can name any of — so they
  *  are derived together and the page cannot say two things about one
- *  place. `primary` is null when nothing is installed at that place, which
- *  is the page's cue to leave the way the reader came. */
+ *  place. The Customize tab's chips move the editor, not the page: a title
+ *  following a chip while the actions under it stay put is the same split
+ *  this page exists to close. `primary` is null when nothing is installed
+ *  at that place, which is the page's cue to leave the way the reader
+ *  came. */
 export function packageMarks(
   source: PlacesSource,
   group: ItemGroup,
   opened: Scope,
-  editing: Scope | null,
 ): {
   primary: ObservedItem | null;
   selected: PlaceStanding | null;
@@ -83,7 +73,7 @@ export function packageMarks(
   const standings = placeStandings(source, kind, name, groupScopes(group));
   return {
     primary: installationIn(group, opened),
-    selected: headerStanding(standings, opened, editing),
+    selected: standingIn(standings, opened),
     editedRow: editedRowIn(source, kind, name, opened),
   };
 }
