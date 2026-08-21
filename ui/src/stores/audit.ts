@@ -87,18 +87,19 @@ export const useAuditStore = create<AuditState>((set, get) => {
     opts: { title: string; successMessage?: string; steps?: string[] },
   ) => {
     set({ busy: true });
-    let response: Awaited<ReturnType<typeof action>>;
+    // Busy is one of the flags holding the Customize tab's Save bar down, so
+    // it stays up until the editor has been told its copy is stale — clearing
+    // it any earlier leaves a window where a save passes the outdated check
+    // and writes the pre-action manifest back.
     try {
-      response = await action();
-    } finally {
-      set({ busy: false });
-    }
-    if (response.status === "ok") {
-      set({ views: replaceView(get().views, response.data), error: null });
-      if (opts.successMessage) toast.success(opts.successMessage);
-      await manifestRewritten(scope);
-      await useScanStore.getState().refresh();
-    } else {
+      const response = await action();
+      if (response.status === "ok") {
+        set({ views: replaceView(get().views, response.data), error: null });
+        if (opts.successMessage) toast.success(opts.successMessage);
+        await manifestRewritten(scope);
+        await useScanStore.getState().refresh();
+        return;
+      }
       set({ error: response.error });
       const retry: ErrorAction = {
         label: "Retry",
@@ -110,6 +111,8 @@ export const useAuditStore = create<AuditState>((set, get) => {
         steps: opts.steps,
         actions: [retry],
       });
+    } finally {
+      set({ busy: false });
     }
   };
 
@@ -182,62 +185,65 @@ export const useAuditStore = create<AuditState>((set, get) => {
       }),
     // A dismissal is the one action whose success carries a way back on the
     // toast itself: the undo names the exact records that were written, so
-    // an old toast can never take back a newer decision at the same key.
+    // an old toast can never take back a newer decision at the same key. It
+    // is written into this place's kendex.toml like every other decision, so
+    // busy stays up — the Save bar with it — until the editor has been told
+    // the copy it holds is stale.
     dismiss: async (scope, tokens, reason) => {
       set({ busy: true });
-      let response: Awaited<ReturnType<typeof commands.dismissFindings>>;
       try {
-        response = await commands.dismissFindings(scope, tokens, reason);
+        const response = await commands.dismissFindings(scope, tokens, reason);
+        if (response.status !== "ok") {
+          set({ error: response.error });
+          useProblemsStore.getState().showError({
+            title: "Couldn't dismiss this finding",
+            message: response.error,
+            steps: [
+              "Nothing was changed — read the finding again and decide again",
+            ],
+          });
+          // The refusal usually means the page was showing findings a minute
+          // old; the fresh audit is what the person should decide on.
+          await get().refresh({ force: true });
+          return;
+        }
+        const { view, records } = response.data;
+        set({ views: replaceView(get().views, view), error: null });
+        await manifestRewritten(scope);
+        toast.success(ignoredToast(records.length), {
+          action: {
+            label: UNDO_LABEL,
+            onClick: () =>
+              void run(
+                scope,
+                async () => {
+                  let latest: Awaited<
+                    ReturnType<typeof commands.revokeDismissal>
+                  > = {
+                    status: "error",
+                    error: "nothing to take back",
+                  };
+                  for (const record of records) {
+                    latest = await commands.revokeDismissal(
+                      scope,
+                      record.key,
+                      record.fingerprint,
+                      record.dismissedAt,
+                    );
+                    if (latest.status !== "ok") break;
+                  }
+                  return latest;
+                },
+                {
+                  title: "Couldn't take the dismissal back",
+                  successMessage: TAKEN_BACK_TOAST,
+                },
+              ),
+          },
+        });
       } finally {
         set({ busy: false });
       }
-      if (response.status !== "ok") {
-        set({ error: response.error });
-        useProblemsStore.getState().showError({
-          title: "Couldn't dismiss this finding",
-          message: response.error,
-          steps: [
-            "Nothing was changed — read the finding again and decide again",
-          ],
-        });
-        // The refusal usually means the page was showing findings a minute
-        // old; the fresh audit is what the person should decide on.
-        await get().refresh({ force: true });
-        return;
-      }
-      const { view, records } = response.data;
-      set({ views: replaceView(get().views, view), error: null });
-      toast.success(ignoredToast(records.length), {
-        action: {
-          label: UNDO_LABEL,
-          onClick: () =>
-            void run(
-              scope,
-              async () => {
-                let latest: Awaited<
-                  ReturnType<typeof commands.revokeDismissal>
-                > = {
-                  status: "error",
-                  error: "nothing to take back",
-                };
-                for (const record of records) {
-                  latest = await commands.revokeDismissal(
-                    scope,
-                    record.key,
-                    record.fingerprint,
-                    record.dismissedAt,
-                  );
-                  if (latest.status !== "ok") break;
-                }
-                return latest;
-              },
-              {
-                title: "Couldn't take the dismissal back",
-                successMessage: TAKEN_BACK_TOAST,
-              },
-            ),
-        },
-      });
     },
   };
 });

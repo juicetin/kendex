@@ -148,11 +148,11 @@ export function packageVersionActions(
     useProblemsStore
       .getState()
       .showError({ title: VERSION_ERROR_TITLE, message });
-  const afterChange = () => {
+  const afterChange = async () => {
     reload();
     // Each of these rewrites this place's kendex.toml, and the editor holds
     // a whole copy of it that a save would write back.
-    void manifestRewritten(ref.scope);
+    await manifestRewritten(ref.scope);
     void useScanStore.getState().refresh();
     void useAuditStore.getState().refresh({ force: true });
   };
@@ -161,15 +161,27 @@ export function packageVersionActions(
     toastMessage: string,
   ) => {
     setBusy(true);
-    void call.then((response) => {
-      setBusy(false);
-      if (response.status === "error") {
-        showError(response.error);
-        return;
+    void (async () => {
+      try {
+        const response = await call;
+        if (response.status === "error") {
+          showError(response.error);
+          return;
+        }
+        toast.success(toastMessage);
+        // Busy is one of the flags holding the Save bar down, so it stays up
+        // until the editor has been told its copy is stale. Clearing it first
+        // leaves a window where a save passes the outdated check and writes
+        // the pre-change manifest back over what this just recorded.
+        await afterChange();
+      } catch (thrown) {
+        // A transport failure rejects rather than answering; without this the
+        // page would spin and the Save bar stay down for good.
+        showError(String(thrown));
+      } finally {
+        setBusy(false);
       }
-      toast.success(toastMessage);
-      afterChange();
-    });
+    })();
   };
 
   const switchTo = (row: VersionRow) =>

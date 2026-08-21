@@ -23,6 +23,7 @@ import {
 import { harnessName, kindLabel, scopeName } from "@/lib/labels";
 import { scopeKey } from "@/lib/scope";
 import { useAuditStore } from "@/stores/audit";
+import { manifestRewritten } from "@/stores/manifest-sync";
 import { useProblemsStore } from "@/stores/problems";
 
 // A hook keeps its full id here — event, matcher, script — because seven
@@ -94,6 +95,9 @@ export function RecordedDecisions() {
             ? `${row.name} is held back again`
             : TAKEN_BACK_TOAST,
         );
+        // Taking a decision back rewrites that place's kendex.toml, under
+        // the whole copy of it the Customize tab may be holding.
+        await manifestRewritten(row.scope);
         await load();
         await useAuditStore.getState().refresh({ force: true });
       } else {

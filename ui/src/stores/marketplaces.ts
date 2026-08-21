@@ -244,7 +244,7 @@ export const useMarketplacesStore = create<MarketplacesState>((set, get) => ({
         ? items[0].name
         : `${items.length} packages`;
     toast.success(`Installed ${what}`);
-    await refreshDownstream(scope);
+    await refreshDownstream(destination ?? scope);
     return true;
   },
 }));

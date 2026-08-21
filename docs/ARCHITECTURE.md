@@ -270,6 +270,17 @@ lives in one capability table read by core and UI.
   save overwrite the first with no warning, so the Customize page reloads
   only when nothing is unsaved, and `lib/customization.ts` slices that
   one draft per package rather than fetching a second copy.
+- **Everything else that writes a manifest tells the editor, before it
+  lets a save through.** A draft is a whole manifest, so a save written
+  after something else rewrote that file puts the old contents back.
+  `stores/manifest-sync.ts::manifestRewritten` re-reads the place when
+  nothing is unsaved and marks it outdated when something is, and
+  `editor-save.ts` refuses an outdated draft. Two things make it hold:
+  the scope passed is the place the command actually wrote — the
+  destination of an install redirected into a project, not the
+  subscription it was browsed from — and it is awaited before the busy
+  flag the Save bar is disabled by comes down, or a save pressed in that
+  gap passes the check and loses the write anyway.
 - **Customization is per place, and every mark names its place.** One
   package can be changed in one project and untouched at user level, so
   "Customized" unqualified answers a question nobody asks.

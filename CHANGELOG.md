@@ -196,8 +196,12 @@ changes carry a **Breaking** call-out with their migration note inline.
   Before, the save put the older copy back and whatever had just been
   recorded was lost silently. Every action that writes those settings now
   tells the editor: keeping a fork, discarding edits, moving or following a
-  version, adopting, enabling and disabling, removing, applying, and
-  subscribing to or installing from a marketplace.
+  version, adopting, enabling and disabling, removing, applying, settling a
+  safety finding or taking that back, and subscribing to or installing from
+  a marketplace — including an install redirected into a project, which is
+  the project that hears about it. The Save bar stays down until the editor
+  has been told, so a save pressed the instant an action finishes cannot
+  slip through ahead of it.
 - Keeping a fork or discarding edits is refused while you have unsaved
   changes on the Customize tab for that same project: saving them afterwards
   would have written the old settings back over the new fork, losing it
