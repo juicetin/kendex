@@ -215,7 +215,7 @@ describe("adding the drift report to a project", () => {
     });
     vi.mocked(commands.getManifest).mockResolvedValue({
       status: "ok",
-      data: null,
+      data: { manifest: null, base: null },
     });
     vi.mocked(commands.editorInventory).mockResolvedValue({
       status: "ok",

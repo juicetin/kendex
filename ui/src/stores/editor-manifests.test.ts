@@ -47,7 +47,10 @@ beforeEach(() => {
 describe("reading every place's manifest", () => {
   it("keeps the reason a place would not read, naming the place", async () => {
     vi.mocked(commands.getManifest)
-      .mockResolvedValueOnce({ status: "ok", data: null })
+      .mockResolvedValueOnce({
+        status: "ok",
+        data: { manifest: null, base: null },
+      })
       .mockResolvedValueOnce({ status: "error", error: "expected a table" });
     await useEditorStore.getState().loadAll();
     const state = useEditorStore.getState();
@@ -60,7 +63,7 @@ describe("reading every place's manifest", () => {
   it("says nothing when every place read", async () => {
     vi.mocked(commands.getManifest).mockResolvedValue({
       status: "ok",
-      data: null,
+      data: { manifest: null, base: null },
     });
     await useEditorStore.getState().loadAll();
     expect(useEditorStore.getState().manifestError).toBe(null);
@@ -81,9 +84,12 @@ describe("passes that overlap", () => {
         return Promise.resolve({
           status: "ok",
           data: {
-            schema: 1,
-            install: {},
-            "skill-instructions": { gh: "typed" },
+            manifest: {
+              schema: 1,
+              install: {},
+              "skill-instructions": { gh: "typed" },
+            },
+            base: "typed",
           },
         });
       }
@@ -99,7 +105,7 @@ describe("passes that overlap", () => {
       scope: "project",
       root: "/work/vg",
     });
-    slow.resolve({ status: "ok", data: null });
+    slow.resolve({ status: "ok", data: { manifest: null, base: null } });
     await pass;
 
     expect(
@@ -110,7 +116,14 @@ describe("passes that overlap", () => {
   it("keeps a place's last good manifest when a later pass cannot read it", async () => {
     vi.mocked(commands.getManifest).mockResolvedValue({
       status: "ok",
-      data: { schema: 1, install: {}, "skill-instructions": { gh: "mine" } },
+      data: {
+        manifest: {
+          schema: 1,
+          install: {},
+          "skill-instructions": { gh: "mine" },
+        },
+        base: "mine-base",
+      },
     });
     await useEditorStore.getState().loadAll();
 
@@ -153,7 +166,14 @@ describe("passes that overlap", () => {
   it("hands back the same object when a re-read says the same thing", async () => {
     vi.mocked(commands.getManifest).mockResolvedValue({
       status: "ok",
-      data: { schema: 1, install: {}, "skill-instructions": { gh: "mine" } },
+      data: {
+        manifest: {
+          schema: 1,
+          install: {},
+          "skill-instructions": { gh: "mine" },
+        },
+        base: "mine-base",
+      },
     });
     await useEditorStore.getState().loadAll();
     const first = useEditorStore.getState().saved;
@@ -175,9 +195,12 @@ describe("passes that overlap", () => {
         : Promise.resolve({
             status: "ok",
             data: {
-              schema: 1,
-              install: {},
-              "skill-instructions": { gh: "read" },
+              manifest: {
+                schema: 1,
+                install: {},
+                "skill-instructions": { gh: "read" },
+              },
+              base: "read",
             },
           }),
     );

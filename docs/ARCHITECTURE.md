@@ -275,16 +275,16 @@ lives in one capability table read by core and UI.
   save overwrite the first with no warning, so the Customize page reloads
   only when nothing is unsaved, and `lib/customization.ts` slices that
   one draft per package rather than fetching a second copy.
-- **Everything else that writes a manifest tells the editor, before it
-  lets a save through.** A draft is a whole manifest, so a save landing
-  after another writer puts the old file back.
-  `stores/manifest-sync.ts::manifestRewritten` marks the place outdated
-  before it awaits anything and re-reads it after, and `editor-save.ts`
-  refuses an outdated draft — refusing first and reading second, so no
-  caller can order it wrong. The re-read takes the mark off only where it
-  applies, and `editor.ts::load` replaces a draft holding typing only for
-  the caller that means to (`discard`). Still the caller's: calling it,
-  with the place written, before the next await — KEN-473 closes that.
+- **A whole-manifest write carries the file it came from, and every other
+  writer tells the editor.** A draft is a whole manifest, so a save landing
+  after another writer puts the old file back. Two answers, failing
+  differently: `update_manifest` takes the `base` its copy was read at
+  (`manifest::check_base`) and refuses a write against a file that became
+  something else, needing nobody to have noticed — which is what holds for
+  a writer nobody wired up; `manifest-sync.ts` marks the place outdated
+  before it awaits anything and re-reads after, so a save in that window
+  never leaves the app, and `editor.ts::load` replaces a draft holding
+  typing only for `discard`. One reload either way.
 - **Customization is per place, and every mark names its place.** One
   package can be changed in one project and untouched at user level, so
   "Customized" unqualified answers a question nobody asks.

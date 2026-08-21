@@ -69,7 +69,7 @@ describe("updates store: edited places", () => {
     // Every path here ends by re-reading the place it rewrote.
     vi.mocked(commands.getManifest).mockResolvedValue({
       status: "ok",
-      data: null,
+      data: { manifest: null, base: null },
     });
     vi.mocked(commands.editorInventory).mockResolvedValue({
       status: "ok",

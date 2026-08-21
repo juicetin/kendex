@@ -62,69 +62,18 @@ export const commands = {
 	 */
 	revokeDismissal: (scope: Scope, key: string, fingerprint: string, dismissedAt: string) => typedError<AuditView_Serialize, string>(__TAURI_INVOKE("revoke_dismissal", { scope, key, fingerprint, dismissedAt })),
 	revokeSafetyOverride: (scope: Scope, key: string) => typedError<AuditView_Serialize, string>(__TAURI_INVOKE("revoke_safety_override", { scope, key })),
-	getManifest: (scope: Scope) => typedError<{
-	schema: number,
-	sources?: { [key in string]: SourceDecl_Serialize },
-	install: InstallDefaults,
-	agents?: { [key in string]: ItemDecl_Serialize },
-	skills?: { [key in string]: ItemDecl_Serialize },
-	hooks?: { [key in string]: ItemDecl_Serialize },
-	commands?: { [key in string]: ItemDecl_Serialize },
-	"mcp-servers"?: { [key in string]: ItemDecl_Serialize },
+	getManifest: (scope: Scope) => typedError<ManifestRead_Serialize, string>(__TAURI_INVOKE("get_manifest", { scope })),
 	/**
-	 *  Plugins are observe + enable/disable only; the key is
-	 *  `name@marketplace`, provenance lives in the lock.
+	 *  Write an edited manifest and reconcile the scope to it.
+	 * 
+	 *  `base` is what the file was when this copy was read. A whole manifest
+	 *  goes back with every save, so a copy read before something else wrote
+	 *  the file would put that back — and the caller cannot be relied on to
+	 *  notice: the app tells the editor about every such write, and a caller
+	 *  that forgets to says nothing at all. Refusing here needs no caller to
+	 *  remember anything.
 	 */
-	plugins?: { [key in string]: PluginDecl },
-	/**
-	 *  Installed bundles: a curated set the catalog offers under one name.
-	 *  What the set holds is the catalog's to say and derives on every plan;
-	 *  this records only that the set is installed, and how its members
-	 *  install — the same choices any declaration makes.
-	 */
-	bundles?: { [key in string]: ItemDecl_Serialize },
-	"pi-extensions"?: { [key in string]: ItemDecl_Serialize },
-	/**
-	 *  Items the user removed and wants kept removed, by kind: a dependency
-	 *  another item requires, or a member of an installed bundle. A refresh
-	 *  honors these instead of re-deriving what was taken away, and the item
-	 *  that wanted them says so in the audit.
-	 */
-	suppressed?: Partial<{ [key in ItemKind]: string[] }>,
-	/**
-	 *  Optional dependencies taken at install time, per item that offers
-	 *  them. A choice, so it belongs here and survives refresh, cache loss,
-	 *  and other machines; what those choices pull in does not.
-	 */
-	"optional-dependencies"?: { [key in string]: string[] },
-	/**
-	 *  Reviews of content the safety gate blocked, keyed by installation.
-	 *  Each one binds to the content, the rule set and the findings it was
-	 *  granted against, so it stops applying the moment any of them moves.
-	 */
-	"safety-overrides"?: { [key in string]: SafetyOverride_Serialize },
-	/**
-	 *  Findings judged not to be problems, keyed by installation, one
-	 *  snapshot of the reviewed content per installation with each
-	 *  dismissal beneath it. A dismissal settles a question and never
-	 *  unblocks anything.
-	 */
-	"safety-reviews"?: { [key in string]: SafetyReview_Serialize },
-	"agent-skills"?: { [key in string]: string[] },
-	"agent-launch-instructions"?: { [key in string]: string },
-	"agent-additional-instructions"?: { [key in string]: string },
-	"skill-instructions"?: { [key in string]: string },
-	/**  `[agent-frontmatter.<harness>.<agent>]`. */
-	"agent-frontmatter"?: { [key in string]: { [key in string]: FrontmatterOverrides_Serialize } },
-	"custom-hooks"?: CustomHook_Serialize[],
-	/**
-	 *  Forked items by kind and name — `[forks.skill.<name>]`. The name is
-	 *  the item's installed name, unchanged by forking.
-	 */
-	forks?: Partial<{ [key in ItemKind]: { [key in string]: ForkProvenance_Serialize } }>,
-} | null, string>(__TAURI_INVOKE("get_manifest", { scope })),
-	/**  Write an edited manifest and reconcile the scope to it. */
-	updateManifest: (scope: Scope, manifest: Manifest_Deserialize) => typedError<AuditView_Serialize, string>(__TAURI_INVOKE("update_manifest", { scope, manifest })),
+	updateManifest: (scope: Scope, manifest: Manifest_Deserialize, base: string | null) => typedError<ManifestWritten_Serialize, WriteRefused>(__TAURI_INVOKE("update_manifest", { scope, manifest, base })),
 	editorInventory: (scope: Scope) => typedError<EditorInventory, string>(__TAURI_INVOKE("editor_inventory", { scope })),
 	/**
 	 *  Per-hook, per-harness delivery for the hooks as currently drafted in the
@@ -1605,6 +1554,78 @@ export type LoginStart = {
 
 export type Manifest = Manifest_Serialize | Manifest_Deserialize;
 
+/**
+ *  A place's manifest and what the file it came from was at that moment.
+ *  One value, because a copy without its base cannot be written back
+ *  safely, and the two read apart could describe different files.
+ */
+export type ManifestRead = ManifestRead_Serialize | ManifestRead_Deserialize;
+
+/**
+ *  A place's manifest and what the file it came from was at that moment.
+ *  One value, because a copy without its base cannot be written back
+ *  safely, and the two read apart could describe different files.
+ */
+export type ManifestRead_Deserialize = {
+	/**
+	 *  Absent where the place has no manifest yet — the editor still opens,
+	 *  on an empty one.
+	 */
+	manifest: Manifest_Deserialize | null,
+	/**
+	 *  `None` where nothing was there, which is itself a base: a write
+	 *  carrying it says "there was no file", and is refused if there is
+	 *  one now.
+	 */
+	base: string | null,
+};
+
+/**
+ *  A place's manifest and what the file it came from was at that moment.
+ *  One value, because a copy without its base cannot be written back
+ *  safely, and the two read apart could describe different files.
+ */
+export type ManifestRead_Serialize = {
+	/**
+	 *  Absent where the place has no manifest yet — the editor still opens,
+	 *  on an empty one.
+	 */
+	manifest: Manifest_Serialize | null,
+	/**
+	 *  `None` where nothing was there, which is itself a base: a write
+	 *  carrying it says "there was no file", and is refused if there is
+	 *  one now.
+	 */
+	base: string | null,
+};
+
+/**
+ *  A whole-manifest write that landed, and what the file is now: the base
+ *  for the next write from the same copy, so saving twice in a row does not
+ *  have to wait for a re-read in between.
+ */
+export type ManifestWritten = ManifestWritten_Serialize | ManifestWritten_Deserialize;
+
+/**
+ *  A whole-manifest write that landed, and what the file is now: the base
+ *  for the next write from the same copy, so saving twice in a row does not
+ *  have to wait for a re-read in between.
+ */
+export type ManifestWritten_Deserialize = {
+	view: AuditView_Deserialize,
+	base: string | null,
+};
+
+/**
+ *  A whole-manifest write that landed, and what the file is now: the base
+ *  for the next write from the same copy, so saving twice in a row does not
+ *  have to wait for a re-read in between.
+ */
+export type ManifestWritten_Serialize = {
+	view: AuditView_Serialize,
+	base: string | null,
+};
+
 export type Manifest_Deserialize = {
 	schema: number,
 	sources?: { [key in string]: SourceDecl_Deserialize },
@@ -2531,6 +2552,19 @@ export type VersionSel =
 { at: "commit"; commit: string } | 
 /**  What is installed on disk right now. */
 { at: "installed" };
+
+/**
+ *  Why a whole-manifest write did not happen. Refusing is a normal answer
+ *  here, not a failure, so it is a shape the editor can act on rather than
+ *  a message it would have to recognise by its words.
+ */
+export type WriteRefused = 
+/**
+ *  The file is no longer the one this copy was read from. Something
+ *  else wrote it — a fork, a hold, a dismissal, an install — and
+ *  writing this copy would put that back.
+ */
+{ kind: "stale" } | { kind: "failed"; message: string };
 
 export type ZoomState = {
 	/**

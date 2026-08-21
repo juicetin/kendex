@@ -141,3 +141,66 @@ fn source_catalog_routes_install_state_to_a_sibling() {
         "kendex.toml",
     );
 }
+
+// The base is what a copy in hand remembers about the file it came from,
+// and the only thing that can tell a write from an overwrite: the caller
+// that read the file may be gone, and a caller that never asked cannot be
+// made to.
+mod stale_writes {
+    use super::super::{base, check_base};
+
+    #[allow(clippy::unwrap_used)]
+    fn file(dir: &std::path::Path, text: &str) -> std::path::PathBuf {
+        let path = dir.join("kendex.toml");
+        std::fs::write(&path, text).unwrap();
+        path
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn a_copy_of_the_file_it_came_from_writes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = file(tmp.path(), "schema = 5\n");
+        let held = base(&path).unwrap();
+
+        assert!(held.is_some(), "a file that is there has a base");
+        assert!(check_base(&path, held.as_deref()).is_ok());
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn a_copy_of_what_the_file_used_to_be_does_not() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = file(tmp.path(), "schema = 5\n");
+        let held = base(&path).unwrap();
+        // Something else rewrote it — a fork, a hold, a dismissal.
+        file(
+            tmp.path(),
+            "schema = 5\n\n[forks.skill.gh]\nsource = \"cat\"\n",
+        );
+
+        assert!(check_base(&path, held.as_deref()).is_err());
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn nothing_read_and_nothing_there_writes_the_first_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("kendex.toml");
+
+        assert_eq!(base(&path).unwrap(), None);
+        assert!(check_base(&path, None).is_ok());
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn nothing_read_but_something_there_now_does_not() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("kendex.toml");
+        let held = base(&path).unwrap();
+        // Between the read and the write, the place got its first manifest.
+        file(tmp.path(), "schema = 5\n");
+
+        assert!(check_base(&path, held.as_deref()).is_err());
+    }
+}

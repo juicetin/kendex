@@ -45,6 +45,9 @@ const manifest = (note: string): Manifest_Serialize => ({
   "skill-instructions": { gh: note },
 });
 
+/** A read of a place: its manifest and what the file was when it was read. */
+const read = (note: string) => ({ manifest: manifest(note), base: note });
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((keep) => {
@@ -81,14 +84,12 @@ describe("reads that draw no editor", () => {
     const slow = deferred<Awaited<ReturnType<typeof commands.getManifest>>>();
     let held = true;
     vi.mocked(commands.getManifest).mockImplementation(() =>
-      held
-        ? slow.promise
-        : Promise.resolve({ status: "ok", data: manifest("a") }),
+      held ? slow.promise : Promise.resolve({ status: "ok", data: read("a") }),
     );
     const opening = useEditorStore.getState().setScope(A);
     held = false;
     await useEditorStore.getState().loadAll();
-    slow.resolve({ status: "ok", data: manifest("a") });
+    slow.resolve({ status: "ok", data: read("a") });
     await opening;
 
     const state = useEditorStore.getState();
@@ -99,11 +100,11 @@ describe("reads that draw no editor", () => {
   it("is not left spinning by a save re-reading the place it wrote", async () => {
     vi.mocked(commands.getManifest).mockResolvedValue({
       status: "ok",
-      data: manifest("a"),
+      data: read("a"),
     });
     vi.mocked(commands.updateManifest).mockResolvedValue({
       status: "ok",
-      data: audited(),
+      data: { view: audited(), base: "written" },
     });
     await useEditorStore.getState().setScope(A);
     const saving = useEditorStore.getState().save();
@@ -143,7 +144,7 @@ describe("manifest passes that overlap", () => {
 
     // The older pass succeeds, late. Clearing the newer failure here would
     // hand the marks a banner-free screen for a read that did fail.
-    slow.resolve({ status: "ok", data: null });
+    slow.resolve({ status: "ok", data: { manifest: null, base: null } });
     await older;
     expect(useEditorStore.getState().manifestError).toContain("gone");
     expect(useEditorStore.getState().manifestsReading).toBe(false);
@@ -157,12 +158,15 @@ describe("manifest passes that overlap", () => {
       call += 1;
       return call === 1
         ? slow.promise
-        : Promise.resolve({ status: "ok", data: null });
+        : Promise.resolve({
+            status: "ok",
+            data: { manifest: null, base: null },
+          });
     });
     const older = useEditorStore.getState().loadAll();
     await useEditorStore.getState().loadAll();
     expect(useEditorStore.getState().manifestsReading).toBe(true);
-    slow.resolve({ status: "ok", data: null });
+    slow.resolve({ status: "ok", data: { manifest: null, base: null } });
     await older;
     expect(useEditorStore.getState().manifestsReading).toBe(false);
   });
@@ -187,7 +191,7 @@ describe("pointing the editor at a place it already holds", () => {
   it("keeps the copy in hand rather than reading over it", async () => {
     vi.mocked(commands.getManifest).mockResolvedValue({
       status: "ok",
-      data: manifest("saved"),
+      data: read("saved"),
     });
     await useEditorStore.getState().setScope(A);
     useEditorStore.getState().edit((draft) => ({

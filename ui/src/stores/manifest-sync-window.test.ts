@@ -98,7 +98,7 @@ describe("a save pressed the moment the busy flag comes down", () => {
     useProblemsStore.getState().closeError();
     vi.mocked(commands.getManifest).mockResolvedValue({
       status: "ok",
-      data: null,
+      data: { manifest: null, base: null },
     });
     vi.mocked(commands.editorInventory).mockResolvedValue({
       status: "ok",
@@ -117,7 +117,7 @@ describe("a save pressed the moment the busy flag comes down", () => {
     vi.mocked(commands.auditAll).mockResolvedValue({ status: "ok", data: [] });
     vi.mocked(commands.updateManifest).mockResolvedValue({
       status: "error",
-      error: "should never be reached",
+      error: { kind: "failed", message: "should never be reached" },
     });
   });
 

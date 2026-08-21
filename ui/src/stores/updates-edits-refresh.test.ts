@@ -71,7 +71,7 @@ describe("after a fork or a discard", () => {
     // Every path here ends by re-reading the place it rewrote.
     vi.mocked(commands.getManifest).mockResolvedValue({
       status: "ok",
-      data: null,
+      data: { manifest: null, base: null },
     });
     vi.mocked(commands.editorInventory).mockResolvedValue({
       status: "ok",
@@ -112,9 +112,14 @@ describe("after a fork or a discard", () => {
     vi.mocked(commands.getManifest).mockResolvedValue({
       status: "ok",
       data: {
-        schema: 1,
-        install: {},
-        forks: { skill: { gh: { source: "cat", "forked-at": "2026-08-01" } } },
+        manifest: {
+          schema: 1,
+          install: {},
+          forks: {
+            skill: { gh: { source: "cat", "forked-at": "2026-08-01" } },
+          },
+        },
+        base: "after-the-fork",
       },
     });
 
@@ -161,9 +166,14 @@ describe("after a fork or a discard", () => {
     vi.mocked(commands.getManifest).mockResolvedValue({
       status: "ok",
       data: {
-        schema: 1,
-        install: {},
-        forks: { skill: { gh: { source: "cat", "forked-at": "2026-08-01" } } },
+        manifest: {
+          schema: 1,
+          install: {},
+          forks: {
+            skill: { gh: { source: "cat", "forked-at": "2026-08-01" } },
+          },
+        },
+        base: "after-the-fork",
       },
     });
     // The editor is pointed at the place the fork rewrote, holding the

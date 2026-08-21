@@ -42,7 +42,7 @@ describe("an install redirected into a project", () => {
     });
     vi.mocked(commands.getManifest).mockResolvedValue({
       status: "ok",
-      data: null,
+      data: { manifest: null, base: null },
     });
     vi.mocked(commands.editorInventory).mockResolvedValue({
       status: "ok",
@@ -96,7 +96,7 @@ describe("an install redirected into a project", () => {
 
     vi.mocked(commands.updateManifest).mockResolvedValue({
       status: "error",
-      error: "should never be reached",
+      error: { kind: "failed", message: "should never be reached" },
     });
     await useEditorStore.getState().save();
 

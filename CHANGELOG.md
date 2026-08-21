@@ -228,7 +228,10 @@ changes carry a **Breaking** call-out with their migration note inline.
   action starts and comes off only once the tab has caught up, so a save
   pressed anywhere in between cannot slip through — and typing you start
   while the tab is catching up is kept rather than replaced by the file it
-  read.
+  read. Underneath, the save itself now sends the settings file it was
+  opened on, and kendex refuses to write over a file that has changed
+  since: your work is protected even where nothing in the app noticed the
+  change, and the refusal reads the same, with the same Reload.
 - Keeping a fork or discarding edits is refused while you have unsaved
   changes on the Customize tab for that same project: saving them afterwards
   would have written the old settings back over the new fork, losing it

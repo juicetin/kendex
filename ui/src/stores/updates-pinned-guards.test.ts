@@ -88,7 +88,7 @@ describe("a pinned update beside an open Customize tab", () => {
     // Every path here ends by re-reading the place it rewrote.
     vi.mocked(commands.getManifest).mockResolvedValue({
       status: "ok",
-      data: null,
+      data: { manifest: null, base: null },
     });
     vi.mocked(commands.editorInventory).mockResolvedValue({
       status: "ok",
@@ -138,7 +138,7 @@ describe("a pinned update beside an open Customize tab", () => {
 
     vi.mocked(commands.updateManifest).mockResolvedValue({
       status: "error",
-      error: "should never be reached",
+      error: { kind: "failed", message: "should never be reached" },
     });
     await useEditorStore.getState().save();
     expect(commands.updateManifest).not.toHaveBeenCalled();

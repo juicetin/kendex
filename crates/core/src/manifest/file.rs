@@ -100,6 +100,30 @@ pub fn load_for_mutation(path: &Path) -> Result<Option<Manifest>> {
     }
 }
 
+/// What the file at this path is right now, as the copy read from it will
+/// remember it — `None` when nothing is there. A whole-manifest write from
+/// a copy someone is holding sends this back with it, and the write is
+/// refused if the file has become something else in between.
+pub fn base(path: &Path) -> Result<Option<String>> {
+    match path.is_file() {
+        true => Ok(Some(crate::hash::hash_tree(path)?)),
+        false => Ok(None),
+    }
+}
+
+/// Refuse a whole-file write whose copy came from a file that is no longer
+/// there. Writing it would put the older content back over whatever
+/// replaced it, and the writer is the only place that can know: a caller
+/// can forget to ask, and forgetting is silent.
+pub fn check_base(path: &Path, held: Option<&str>) -> Result<()> {
+    match base(path)?.as_deref() == held {
+        true => Ok(()),
+        false => Err(CoreError::PlanStale {
+            path: path.to_path_buf(),
+        }),
+    }
+}
+
 /// First manifest for a scope: the default source is seeded exactly once,
 /// here — later reconciliation never re-adds it (its removal is durable).
 pub fn seed(detected_harnesses: &[HarnessId]) -> Manifest {

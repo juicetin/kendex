@@ -60,7 +60,7 @@ describe("the sync refuses before it reads", () => {
     useProblemsStore.getState().closeError();
     vi.mocked(commands.getManifest).mockResolvedValue({
       status: "ok",
-      data: null,
+      data: { manifest: null, base: null },
     });
     vi.mocked(commands.editorInventory).mockResolvedValue({
       status: "ok",
@@ -68,7 +68,7 @@ describe("the sync refuses before it reads", () => {
     });
     vi.mocked(commands.updateManifest).mockResolvedValue({
       status: "error",
-      error: "should never be reached",
+      error: { kind: "failed", message: "should never be reached" },
     });
   });
 
@@ -91,7 +91,7 @@ describe("the sync refuses before it reads", () => {
     vi.mocked(commands.getManifest).mockImplementation(async () => {
       reads += 1;
       if (reads === 2) type();
-      return { status: "ok", data: null };
+      return { status: "ok", data: { manifest: null, base: null } };
     });
 
     await manifestRewritten(scope);

@@ -44,6 +44,10 @@ const manifest = (note: string): Manifest_Serialize => ({
   "skill-instructions": { gh: note },
 });
 
+/** A read of a place: its manifest and what the file was when it was read.
+ *  The two travel together, so the tests hand them over together. */
+const read = (note: string) => ({ manifest: manifest(note), base: note });
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((keep) => {
@@ -84,9 +88,9 @@ describe("switching place while a read is in flight", () => {
 
     const first = useEditorStore.getState().setScope(A);
     const second = useEditorStore.getState().setScope(B);
-    quick.resolve({ status: "ok", data: manifest("b") });
+    quick.resolve({ status: "ok", data: read("b") });
     await second;
-    slow.resolve({ status: "ok", data: manifest("a") });
+    slow.resolve({ status: "ok", data: read("a") });
     await first;
 
     const state = useEditorStore.getState();
@@ -105,7 +109,7 @@ describe("switching place while a read is in flight", () => {
 
     const first = useEditorStore.getState().setScope(A);
     const second = useEditorStore.getState().setScope(B);
-    quick.resolve({ status: "ok", data: manifest("b") });
+    quick.resolve({ status: "ok", data: read("b") });
     await second;
     slow.resolve({ status: "error", error: "unreadable" });
     await first;
@@ -124,12 +128,12 @@ describe("switching place while a read is in flight", () => {
 
     const first = useEditorStore.getState().setScope(A);
     const second = useEditorStore.getState().setScope(B);
-    slow.resolve({ status: "ok", data: manifest("a") });
+    slow.resolve({ status: "ok", data: read("a") });
     await first;
     // The superseded read came back; the one the editor is waiting on has
     // not, so clearing the spinner here would say the place is on screen.
     expect(useEditorStore.getState().loading).toBe(true);
-    quick.resolve({ status: "ok", data: manifest("b") });
+    quick.resolve({ status: "ok", data: read("b") });
     await second;
     expect(useEditorStore.getState().loading).toBe(false);
   });
@@ -137,11 +141,11 @@ describe("switching place while a read is in flight", () => {
   it("writes the place the draft on screen belongs to", async () => {
     vi.mocked(commands.getManifest).mockResolvedValue({
       status: "ok",
-      data: manifest("b"),
+      data: read("b"),
     });
     vi.mocked(commands.updateManifest).mockResolvedValue({
       status: "error",
-      error: "stop here",
+      error: { kind: "failed", message: "stop here" },
     });
     await useEditorStore.getState().setScope(B);
     await useEditorStore.getState().save();
@@ -165,13 +169,16 @@ describe("switching place while a save is in flight", () => {
   it("names the place a failed save was about, not the one on screen", async () => {
     vi.mocked(commands.getManifest).mockResolvedValue({
       status: "ok",
-      data: manifest("a"),
+      data: read("a"),
     });
     await useEditorStore.getState().setScope(A);
     const landing = inFlight();
     const saving = useEditorStore.getState().save();
     await useEditorStore.getState().setScope(B);
-    landing.resolve({ status: "error", error: "read-only" });
+    landing.resolve({
+      status: "error",
+      error: { kind: "failed", message: "read-only" },
+    });
     await saving;
 
     const state = useEditorStore.getState();
@@ -183,7 +190,7 @@ describe("switching place while a save is in flight", () => {
   it("re-reads the place it wrote, never whichever is open now", async () => {
     vi.mocked(commands.getManifest).mockResolvedValue({
       status: "ok",
-      data: manifest("before"),
+      data: read("before"),
     });
     await useEditorStore.getState().setScope(A);
     const landing = inFlight();
@@ -191,9 +198,9 @@ describe("switching place while a save is in flight", () => {
     await useEditorStore.getState().setScope(B);
     vi.mocked(commands.getManifest).mockResolvedValue({
       status: "ok",
-      data: manifest("after"),
+      data: read("after"),
     });
-    landing.resolve({ status: "ok", data: audited() });
+    landing.resolve({ status: "ok", data: { view: audited(), base: "after" } });
     await saving;
 
     // A's mark reads its saved manifest, so a save that refreshed B instead

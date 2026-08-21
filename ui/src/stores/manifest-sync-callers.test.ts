@@ -86,7 +86,7 @@ describe("a subscription mutation tells the editor before it re-reads", () => {
     useProblemsStore.getState().closeError();
     vi.mocked(commands.getManifest).mockResolvedValue({
       status: "ok",
-      data: null,
+      data: { manifest: null, base: null },
     });
     vi.mocked(commands.editorInventory).mockResolvedValue({
       status: "ok",
@@ -94,7 +94,7 @@ describe("a subscription mutation tells the editor before it re-reads", () => {
     });
     vi.mocked(commands.updateManifest).mockResolvedValue({
       status: "error",
-      error: "should never be reached",
+      error: { kind: "failed", message: "should never be reached" },
     });
     // The tables re-read after the manifest was rewritten: the save lands
     // in that window.
@@ -162,7 +162,7 @@ describe("keeping a fork tells the editor before it re-reads", () => {
     useProblemsStore.getState().closeError();
     vi.mocked(commands.getManifest).mockResolvedValue({
       status: "ok",
-      data: null,
+      data: { manifest: null, base: null },
     });
     vi.mocked(commands.editorInventory).mockResolvedValue({
       status: "ok",
@@ -170,7 +170,7 @@ describe("keeping a fork tells the editor before it re-reads", () => {
     });
     vi.mocked(commands.updateManifest).mockResolvedValue({
       status: "error",
-      error: "should never be reached",
+      error: { kind: "failed", message: "should never be reached" },
     });
     // Typing arrives while the fork is being written, and the save lands
     // in the updates read that follows it.
@@ -203,7 +203,7 @@ describe("holding a version tells the editor before it re-reads", () => {
     useProblemsStore.getState().closeError();
     vi.mocked(commands.getManifest).mockResolvedValue({
       status: "ok",
-      data: null,
+      data: { manifest: null, base: null },
     });
     vi.mocked(commands.editorInventory).mockResolvedValue({
       status: "ok",
@@ -211,7 +211,7 @@ describe("holding a version tells the editor before it re-reads", () => {
     });
     vi.mocked(commands.updateManifest).mockResolvedValue({
       status: "error",
-      error: "should never be reached",
+      error: { kind: "failed", message: "should never be reached" },
     });
     vi.mocked(commands.packageSetRev).mockResolvedValue({
       status: "ok",

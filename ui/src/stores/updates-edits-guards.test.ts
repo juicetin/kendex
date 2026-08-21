@@ -75,7 +75,7 @@ describe("a fork or discard beside an open Customize tab", () => {
     // Every path here ends by re-reading the place it rewrote.
     vi.mocked(commands.getManifest).mockResolvedValue({
       status: "ok",
-      data: null,
+      data: { manifest: null, base: null },
     });
     vi.mocked(commands.editorInventory).mockResolvedValue({
       status: "ok",
@@ -176,7 +176,7 @@ describe("a fork or discard beside an open Customize tab", () => {
     // the record just made: keeping the typing is only half the answer.
     vi.mocked(commands.updateManifest).mockResolvedValue({
       status: "ok",
-      data: view,
+      data: { view, base: "written" },
     });
     await useEditorStore.getState().save();
     expect(commands.updateManifest).not.toHaveBeenCalled();

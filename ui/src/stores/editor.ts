@@ -10,6 +10,11 @@ interface EditorState {
   /** The single scope being edited — deliberately not the sidebar filter. */
   scope: Scope;
   draft: Draft | null;
+  /** What the open place's file was when this draft was read from it. Sent
+   *  back with a save, which the write refuses if the file has become
+   *  something else since — the one check no caller has to remember to
+   *  make. Null means there was no file, which is a base of its own. */
+  base: string | null;
   inventory: EditorInventory | null;
   /** Every scope's saved manifest, keyed by scope. What the Library and the
    *  Customize index read to mark what has been customized; `draft` above is
@@ -109,7 +114,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
         set({
           loading: false,
           error: String(thrown),
-          ...(takes() ? { draft: null, dirty: false } : {}),
+          ...(takes() ? { draft: null, base: null, dirty: false } : {}),
         });
       return;
     }
@@ -118,14 +123,16 @@ export const useEditorStore = create<EditorState>((set, get) => {
       if (onScreen())
         set({
           error: manifest.error,
-          ...(takes() ? { draft: null, dirty: false } : {}),
+          ...(takes() ? { draft: null, base: null, dirty: false } : {}),
         });
       return;
     }
     // With no manifest here yet the editor still opens, on an empty one:
     // asking someone to press "create" before they can type is a step that
     // decides nothing. Saving is what writes the file.
-    const draft = manifest.data ? toDraft(manifest.data) : emptyDraft();
+    const draft = manifest.data.manifest
+      ? toDraft(manifest.data.manifest)
+      : emptyDraft();
     const read: [string, Draft][] = [[scopeKey(scope), draft]];
     // A read that no longer speaks for the screen, and one that arrived to
     // find typing it must not take, both still know their own place's
@@ -136,6 +143,10 @@ export const useEditorStore = create<EditorState>((set, get) => {
     }
     set((state) => ({
       draft,
+      // The base belongs to this draft: they are read together and the
+      // save sends them together, or a write could carry one file's
+      // contents under another file's name.
+      base: manifest.data.base,
       inventory: inventory.status === "ok" ? inventory.data : state.inventory,
       saved: fold(state.saved, read, token),
       dirty: false,
@@ -149,6 +160,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
   return {
     scope: { scope: "global" },
     draft: null,
+    base: null,
     inventory: null,
     saved: {},
     manifestsLoaded: false,
@@ -161,7 +173,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
     error: null,
 
     setScope: async (scope) => {
-      set({ scope, draft: null, dirty: false, error: null });
+      set({ scope, draft: null, base: null, dirty: false, error: null });
       await load();
     },
 

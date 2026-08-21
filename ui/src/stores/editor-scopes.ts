@@ -51,7 +51,7 @@ export async function readManifests(): Promise<{
     }
     read.push([
       scopeKey(scopes[index]),
-      response.data ? toDraft(response.data) : emptyDraft(),
+      response.data.manifest ? toDraft(response.data.manifest) : emptyDraft(),
     ]);
   }
   return { read, failed };
