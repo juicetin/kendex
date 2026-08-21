@@ -60,7 +60,18 @@ function deferred<T>() {
 /** The Customize tab, opened on a real read and typed in — so the draft
  *  carries the base of the file it came from, as a save needs. */
 const typedIn = async (note: string) => {
-  useEditorStore.setState({ outdated: null, saved: {}, error: null });
+  // A fresh open, not a re-point: pointing the editor at the place it is
+  // already on keeps whatever is in hand, which is the whole point of the
+  // move, so the previous case's typing is cleared here rather than by it.
+  useEditorStore.setState({
+    outdated: null,
+    saved: {},
+    error: null,
+    held: {},
+    draft: null,
+    base: null,
+    dirty: false,
+  });
   await useEditorStore.getState().setScope(scope);
   expect(useEditorStore.getState().base).toBe("on-disk");
   useEditorStore

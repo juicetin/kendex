@@ -41,7 +41,13 @@ export const SKILLS_BACK_TO_AUTOMATIC = "Back to automatic";
 export const SETTINGS_SECTION = "Settings";
 export const SAVE_NOTE =
   "Saving writes these changes into every harness that reads them.";
-export const SAVE_FIRST = "Save your changes before switching location.";
+// Typing parked at a place the editor moved away from. Moving between
+// places keeps it rather than dropping it, and this is how anyone finds it
+// again.
+export const UNSAVED_ELSEWHERE_TITLE = "Unsaved changes at another location";
+export const UNSAVED_ELSEWHERE_BODY =
+  "They are kept exactly as you left them. Open the location to save or discard them.";
+export const openLocationLabel = (place: string): string => `Open ${place}`;
 
 // The Customize page: what belongs to everything rather than to one package.
 export const CUSTOMIZE_SUBTITLE = "Your own edits on top of what you installed";

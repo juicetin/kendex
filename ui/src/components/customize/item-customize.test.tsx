@@ -2,7 +2,6 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Scope, UpdateRow } from "@/bindings";
 import { updateRow } from "@/components/updates-test-rows";
-import { SAVE_FIRST } from "@/lib/copy-customize";
 import { type Draft, emptyDraft } from "@/lib/editor-draft";
 import { ItemCustomize } from "./item-customize";
 
@@ -16,7 +15,7 @@ const stub = vi.hoisted(() => ({
   saved: {} as Record<string, unknown>,
   manifestsLoaded: true,
   manifestError: null as string | null,
-  dirty: false,
+  saving: false,
   rows: [] as unknown[],
   updatesLoaded: true,
   updatesError: null as string | null,
@@ -32,7 +31,7 @@ vi.mock("@/stores/editor", async (importOriginal) => {
       saved: stub.saved,
       manifestsLoaded: stub.manifestsLoaded,
       manifestError: stub.manifestError,
-      dirty: stub.dirty,
+      saving: stub.saving,
     };
     return selector ? selector(state) : state;
   };
@@ -72,7 +71,7 @@ beforeEach(() => {
   stub.saved = { "/work/vg": changed(), "/work/hyprtrade": emptyDraft() };
   stub.manifestsLoaded = true;
   stub.manifestError = null;
-  stub.dirty = false;
+  stub.saving = false;
   stub.updatesLoaded = true;
   stub.updatesError = null;
   stub.rows = [current(VG), current(HYPR)];
@@ -151,22 +150,22 @@ describe("the Customize tab's place chips", () => {
     expect(html).toContain(">two/api<");
   });
 
-  // The chips are the one gate on switching place mid-edit: editor.ts's
-  // race guard rests on them, and a click that landed anyway would leave a
-  // draft for one place with the other on screen.
-  it("shuts the chips while there are unsaved changes, and says why", () => {
-    stub.dirty = true;
-    const html = render();
-    expect(html).toContain(SAVE_FIRST);
-    const chips = html
-      .split("<button")
-      .slice(1, 3)
-      .map((chip) => chip.slice(0, chip.indexOf(">")));
-    // The open place stays clickable — going there changes nothing. Every
-    // other place is shut, and the attribute is the test, not the
-    // `disabled:` utility classes every chip carries either way.
+  // A save in flight is about one place, so landing its outcome on another
+  // would attribute it to a place it is not about. Unsaved typing is not a
+  // reason to shut a chip: the move carries it to its own place.
+  it("shuts the chips only while a save is in flight", () => {
+    const shut = () =>
+      render()
+        .split("<button")
+        .slice(1, 3)
+        .map((chip) => chip.slice(0, chip.indexOf(">")));
+    // The attribute is the test, not the `disabled:` utility classes every
+    // chip carries either way.
+    expect(shut()[1]).not.toContain(' disabled=""');
+    stub.saving = true;
+    const chips = shut();
+    // The open place stays clickable — going there changes nothing.
     expect(chips[0]).not.toContain(' disabled=""');
     expect(chips[1]).toContain(' disabled=""');
-    expect(chips[1]).toContain(SAVE_FIRST);
   });
 });

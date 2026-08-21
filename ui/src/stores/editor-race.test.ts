@@ -68,6 +68,7 @@ beforeEach(() => {
     },
   });
   useEditorStore.setState({
+    held: {},
     scope: { scope: "global" },
     draft: null,
     saved: {},

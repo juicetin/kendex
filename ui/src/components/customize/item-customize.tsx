@@ -12,7 +12,6 @@ import {
   LAUNCH_HELP,
   LAUNCH_LABEL,
   placeStateLine,
-  SAVE_FIRST,
   SETTINGS_SECTION,
   SKILL_INSTRUCTIONS_HELP,
   SKILL_INSTRUCTIONS_LABEL,
@@ -46,7 +45,7 @@ export function ItemCustomize({
   scopes: Scope[];
   harnesses: HarnessId[];
 }) {
-  const { scope, draft, inventory, dirty, error, setScope, edit } =
+  const { scope, draft, inventory, saving, error, setScope, edit } =
     useEditorStore();
   const places = useEditingPlacesSource();
   // Which places already carry changes, so switching to one is an informed
@@ -76,8 +75,12 @@ export function ItemCustomize({
               <Pill
                 key={scopeKey(standing.scope)}
                 selected={scopeKey(standing.scope) === scopeKey(scope)}
-                disabled={dirty}
-                title={dirty ? SAVE_FIRST : stateLine(standing)}
+                // Switching place mid-save would attribute the outcome to
+                // a place it is not about, the same reason the Customize
+                // page's picker is gated. Unsaved typing is not a reason to
+                // shut a chip: it travels to the place it belongs to.
+                disabled={saving}
+                title={stateLine(standing)}
                 onClick={() => void setScope(standing.scope)}
               >
                 {standing.state === "customized" ? (

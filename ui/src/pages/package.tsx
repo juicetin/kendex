@@ -3,6 +3,7 @@ import { toast } from "sonner";
 import type { HarnessId, Scope, VersionRow } from "@/bindings";
 import { ItemCustomize } from "@/components/customize/item-customize";
 import { SaveBar } from "@/components/customize/save-bar";
+import { UnsavedElsewhere } from "@/components/customize/unsaved-elsewhere";
 import { MarksNote } from "@/components/marks-note";
 import { PackageActions } from "@/components/package/package-actions";
 import { PackageBody } from "@/components/package/package-body";
@@ -189,6 +190,10 @@ export function PackagePage() {
               reads the Library's do, so a failure has to be sayable here
               too — this is where someone comes to act on one. */}
           <MarksNote className="mt-3" />
+          {/* Typing left at another place travels rather than being
+              dropped, so it is named here — above the tabs, since arriving
+              on Overview must not hide it. */}
+          <UnsavedElsewhere className="mt-3" />
           <PackageTabs
             customizable={customizable}
             tab={tab}

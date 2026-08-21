@@ -1,8 +1,9 @@
 import { create } from "zustand";
-import { commands, type EditorInventory, type Scope } from "@/bindings";
-import { type Draft, emptyDraft, toDraft } from "@/lib/editor-draft";
+import type { EditorInventory, Scope } from "@/bindings";
+import type { Draft } from "@/lib/editor-draft";
 import { sameScope, scopeKey } from "@/lib/scope";
-import { manifestFold } from "./editor-order";
+import { type Held, pointAt } from "./editor-held";
+import { fold, loadManifest, nextRead } from "./editor-read";
 import { saveManifest } from "./editor-save";
 import { readManifests } from "./editor-scopes";
 
@@ -15,6 +16,10 @@ interface EditorState {
    *  something else since — the one check no caller has to remember to
    *  make. Null means there was no file, which is a base of its own. */
   base: string | null;
+  /** Typing left at places the editor has since been pointed away from.
+   *  Moving between places is what the per-place marks are for, so a move
+   *  parks what is in hand rather than dropping it. */
+  held: Held;
   inventory: EditorInventory | null;
   /** Every scope's saved manifest, keyed by scope. What the Library and the
    *  Customize index read to mark what has been customized; `draft` above is
@@ -39,8 +44,11 @@ interface EditorState {
   loading: boolean;
   saving: boolean;
   error: string | null;
+  /** Point the editor at a place, parking what is in hand at its own place
+   *  and bringing back whatever was parked at this one. */
   setScope: (scope: Scope) => Promise<void>;
-  /** Point the editor at a scope without discarding edits already in hand. */
+  /** The same move, skipped when the place asked for is already open with
+   *  a copy in hand — so arriving at a package does not re-read over it. */
   openScope: (scope: Scope) => Promise<void>;
   /** Read one place's manifest — the open one, or the one named. Typing in
    *  hand is never replaced: `discardEdits` is how a caller says it means
@@ -60,110 +68,17 @@ interface EditorState {
 }
 
 export const useEditorStore = create<EditorState>((set, get) => {
-  // Every manifest read takes a ticket. Three readers overlap — one place
-  // at a time, every place at once, and the re-read a save ends with — and
-  // without tickets the pass that happens to land last wins, reverting a
-  // place someone just read or just saved.
-  let reads = 0;
-  const fold = manifestFold();
-  // Which read the editor on screen is waiting for. Only a read that can
-  // answer for it takes one: the manifest pass and the re-read a save ends
-  // with draw no editor, and counting them here would leave the surface
-  // spinning on a read that was never going to fill it.
-  let screenReads = 0;
   // How many manifest passes are still running, so the reading flag comes
   // down when the last one lands rather than the first, and which of them
   // owns what the status says.
   let passes = 0;
   let latestPass = 0;
 
-  const load = async (target?: Scope, opts?: { discardEdits?: boolean }) => {
-    const scope = target ?? get().scope;
-    // Typing that arrives while this read is on its way is newer than the
-    // bytes it reads, so only a deliberate discard replaces it. Every other
-    // reader still feeds the marks from what it read, and leaves whatever
-    // outdated mark the place carries standing — so a save of the older
-    // copy is still refused rather than quietly winning.
-    const takes = () => opts?.discardEdits === true || !get().dirty;
-    reads += 1;
-    const token = reads;
-    // A read answers for the editor only when it reads the place the editor
-    // is pointed at; one for somewhere else — the re-read a save ends with —
-    // feeds the marks and nothing more, and must not leave the surface
-    // waiting on itself.
-    // -1 can never equal a claim, which counts up from 1: a read for
-    // somewhere else is self-evidently not the one the screen waits on,
-    // without resting on where its callers happen to be.
-    const drawing = sameScope(get().scope, scope);
-    if (drawing) screenReads += 1;
-    const claim = drawing ? screenReads : -1;
-    // This read speaks for the editor on screen only while it is the newest
-    // that could, and the editor still points at the place it read.
-    const onScreen = () =>
-      claim === screenReads && sameScope(get().scope, scope);
-    if (onScreen()) set({ loading: true });
-    let manifest: Awaited<ReturnType<typeof commands.getManifest>>;
-    let inventory: Awaited<ReturnType<typeof commands.editorInventory>>;
-    try {
-      [manifest, inventory] = await Promise.all([
-        commands.getManifest(scope),
-        commands.editorInventory(scope),
-      ]);
-    } catch (thrown) {
-      // A transport failure rejects rather than answering, and a read that
-      // ends with nothing said is the silent failure this store exists to
-      // avoid — the editor says it could not open rather than sitting empty.
-      if (onScreen())
-        set({
-          loading: false,
-          error: String(thrown),
-          ...(takes() ? { draft: null, base: null, dirty: false } : {}),
-        });
-      return;
-    }
-    if (onScreen()) set({ loading: false });
-    if (manifest.status === "error") {
-      if (onScreen())
-        set({
-          error: manifest.error,
-          ...(takes() ? { draft: null, base: null, dirty: false } : {}),
-        });
-      return;
-    }
-    // With no manifest here yet the editor still opens, on an empty one:
-    // asking someone to press "create" before they can type is a step that
-    // decides nothing. Saving is what writes the file.
-    const draft = manifest.data.manifest
-      ? toDraft(manifest.data.manifest)
-      : emptyDraft();
-    const read: [string, Draft][] = [[scopeKey(scope), draft]];
-    // A read that no longer speaks for the screen, and one that arrived to
-    // find typing it must not take, both still know their own place's
-    // manifest — so both keep feeding the marks and draw nothing.
-    if (!onScreen() || !takes()) {
-      set((state) => ({ saved: fold(state.saved, read, token) }));
-      return;
-    }
-    set((state) => ({
-      draft,
-      // The base belongs to this draft: they are read together and the
-      // save sends them together, or a write could carry one file's
-      // contents under another file's name.
-      base: manifest.data.base,
-      inventory: inventory.status === "ok" ? inventory.data : state.inventory,
-      saved: fold(state.saved, read, token),
-      dirty: false,
-      // What is in hand is this read's, so whatever rewrote the file before
-      // it is no longer under it.
-      outdated: state.outdated === scopeKey(scope) ? null : state.outdated,
-      error: inventory.status === "ok" ? null : inventory.error,
-    }));
-  };
-
   return {
     scope: { scope: "global" },
     draft: null,
     base: null,
+    held: {},
     inventory: null,
     saved: {},
     manifestsLoaded: false,
@@ -176,8 +91,8 @@ export const useEditorStore = create<EditorState>((set, get) => {
     error: null,
 
     setScope: async (scope) => {
-      set({ scope, draft: null, base: null, dirty: false, error: null });
-      await load();
+      set({ ...pointAt(get(), scope), error: null });
+      await loadManifest();
     },
 
     outdate: (scope) => set({ outdated: scopeKey(scope) }),
@@ -193,13 +108,12 @@ export const useEditorStore = create<EditorState>((set, get) => {
       await state.setScope(scope);
     },
 
-    load,
+    load: loadManifest,
 
-    discard: () => load(get().scope, { discardEdits: true }),
+    discard: () => loadManifest(get().scope, { discardEdits: true }),
 
     loadAll: async () => {
-      reads += 1;
-      const token = reads;
+      const token = nextRead();
       // Passes overlap — startup waits on settings first, the focus handler
       // fires on every return, and a fork adds one — so the status belongs
       // to the newest, not to whichever lands last. The saved fold is safe

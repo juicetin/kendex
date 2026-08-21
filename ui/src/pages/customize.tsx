@@ -3,6 +3,7 @@ import { CustomHooks } from "@/components/customize/custom-hooks";
 import { CustomizedIndex } from "@/components/customize/customized-index";
 import { SaveBar } from "@/components/customize/save-bar";
 import { SharedInstructions } from "@/components/customize/shared-instructions";
+import { UnsavedElsewhere } from "@/components/customize/unsaved-elsewhere";
 import { DotSpinner } from "@/components/loading";
 import { PageHeader } from "@/components/page-header";
 import { Section } from "@/components/section";
@@ -53,10 +54,11 @@ export function CustomizePage() {
   } = useEditorStore();
   const projects = useSettingsStore((s) => s.settings?.projects ?? []);
 
-  // Unsaved edits made on a package's own page live in this same draft;
-  // reloading over them here would throw away work with nothing said.
+  // Unsaved edits made on a package's own page live in this same draft.
+  // The read declines to replace typing in hand — only a deliberate
+  // discard does — so this refreshes the place without a guard of its own.
   useEffect(() => {
-    if (!useEditorStore.getState().dirty) void load();
+    void load();
   }, [load]);
 
   return (
@@ -103,6 +105,7 @@ export function CustomizePage() {
       />
       <div className={cn("flex-1", PAGE_BODY)}>
         <div className={cn("flex flex-col gap-10", CONTENT_WIDTH)}>
+          <UnsavedElsewhere />
           {error ? (
             <StatusNote tone="critical" title="That change couldn't be saved">
               <span className="whitespace-pre-wrap">{error}</span>

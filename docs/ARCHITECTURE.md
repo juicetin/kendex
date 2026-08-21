@@ -272,9 +272,15 @@ lives in one capability table read by core and UI.
   a package's own page is where they already are.
 - Both surfaces edit one draft of one manifest per scope, held in
   `stores/editor.ts`. Two drafts of the same file would let the second
-  save overwrite the first with no warning, so the Customize page reloads
-  only when nothing is unsaved, and `lib/customization.ts` slices that
-  one draft per package rather than fetching a second copy.
+  save overwrite the first with no warning, so a read never replaces
+  typing in hand — only a deliberate discard does — and
+  `lib/customization.ts` slices that one draft per package rather than
+  fetching a second copy. Every mark is a link to another place, so a
+  move between places must not cost anyone their typing:
+  `stores/editor-held.ts` parks the copy in hand at the place it was read
+  from, base included, and gives it back when that place is opened again.
+  Both editing surfaces name what is parked — work that survives a move
+  and that nobody can see is the same loss one step later.
 - **A whole-manifest write carries the file it came from, and every other
   writer tells the editor.** A draft is a whole manifest, so a save landing
   after another writer puts the old file back. Two answers, failing

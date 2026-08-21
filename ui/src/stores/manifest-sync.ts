@@ -23,6 +23,9 @@ export async function manifestRewritten(scope: Scope): Promise<void> {
   if (sameScope(editor.scope, scope)) editor.outdate(scope);
   await editor.loadAll();
   const after = useEditorStore.getState();
+  // Typing parked at some other place is deliberately not marked here: it
+  // travels with the base it was read against, so the write refuses it on
+  // the file's own evidence when its place is opened again.
   if (!sameScope(after.scope, scope)) return;
   // Typing that arrived while the manifests were being read is newer than
   // the file this is about, so it is kept — and now the mark is measured

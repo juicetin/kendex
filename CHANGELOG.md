@@ -196,6 +196,15 @@ changes carry a **Breaking** call-out with their migration note inline.
 
 ### Fixed
 
+- Text you were typing is no longer thrown away by moving to another
+  location. Opening a package in a different project, or picking another
+  project on the Customize page, used to clear whatever was in the box
+  with nothing said. What you typed now waits at the location it belongs
+  to and is put back in front of you when you open that location again,
+  and both editing surfaces say where it is waiting with a way straight
+  back to it. Because of that, the Customize tab's location chips no
+  longer shut while you have unsaved changes — switching location keeps
+  them.
 - Editing a package you had kept as your own now offers the way back. It
   was held like any other edit, but the only exit named was to keep it as
   your own — which it already was — so `kendex check` and the app's change

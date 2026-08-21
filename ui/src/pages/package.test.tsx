@@ -1,7 +1,9 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { updateRow } from "@/components/updates-test-rows";
+import { UNSAVED_ELSEWHERE_TITLE } from "@/lib/copy-customize";
 import type { PlaceStanding } from "@/lib/customized-places";
+import { emptyDraft } from "@/lib/editor-draft";
 import { observedItem } from "@/lib/observed-test-item";
 import { PackagePage } from "./package";
 
@@ -47,6 +49,7 @@ const stub = vi.hoisted(() => ({
   editorScope: { scope: "project", root: "/work/hyprtrade" } as unknown,
   rows: [] as unknown[],
   saved: {} as Record<string, unknown>,
+  held: {} as Record<string, unknown>,
   // Enough for the Update button to be offered: a newer version exists and
   // the package's own record was read.
   meta: null as unknown,
@@ -111,6 +114,8 @@ vi.mock("@/stores/editor", async (importOriginal) => {
       scope: stub.editorScope,
       draft: null,
       saved: stub.saved,
+      held: stub.held,
+      saving: false,
       manifestsLoaded: true,
       manifestError: null,
       openScope: async () => {},
@@ -149,6 +154,7 @@ beforeEach(() => {
   stub.editorScope = HYPR;
   stub.rows = [];
   stub.saved = { "/work/vg": {}, "/work/hyprtrade": {} };
+  stub.held = {};
   stub.meta = { rev: null, fork: null };
   stub.versions = [
     {
@@ -203,6 +209,25 @@ describe("what the package page is about", () => {
     expect((render().body.editedRow as { scope: unknown }).scope).toEqual(VG);
     stub.scope = HYPR;
     expect(render().body.editedRow).toBe(null);
+  });
+
+  // Arriving here is what parks typing left at another place, so this is
+  // the page that has to say where it went — above the tabs, since landing
+  // on Overview must not hide it.
+  it("names typing parked at another place, whatever tab is open", () => {
+    expect(renderToStaticMarkup(<PackagePage />)).not.toContain(
+      UNSAVED_ELSEWHERE_TITLE,
+    );
+    stub.held = {
+      "/work/hyprtrade": {
+        scope: HYPR,
+        draft: emptyDraft(),
+        base: null,
+      },
+    };
+    const html = renderToStaticMarkup(<PackagePage />);
+    expect(html).toContain(UNSAVED_ELSEWHERE_TITLE);
+    expect(html).toContain("/work/hyprtrade");
   });
 
   it("does not offer an update for a place its edits are holding", () => {
