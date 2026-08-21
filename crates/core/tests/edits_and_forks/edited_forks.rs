@@ -87,12 +87,16 @@ fn editing_your_own_fork_is_not_drift_and_offers_no_second_fork() {
     assert!(text.contains("re-render from your own copy"), "{text}");
     assert!(!text.contains("kendex fork"), "{text}");
     // The printed fix has to be the command that performs the exit the line
-    // names. A bare `kendex refresh` holds the edit and prints "up to date"
-    // over it, and render_plain is what an agent pastes.
+    // names, and only for the package the line is about. A bare `kendex
+    // refresh` holds the edit and prints "up to date" over it; the
+    // scope-wide `refresh --discard-edits` resolves this line by discarding
+    // every other hand-edited package in the scope. render_plain is what an
+    // agent pastes, so the narrow spelling is the only safe one to print.
     assert!(
-        text.contains("fix: kendex refresh --discard-edits"),
+        text.contains("fix: kendex discard-edits skill gh"),
         "{text}"
     );
+    assert!(!text.contains("refresh --discard-edits"), "{text}");
     let row = updates::updates(&w.env, &w.scope).unwrap().rows;
     let row = row.iter().find(|row| row.name == "gh").unwrap();
     assert!(row.can_discard, "the exit the notice offers: {row:?}");

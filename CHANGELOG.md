@@ -87,6 +87,20 @@ changes carry a **Breaking** call-out with their migration note inline.
   question, theirs can lift a hold — so none of it is taken from a file your
   project commits: an installation whose content is not what its catalog
   publishes is told so plainly, and settles nothing.
+- `kendex discard-edits <kind> <name>` puts one package's declared content
+  back over the edits made to its installed files — the exit beside
+  `kendex fork`, and the one `kendex check` names for an edited package.
+  `kendex refresh --discard-edits` still does the whole scope, which is
+  what it is for.
+- Catalog authors can settle a reviewed safety finding:
+  `kendex dismiss --catalog <dir> --reason intended '<token>'` records the
+  decision in a committed `kendex-reviews.toml`, and `kendex check --catalog`
+  stops holding the catalog back for that exact finding on that exact
+  content. Any edit to the item brings the hold back, dismissed findings are
+  still reported, and installs on other machines are unaffected — a catalog
+  can never pre-approve its own content for consumers. `check --catalog`
+  prints the token beside each blocking finding.
+
 ### Changed
 
 - Everywhere the app says a package is customized, it now says **where**.
@@ -180,8 +194,11 @@ changes carry a **Breaking** call-out with their migration note inline.
   your own — which it already was — so `kendex check` and the app's change
   badge both reported a state nothing could clear. The package now says
   "discard the edits and go back to the copy you kept", `kendex check`
-  prints `kendex refresh --discard-edits` as its fix, and that command does
-  exactly what the line says. The offer disappears when the copy you kept can
+  prints `kendex discard-edits skill <name>` as its fix, and that command
+  does exactly what the line says — that package and no other. The check
+  used to print `kendex refresh --discard-edits`, which discards every
+  hand-edited package in the scope: following the advice for one package
+  cost you the edits in all the rest. The offer disappears when the copy you kept can
   no longer be re-rendered from — removed, replaced by a directory, left as a
   link where content belongs, or grown past what kendex will read as one
   package — and `kendex check` stops printing the command there too, saying

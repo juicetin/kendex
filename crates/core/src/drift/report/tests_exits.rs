@@ -108,10 +108,13 @@ fn an_edited_fork_with_no_readable_copy_names_no_exit() {
     let text = render_plain(&check(&env, std::slice::from_ref(&scope)));
     assert!(text.contains("'mine'"), "{text}");
     assert!(text.contains("can no longer be read back"), "{text}");
-    assert!(!text.contains("--discard-edits"), "{text}");
+    assert!(!text.contains("discard-edits"), "{text}");
 }
 
-// The control: the same fork with its copy intact keeps the exit.
+// The control: the same fork with its copy intact keeps the exit — and the
+// exit is this package's, not the scope's. `refresh --discard-edits` takes
+// every hand-edited package in the scope with it, so printing it as the fix
+// for one line spends the others' edits on this one.
 #[test]
 fn an_edited_fork_with_its_copy_intact_names_the_discard() {
     let tmp = tempfile::tempdir().unwrap();
@@ -129,5 +132,6 @@ fn an_edited_fork_with_its_copy_intact_names_the_discard() {
     );
 
     let text = render_plain(&check(&env, std::slice::from_ref(&scope)));
-    assert!(text.contains("--discard-edits"), "{text}");
+    assert!(text.contains("kendex discard-edits skill mine"), "{text}");
+    assert!(!text.contains("refresh --discard-edits"), "{text}");
 }

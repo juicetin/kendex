@@ -54,9 +54,10 @@ lives in one capability table read by core and UI.
    regenerates from scratch and re-merges the manifest, but bytes no
    apply ever wrote are the user's: an edited installation becomes a
    conflict naming its exits (keep it as a fork, or discard the edits),
-   and no write, sweep, refusal, or re-shape touches it. Discarding is an
-   explicit option (`overwrite_edited` / `--discard-edits`). The anchor
-   is the lock's rendered hash — what apply last put on disk — and a
+   and no write, sweep, refusal, or re-shape touches it. Discarding is
+   explicit, and per package (`kendex discard-edits`) — the scope-wide
+   `refresh --discard-edits` is never one line's fix. The anchor is the
+   lock's rendered hash — what apply last put on disk — and a
    record that cannot prove which bytes are whose holds too: one
    conflict, never one silent loss. A fork's bytes are held the same way;
    only its exits differ — keeping it as a fork is done, so the conflict
@@ -271,16 +272,15 @@ lives in one capability table read by core and UI.
   only when nothing is unsaved, and `lib/customization.ts` slices that
   one draft per package rather than fetching a second copy.
 - **Everything else that writes a manifest tells the editor, before it
-  lets a save through.** A draft is a whole manifest, so a save written
-  after something else rewrote that file puts the old contents back.
+  lets a save through.** A draft is a whole manifest, so a save landing
+  after another writer puts the old file back.
   `stores/manifest-sync.ts::manifestRewritten` marks the place outdated
   before it awaits anything and re-reads it after, and `editor-save.ts`
   refuses an outdated draft — refusing first and reading second, so no
   caller can order it wrong. The re-read takes the mark off only where it
   applies, and `editor.ts::load` replaces a draft holding typing only for
-  the caller that means to (`discard`). What is still the caller's to get
-  right is calling it at all, with the place the command wrote, before the
-  next await; a writer refusing a stale base (KEN-473) closes that.
+  the caller that means to (`discard`). Still the caller's: calling it,
+  with the place written, before the next await — KEN-473 closes that.
 - **Customization is per place, and every mark names its place.** One
   package can be changed in one project and untouched at user level, so
   "Customized" unqualified answers a question nobody asks.

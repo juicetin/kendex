@@ -233,16 +233,18 @@ impl ScopeCheck<'_> {
             } else if package.forked {
                 (
                     format!(
-                        "{prefix}{kind} '{name}' was edited on disk since your fork was rendered — refresh with edits discarded to re-render from your own copy"
+                        "{prefix}{kind} '{name}' was edited on disk since your fork was rendered — discard its edits to re-render from your own copy"
                     ),
                     Some(Remedy::DiscardEdits {
+                        kind: package.kind,
+                        name: package.name.clone(),
                         global: self.global,
                     }),
                 )
             } else {
                 (
                     format!(
-                        "{prefix}{kind} '{name}' was edited on disk — keep it as a fork, or refresh with edits discarded"
+                        "{prefix}{kind} '{name}' was edited on disk — keep it as a fork, or discard its edits"
                     ),
                     Some(Remedy::Fork {
                         kind: package.kind,

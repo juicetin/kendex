@@ -163,18 +163,22 @@ pub(super) fn hold_local_edit(
     };
     // A fork's copy is already the user's own, so keeping it as one is not
     // an exit left to offer. The one that is: put its own bytes back, which
-    // live in the local source the fork wrote them to.
+    // live in the local source the fork wrote them to. Every exit here is
+    // named as an act, not as a command spelling — the spellings that
+    // discard are per package (`kendex discard-edits`) and scope-wide
+    // (`refresh --discard-edits`), and prose about one row must not send a
+    // reader to the one that takes every other row's edits.
     let detail = if item.recorded_fork {
-        "edited on disk since your fork was rendered — apply with edits discarded to re-render from your own copy"
+        "edited on disk since your fork was rendered — discard its edits to re-render from your own copy"
     } else {
         match (cause, &entry.rendered_hash) {
             (DriftCause::Both, None) => {
-                "changed upstream and on disk — kendex cannot tell your edits from the update; keep it as a fork or apply with edits discarded"
+                "changed upstream and on disk — kendex cannot tell your edits from the update; keep it as a fork or discard its edits"
             }
             (DriftCause::Both, _) => {
-                "edited on disk and changed upstream — keep your edits as a fork, or apply with edits discarded"
+                "edited on disk and changed upstream — keep your edits as a fork, or discard its edits"
             }
-            _ => "edited on disk since install — keep it as a fork, or apply with edits discarded",
+            _ => "edited on disk since install — keep it as a fork, or discard its edits",
         }
     };
     sink.drift.push(DriftRow {
