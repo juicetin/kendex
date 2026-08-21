@@ -39,6 +39,7 @@ pub fn install(env: &Env, scope: &Scope, yes: bool) -> CliResult {
             kept: Vec::new(),
             safety: Vec::new(),
             unmeasured: Default::default(),
+            rendered: Default::default(),
         };
         confirm_and_execute(env, &report, yes)?;
     }

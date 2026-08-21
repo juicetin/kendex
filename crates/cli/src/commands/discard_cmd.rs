@@ -128,29 +128,14 @@ pub fn run(env: &Env, args: DiscardArgs) -> CliResult {
             ..PlanOptions::default()
         },
     )?;
-    // A package the gate refuses gets no rendering written, whatever this
-    // command authorises — and the plan can still be non-empty, because a
-    // scope carries its own maintenance (a repository move, a manifest
-    // write) alongside. Asking whether anything is planned would take that
-    // maintenance for the replacement and report a discard nobody did.
-    // Ask about the package instead.
-    if report
-        .safety
-        .iter()
-        .any(|row| row.kind == kind && row.name == args.name && row.blocked())
-    {
+    // Whether this package got a rendering, asked of the plan rather than
+    // read off its op list: a scope carries its own maintenance, so ops
+    // exist whether or not the package named got one, and every reason a
+    // package is skipped — refused, held, unmeasured — leaves the same
+    // silence there. Executing anyway would report a restore nobody did.
+    if !report.rendered.contains(&(kind, args.name.clone())) {
         return Err(format!(
-            "{} '{}' was edited, and its declared content is held back by a safety finding — nothing here can put it back until that is settled; 'kendex check' reports it",
-            kind.name(),
-            args.name
-        )
-        .into());
-    }
-    // Anything else that leaves nothing to write reads the same way from
-    // here: there is no replacement, so there is nothing to report as one.
-    if report.plan.ops.is_empty() {
-        return Err(format!(
-            "{} '{}' was edited, and nothing here can put its declared content back — run 'kendex check' to see what is holding it",
+            "{} '{}' was edited, and nothing here rendered its declared content to put back — 'kendex check' reports what is holding it",
             kind.name(),
             args.name
         )

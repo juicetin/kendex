@@ -26,4 +26,10 @@ describe("noticing that the set of places changed", () => {
     placesChanged(known, undefined);
     expect(placesChanged(known, [])).toBe(false);
   });
+
+  it("tells apart two sets a separator would run together", () => {
+    const known = fresh();
+    placesChanged(known, ["/a", "/b"]);
+    expect(placesChanged(known, ["/a /b"])).toBe(true);
+  });
 });

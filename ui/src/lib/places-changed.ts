@@ -15,7 +15,10 @@ export function placesChanged(
   known: { current: string | null },
   projects: string[] | undefined,
 ): boolean {
-  const now = (projects ?? []).join(" ");
+  // Serialised, not joined: a project path can hold whatever separator a
+  // join picks, and then ["/a", "/b"] and ["/a /b"] are the same string —
+  // two different sets of places that would read as unchanged.
+  const now = JSON.stringify(projects ?? []);
   const first = known.current === null;
   const changed = !first && known.current !== now;
   known.current = now;

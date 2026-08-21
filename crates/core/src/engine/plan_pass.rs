@@ -8,7 +8,7 @@ use crate::apply::PlannedOp;
 use crate::env::Env;
 use crate::error::Result;
 use crate::lock::Lock;
-use crate::model::Scope;
+use crate::model::{ItemKind, Scope};
 
 use super::item_plan::plan_item;
 use super::{
@@ -32,6 +32,12 @@ pub(super) fn plan_items(
     config_edits: &mut config_edits::ConfigEditPlan,
     new_lock: &mut Lock,
     written: &mut tree_plan::Written,
+    // What this pass planned a rendering for. A caller acting on one
+    // package cannot read that off the op list: a scope brings its own
+    // maintenance along, so ops exist whether or not the package it named
+    // got one, and every reason a package is skipped above leaves the
+    // same silence behind.
+    rendered: &mut BTreeSet<(ItemKind, String)>,
 ) -> Result<()> {
     for item in &state.items {
         let mut sink = item_plan::PlanSink {
@@ -68,6 +74,7 @@ pub(super) fn plan_items(
             continue;
         }
         plan_item(env, item, scope, lock, emitted_paths, &mut sink)?;
+        rendered.insert((item.kind, item.name.clone()));
     }
     Ok(())
 }

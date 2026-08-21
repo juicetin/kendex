@@ -192,21 +192,33 @@ fn a_discard_aimed_at_a_refused_package_plans_nothing() {
     )
     .unwrap();
 
-    // The plan carries no replacement for it — but "no ops at all" is the
-    // wrong question to ask, because a scope brings its own maintenance
-    // along and that would read as the replacement. The package's own row
-    // is what says it.
+    // "No ops at all" is the wrong question — a scope brings its own
+    // maintenance along, and that would read as the replacement. What the
+    // plan rendered is the question, and it rendered nothing for this one.
     assert!(
-        discard
-            .safety
-            .iter()
-            .any(|row| row.name == "hostile" && row.blocked()),
-        "the gate is what holds it, and the row is how a caller can tell"
+        !discard
+            .rendered
+            .contains(&(ItemKind::Skill, "hostile".to_owned())),
+        "the plan claims a rendering for a package the gate refused"
     );
+    // The control, so this is not passing because the fixture renders
+    // nothing at all: the sibling is rendered in the same pass.
+    let clean = plan_scope(
+        &f.env,
+        &f.scope,
+        &manifest,
+        &lock,
+        &PlanOptions {
+            only_names: Some(vec![(ItemKind::Skill, "clean".to_owned())]),
+            ..PlanOptions::default()
+        },
+    )
+    .unwrap();
     assert!(
-        discard.plan.ops.is_empty(),
-        "nothing at all here, which is the simple case: {:?}",
-        discard.plan.ops
+        clean
+            .rendered
+            .contains(&(ItemKind::Skill, "clean".to_owned())),
+        "a package nothing holds is rendered, or the check above says nothing"
     );
     assert!(
         std::fs::read_to_string(&file).unwrap().contains("Mine."),

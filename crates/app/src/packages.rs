@@ -247,22 +247,12 @@ pub fn apply_discard_edits(
         },
     )
     .map_err(|e| e.to_string())?;
-    // A refused package gets no rendering written whatever this authorises,
-    // and the plan can still be non-empty because the scope carries its own
-    // maintenance alongside. Asking whether anything is planned would take
-    // that for the replacement.
-    if report
-        .safety
-        .iter()
-        .any(|row| row.kind == kind && row.name == name && row.blocked())
-    {
+    // Whether this package got a rendering, asked of the plan rather than
+    // read off its op list: a scope carries its own maintenance, so ops
+    // exist whether or not the package named got one.
+    if !report.rendered.contains(&(kind, name.clone())) {
         return Err(format!(
-            "{name} was edited, and its declared content is held back by a safety finding — settle it in Review and try again"
-        ));
-    }
-    if report.plan.ops.is_empty() {
-        return Err(format!(
-            "{name} was edited, and nothing here can put its declared content back — Review says what is holding it"
+            "{name} was edited, and nothing here rendered its declared content to put back — Review reports what is holding it"
         ));
     }
     apply::execute(&env, &report.plan, None).map_err(|e| e.to_string())?;

@@ -94,6 +94,12 @@ pub struct EngineReport {
     /// Blocked rows also appear as conflicts in `drift`; the rest install
     /// and are worth reading first.
     pub safety: Vec<ItemSafety>,
+    /// What this plan writes a rendering for. A caller acting on one
+    /// package asks here rather than reading the op list: a scope carries
+    /// its own maintenance, so ops exist whether or not the package it
+    /// named got one — and every reason a package is skipped, refused or
+    /// held or unmeasured, leaves the same silence in that list.
+    pub rendered: BTreeSet<(ItemKind, String)>,
     /// Declarations this pass could not measure: their source did not
     /// resolve, could not be read, or no longer carries the item, so
     /// nothing was rendered to compare what is on disk against. They are
