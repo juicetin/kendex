@@ -242,11 +242,21 @@ pub fn apply_discard_edits(
         &lock,
         &engine::PlanOptions {
             overwrite_edited_names: Some(vec![(kind, name.clone())]),
-            only_names: Some(vec![(kind, name)]),
+            only_names: Some(vec![(kind, name.clone())]),
             ..Default::default()
         },
     )
     .map_err(|e| e.to_string())?;
+    // The edit was measured, so the plan should carry the write that puts
+    // the declared content back. An empty one means something else held it
+    // — a safety refusal keeps a refused rendering off disk whatever this
+    // authorises — and applying it would report a discard that never
+    // happened over edits still on disk.
+    if report.plan.ops.is_empty() {
+        return Err(format!(
+            "{name} was edited, and nothing here can put its declared content back — Review says what is holding it"
+        ));
+    }
     apply::execute(&env, &report.plan, None).map_err(|e| e.to_string())?;
     Ok(view(&env, &scope))
 }

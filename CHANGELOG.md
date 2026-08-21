@@ -233,6 +233,10 @@ changes carry a **Breaking** call-out with their migration note inline.
   its edits rather than to keep it as its own copy. Keeping it was never
   possible — it has no entry of its own to record a fork under — so the fix
   the report printed refused when run.
+- Discarding a package's edits says so plainly when something is holding
+  the package back — a safety finding, say — instead of reporting the
+  content restored while your edited files are still there. The app's
+  discard says the same.
 - `kendex discard-edits` on a package whose source cannot be read says so
   and stops, instead of reporting "no edits to discard" while your edited
   files are still there. The app's discard says the same.

@@ -128,6 +128,19 @@ pub fn run(env: &Env, args: DiscardArgs) -> CliResult {
             ..PlanOptions::default()
         },
     )?;
+    // The edit was measured, so the plan should carry the write that puts
+    // the declared content back. An empty one means something else held it
+    // — a safety refusal keeps a refused rendering off disk whatever this
+    // command authorises — and executing it would report a discard that
+    // never happened over edits still sitting there.
+    if report.plan.ops.is_empty() {
+        return Err(format!(
+            "{} '{}' was edited, and nothing here can put its declared content back — run 'kendex check' to see what is holding it",
+            kind.name(),
+            args.name
+        )
+        .into());
+    }
     for op in &report.plan.ops {
         say(&format!("  - {}", op.description));
     }
