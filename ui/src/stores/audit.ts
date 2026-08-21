@@ -17,6 +17,7 @@ import {
 import { manifestRewritten } from "./manifest-sync";
 import { type ErrorAction, useProblemsStore } from "./problems";
 import { useScanStore } from "./scan";
+import { refusesForUnsaved } from "./unsaved-first";
 
 interface AuditState {
   views: AuditView[];
@@ -86,6 +87,11 @@ export const useAuditStore = create<AuditState>((set, get) => {
     >,
     opts: { title: string; successMessage?: string; steps?: string[] },
   ) => {
+    // Apply, adopt, toggle and remove all rewrite this scope's kendex.toml,
+    // so unsaved customization for it refuses them the way a fork or a
+    // discard is refused — before anything is written, and wherever the
+    // typing is waiting.
+    if (refusesForUnsaved(scope)) return;
     set({ busy: true });
     // Busy is one of the flags holding the Customize tab's Save bar down, so
     // it stays up until the editor has been told its copy is stale — clearing

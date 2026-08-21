@@ -106,3 +106,70 @@ describe("an install redirected into a project", () => {
     );
   });
 });
+
+// The busy flag is what holds the Customize Save bar down. The manifest
+// this install rewrote only reaches the editor inside the downstream sync,
+// so lowering the flag before that sync reopens the window it exists to
+// close: a save landing there carries a copy read before the install.
+describe("the install's busy flag", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useSettingsStore.setState({
+      settings: { schema: 1, projects: ["/w/app"] },
+    });
+    useEditorStore.setState({
+      scope: project,
+      draft: null,
+      dirty: false,
+      held: {},
+      outdated: null,
+      saved: {},
+    });
+    vi.mocked(commands.editorInventory).mockResolvedValue({
+      status: "ok",
+      data: {
+        declaredAgents: [],
+        declaredSkills: [],
+        availableSkills: [],
+        harnesses: [],
+        hookEvents: [],
+      },
+    });
+    vi.mocked(commands.marketplaceInstall).mockResolvedValue({
+      status: "ok",
+      data: [],
+    });
+  });
+
+  it("stays up until the manifest has been handed to the editor", async () => {
+    let busyDuringSync: boolean | null = null;
+    vi.mocked(commands.getManifest).mockImplementation(async () => {
+      busyDuringSync = useMarketplacesStore.getState().busy;
+      return { status: "ok", data: { manifest: null, base: "rewritten" } };
+    });
+
+    await useMarketplacesStore.getState().install({
+      scope: personal,
+      source: "kit",
+      items: [{ kind: "skill", name: "gh" }],
+      destination: project,
+    });
+
+    expect(busyDuringSync).toBe(true);
+    expect(useMarketplacesStore.getState().busy).toBe(false);
+  });
+
+  it("comes back down when the install fails", async () => {
+    vi.mocked(commands.marketplaceInstall).mockResolvedValue({
+      status: "error",
+      error: "nope",
+    });
+    await useMarketplacesStore.getState().install({
+      scope: personal,
+      source: "kit",
+      items: [{ kind: "skill", name: "gh" }],
+      destination: project,
+    });
+    expect(useMarketplacesStore.getState().busy).toBe(false);
+  });
+});

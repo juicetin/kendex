@@ -9,6 +9,7 @@ const editor = vi.hoisted(() => ({
   state: {} as Record<string, unknown>,
 }));
 const audit = vi.hoisted(() => ({ busy: false }));
+const market = vi.hoisted(() => ({ busy: false }));
 
 vi.mock("@/stores/editor", async (importOriginal) => {
   const mod = await importOriginal<typeof import("@/stores/editor")>();
@@ -18,6 +19,17 @@ vi.mock("@/stores/editor", async (importOriginal) => {
       (selector?: (state: Record<string, unknown>) => unknown) =>
         selector ? selector(editor.state) : editor.state,
       { getState: () => editor.state, setState: () => {} },
+    ),
+  };
+});
+vi.mock("@/stores/marketplaces", async (importOriginal) => {
+  const mod = await importOriginal<typeof import("@/stores/marketplaces")>();
+  return {
+    ...mod,
+    useMarketplacesStore: Object.assign(
+      (selector?: (state: typeof market) => unknown) =>
+        selector ? selector(market) : market,
+      { getState: () => market },
     ),
   };
 });
@@ -44,6 +56,7 @@ const saveButton = (html: string): string => {
 
 beforeEach(() => {
   audit.busy = false;
+  market.busy = false;
   editor.state = {
     scope: { scope: "global" },
     draft: emptyDraft(),
@@ -80,6 +93,15 @@ describe("the Customize page's Save bar", () => {
 
   it("is held down while a mutation started elsewhere is in flight", () => {
     audit.busy = true;
+    expect(saveButton(renderToStaticMarkup(<CustomizePage />))).toContain(
+      'disabled=""',
+    );
+  });
+
+  // An install or a subscription change rewrites the same file. It is a
+  // writer like any other, and the gate names every writer or it names none.
+  it("is held down while a marketplace write is in flight", () => {
+    market.busy = true;
     expect(saveButton(renderToStaticMarkup(<CustomizePage />))).toContain(
       'disabled=""',
     );

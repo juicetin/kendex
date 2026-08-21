@@ -1,19 +1,13 @@
 import { toast } from "sonner";
 import { commands, type Scope, type UpdateRow } from "@/bindings";
 import { forkedToastLabel } from "@/lib/copy";
-import {
-  FORK_ERROR_TITLE,
-  UNSAVED_FIRST_BODY,
-  UNSAVED_FIRST_TITLE,
-  unsavedFirstSteps,
-} from "@/lib/copy-forks";
-import { packageDisplayName, scopeName } from "@/lib/labels";
-import { sameScope, scopeKey } from "@/lib/scope";
+import { FORK_ERROR_TITLE } from "@/lib/copy-forks";
+import { packageDisplayName } from "@/lib/labels";
 import { useAuditStore } from "./audit";
-import { useEditorStore } from "./editor";
 import { manifestRewritten } from "./manifest-sync";
 import { useProblemsStore } from "./problems";
 import { useScanStore } from "./scan";
+import { refusesForUnsaved } from "./unsaved-first";
 import { useUpdatesStore } from "./updates";
 
 /** The two ways out of an edited place, run under the updates store's
@@ -24,21 +18,7 @@ const run = async (scope: Scope, work: () => Promise<string | null>) => {
   // Both of these rewrite this scope's kendex.toml, which the Customize tab
   // may be holding an older copy of. Saving that copy afterwards would put
   // the pre-fork contents back, and the fork record lives nowhere else.
-  const editor = useEditorStore.getState();
-  // Unsaved typing for this place refuses the write whether it is on screen
-  // or parked behind another one. Parking is not a ruling on a draft and
-  // this is: reaching only the copy on screen would let a move between
-  // places decide whether the write is refused, which is not something
-  // anyone chose. Anything parked is unsaved by construction.
-  const parked = editor.held[scopeKey(scope)] !== undefined;
-  if (parked || (editor.dirty && sameScope(editor.scope, scope))) {
-    useProblemsStore.getState().showError({
-      title: UNSAVED_FIRST_TITLE,
-      message: UNSAVED_FIRST_BODY,
-      steps: unsavedFirstSteps(parked ? scopeName(scope) : null),
-    });
-    return;
-  }
+  if (refusesForUnsaved(scope)) return;
   useUpdatesStore.setState({ busy: true });
   try {
     const error = await work();

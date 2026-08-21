@@ -145,10 +145,12 @@ export const useMarketplacesStore = create<MarketplacesState>((set, get) => ({
         destination ?? null,
         false,
       );
-    } finally {
+    } catch (thrown) {
       set({ busy: false });
+      throw thrown;
     }
     if (response.status === "error") {
+      set({ busy: false });
       toast.error(response.error);
       return false;
     }
@@ -167,7 +169,15 @@ export const useMarketplacesStore = create<MarketplacesState>((set, get) => ({
         ? items[0].name
         : `${items.length} packages`;
     toast.success(`Installed ${what}`);
-    await refreshDownstream(destination ?? scope);
+    // Busy stays up through the sync: it is what holds the Customize save
+    // down, and the manifest this install rewrote is only handed to the
+    // editor inside refreshDownstream. Lowering it first reopens the very
+    // window the flag exists to close.
+    try {
+      await refreshDownstream(destination ?? scope);
+    } finally {
+      set({ busy: false });
+    }
     return true;
   },
 }));

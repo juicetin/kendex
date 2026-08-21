@@ -17,9 +17,11 @@ import { versionRowLabel } from "@/lib/versions";
 import { useAuditStore } from "@/stores/audit";
 import { useEditorStore } from "@/stores/editor";
 import { manifestRewritten } from "@/stores/manifest-sync";
+import { useMarketplacesStore } from "@/stores/marketplaces";
 import type { PackageView as OpenedAt, PackageRef } from "@/stores/nav";
 import { useProblemsStore } from "@/stores/problems";
 import { useScanStore } from "@/stores/scan";
+import { refusesForUnsaved } from "@/stores/unsaved-first";
 import { useUpdatesStore } from "@/stores/updates";
 
 export type PackageView =
@@ -157,13 +159,19 @@ export function packageVersionActions(
     void useAuditStore.getState().refresh({ force: true });
   };
   const run = (
-    call: Promise<{ status: "ok" } | { status: "error"; error: string }>,
+    // The call itself, not the promise it returns: a guard that runs after
+    // the command was already invoked refuses nothing.
+    call: () => Promise<{ status: "ok" } | { status: "error"; error: string }>,
     toastMessage: string,
   ) => {
+    // Switching version, holding one, and following a source all rewrite
+    // this place's kendex.toml, so unsaved customization for it refuses
+    // them wherever that typing is waiting.
+    if (refusesForUnsaved(ref.scope)) return;
     setBusy(true);
     void (async () => {
       try {
-        const response = await call;
+        const response = await call();
         if (response.status === "error") {
           showError(response.error);
           return;
@@ -186,7 +194,7 @@ export function packageVersionActions(
 
   const switchTo = (row: VersionRow) =>
     run(
-      commands.packageSetRev(ref.scope, ref.kind, ref.name, row.id),
+      () => commands.packageSetRev(ref.scope, ref.kind, ref.name, row.id),
       updatedToastLabel(`${displayName} to ${versionRowLabel(row)}`),
     );
 
@@ -196,25 +204,29 @@ export function packageVersionActions(
     held
       ? switchTo(latest)
       : run(
-          commands.applyPlan(ref.scope, false, []),
+          () => commands.applyPlan(ref.scope, false, []),
           updatedToastLabel(displayName),
         );
 
   const follow = () =>
     run(
-      commands.packageSetRev(ref.scope, ref.kind, ref.name, null),
+      () => commands.packageSetRev(ref.scope, ref.kind, ref.name, null),
       FOLLOW_SOURCE_TOAST,
     );
 
   return { switchTo, updateToLatest, follow };
 }
 
-/** One gate for every control that rewrites this package's manifest: the
+/** One gate for every control that rewrites this scope's manifest: the
  *  audit store's apply, a version switch in flight, the updates store's
- *  fork or discard, and the editor's save all touch the same file. */
+ *  fork or discard, a marketplace install or subscription change, and the
+ *  editor's save all touch the same file. Every writer of kendex.toml
+ *  belongs here — a writer left out is a control that stays live while the
+ *  file moves under it. */
 export function useManifestBusy(switching: boolean): boolean {
   const auditBusy = useAuditStore((s) => s.busy);
   const updatesBusy = useUpdatesStore((s) => s.busy);
+  const marketBusy = useMarketplacesStore((s) => s.busy);
   const saving = useEditorStore((s) => s.saving);
-  return auditBusy || switching || updatesBusy || saving;
+  return auditBusy || switching || updatesBusy || marketBusy || saving;
 }
