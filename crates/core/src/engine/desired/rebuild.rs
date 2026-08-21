@@ -13,6 +13,7 @@ use crate::manifest::Manifest;
 use crate::model::{HarnessId, ItemKind, Scope};
 
 use super::super::expansion::PLANNED_KINDS;
+use crate::engine::PlanOptions;
 use super::{Desired, desired_state};
 
 /// The revision each installation is recorded at, keyed by the
@@ -86,7 +87,18 @@ pub fn desired_as_installed(
         .max(1);
     let mut built: Vec<Desired> = Vec::new();
     for pass in 0..passes {
-        for item in desired_state(env, scope, &pinned_to(manifest, &governed, pass), lock)?.items {
+        // Rebuilding what is installed asks about every declaration, not
+        // the subset some caller named: an unrestricted plan is the whole
+        // question this function exists to answer.
+        for item in desired_state(
+            env,
+            scope,
+            &pinned_to(manifest, &governed, pass),
+            lock,
+            &PlanOptions::default(),
+        )?
+        .items
+        {
             let already = built.iter().any(|kept| {
                 (kept.kind, &kept.name, kept.harness) == (item.kind, &item.name, item.harness)
             });

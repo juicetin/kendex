@@ -105,7 +105,7 @@ pub fn plan_scope(
     let disk_lock = lock;
     let manifest = moved_manifest.as_ref().unwrap_or(manifest);
     let lock = moved_lock.as_ref().unwrap_or(lock);
-    let mut state = desired_state(env, scope, manifest, lock)?;
+    let mut state = desired_state(env, scope, manifest, lock, options)?;
     // The gate runs before anything is planned for these items: a blocked
     // rendering must never reach the op list, and an override it grants has
     // to ride out on the manifest write this same plan performs.
@@ -128,11 +128,18 @@ pub fn plan_scope(
     // `plan_items` (writes for the named items, others carried forward),
     // `plan_settings_seed` (seeds only what the named packages ship),
     // `stale_emitted` (sweeps only their old paths), `plan_refusals` (takes
-    // only their refused renderings off disk). Not asked, deliberately:
-    // `plan_manifest_write`, which maintains the scope's own manifest and
-    // belongs to no package, and `orphans`, which removes only under
-    // `remove_orphans` or `sweep_unneeded` — a verb asking for exactly that,
-    // and never a restricted plan, which passes neither.
+    // only their refused renderings off disk).
+    //
+    // `plan_manifest_write` is asked once removed. Its scope maintenance —
+    // a schema upgrade, a repository move — belongs to no package and
+    // always runs. What it writes *for* packages does not: an agent's
+    // upstream skill additions are merged in `desired_state`, which leaves
+    // out everything a restricted plan will not render, so the file never
+    // records an install that did not happen.
+    //
+    // `orphans` is not asked, deliberately: it removes only under
+    // `remove_orphans` or `sweep_unneeded` — a verb asking for exactly
+    // that, and never a restricted plan, which passes neither.
     // `plan_lock_write` records what the passes above decided.
     plan_manifest_write(env, scope, repo_moved, manifest, &state, options, &mut ops)?;
 

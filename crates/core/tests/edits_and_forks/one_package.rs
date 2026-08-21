@@ -98,3 +98,86 @@ fn a_plan_for_one_package_leaves_every_other_declaration_alone() {
         "the record of an untouched install was dropped: {after:?}"
     );
 }
+
+/// The manifest records what an agent renders with, and upstream additions
+/// are merged into it as a side effect of planning. A plan restricted to
+/// one package renders nothing for anybody else, so it must not write
+/// anybody else's additions either: a manifest that has gained a skill
+/// nothing installed describes a machine that does not exist, and the next
+/// pass reads it as intent.
+#[test]
+#[allow(clippy::unwrap_used)]
+fn a_plan_for_one_package_records_no_other_packages_additions() {
+    let w = world();
+    write_skill(&w.upstream, "gh", "Upstream gh.");
+    // An agent whose role takes every skill matching its name.
+    let agents = w.upstream.join("agents");
+    fs::create_dir_all(&agents).unwrap();
+    fs::write(
+        agents.join("rust.md"),
+        "---\nname: rust\ndescription: Rust engineer\nrole: engineer\n---\nBody.\n",
+    )
+    .unwrap();
+    commit(&w.upstream, "one");
+    declare(
+        &w,
+        "[skills.gh]\nsource = \"cat\"\n\n[agents.rust]\nsource = \"cat\"\n",
+    );
+    sync_and_apply(&w);
+    // The agent's skill list is recorded, which is what makes a later
+    // upstream skill an addition rather than part of the original set.
+    declare(
+        &w,
+        "[skills.gh]\nsource = \"cat\"\n\n[agents.rust]\nsource = \"cat\"\n\n[agent-skills]\nrust = []\n",
+    );
+    sync_and_apply(&w);
+
+    // Upstream gains a skill the agent will claim.
+    write_skill(&w.upstream, "rust-perf", "Perf.");
+    commit(&w.upstream, "two");
+    let loaded = manifest::load_for_mutation(&manifest::manifest_path(&w.env, &w.scope))
+        .unwrap()
+        .unwrap();
+    kendex_core::remote::sync_sources(&w.env, &loaded).unwrap();
+
+    let planned = |only: Option<Vec<(ItemKind, String)>>| {
+        let manifest = manifest::load_for_mutation(&manifest::manifest_path(&w.env, &w.scope))
+            .unwrap()
+            .unwrap();
+        let lock = load_lock(&lock_path(&w.env, &w.scope)).unwrap();
+        plan_scope(
+            &w.env,
+            &w.scope,
+            &manifest,
+            &lock,
+            &PlanOptions {
+                only_names: only,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+    };
+
+    // The control: unrestricted, the addition is recorded and rendered.
+    let all = planned(None);
+    assert!(
+        kendex_core::engine::persists_manifest(&all.plan.ops),
+        "the merge is written back"
+    );
+
+    // Restricted to another package, the agent is not rendered — so its
+    // addition is not written down either.
+    let one = planned(Some(vec![(ItemKind::Skill, "gh".to_owned())]));
+    apply::execute(&w.env, &one.plan, None).unwrap();
+
+    let after = manifest::load_for_mutation(&manifest::manifest_path(&w.env, &w.scope))
+        .unwrap()
+        .unwrap();
+    assert!(
+        !after
+            .agent_skills
+            .get("rust")
+            .is_some_and(|skills| skills.iter().any(|skill| skill == "rust-perf")),
+        "the manifest gained a skill nothing installed: {after:?}"
+    );
+}
