@@ -84,6 +84,14 @@ tokenize() {
         quote=$c
         started=1
         ;;
+      '(' | ')' | '{' | '}')
+        if [ "$started" -eq 1 ]; then
+          TOKENS+=("$word")
+          word=''
+          started=0
+        fi
+        TOKENS+=("$c")
+        ;;
       ' ')
         if [ "$started" -eq 1 ]; then
           TOKENS+=("$word")
@@ -108,23 +116,33 @@ tokenize() {
 }
 
 # Where the commit lands, which is not always where this hook started: a
-# session working in a git worktree commits with `git -C <path>` or a
-# `cd <path> &&` prefix. Reading the staged set from the wrong place answers
-# for another repository's work — either blocking a commit it has nothing to
-# do with, or clearing one nobody checked.
+# session working in a git worktree commits with `git -C <path>`, with
+# `--git-dir`/`--work-tree`, or behind a `cd <path> &&` prefix. Reading the
+# staged set from the wrong place answers for another repository's work —
+# either blocking a commit it has nothing to do with, or clearing one
+# nobody checked.
 #
-# A command is a sequence of segments, so the `-C` that counts is the one
-# belonging to the git that commits: in `git -C clean status && git -C dirty
-# commit` the first names a repository this hook must not answer for.
+# Only the shell part is read here. Which repository git's own options name
+# is git's question, and git is the only thing that answers it for every
+# option it has: a reader here has to be taught each one, and the ones it
+# has not been taught send the checks to the wrong index while reporting
+# success. So the options ride back to git as they were written.
 git_home=${HOME:-}
+
+# A leading `~` is the shell's, expanded before git or this hook ever sees
+# the word, so both have to read it the same way.
+untilde() {
+  case $1 in
+    '~') printf '%s' "$git_home" ;;
+    '~/'*) printf '%s' "$git_home/${1#'~/'}" ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
 
 # Join a path onto the running target the way the shell would.
 move_target() {
-  local path=$1
-  case $path in
-    '~') path=$git_home ;;
-    '~/'*) path=$git_home/${path#'~/'} ;;
-  esac
+  local path
+  path=$(untilde "$1")
   case $path in
     /*) TARGET_DIR=$path ;;
     *) TARGET_DIR=${TARGET_DIR:-.}/$path ;;
@@ -134,13 +152,13 @@ move_target() {
 tokenize "$FLAT"
 TARGET_DIR=""
 committing=0
+COMMIT_OPTS=()
 at_segment_start=1
 i=0
 n=${#TOKENS[@]}
 while [ "$i" -lt "$n" ]; do
-  token=${TOKENS[$i]}
-  case $token in
-    '&&' | '||' | ';' | '|' | '&')
+  case ${TOKENS[$i]} in
+    '&&' | '||' | ';' | '|' | '&' | '(' | ')' | '{' | '}')
       at_segment_start=1
       i=$((i + 1))
       continue
@@ -148,7 +166,7 @@ while [ "$i" -lt "$n" ]; do
   esac
   # A `cd` ahead of the commit moves it; one after belongs to whatever comes
   # next and must not drag the check along with it.
-  if [ "$at_segment_start" -eq 1 ] && [ "$token" = "cd" ] && [ "$committing" -eq 0 ]; then
+  if [ "$at_segment_start" -eq 1 ] && [ "${TOKENS[$i]}" = "cd" ] && [ "$committing" -eq 0 ]; then
     j=$((i + 1))
     [ "${TOKENS[$j]:-}" = "--" ] && j=$((j + 1))
     [ -n "${TOKENS[$j]:-}" ] && move_target "${TOKENS[$j]}"
@@ -157,40 +175,36 @@ while [ "$i" -lt "$n" ]; do
     continue
   fi
   at_segment_start=0
-  case $token in
+  case ${TOKENS[$i]} in
     git | */git) ;;
     *)
       i=$((i + 1))
       continue
       ;;
   esac
-  # git's own options sit between it and the subcommand, and these carry
-  # their value in the next word, so the subcommand is not what follows them.
-  pending=()
+  # Find where the subcommand starts. These few options carry their value in
+  # the next word, so the subcommand is not what follows them; the list only
+  # decides where `commit` would be, never which repository is meant.
+  opts=()
   j=$((i + 1))
   while [ "$j" -lt "$n" ]; do
     case ${TOKENS[$j]} in
-      -C)
-        pending+=("${TOKENS[$((j + 1))]:-}")
+      -C | -c | --git-dir | --work-tree | --namespace | --exec-path | --config-env | --super-prefix)
+        opts+=("${TOKENS[$j]}" "$(untilde "${TOKENS[$((j + 1))]:-}")")
         j=$((j + 2))
         ;;
-      -C?*)
-        pending+=("${TOKENS[$j]#-C}")
+      -*)
+        opts+=("${TOKENS[$j]}")
         j=$((j + 1))
         ;;
-      -c | --git-dir | --work-tree | --namespace | --exec-path | --config-env)
-        j=$((j + 2))
+      commit)
+        committing=$((committing + 1))
+        COMMIT_OPTS=(${opts[@]+"${opts[@]}"})
+        break
         ;;
-      -*) j=$((j + 1)) ;;
       *) break ;;
     esac
   done
-  if [ "${TOKENS[$j]:-}" = "commit" ]; then
-    committing=$((committing + 1))
-    for path in ${pending[@]+"${pending[@]}"}; do
-      move_target "$path"
-    done
-  fi
   i=$((j + 1))
 done
 
@@ -199,13 +213,21 @@ if [ "$committing" -gt 1 ]; then
   exit 2
 fi
 
-# A named target this hook cannot enter is refused, never dropped. A path
-# the shell expands and this reader cannot — `git -C "$repo" commit` — used
-# to fall back to the checkout the hook started in, so the commit landed
-# somewhere nothing had looked at and the run reported success.
-if [ -n "$TARGET_DIR" ] && ! cd "$TARGET_DIR" 2>/dev/null; then
-  echo "pre-commit-check: cannot enter '$TARGET_DIR' — name the repository with a literal path so its commit can be checked" >&2
-  exit 2
+# Ask git which repository this commits in, from wherever the shell left it.
+# A target that cannot be entered, an option this hook cannot honour, a path
+# only the shell can expand — each used to fall back to the checkout the
+# hook started in, so the commit landed somewhere nothing had looked at and
+# the run reported success. A guard that answers for the wrong index is
+# worse than one that says it cannot answer.
+if [ "$committing" -eq 1 ]; then
+  if ! COMMIT_ROOT=$(
+    cd "${TARGET_DIR:-.}" 2>/dev/null &&
+      git ${COMMIT_OPTS[@]+"${COMMIT_OPTS[@]}"} rev-parse --show-toplevel 2>/dev/null
+  ) || [ -z "$COMMIT_ROOT" ]; then
+    echo "pre-commit-check: cannot tell which repository this commits in — name it with a literal path so the commit can be checked" >&2
+    exit 2
+  fi
+  cd "$COMMIT_ROOT" || exit 2
 fi
 
 # Check staged files

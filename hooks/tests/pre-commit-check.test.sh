@@ -493,7 +493,7 @@ assert_eq "$rc" "2" "the lanes run in the space-named repo, not just skip"
 # the commit through on a repository nothing looked at.
 aimed_from "$REPO_W" "repo=$REPO_W; git -C \\\"\$repo\\\" commit -m test"
 assert_eq "$rc" "2" "an unresolvable git -C target is refused"
-assert_contains "$err" "cannot enter" "the refusal names what it could not enter"
+assert_contains "$err" "cannot tell which repository" "the refusal says what it could not work out"
 
 aimed_from "$REPO_W" "cd -- \\\"\$repo\\\" && git commit -m test"
 assert_eq "$rc" "2" "an unresolvable cd target is refused"
@@ -525,6 +525,16 @@ assert_eq "$rc" "2" "more than one commit in a command is refused"
 # must not pay for the over-approximation with a blocked lane.
 aimed_at "git log --grep=commit"
 assert_eq "$rc" "0" "commit inside an option value is not a commit"
+
+# git names its target with more than `-C`, and every option it grows is
+# one more a reader here would have to be taught. These ride back to git.
+aimed_from "$REPO_W" "git --git-dir=$REPO_G/.git --work-tree=$REPO_G commit -m test"
+assert_eq "$rc" "2" "--git-dir and --work-tree name the repo that is checked"
+
+# A subshell is a valid way to wrap a commit, and its parenthesis used to
+# glue itself to the `cd` so the directory change went unread.
+aimed_from "$REPO_W" "(cd $REPO_G && git commit -m test)"
+assert_eq "$rc" "2" "a commit inside a subshell is checked where it lands"
 
 # A payload carrying no command is not a commit; one carrying a command the
 # decoder cannot recover would otherwise run every lane on an empty string.
