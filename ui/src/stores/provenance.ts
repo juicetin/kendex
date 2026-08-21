@@ -21,36 +21,49 @@ interface ProvenanceState {
 
 /** Where every installation came from — the Library's From column reads
  * this join once and matches rows into its groups. */
-export const useProvenanceStore = create<ProvenanceState>((set) => ({
-  rows: [],
-  loaded: false,
-  error: null,
-  load: async () => {
-    let response: Awaited<ReturnType<typeof commands.libraryProvenance>>;
-    try {
-      response = await commands.libraryProvenance();
-    } catch (thrown) {
-      // Both callers fire this without awaiting, so a rejection left alone
-      // is unhandled and the From row simply never appears.
-      set({ loaded: true, error: String(thrown) });
-      return;
-    }
-    if (response.status === "ok") {
-      // A re-read that says the same thing hands back the array already on
-      // screen: the Library keys these per place and memoizes on identity,
-      // so an equal copy re-derives and re-renders the whole table.
-      set((state) => ({
-        rows: keepIfSame(state.rows, response.data),
-        loaded: true,
-        error: null,
-      }));
-    } else {
-      // Left silent, a failure renders as a From row that simply never
-      // appears — the reader is told nothing and has nothing to retry.
-      set({ loaded: true, error: response.error });
-    }
-  },
-}));
+export const useProvenanceStore = create<ProvenanceState>((set) => {
+  // Every read takes a ticket, and only the newest one speaks. This store
+  // reads one thing one way, so its rank is arrival order: the Library
+  // starts a read after every scan while the package page can start another
+  // before that one lands, and without a ticket whichever returns last
+  // wins — putting back provenance a newer read has already replaced, or
+  // clearing an error it just set.
+  let reads = 0;
+  return {
+    rows: [],
+    loaded: false,
+    error: null,
+    load: async () => {
+      reads += 1;
+      const token = reads;
+      const newest = () => token === reads;
+      let response: Awaited<ReturnType<typeof commands.libraryProvenance>>;
+      try {
+        response = await commands.libraryProvenance();
+      } catch (thrown) {
+        // Both callers fire this without awaiting, so a rejection left alone
+        // is unhandled and the From row simply never appears.
+        if (newest()) set({ loaded: true, error: String(thrown) });
+        return;
+      }
+      if (!newest()) return;
+      if (response.status === "ok") {
+        // A re-read that says the same thing hands back the array already on
+        // screen: the Library keys these per place and memoizes on identity,
+        // so an equal copy re-derives and re-renders the whole table.
+        set((state) => ({
+          rows: keepIfSame(state.rows, response.data),
+          loaded: true,
+          error: null,
+        }));
+      } else {
+        // Left silent, a failure renders as a From row that simply never
+        // appears — the reader is told nothing and has nothing to retry.
+        set({ loaded: true, error: response.error });
+      }
+    },
+  };
+});
 
 const originKey = (kind: ItemKind, name: string, scope: Scope): string =>
   `${kind}:${name}:${scopeKey(scope)}`;

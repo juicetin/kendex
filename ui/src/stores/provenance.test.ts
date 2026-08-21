@@ -118,3 +118,49 @@ describe("a join read that rejects rather than answering", () => {
     expect(useProvenanceStore.getState().loaded).toBe(true);
   });
 });
+
+// Two readers fire this without coordinating — the Library after every
+// scan, the package page on its own — so an older response landing last
+// would put back provenance a newer read has already replaced, or clear an
+// error it just set.
+describe("two joins in flight together", () => {
+  function deferred<T>() {
+    let resolve!: (value: T) => void;
+    const promise = new Promise<T>((keep) => {
+      resolve = keep;
+    });
+    return { promise, resolve };
+  }
+
+  it("never lets a superseded read overwrite a newer one", async () => {
+    const slow =
+      deferred<Awaited<ReturnType<typeof commands.libraryProvenance>>>();
+    vi.mocked(commands.libraryProvenance)
+      .mockImplementationOnce(() => slow.promise)
+      .mockResolvedValue({ status: "ok", data: [] });
+
+    const older = useProvenanceStore.getState().load();
+    await useProvenanceStore.getState().load();
+    expect(useProvenanceStore.getState().rows).toEqual([]);
+
+    slow.resolve({ status: "ok", data: ROWS });
+    await older;
+    expect(useProvenanceStore.getState().rows).toEqual([]);
+  });
+
+  it("never lets a superseded failure clear a newer read", async () => {
+    const slow =
+      deferred<Awaited<ReturnType<typeof commands.libraryProvenance>>>();
+    vi.mocked(commands.libraryProvenance)
+      .mockImplementationOnce(() => slow.promise)
+      .mockResolvedValue({ status: "ok", data: ROWS });
+
+    const older = useProvenanceStore.getState().load();
+    await useProvenanceStore.getState().load();
+    slow.resolve({ status: "error", error: "no channel" });
+    await older;
+
+    expect(useProvenanceStore.getState().error).toBe(null);
+    expect(useProvenanceStore.getState().rows).toEqual(ROWS);
+  });
+});

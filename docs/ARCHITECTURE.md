@@ -285,6 +285,18 @@ lives in one capability table read by core and UI.
   draft outranks it and must reach the copy parked for the place it is
   about, not only the one on screen — a discard destroys that copy, a save
   settles it against the file it just wrote.
+- **Every store that reads asynchronously ranks its overlapping reads, and
+  the rank is its own.** Reads of the same thing overlap constantly — a
+  scan finishes, the window regains focus, a page mounts — and unranked,
+  whichever returns last wins, putting back what a newer read replaced or
+  clearing an error it just set. There is no shared ticket because the rank
+  differs: `stores/provenance.ts` reads one thing one way, so newest by
+  arrival is the whole rule; `stores/updates.ts` ranks two kinds of read,
+  where a fetch outranks a poll however they land and a poll begun during a
+  fetch is stale before it returns; `stores/editor-read.ts` ranks per place
+  through `editor-order.ts` and separately asks which read the surface on
+  screen is waiting for. A helper fitting all three would take the
+  differences as parameters and hide the part each has to get right.
 - **A whole-manifest write carries the file it came from, and every other
   writer tells the editor.** A draft is a whole manifest, so a save landing
   after another writer puts the old file back. Two answers, failing
@@ -295,6 +307,14 @@ lives in one capability table read by core and UI.
   nobody wired up. `manifest-sync.ts` marks the place before it awaits, so
   a save in that window never leaves the app, then measures that mark
   against the base. One reload either way.
+- **A read that failed keeps its rows and loses its buttons.** Blanking a
+  page because a read did not finish throws away the only thing on screen;
+  leaving its actions live lets someone apply a revision nobody could
+  confirm, which is the mark that called a place untouched when nobody had
+  looked. So the last good rows stay, the page says they are the last it
+  could check and offers the retry, and every control that writes something
+  the read produced is gated on the read having succeeded
+  (`canApplyUpdates`), not merely on nothing being in flight.
 - **Customization is per place, and every mark names its place.** One
   package can be changed in one project and untouched at user level, so
   "Customized" unqualified answers a question nobody asks.

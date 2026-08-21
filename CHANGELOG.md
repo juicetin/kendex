@@ -198,6 +198,12 @@ changes carry a **Breaking** call-out with their migration note inline.
 
 ### Fixed
 
+- A check for updates that cannot finish no longer looks like one that did.
+  The versions already on screen stay there, and the page now says they are
+  the last ones kendex could check, gives you the retry, and turns off
+  Update, Update all and the Follow switch until a check succeeds — pressing
+  them applied a version nothing had confirmed. A failed check with nothing
+  to show also stops greeting you with "You're up to date".
 - Review no longer counts a standoff as work it can do. A package whose
   files you edited, or whose copy is your own, has no button behind it —
   its way out is on the package's own page — so it is no longer added to

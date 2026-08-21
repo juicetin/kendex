@@ -29,6 +29,16 @@ interface UpdatesState {
   setIgnored: (row: UpdateRow, ignored: boolean) => Promise<void>;
 }
 
+/** Whether the rows on screen may be acted on. A read that failed keeps the
+ *  last good rows rather than blanking the page, which is right for reading
+ *  — but a button that applies a revision off a row nobody could confirm is
+ *  the mark that called a place untouched when nobody had looked. `loaded`
+ *  is the read having succeeded; `busy` is one already running. */
+export const canApplyUpdates = (state: {
+  loaded: boolean;
+  busy: boolean;
+}): boolean => state.loaded && !state.busy;
+
 export const useUpdatesStore = create<UpdatesState>((set) => {
   const showError = (title: string, message: string) =>
     useProblemsStore.getState().showError({ title, message });
