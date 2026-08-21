@@ -164,7 +164,9 @@ mod stale_writes {
     #[test]
     #[allow(clippy::unwrap_used)]
     fn the_base_belongs_to_the_bytes_the_manifest_came_from() {
-        use super::super::{Base, parse_with_base, read_for_mutation};
+        // Through the module, since the pairing is not offered beyond it.
+        use super::super::file::parse_with_base;
+        use super::super::{Base, read_for_mutation};
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("kendex.toml");
         let text = "schema = 5\n";

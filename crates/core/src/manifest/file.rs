@@ -163,9 +163,16 @@ pub fn read_for_mutation(path: &Path) -> Result<(Option<Manifest>, Base)> {
     parse_with_base(path, &text)
 }
 
-/// [`read_for_mutation`] for text the caller already read, and where the
-/// pairing is provable: the base is taken over exactly these bytes.
-pub fn parse_with_base(path: &Path, text: &str) -> Result<(Option<Manifest>, Base)> {
+/// [`read_for_mutation`] for text already in hand, and where the pairing is
+/// provable: the base is taken over exactly these bytes.
+///
+/// Not public beyond this module, and that is the point. It proves the base
+/// matches *these* bytes; it cannot prove these are the bytes the caller
+/// went on to write. Reachable from outside, that is a way to assemble by
+/// hand the pairing [`Base`] exists to prevent — the same fault as a base
+/// read separately from its content, arriving by value instead of by path.
+/// In here there is one caller, and it hands over the bytes it just read.
+pub(super) fn parse_with_base(path: &Path, text: &str) -> Result<(Option<Manifest>, Base)> {
     let base = Base::of(text);
     match parse_text(path, text)? {
         ManifestFile::Absent => Ok((None, base)),

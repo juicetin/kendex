@@ -10,7 +10,7 @@ mod file;
 mod validate;
 pub use file::{
     Base, ManifestFile, check_base, load, load_for_mutation, manifest_path, parse_text,
-    parse_with_base, read_for_mutation, save, seed,
+    read_for_mutation, save, seed,
 };
 pub use validate::{Finding, validate};
 
