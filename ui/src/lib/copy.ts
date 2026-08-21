@@ -181,6 +181,13 @@ export const VERSION_ERROR_TITLE = "Couldn't switch versions";
 // came from nowhere" rather than "kendex could not tell".
 export const ORIGIN_UNREAD = "Couldn't be read";
 
+// A refresh that fails keeps the origin already on screen rather than
+// blanking the row, so there is still something to draw. Drawn plainly it
+// would read as confirmed, which is the one thing it is not.
+export const ORIGIN_UNCONFIRMED = "last known";
+export const originUnconfirmedTitle = (why: string): string =>
+  `kendex could not check where this came from — showing the last answer it had. ${why}`;
+
 // Nav state outlives a scan: a mark clicked before a package was removed
 // from that project opens a page with nothing to say. Going back can land
 // on the row that was clicked, so leaving says why.

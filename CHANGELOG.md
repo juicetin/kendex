@@ -205,6 +205,10 @@ changes carry a **Breaking** call-out with their migration note inline.
   which is what its buttons and badges have always meant.
 - Two projects whose folders share a name are told apart on Review, the way
   they already are in the Library and on a package's own page.
+- A package's From row says when it is showing the last answer kendex had.
+  If the read of where your packages came from fails, the row keeps what it
+  last knew rather than emptying, and marks it as last known instead of
+  presenting it as current.
 - A check for updates that cannot finish no longer looks like one that did.
   The versions already on screen stay there, and the page now says they are
   the last ones kendex could check, gives you the retry, and turns off
