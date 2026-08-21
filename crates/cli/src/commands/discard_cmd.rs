@@ -18,7 +18,7 @@ use crate::scope::ScopeFilter;
 /// package, and why the app has only ever offered the targeted apply.
 #[derive(Args)]
 pub struct DiscardArgs {
-    /// agent | skill
+    /// agent | skill | hook | command | mcp-server | pi-extension
     kind: String,
     name: String,
     #[arg(short = 'g', long)]

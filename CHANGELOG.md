@@ -205,6 +205,14 @@ changes carry a **Breaking** call-out with their migration note inline.
   which is what its buttons and badges have always meant.
 - Two projects whose folders share a name are told apart on Review, the way
   they already are in the Library and on a package's own page.
+- The Customize page holds its Save button down while an apply, adopt,
+  toggle or remove you started elsewhere is still running, the way a
+  package's own page already did. Saving into that window wrote a copy of
+  the settings file the action had already changed.
+- `kendex discard-edits --help` lists every kind the command takes — hooks,
+  commands, MCP servers and Pi extensions as well as agents and skills. It
+  named only two, so a fix `kendex check` printed for one of the others read
+  as unsupported.
 - Discarding your unsaved customization no longer takes typing you did
   after pressing it. The reload that follows leaves anything newer than the
   instruction alone, instead of replacing it without a word.

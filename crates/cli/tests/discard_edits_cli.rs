@@ -352,3 +352,28 @@ fn a_target_nothing_needs_any_more_says_so_instead_of_doing_nothing() {
         "the edit is still there, whatever was said about it"
     );
 }
+
+/// The kinds the help names and the kinds the parser takes are the same
+/// set. The drift report renders this command for whatever kind its line
+/// is about, so a narrower help turns a printed fix into one a reader
+/// takes for unsupported and does not run.
+#[test]
+#[allow(clippy::unwrap_used)]
+fn the_help_names_every_kind_the_command_takes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path();
+    let project = project_with_two_skills(home);
+    let output = kendex(home, &project, &["discard-edits", "--help"]);
+    let said = String::from_utf8_lossy(&output.stdout).into_owned()
+        + &String::from_utf8_lossy(&output.stderr);
+    for kind in [
+        "agent",
+        "skill",
+        "hook",
+        "command",
+        "mcp-server",
+        "pi-extension",
+    ] {
+        assert!(said.contains(kind), "help does not name '{kind}': {said}");
+    }
+}

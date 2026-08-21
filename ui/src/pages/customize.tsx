@@ -5,6 +5,7 @@ import { SaveBar } from "@/components/customize/save-bar";
 import { SharedInstructions } from "@/components/customize/shared-instructions";
 import { UnsavedElsewhere } from "@/components/customize/unsaved-elsewhere";
 import { DotSpinner } from "@/components/loading";
+import { useManifestBusy } from "@/components/package/use-package-data";
 import { PageHeader } from "@/components/page-header";
 import { Section } from "@/components/section";
 import { StatusNote } from "@/components/status-note";
@@ -53,6 +54,12 @@ export function CustomizePage() {
     save,
   } = useEditorStore();
   const projects = useSettingsStore((s) => s.settings?.projects ?? []);
+  // Every rewrite of this place's kendex.toml holds the Save bar down, not
+  // only this page's own save. An apply or a fork started elsewhere is
+  // still in flight when someone walks in here, and a save landing on top
+  // of it carries a draft the file no longer matches. The package page
+  // gates on the same thing; this page reads the manifest just as much.
+  const mutating = useManifestBusy(false);
 
   // Unsaved edits made on a package's own page live in this same draft.
   // The read declines to replace typing in hand — only a deliberate
@@ -154,6 +161,7 @@ export function CustomizePage() {
       {dirty ? (
         <SaveBar
           saving={saving}
+          busy={mutating}
           onSave={() => void save()}
           onDiscard={() => void discard()}
         />
