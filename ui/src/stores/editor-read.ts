@@ -151,8 +151,15 @@ export const loadManifest = async (
         [[scopeKey(scope), false]],
         token,
       ),
-      ...(onScreen() && inventory.status === "ok"
-        ? { inventory: inventory.data }
+      // A typed draft comes back to its own place; the choices beside it
+      // do not follow. When this place's inventory would not read, the one
+      // still in hand belongs to wherever the editor was last — so the
+      // form offers nothing and says why, rather than offering another
+      // project's skills to a save about this one.
+      ...(onScreen()
+        ? inventory.status === "ok"
+          ? { inventory: inventory.data }
+          : { inventory: null, error: inventory.error }
         : {}),
     }));
     return;
