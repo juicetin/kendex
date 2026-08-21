@@ -205,6 +205,9 @@ changes carry a **Breaking** call-out with their migration note inline.
   which is what its buttons and badges have always meant.
 - Two projects whose folders share a name are told apart on Review, the way
   they already are in the Library and on a package's own page.
+- Update all waits for every project it would touch: if any one has unsaved
+  customization, none is updated. It used to update the others and skip
+  that one.
 - Turning a package on or off across every project it is in now waits for
   all of them: if any one has unsaved customization, none is changed. It
   used to change the others and quietly skip that one.
@@ -214,6 +217,10 @@ changes carry a **Breaking** call-out with their migration note inline.
 - Taking back a dismissal or an acceptance now waits for unsaved
   customization in that project, and holds the Customize Save button while
   it runs, like every other change to a project's settings.
+- A package that came with a bundle or as a dependency is told to discard
+  its edits rather than to keep it as its own copy. Keeping it was never
+  possible — it has no entry of its own to record a fork under — so the fix
+  the report printed refused when run.
 - `kendex discard-edits` on a package whose source cannot be read says so
   and stops, instead of reporting "no edits to discard" while your edited
   files are still there. The app's discard says the same.

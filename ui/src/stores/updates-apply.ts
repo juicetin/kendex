@@ -13,7 +13,7 @@ import { useAuditStore } from "./audit";
 import { manifestRewritten } from "./manifest-sync";
 import { useProblemsStore } from "./problems";
 import { useScanStore } from "./scan";
-import { refusesForUnsaved } from "./unsaved-first";
+import { refusesForUnsaved, refusesForUnsavedIn } from "./unsaved-first";
 import { useUpdatesStore } from "./updates";
 
 // Bringing places current, under the updates store's busy flag so every
@@ -89,6 +89,11 @@ export const applyMany = async (wanted: UpdateRow[]): Promise<void> => {
       toast.info(nothingToUpdateToastLabel(skipped));
       return;
     }
+    // Every place this touches is asked before the first one is written.
+    // Asked per row inside the loops below, the first refusal would leave
+    // the set half updated — some places current, one untouched, from a
+    // single Update all that never offered to do part of it.
+    if (refusesForUnsavedIn(rows.map((row) => row.scope))) return;
     // Move every hold first — each move applies its whole scope, so
     // that scope's followers are already current — then one apply per
     // scope no hold touched. Never two applies for one scope.
@@ -104,10 +109,6 @@ export const applyMany = async (wanted: UpdateRow[]): Promise<void> => {
         .map((row) => [scopeKey(row.scope), row] as const),
     );
     for (const row of scopes.values()) {
-      if (refusesForUnsaved(row.scope)) {
-        ok = false;
-        continue;
-      }
       const response = await commands.applyPlan(row.scope, false, []);
       if (response.status === "error") {
         showError(UPDATE_ERROR_TITLE, response.error);

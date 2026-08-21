@@ -53,6 +53,7 @@ pub(super) fn package(name: &str) -> PackageSnapshot {
         edited: false,
         mixed: false,
         forked: false,
+        derived: false,
         can_discard: true,
         open_findings: 0,
     }

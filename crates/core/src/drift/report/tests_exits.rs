@@ -135,3 +135,37 @@ fn an_edited_fork_with_its_copy_intact_names_the_discard() {
     assert!(text.contains("kendex discard-edits skill mine"), "{text}");
     assert!(!text.contains("refresh --discard-edits"), "{text}");
 }
+
+/// A package installed because something else needs it has no declaration
+/// of its own, and `fork` refuses one for that reason. A line naming
+/// forking as its exit names one that will not run.
+#[test]
+fn an_edited_derived_package_is_offered_the_discard_it_can_take() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = env_in(tmp.path());
+    let scope = project_scope(tmp.path());
+    write_manifest(&env, &scope, &manifest_with_remote());
+    snapshot_with(
+        &env,
+        &scope,
+        vec![PackageSnapshot {
+            edited: true,
+            derived: true,
+            ..package("carried-one")
+        }],
+    );
+
+    let text = render_plain(&check(&env, std::slice::from_ref(&scope)));
+    assert!(
+        !text.contains("kendex fork"),
+        "it names an exit that refuses: {text}"
+    );
+    assert!(
+        text.contains("fix: kendex discard-edits skill carried-one"),
+        "and not the one it can take: {text}"
+    );
+    assert!(
+        text.contains("came with something else"),
+        "the line has to say why forking is not offered: {text}"
+    );
+}

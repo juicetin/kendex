@@ -241,6 +241,21 @@ impl ScopeCheck<'_> {
                         global: self.global,
                     }),
                 )
+            } else if package.derived {
+                // Installed because something else needs it, so there is no
+                // declaration to write a fork under and `fork` refuses one.
+                // Discarding is the exit it does have, and the command takes
+                // a derived package by name.
+                (
+                    format!(
+                        "{prefix}{kind} '{name}' was edited on disk — it came with something else, so discard its edits to put it back"
+                    ),
+                    Some(Remedy::DiscardEdits {
+                        kind: package.kind,
+                        name: package.name.clone(),
+                        global: self.global,
+                    }),
+                )
             } else {
                 (
                     format!(

@@ -58,6 +58,12 @@ pub struct PackageSnapshot {
     pub edited: bool,
     pub mixed: bool,
     pub forked: bool,
+    /// Installed because something else needs it — a bundle member or a
+    /// dependency — rather than because this place declared it. `fork`
+    /// refuses one: there is no declaration to write the fork under. The
+    /// line has to know, or it prints an exit that refuses.
+    #[serde(default)]
+    pub derived: bool,
     /// Whether the fork's own copy can still be re-rendered from. The report
     /// names the discard exit only where it would run — measured by the same
     /// read the discard does, never assumed from the fork.
@@ -146,6 +152,7 @@ pub fn record_with(
             edited: row.blocked_by_local_edit,
             mixed: row.mixed,
             forked: row.forked,
+            derived: row.derived,
             can_discard: row.can_discard,
             open_findings: open
                 .get(&(row.kind, row.name.clone()))
