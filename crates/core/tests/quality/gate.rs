@@ -192,14 +192,24 @@ fn a_discard_aimed_at_a_refused_package_plans_nothing() {
     )
     .unwrap();
 
+    // The plan carries no replacement for it — but "no ops at all" is the
+    // wrong question to ask, because a scope brings its own maintenance
+    // along and that would read as the replacement. The package's own row
+    // is what says it.
+    assert!(
+        discard
+            .safety
+            .iter()
+            .any(|row| row.name == "hostile" && row.blocked()),
+        "the gate is what holds it, and the row is how a caller can tell"
+    );
     assert!(
         discard.plan.ops.is_empty(),
-        "the refusal holds it, so there is nothing to put back: {:?}",
+        "nothing at all here, which is the simple case: {:?}",
         discard.plan.ops
     );
-    assert_eq!(
+    assert!(
         std::fs::read_to_string(&file).unwrap().contains("Mine."),
-        true,
         "and the edit is still there, which is why saying it was discarded would be false"
     );
 }

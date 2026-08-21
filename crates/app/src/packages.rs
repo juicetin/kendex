@@ -247,11 +247,19 @@ pub fn apply_discard_edits(
         },
     )
     .map_err(|e| e.to_string())?;
-    // The edit was measured, so the plan should carry the write that puts
-    // the declared content back. An empty one means something else held it
-    // — a safety refusal keeps a refused rendering off disk whatever this
-    // authorises — and applying it would report a discard that never
-    // happened over edits still on disk.
+    // A refused package gets no rendering written whatever this authorises,
+    // and the plan can still be non-empty because the scope carries its own
+    // maintenance alongside. Asking whether anything is planned would take
+    // that for the replacement.
+    if report
+        .safety
+        .iter()
+        .any(|row| row.kind == kind && row.name == name && row.blocked())
+    {
+        return Err(format!(
+            "{name} was edited, and its declared content is held back by a safety finding — settle it in Review and try again"
+        ));
+    }
     if report.plan.ops.is_empty() {
         return Err(format!(
             "{name} was edited, and nothing here can put its declared content back — Review says what is holding it"
