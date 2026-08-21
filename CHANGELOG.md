@@ -205,6 +205,12 @@ changes carry a **Breaking** call-out with their migration note inline.
   which is what its buttons and badges have always meant.
 - Two projects whose folders share a name are told apart on Review, the way
   they already are in the Library and on a package's own page.
+- Removing a package from every project it is in, and turning one on or
+  off across them, now stop if you start typing settings for a project
+  still to come — rather than carrying on and writing over what you typed.
+- Keeping a package as your own tells you how to get its files back if the
+  step that renders them did not run. It named two ways out that both
+  assume the files are there.
 - Update all waits for every project it would touch: if any one has unsaved
   customization, none is updated. It used to update the others and skip
   that one.

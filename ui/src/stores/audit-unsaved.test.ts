@@ -4,7 +4,7 @@ import { commands } from "@/bindings";
 import { useAuditStore } from "./audit";
 import { useEditorStore } from "./editor";
 import { useProblemsStore } from "./problems";
-import { refusesForUnsavedIn } from "./unsaved-first";
+import { inEveryPlace, refusesForUnsavedIn } from "./unsaved-first";
 
 vi.mock("@/bindings", () => ({
   commands: {
@@ -173,5 +173,40 @@ describe("a package-wide action across several places", () => {
   it("goes ahead when none of them does", () => {
     useEditorStore.setState({ scope: VG, draft: null, dirty: false, held: {} });
     expect(refusesForUnsavedIn([VG, globalScope])).toBe(false);
+  });
+});
+
+// Every await between places is a window someone can type in, and these
+// actions return nothing — so a refusal inside one is invisible to the
+// loop unless the loop asks again itself.
+describe("a package-wide action while someone types mid-run", () => {
+  const VG = { scope: "project" as const, root: "/work/vg" };
+
+  it("stops at the place the typing is about", async () => {
+    useEditorStore.setState({ scope: VG, draft: null, dirty: false, held: {} });
+    const done: string[] = [];
+    await inEveryPlace([VG, globalScope], async (scope) => {
+      done.push(scope.scope === "global" ? "global" : scope.root);
+      // Typing arrives about the place still to come.
+      useEditorStore.setState({
+        held: {
+          global: {
+            scope: globalScope,
+            draft: { schema: 1, install: {} },
+            base: "read-earlier",
+          },
+        },
+      });
+    });
+    expect(done).toEqual(["/work/vg"]);
+  });
+
+  it("does every place when nobody types", async () => {
+    useEditorStore.setState({ scope: VG, draft: null, dirty: false, held: {} });
+    const done: string[] = [];
+    await inEveryPlace([VG, globalScope], async (scope) => {
+      done.push(scope.scope === "global" ? "global" : scope.root);
+    });
+    expect(done).toEqual(["/work/vg", "global"]);
   });
 });

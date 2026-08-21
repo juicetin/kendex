@@ -160,8 +160,15 @@ pub enum CoreError {
     /// A second fork of the same package would overwrite the first's
     /// provenance — which source it came from, and at which commit — and
     /// that record lives nowhere but the manifest.
+    /// Keeping a package as your own is two steps: the record, and the
+    /// render from the copy just kept. The first commits on its own and
+    /// takes the installed rendering away, so an interruption between them
+    /// leaves the record standing and nothing on disk — and forking again
+    /// refuses, because the record is already there. The line has to name
+    /// the way back out of that, not only the exits that assume the files
+    /// are present.
     #[error(
-        "'{name}' is already your own copy — edit it in place, or remove it and install it again to go back to the source"
+        "'{name}' is already your own copy — apply this scope to render it again if its files are missing, edit them in place, or remove it and install it again to go back to the source"
     )]
     AlreadyForked { name: String },
 

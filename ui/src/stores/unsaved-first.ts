@@ -64,3 +64,27 @@ export function refusesForUnsavedIn(scopes: Scope[]): boolean {
   });
   return true;
 }
+
+/** Run one package-wide action over every place it is about, or over none.
+ *
+ *  Two questions, because they are different questions. The first is asked
+ *  before anything is written: a set that already has unsaved typing in it
+ *  is not started, so one click cannot leave the package changed in two
+ *  projects and not the third. The second is asked again before each place,
+ *  because every await in between is a window someone can type in — and
+ *  these actions return nothing, so a refusal inside one is invisible from
+ *  out here.
+ *
+ *  A refusal stops the loop rather than skipping past it. The places
+ *  already done are done; writing the rest over what someone just typed
+ *  would be the same loss one place along. */
+export async function inEveryPlace(
+  scopes: Scope[],
+  act: (scope: Scope) => Promise<void>,
+): Promise<void> {
+  if (refusesForUnsavedIn(scopes)) return;
+  for (const scope of scopes) {
+    if (refusesForUnsaved(scope)) return;
+    await act(scope);
+  }
+}
