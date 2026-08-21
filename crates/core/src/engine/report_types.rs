@@ -129,12 +129,13 @@ pub struct PlanOptions {
     pub overwrite_edited_names: Option<Vec<(ItemKind, String)>>,
     /// Plan for these items only. Every other declared item is carried
     /// forward exactly as the lock records it — nothing written for it and
-    /// nothing of its taken away. A plan is always the scope's, so a
-    /// command naming one package would otherwise install, update and
-    /// re-render whatever else the scope had pending, and sweep another
-    /// package's stale path, under that package's name. What is not an
-    /// item's own work still runs: the manifest kendex maintains, and the
-    /// safety gate taking a refused rendering off disk.
+    /// nothing of its taken away, by any pass: the item writes, the sweep
+    /// of a path an earlier install left, and the removal a safety refusal
+    /// would make. A plan is always the scope's, so a command naming one
+    /// package would otherwise install, update and re-render whatever else
+    /// the scope had pending, and delete files belonging to packages it
+    /// never mentioned. What runs regardless is what belongs to no item:
+    /// the manifest kendex maintains for the scope.
     pub only_names: Option<Vec<(ItemKind, String)>>,
 }
 

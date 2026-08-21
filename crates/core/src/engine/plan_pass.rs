@@ -83,6 +83,7 @@ pub(super) fn plan_refusals(
     scope: &Scope,
     lock: &Lock,
     state: &desired::DesiredState,
+    options: &PlanOptions,
     guard: &mut removal::TrashGuard,
     drift: &mut Vec<DriftRow>,
     ops: &mut Vec<PlannedOp>,
@@ -98,12 +99,17 @@ pub(super) fn plan_refusals(
         let key = crate::lock::entry_key(refusal.kind, &refusal.name, refusal.harness);
         let mut removals = Vec::new();
         if let Some(entry) = lock.entries.get(&key) {
-            // A refused rendering takes its previous installation off disk
-            // — unless the user's edits are in it. Edited bytes are never
-            // an automatic casualty of an upstream change (that is the
-            // exact promise of edit protection), so they hold and the
-            // conflict says why.
-            if removal::edit_holds(env, scope, entry) {
+            // A refused rendering takes its previous installation off disk,
+            // and two things keep it there. It may not be this plan's
+            // package: taking a sibling's files is not a command about
+            // another package's to do, and the next unrestricted pass —
+            // every audit, every apply — takes them. Or the user's edits
+            // are in it, and edited bytes are never an automatic casualty
+            // (that is the exact promise of edit protection). Either way
+            // the record stays with the files it describes.
+            if !options.acts_on(refusal.kind, &refusal.name) {
+                new_lock.entries.insert(key.clone(), entry.clone());
+            } else if removal::edit_holds(env, scope, entry) {
                 drift.push(DriftRow {
                     kind: refusal.kind,
                     name: refusal.name.clone(),
@@ -123,12 +129,14 @@ pub(super) fn plan_refusals(
                 // a stranger's directory — refusing, forever, to write the
                 // accepted content over it.
                 new_lock.entries.insert(key, entry.clone());
+                // The conflict says why; nothing else is planned for it.
                 continue;
+            } else {
+                guard.extend(
+                    &mut removals,
+                    removal::removal_ops(env, scope, entry, config_edits)?,
+                );
             }
-            guard.extend(
-                &mut removals,
-                removal::removal_ops(env, scope, entry, config_edits)?,
-            );
         }
         drift.push(DriftRow {
             kind: refusal.kind,

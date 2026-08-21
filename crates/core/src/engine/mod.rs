@@ -161,6 +161,7 @@ pub fn plan_scope(
         scope,
         lock,
         &state,
+        options,
         &mut guard,
         &mut drift,
         &mut ops,
