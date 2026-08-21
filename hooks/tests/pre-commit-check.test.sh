@@ -408,14 +408,21 @@ git -C "$REPO_W" add NOTES.md
 printf 'fn other() {}\n' >"$REPO_G/dirty.rs"
 git -C "$REPO_G" add dirty.rs
 
-aimed_at() {
+# Run the hook from $1 against the command in $2. Where it starts matters:
+# a starting checkout with failing Rust staged makes rc 2 the answer for a
+# hook that never moved, so any test proving it moved has to start clean.
+aimed_from() {
   set +e
-  out=$( (cd "$REPO_G" && env -u KENDEX_PRE_COMMIT_RUST_CLIPPY \
+  out=$( (cd "$1" && env -u KENDEX_PRE_COMMIT_RUST_CLIPPY \
     PATH="$BIN_DIR:$PATH" CARGO_LOG="$CARGO_LOG" CARGO_CLIPPY_EXIT=1 \
-    bash "$HOOK" <<<"{\"command\": \"$1\"}") 2>"$ERR_FILE")
+    bash "$HOOK" <<<"{\"command\": \"$2\"}") 2>"$ERR_FILE")
   rc=$?
   set -e
   err="$(cat "$ERR_FILE")"
+}
+
+aimed_at() {
+  aimed_from "$REPO_G" "$1"
 }
 
 # Control: with no target named, the hook answers for the repo it starts in,
@@ -480,6 +487,44 @@ printf 'fn spaced() {}\n' >"$REPO_SP/dirty.rs"
 git -C "$REPO_SP" add dirty.rs
 aimed_at "git -C \\\"$REPO_SP\\\" commit -m test"
 assert_eq "$rc" "2" "the lanes run in the space-named repo, not just skip"
+
+# A target this reader cannot resolve is refused, not dropped. The shell
+# expands `$repo` and commits there; a hook that shrugs and stays put lets
+# the commit through on a repository nothing looked at.
+aimed_from "$REPO_W" "repo=$REPO_W; git -C \\\"\$repo\\\" commit -m test"
+assert_eq "$rc" "2" "an unresolvable git -C target is refused"
+assert_contains "$err" "cannot enter" "the refusal names what it could not enter"
+
+aimed_from "$REPO_W" "cd -- \\\"\$repo\\\" && git commit -m test"
+assert_eq "$rc" "2" "an unresolvable cd target is refused"
+
+# The -C that counts belongs to the git that commits. Reading the first one
+# anywhere in the command checks a repository the commit never touches.
+aimed_at "git -C $REPO_W status && git -C $REPO_SP commit -m test"
+assert_eq "$rc" "2" "the -C of the committing git is the one that counts"
+
+# A cd after the commit belongs to whatever runs next.
+aimed_at "git commit -m test && cd $REPO_W"
+assert_eq "$rc" "2" "a cd after the commit does not move the check"
+
+# A tilde is the shell's, and the hook has to read it the same way.
+set +e
+out=$( (cd "$REPO_G" && env -u KENDEX_PRE_COMMIT_RUST_CLIPPY HOME="$TMP_ROOT" \
+  PATH="$BIN_DIR:$PATH" CARGO_LOG="$CARGO_LOG" CARGO_CLIPPY_EXIT=1 \
+  bash "$HOOK" <<<"{\"command\": \"git -C ~/worktree commit -m test\"}") 2>"$ERR_FILE")
+rc=$?
+set -e
+assert_eq "$rc" "0" "a tilde in the target resolves against HOME"
+
+# Two commits in one command would each need their own answer; one run
+# cannot give it, so it refuses rather than checking whichever it saw first.
+aimed_from "$REPO_W" "git -C $REPO_G commit -m a && git -C $REPO_W commit -m b"
+assert_eq "$rc" "2" "more than one commit in a command is refused"
+
+# `commit` as an option value is not a subcommand, and a read-only command
+# must not pay for the over-approximation with a blocked lane.
+aimed_at "git log --grep=commit"
+assert_eq "$rc" "0" "commit inside an option value is not a commit"
 
 # A payload carrying no command is not a commit; one carrying a command the
 # decoder cannot recover would otherwise run every lane on an empty string.

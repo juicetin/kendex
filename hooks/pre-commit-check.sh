@@ -51,7 +51,7 @@ fi
 # order. `git log --grep=commit` pays for that with a lint run it did not
 # need, which is the side worth being wrong on.
 FLAT=$(printf '%s' "$COMMAND" | tr '\n\t' '  ')
-WORDS=" $(printf '%s' "$FLAT" | tr -c 'a-zA-Z0-9_-' ' ') "
+WORDS=" $(printf '%s' "$FLAT" | tr -c 'a-zA-Z0-9_=-' ' ') "
 if ! printf '%s' "$WORDS" | grep -qE ' git( .*)? commit '; then
   exit 0
 fi
@@ -107,43 +107,105 @@ tokenize() {
   fi
 }
 
-# Check the repository the command commits in, which is not always the one
-# this hook starts in: a session working in a git worktree commits with
-# `git -C <path>` or a `cd <path> &&` prefix while the hook's own cwd stays
-# at the project directory. Reading the staged set and linting from there
-# would answer for whatever is uncommitted in the main checkout instead —
-# another repository's work, blocking a commit it has nothing to do with.
-# `block-repo-copy.sh` walks a command's `cd` segments for the same reason.
+# Where the commit lands, which is not always where this hook started: a
+# session working in a git worktree commits with `git -C <path>` or a
+# `cd <path> &&` prefix. Reading the staged set from the wrong place answers
+# for another repository's work — either blocking a commit it has nothing to
+# do with, or clearing one nobody checked.
+#
+# A command is a sequence of segments, so the `-C` that counts is the one
+# belonging to the git that commits: in `git -C clean status && git -C dirty
+# commit` the first names a repository this hook must not answer for.
+git_home=${HOME:-}
+
+# Join a path onto the running target the way the shell would.
+move_target() {
+  local path=$1
+  case $path in
+    '~') path=$git_home ;;
+    '~/'*) path=$git_home/${path#'~/'} ;;
+  esac
+  case $path in
+    /*) TARGET_DIR=$path ;;
+    *) TARGET_DIR=${TARGET_DIR:-.}/$path ;;
+  esac
+}
+
 tokenize "$FLAT"
 TARGET_DIR=""
-for ((i = 0; i < ${#TOKENS[@]}; i++)); do
-  case ${TOKENS[$i]} in
-    git | */git) ;;
-    *) continue ;;
+committing=0
+at_segment_start=1
+i=0
+n=${#TOKENS[@]}
+while [ "$i" -lt "$n" ]; do
+  token=${TOKENS[$i]}
+  case $token in
+    '&&' | '||' | ';' | '|' | '&')
+      at_segment_start=1
+      i=$((i + 1))
+      continue
+      ;;
   esac
-  # `-C` binds to git itself, so it sits among the options between `git` and
-  # the subcommand. A `-C` after the subcommand belongs to the subcommand
-  # (`git log -C` asks for copy detection) and names no directory.
-  for ((j = i + 1; j < ${#TOKENS[@]}; j++)); do
+  # A `cd` ahead of the commit moves it; one after belongs to whatever comes
+  # next and must not drag the check along with it.
+  if [ "$at_segment_start" -eq 1 ] && [ "$token" = "cd" ] && [ "$committing" -eq 0 ]; then
+    j=$((i + 1))
+    [ "${TOKENS[$j]:-}" = "--" ] && j=$((j + 1))
+    [ -n "${TOKENS[$j]:-}" ] && move_target "${TOKENS[$j]}"
+    at_segment_start=0
+    i=$((i + 1))
+    continue
+  fi
+  at_segment_start=0
+  case $token in
+    git | */git) ;;
+    *)
+      i=$((i + 1))
+      continue
+      ;;
+  esac
+  # git's own options sit between it and the subcommand, and these carry
+  # their value in the next word, so the subcommand is not what follows them.
+  pending=()
+  j=$((i + 1))
+  while [ "$j" -lt "$n" ]; do
     case ${TOKENS[$j]} in
       -C)
-        TARGET_DIR=${TOKENS[$((j + 1))]:-}
-        break 2
+        pending+=("${TOKENS[$((j + 1))]:-}")
+        j=$((j + 2))
         ;;
       -C?*)
-        TARGET_DIR=${TOKENS[$j]#-C}
-        break 2
+        pending+=("${TOKENS[$j]#-C}")
+        j=$((j + 1))
         ;;
-      -*) ;;
+      -c | --git-dir | --work-tree | --namespace | --exec-path | --config-env)
+        j=$((j + 2))
+        ;;
+      -*) j=$((j + 1)) ;;
       *) break ;;
     esac
   done
+  if [ "${TOKENS[$j]:-}" = "commit" ]; then
+    committing=$((committing + 1))
+    for path in ${pending[@]+"${pending[@]}"}; do
+      move_target "$path"
+    done
+  fi
+  i=$((j + 1))
 done
-if [ -z "$TARGET_DIR" ] && [ "${TOKENS[0]:-}" = "cd" ]; then
-  TARGET_DIR=${TOKENS[1]:-}
+
+if [ "$committing" -gt 1 ]; then
+  echo "pre-commit-check: more than one commit in this command — run them separately so each is checked" >&2
+  exit 2
 fi
-if [ -n "$TARGET_DIR" ] && [ -d "$TARGET_DIR" ]; then
-  cd "$TARGET_DIR" || exit 0
+
+# A named target this hook cannot enter is refused, never dropped. A path
+# the shell expands and this reader cannot — `git -C "$repo" commit` — used
+# to fall back to the checkout the hook started in, so the commit landed
+# somewhere nothing had looked at and the run reported success.
+if [ -n "$TARGET_DIR" ] && ! cd "$TARGET_DIR" 2>/dev/null; then
+  echo "pre-commit-check: cannot enter '$TARGET_DIR' — name the repository with a literal path so its commit can be checked" >&2
+  exit 2
 fi
 
 # Check staged files
