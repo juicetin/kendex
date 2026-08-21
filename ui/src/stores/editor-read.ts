@@ -163,7 +163,13 @@ export const loadManifest = async (
     // save sends them together, or a write could carry one file's
     // contents under another file's name.
     base: manifest.data.base,
-    inventory: inventory.status === "ok" ? inventory.data : current.inventory,
+    // Null rather than whatever was there: the one still in hand belongs
+    // to the place last read, and after a move that is a different place.
+    // Keeping it offers this place's form another place's skills and hooks
+    // and hides its own, so a save here writes choices made about
+    // somewhere else. Nothing to offer is the honest state, and the error
+    // below says why.
+    inventory: inventory.status === "ok" ? inventory.data : null,
     saved: fold(current.saved, read, token),
     unreadPlaces: foldUnread(
       current.unreadPlaces,

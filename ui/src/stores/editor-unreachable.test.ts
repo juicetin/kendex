@@ -149,3 +149,40 @@ describe("when only the inventory read fails", () => {
     expect(state.error).toContain("bridge went away");
   });
 });
+
+// The choices a form offers belong to the place it is about. After a move,
+// the inventory in hand belongs to where you were — so keeping it when the
+// new place's read fails offers one project's skills while saving another
+// project's file.
+describe("returning to a parked place when its inventory will not read", () => {
+  it("offers nothing rather than the place you came from", async () => {
+    const stocked = {
+      declaredAgents: [],
+      declaredSkills: ["from-the-other-place"],
+      availableSkills: ["from-the-other-place"],
+      harnesses: [],
+      hookEvents: [],
+    };
+    vi.mocked(commands.getManifest).mockResolvedValue({
+      status: "ok",
+      data: { manifest: null, base: "read" },
+    });
+    vi.mocked(commands.editorInventory).mockResolvedValue({
+      status: "ok",
+      data: stocked,
+    });
+    await useEditorStore.getState().load({ scope: "global" });
+    expect(useEditorStore.getState().inventory).toEqual(stocked);
+
+    // Back to a place whose inventory will not come.
+    vi.mocked(commands.editorInventory).mockResolvedValue({
+      status: "error",
+      error: "the inventory would not read",
+    });
+    await useEditorStore.getState().load({ scope: "global" });
+
+    const state = useEditorStore.getState();
+    expect(state.inventory).toBeNull();
+    expect(state.error).toContain("would not read");
+  });
+});

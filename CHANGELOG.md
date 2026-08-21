@@ -226,6 +226,9 @@ changes carry a **Breaking** call-out with their migration note inline.
 - A package-wide toggle or removal stops when one project refuses it,
   rather than carrying on and leaving the package changed in some projects
   and not others.
+- Coming back to a project whose skill list will not load offers nothing
+  rather than the last project's, so a save here cannot write choices made
+  about somewhere else.
 - A project whose settings fail to re-read on their own says so straight
   away, rather than going on showing what kendex last knew as current.
 - A project that could not be read stops reading as unchecked as soon as it
