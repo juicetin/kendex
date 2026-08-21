@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { commands, type ItemWarning, type UpdateRow } from "@/bindings";
 import { UPDATE_ERROR_TITLE } from "@/lib/copy";
 import { keepIfSame } from "@/lib/same-read";
+import { manifestRewritten } from "./manifest-sync";
 import { useProblemsStore } from "./problems";
 import { applyMany, applyOne } from "./updates-apply";
 
@@ -138,6 +139,12 @@ export const useUpdatesStore = create<UpdatesState>((set) => {
         );
         if (response.status === "error") {
           showError(UPDATE_ERROR_TITLE, response.error);
+        } else {
+          // Holding a package at a version, or letting it follow again,
+          // writes that place's kendex.toml — before the tables re-read,
+          // or a save of the copy the Customize tab holds puts the old
+          // file back over what this just recorded.
+          await manifestRewritten(row.scope);
         }
         await reload();
       } finally {

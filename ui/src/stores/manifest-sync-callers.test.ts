@@ -10,6 +10,7 @@ import { useEditorStore } from "./editor";
 import { useMarketplacesStore } from "./marketplaces";
 import { useProblemsStore } from "./problems";
 import { useSettingsStore } from "./settings";
+import { useUpdatesStore } from "./updates";
 import { keepAsOwn } from "./updates-edits";
 
 vi.mock("@/bindings", () => ({
@@ -22,6 +23,7 @@ vi.mock("@/bindings", () => ({
     sourceToggle: vi.fn(),
     marketplacesOverview: vi.fn(),
     packageFork: vi.fn(),
+    packageSetRev: vi.fn(),
     updatesOverview: vi.fn(),
   },
 }));
@@ -186,6 +188,47 @@ describe("keeping a fork tells the editor before it re-reads", () => {
     await keepAsOwn(updateRow("gh", null, { forkableHarness: "claude" }));
 
     expect(commands.packageFork).toHaveBeenCalled();
+    refused();
+  });
+});
+
+// Switching a place between following its source and holding at what is
+// installed writes that place's kendex.toml, like every other version move.
+describe("holding a version tells the editor before it re-reads", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useSettingsStore.setState({ settings: { schema: 1, projects: [] } });
+    useEditorStore.setState({ scope, draft: typed, dirty: true, saved: {} });
+    useEditorStore.setState({ outdated: null });
+    useProblemsStore.getState().closeError();
+    vi.mocked(commands.getManifest).mockResolvedValue({
+      status: "ok",
+      data: null,
+    });
+    vi.mocked(commands.editorInventory).mockResolvedValue({
+      status: "ok",
+      data: inventory,
+    });
+    vi.mocked(commands.updateManifest).mockResolvedValue({
+      status: "error",
+      error: "should never be reached",
+    });
+    vi.mocked(commands.packageSetRev).mockResolvedValue({
+      status: "ok",
+      data: view,
+    });
+    vi.mocked(commands.updatesOverview).mockImplementation(async () => {
+      press();
+      return { status: "ok", data: { rows: [], warnings: [] } };
+    });
+  });
+
+  it("refuses the save after turning following off", async () => {
+    await useUpdatesStore
+      .getState()
+      .setAutoUpdate(updateRow("gh", null, { updateAvailable: false }), false);
+
+    expect(commands.packageSetRev).toHaveBeenCalled();
     refused();
   });
 });
