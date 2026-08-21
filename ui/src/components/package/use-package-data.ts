@@ -16,7 +16,7 @@ import {
 import { versionRowLabel } from "@/lib/versions";
 import { useAuditStore } from "@/stores/audit";
 import { useEditorStore } from "@/stores/editor";
-import type { PackageRef } from "@/stores/nav";
+import type { PackageView as OpenedAt, PackageRef } from "@/stores/nav";
 import { useProblemsStore } from "@/stores/problems";
 import { useScanStore } from "@/stores/scan";
 import { useUpdatesStore } from "@/stores/updates";
@@ -34,6 +34,24 @@ export type PackageView =
        *  package's primary installation. */
       harness?: HarnessId;
     };
+
+/** What the page shows on arrival: the comparison a Preview link asked
+ *  for, else the package's files. */
+export const openingView = (opened: OpenedAt | null): PackageView =>
+  opened?.mode === "diff"
+    ? {
+        mode: "diff",
+        from: opened.from,
+        to: opened.to,
+        fromLabel: opened.from.slice(0, 7),
+        toLabel: opened.to.slice(0, 7),
+      }
+    : { mode: "files", file: null };
+
+/** Which tab it opens on: a customized mark points at what was changed in
+ *  a place, which is the Customize tab's business, not the overview's. */
+export const openingTab = (opened: OpenedAt | null): string =>
+  opened?.mode === "customize" ? "customize" : "overview";
 
 /** Which rendering a diff reads: the one the view names, else the
  *  package's primary installation. */

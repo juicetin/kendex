@@ -1,20 +1,8 @@
 import { useEffect, useMemo, useRef } from "react";
 import type { ItemKind, Tag } from "@/bindings";
-import { InstalledRow } from "@/components/library/installed-row";
-import { InstalledSkeleton } from "@/components/library/installed-skeleton";
+import { InstalledTable } from "@/components/library/installed-table";
 import { LibraryFilters } from "@/components/library/library-filters";
-import { LibraryLegend } from "@/components/library/library-legend";
 import { NotManagedPanel } from "@/components/library/not-managed";
-import { TableEmptyRow } from "@/components/library/table-empty";
-import {
-  Table,
-  TableBody,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
-import { TAGS_ROW_LABEL } from "@/lib/copy";
-import { customizedItems } from "@/lib/customization";
 import {
   filterItems,
   groupItems,
@@ -22,7 +10,6 @@ import {
   projectScopes,
 } from "@/lib/derive";
 import { PAGE_GUTTER, WIDE_CONTENT_WIDTH } from "@/lib/layout";
-import { scopeKey } from "@/lib/scope";
 import { cn } from "@/lib/utils";
 import { useEditorStore } from "@/stores/editor";
 import { useLibraryViewStore } from "@/stores/library-view";
@@ -42,7 +29,6 @@ export function InstalledView() {
   const scope = useNavStore((s) => s.libraryScope);
   const setScope = useNavStore((s) => s.setLibraryScope);
   const goToMarketplaces = useNavStore((s) => s.goToMarketplaces);
-  const goToPackage = useNavStore((s) => s.goToPackage);
   const clearLibraryFilter = useNavStore((s) => s.clearLibraryFilter);
   const {
     kind,
@@ -64,9 +50,8 @@ export function InstalledView() {
   const setSearch = useNavStore((s) => s.setSearch);
   const projects = result ? projectScopes(result) : [];
   const scroller = useRef<HTMLDivElement | null>(null);
-  // Every scope's manifest, so a row can say whether you have changed the
-  // package wherever it is installed — not only in the scope last edited.
-  const saved = useEditorStore((s) => s.saved);
+  // Every scope's manifest, so a row can say where you have changed the
+  // package — not only in the scope last edited.
   const loadAll = useEditorStore((s) => s.loadAll);
   useEffect(() => {
     void loadAll();
@@ -78,20 +63,6 @@ export function InstalledView() {
     if (!result) return;
     void loadProvenance();
   }, [loadProvenance, result]);
-  const customizedKeys = useMemo(() => {
-    const keys = new Set<string>();
-    for (const [where, draft] of Object.entries(saved)) {
-      for (const item of customizedItems(draft)) {
-        keys.add(`${where}|${item.kind}:${item.name}`);
-      }
-    }
-    return keys;
-  }, [saved]);
-  const isCustomizedHere = (group: ReturnType<typeof groupItems>[number]) =>
-    groupScopes(group).some((scope) =>
-      customizedKeys.has(`${scopeKey(scope)}|${group.kind}:${group.name}`),
-    );
-
   // The filter is a one-time handoff from wherever the link was clicked
   // (Harnesses, Projects); once applied, further tab visits start from the
   // stored view again rather than reapplying a stale filter.
@@ -191,55 +162,14 @@ export function InstalledView() {
             className="min-w-0 flex-1 overflow-y-auto pr-2 [scrollbar-gutter:stable]"
           >
             <NotManagedPanel />
-            {groups.some(isCustomizedHere) ? <LibraryLegend /> : null}
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Name</TableHead>
-                  <TableHead>Type</TableHead>
-                  <TableHead>{TAGS_ROW_LABEL}</TableHead>
-                  <TableHead>Harnesses</TableHead>
-                  <TableHead>Where</TableHead>
-                  <TableHead>From</TableHead>
-                  <TableHead className="text-right">Updated</TableHead>
-                  <TableHead>Status</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {groups.map((group) => {
-                  const primary = group.installations[0];
-                  return (
-                    <InstalledRow
-                      key={group.key}
-                      group={group}
-                      origin={originFor(
-                        provenance,
-                        group.kind,
-                        group.name,
-                        groupScopes(group),
-                      )}
-                      customized={isCustomizedHere(group)}
-                      onOpen={() => {
-                        if (!primary) return;
-                        goToPackage({
-                          kind: group.kind,
-                          name: group.name,
-                          scope: primary.scope,
-                        });
-                      }}
-                    />
-                  );
-                })}
-                {scanning ? <InstalledSkeleton /> : null}
-                {!scanning && groups.length === 0 ? (
-                  <TableEmptyRow
-                    hasAnyItems={hasAnyItems}
-                    onClearFilters={clearFilters}
-                    onBrowse={() => goToMarketplaces()}
-                  />
-                ) : null}
-              </TableBody>
-            </Table>
+            <InstalledTable
+              groups={groups}
+              provenance={provenance}
+              scanning={scanning}
+              hasAnyItems={hasAnyItems}
+              onClearFilters={clearFilters}
+              onBrowse={() => goToMarketplaces()}
+            />
           </div>
         </div>
       </div>

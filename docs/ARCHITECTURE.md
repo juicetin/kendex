@@ -183,9 +183,10 @@ lives in one capability table read by core and UI.
   always had, and item kinds are told apart by icon — so no surface ever
   asks a reader to decode two colour languages at once. The Library's
   table is the single exception: a row's kind icon takes `--customized`
-  when you have changed that package, and the table prints the key above
-  itself. A colour that means something has to say what, on the same
-  screen as the thing it marks.
+  when you have changed that package somewhere, and the table prints the
+  key above itself. A colour that means something has to say what, on the
+  same screen as the thing it marks — and since the colour cannot say
+  *where*, the row's Where cell spells that out in words.
 - In a table, a harness is its mark, not its name. Every row carries the
   same five or six harnesses, so spelling them out is a column of repeated
   words crowding out the columns that differ; the logo and its hue tell
@@ -266,6 +267,16 @@ lives in one capability table read by core and UI.
   save overwrite the first with no warning, so the Customize page reloads
   only when nothing is unsaved, and `lib/customization.ts` slices that
   one draft per package rather than fetching a second copy.
+- **Customization is per place, and every mark names its place.** One
+  package can be changed in one project and untouched at user level, so
+  "Customized" unqualified answers a question nobody asks.
+  `lib/customized-places.ts` joins the two facts that make a place yours —
+  that place's manifest overlay, and its files edited by hand
+  (`UpdateRow::blocked_by_local_edit`) — into one `PlaceState`, which the
+  Library row, the package header, the Customize tab's chips, and the fork
+  mark all read. Its third state, `unknown`, is a fact and not a default:
+  a path or local source gets no update row, so nothing can say whether
+  its files were edited, and that place never counts as untouched.
 - Hook events have one vocabulary — Claude Code's names, in
   `core/hook.rs::EVENTS` — and every other harness's map is keyed by it.
   The picker offers that list, the validator rejects anything outside it,

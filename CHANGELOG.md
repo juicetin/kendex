@@ -89,6 +89,18 @@ changes carry a **Breaking** call-out with their migration note inline.
   publishes is told so plainly, and settles nothing.
 ### Changed
 
+- Everywhere the app says a package is customized, it now says **where**.
+  A skill installed at your user level and in two projects, changed in one
+  of them, reads "Customized in 1 of 3 places" on its Library row and
+  "Customized in vg" in its own header — and clicking the mark opens that
+  project's Customize tab, so where leads straight to what. The Customize
+  tab's project chips carry a dot on the places that hold changes, and the
+  Forked mark now belongs to the place it was made in instead of showing
+  up on every copy. A place counts as customized whether you changed it on
+  the Customize tab or edited its installed files by hand, so a package
+  you hand-edited is marked even when it is up to date. Where a package
+  comes from a local folder the app cannot check its files, and such a
+  place says "not checked" rather than passing as untouched.
 - The Updates page is a table with one row per package. A package out of
   date in several projects shows how many places, expands into a row per
   place — User level and each project by name — and each place has its

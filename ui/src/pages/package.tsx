@@ -8,6 +8,8 @@ import { PackageHeader } from "@/components/package/package-header";
 import { RemoveDialog } from "@/components/package/remove-dialog";
 import {
   diffHarness,
+  openingTab,
+  openingView,
   type PackageView,
   packageVersionActions,
   useManifestBusy,
@@ -16,13 +18,14 @@ import {
 } from "@/components/package/use-package-data";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { CUSTOMIZE_TAB, OVERVIEW_TAB } from "@/lib/copy-customize";
+import { canCustomize } from "@/lib/customization";
 import {
-  canCustomize,
-  isCustomized,
-  itemCustomization,
-} from "@/lib/customization";
+  placeStandings,
+  standingIn,
+  usePlacesSource,
+} from "@/lib/customized-places";
 import { groupItems, groupScopes } from "@/lib/derive";
-import { packageDisplayName } from "@/lib/labels";
+import { packageDisplayName, scopeName } from "@/lib/labels";
 import { PAGE_GUTTER, WIDE_CONTENT_WIDTH } from "@/lib/layout";
 import { sameScope } from "@/lib/scope";
 import { cn } from "@/lib/utils";
@@ -42,19 +45,12 @@ export function PackagePage() {
   const back = useNavStore((s) => s.back);
   const result = useScanStore((s) => s.result);
   const toggle = useAuditStore((s) => s.toggle);
-  const { draft, dirty, saving, openScope, load, save } = useEditorStore();
+  const editorScope = useEditorStore((s) => s.scope);
+  const { dirty, saving, openScope, load, save } = useEditorStore();
+  const places = usePlacesSource();
 
-  const [view, setView] = useState<PackageView>(() =>
-    initialView
-      ? {
-          mode: "diff",
-          from: initialView.from,
-          to: initialView.to,
-          fromLabel: initialView.from.slice(0, 7),
-          toLabel: initialView.to.slice(0, 7),
-        }
-      : { mode: "files", file: null },
-  );
+  const [view, setView] = useState<PackageView>(() => openingView(initialView));
+  const [tab, setTab] = useState(() => openingTab(initialView));
   const [confirmRemove, setConfirmRemove] = useState(false);
   const [switching, setSwitching] = useState(false);
   const mutating = useManifestBusy(switching);
@@ -117,9 +113,16 @@ export function PackagePage() {
     updatesLoaded &&
     !edited;
   const customizable = canCustomize(group.kind);
-  const customized = isCustomized(
-    itemCustomization(draft, group.kind, group.name),
+  // Every mark in the header is about one place: the one the Customize tab
+  // has open, or the one this page was opened at while it loads.
+  const standings = placeStandings(
+    places,
+    group.kind,
+    group.name,
+    groupScopes(group),
   );
+  const selected =
+    standingIn(standings, editorScope) ?? standingIn(standings, ref.scope);
 
   const inEveryScope = async (act: (scope: Scope) => Promise<void>) => {
     for (const scope of groupScopes(group)) await act(scope);
@@ -174,8 +177,9 @@ export function PackagePage() {
         kind={group.kind}
         displayName={displayName}
         description={group.description}
-        forked={meta?.fork != null}
-        customized={customized}
+        forked={selected?.forked === true}
+        customized={selected?.state === "customized"}
+        place={selected ? scopeName(selected.scope) : null}
         action={
           <PackageActions
             scope={primary.scope}
@@ -193,7 +197,7 @@ export function PackagePage() {
       <div className={cn("min-h-0 flex-1 overflow-y-auto", PAGE_GUTTER)}>
         <div className={cn("pb-8", WIDE_CONTENT_WIDTH)}>
           {customizable ? (
-            <Tabs defaultValue="overview">
+            <Tabs value={tab} onValueChange={setTab}>
               <TabsList>
                 <TabsTrigger value="overview">{OVERVIEW_TAB}</TabsTrigger>
                 <TabsTrigger value="customize">{CUSTOMIZE_TAB}</TabsTrigger>

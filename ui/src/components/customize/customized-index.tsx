@@ -60,7 +60,9 @@ export function CustomizedIndex({
               <Button
                 variant="ghost"
                 size="sm"
-                onClick={() => goToPackage({ kind, name, scope })}
+                onClick={() =>
+                  goToPackage({ kind, name, scope }, { mode: "customize" })
+                }
               >
                 Open
                 <ChevronRight className="size-4" />

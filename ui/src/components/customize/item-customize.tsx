@@ -4,12 +4,14 @@ import { ItemSettings } from "@/components/customize/item-settings";
 import { ItemSkills } from "@/components/customize/item-skills";
 import { Pill } from "@/components/pill";
 import { Section } from "@/components/section";
+import { StatusDot } from "@/components/status-dot";
 import { StatusNote } from "@/components/status-note";
 import {
   ADDITIONAL_HELP,
   ADDITIONAL_LABEL,
   LAUNCH_HELP,
   LAUNCH_LABEL,
+  placeStateLine,
   SAVE_FIRST,
   SETTINGS_SECTION,
   SKILL_INSTRUCTIONS_HELP,
@@ -18,6 +20,7 @@ import {
   WRITTEN_INTO,
 } from "@/lib/copy-customize";
 import { itemCustomization, sharedCustomization } from "@/lib/customization";
+import { placeStandings, usePlacesSource } from "@/lib/customized-places";
 import { setInstruction } from "@/lib/editor-draft";
 import { scopeName } from "@/lib/labels";
 import { scopeKey } from "@/lib/scope";
@@ -40,6 +43,10 @@ export function ItemCustomize({
 }) {
   const { scope, draft, inventory, dirty, error, setScope, edit } =
     useEditorStore();
+  const places = usePlacesSource();
+  // Which places already carry changes, so switching to one is an informed
+  // click rather than something you find out after arriving.
+  const standings = placeStandings(places, kind, name, scopes);
 
   const mine = itemCustomization(draft, kind, name);
   const shared = sharedCustomization(draft);
@@ -56,15 +63,22 @@ export function ItemCustomize({
       ) : null}
       {scopes.length > 1 ? (
         <div className="flex flex-wrap items-center gap-1.5">
-          {scopes.map((where) => (
+          {standings.map((standing) => (
             <Pill
-              key={scopeKey(where)}
-              selected={scopeKey(where) === scopeKey(scope)}
+              key={scopeKey(standing.scope)}
+              selected={scopeKey(standing.scope) === scopeKey(scope)}
               disabled={dirty}
-              title={dirty ? SAVE_FIRST : undefined}
-              onClick={() => void setScope(where)}
+              title={
+                dirty
+                  ? SAVE_FIRST
+                  : placeStateLine(scopeName(standing.scope), standing.state)
+              }
+              onClick={() => void setScope(standing.scope)}
             >
-              {scopeName(where)}
+              {standing.state === "customized" ? (
+                <StatusDot tone="customized" />
+              ) : null}
+              {scopeName(standing.scope)}
             </Pill>
           ))}
         </div>
