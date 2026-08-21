@@ -42,14 +42,70 @@ if [ -z "$COMMAND" ] && printf '%s' "$INPUT" | grep -q '"command"[[:space:]]*:';
   exit 2
 fi
 
-# Only relevant for git commit commands. `git` and `commit` are matched with
-# git's own options allowed between them: `git -C <path> commit` is how a
-# session working outside its own checkout commits, and a pattern demanding
-# the two words be adjacent skips those commits silently — every check here
-# fails open for the one caller most likely to need them.
-if ! echo "$COMMAND" | grep -qE 'git[[:space:]]+([-][^[:space:]]+([[:space:]]+[^[:space:]]+)?[[:space:]]+)*commit'; then
+# Whether a command commits must never come back "no" because of how it was
+# quoted: a no skips every check below, so a wrong no is a commit nobody
+# inspected. `git -C "/my repo" commit`, `env X=1 git commit`, a commit
+# behind `&&` — each of those needs its own case in a parser, and the cases
+# nobody thought of are exactly the ones that fail open. So this does not
+# parse. It asks whether the words `git` and `commit` both appear, in that
+# order. `git log --grep=commit` pays for that with a lint run it did not
+# need, which is the side worth being wrong on.
+FLAT=$(printf '%s' "$COMMAND" | tr '\n\t' '  ')
+WORDS=" $(printf '%s' "$FLAT" | tr -c 'a-zA-Z0-9_-' ' ') "
+if ! printf '%s' "$WORDS" | grep -qE ' git( .*)? commit '; then
   exit 0
 fi
+
+# Split a command into shell words with quotes honoured. Nothing is
+# evaluated: this walks characters and tracks which quote is open, so
+# `-C "/my repo"` stays one word instead of becoming `"/my` and `repo"` —
+# a directory that does not exist, which drops the checks back onto the
+# hook's own cwd and answers for another repository's staged work.
+TOKENS=()
+tokenize() {
+  local s=$1 i=0 c quote='' word='' started=0
+  TOKENS=()
+  while [ "$i" -lt "${#s}" ]; do
+    c=${s:$i:1}
+    i=$((i + 1))
+    if [ -n "$quote" ]; then
+      if [ "$c" = "$quote" ]; then
+        quote=''
+      elif [ "$c" = '\' ] && [ "$quote" = '"' ]; then
+        word+=${s:$i:1}
+        i=$((i + 1))
+      else
+        word+=$c
+      fi
+      continue
+    fi
+    case $c in
+      "'" | '"')
+        quote=$c
+        started=1
+        ;;
+      ' ')
+        if [ "$started" -eq 1 ]; then
+          TOKENS+=("$word")
+          word=''
+          started=0
+        fi
+        ;;
+      '\')
+        word+=${s:$i:1}
+        i=$((i + 1))
+        started=1
+        ;;
+      *)
+        word+=$c
+        started=1
+        ;;
+    esac
+  done
+  if [ "$started" -eq 1 ]; then
+    TOKENS+=("$word")
+  fi
+}
 
 # Check the repository the command commits in, which is not always the one
 # this hook starts in: a session working in a git worktree commits with
@@ -58,16 +114,34 @@ fi
 # would answer for whatever is uncommitted in the main checkout instead —
 # another repository's work, blocking a commit it has nothing to do with.
 # `block-repo-copy.sh` walks a command's `cd` segments for the same reason.
-TARGET_DIR=$(echo "$COMMAND" | sed -n 's/.*git[[:space:]]\+-C[[:space:]]\+\([^[:space:]]\+\).*/\1/p' | head -1)
-if [ -z "$TARGET_DIR" ]; then
-  TARGET_DIR=$(echo "$COMMAND" | sed -n 's/^[[:space:]]*cd[[:space:]]\+\([^[:space:]]\+\)[[:space:]]*&&.*/\1/p' | head -1)
+tokenize "$FLAT"
+TARGET_DIR=""
+for ((i = 0; i < ${#TOKENS[@]}; i++)); do
+  case ${TOKENS[$i]} in
+    git | */git) ;;
+    *) continue ;;
+  esac
+  # `-C` binds to git itself, so it sits among the options between `git` and
+  # the subcommand. A `-C` after the subcommand belongs to the subcommand
+  # (`git log -C` asks for copy detection) and names no directory.
+  for ((j = i + 1; j < ${#TOKENS[@]}; j++)); do
+    case ${TOKENS[$j]} in
+      -C)
+        TARGET_DIR=${TOKENS[$((j + 1))]:-}
+        break 2
+        ;;
+      -C?*)
+        TARGET_DIR=${TOKENS[$j]#-C}
+        break 2
+        ;;
+      -*) ;;
+      *) break ;;
+    esac
+  done
+done
+if [ -z "$TARGET_DIR" ] && [ "${TOKENS[0]:-}" = "cd" ]; then
+  TARGET_DIR=${TOKENS[1]:-}
 fi
-# A decoded path keeps the quotes it was written with, and no directory is
-# named `"/repo"`.
-TARGET_DIR=${TARGET_DIR%\"}
-TARGET_DIR=${TARGET_DIR#\"}
-TARGET_DIR=${TARGET_DIR%\'}
-TARGET_DIR=${TARGET_DIR#\'}
 if [ -n "$TARGET_DIR" ] && [ -d "$TARGET_DIR" ]; then
   cd "$TARGET_DIR" || exit 0
 fi

@@ -452,6 +452,35 @@ assert_eq "$rc" "2" "git -C with a quoted path still reaches the lanes"
 aimed_at "cd \\\"$REPO_G\\\" && git commit -m test"
 assert_eq "$rc" "2" "a quoted cd prefix still reaches the lanes"
 
+# A directory whose name contains a space is the case the whitespace reader
+# could not reach: `git -C "/my repo" commit` has to be quoted, and splitting
+# on spaces hands back `"/my`, which is no directory, so the hook silently
+# answered for its own checkout. The fixture's name carries a real space —
+# the earlier quoted-path cases interpolated a path that had none, so they
+# passed against a reader that still split on whitespace.
+REPO_SP="$TMP_ROOT/repo with space"
+mkdir -p "$REPO_SP"
+git -C "$REPO_SP" init -q
+git -C "$REPO_SP" config user.email t@t
+git -C "$REPO_SP" config user.name t
+printf 'notes\n' >"$REPO_SP/NOTES.md"
+git -C "$REPO_SP" add NOTES.md
+
+# Nothing Rust is staged there, so passing can only mean the hook read that
+# repo's staged set; the repo it starts in stages Rust that fails the lane.
+aimed_at "git -C \\\"$REPO_SP\\\" commit -m test"
+assert_eq "$rc" "0" "git -C with a path containing a space names that repo"
+
+aimed_at "cd \\\"$REPO_SP\\\" && git commit -m test"
+assert_eq "$rc" "0" "a cd prefix with a path containing a space names that repo"
+
+# The other direction, so a pass above cannot be the matcher fail-opening:
+# stage failing Rust in the same space-named repo and the lane must block.
+printf 'fn spaced() {}\n' >"$REPO_SP/dirty.rs"
+git -C "$REPO_SP" add dirty.rs
+aimed_at "git -C \\\"$REPO_SP\\\" commit -m test"
+assert_eq "$rc" "2" "the lanes run in the space-named repo, not just skip"
+
 # A payload carrying no command is not a commit; one carrying a command the
 # decoder cannot recover would otherwise run every lane on an empty string.
 set +e
