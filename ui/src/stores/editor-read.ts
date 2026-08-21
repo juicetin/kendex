@@ -102,6 +102,15 @@ export const loadManifest = async (
   if (!onScreen() || !takes()) {
     useEditorStore.setState((current) => ({
       saved: fold(current.saved, read, token),
+      // Except the inventory, which is not the person's to keep: the draft
+      // may be theirs, but the choices the form offers — what this place
+      // declares, what its catalogs carry — belong to the place. Held with
+      // the draft, a form for one project offers another project's skills
+      // and hides its own, which saves the wrong thing rather than
+      // refusing it.
+      ...(onScreen() && inventory.status === "ok"
+        ? { inventory: inventory.data }
+        : {}),
     }));
     return;
   }

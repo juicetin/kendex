@@ -182,6 +182,17 @@ fn edited_items(
     lock: &crate::lock::Lock,
 ) -> std::collections::BTreeMap<(ItemKind, String), Vec<HarnessId>> {
     let mut edited = std::collections::BTreeMap::<(ItemKind, String), Vec<HarnessId>>::new();
+    // The conservative per-entry hold: it compares what is on disk against
+    // what the lock recorded, so it needs no source and holds whatever it
+    // cannot prove is clean. Used wherever the plan cannot speak.
+    let held =
+        |only: &dyn Fn(&crate::lock::LockEntry) -> bool| -> Vec<(ItemKind, String, HarnessId)> {
+            lock.entries
+                .values()
+                .filter(|entry| only(entry) && crate::engine::edit_holds(env, scope, entry))
+                .map(|entry| (entry.kind, entry.name.clone(), entry.harness))
+                .collect()
+        };
     let rows: Vec<(ItemKind, String, HarnessId)> = match crate::engine::plan_scope(
         env,
         scope,
@@ -189,28 +200,36 @@ fn edited_items(
         lock,
         &crate::engine::PlanOptions::default(),
     ) {
-        Ok(report) => report
-            .drift
-            .into_iter()
-            .filter(|row| {
-                matches!(
-                    row.cause,
-                    Some(crate::engine::DriftCause::LocalEdit | crate::engine::DriftCause::Both)
-                )
-            })
-            .map(|row| (row.kind, row.name, row.harness))
-            .collect(),
-        // A plan the scope cannot produce (a broken manifest, an
-        // unreadable source) must not fail open — reporting nothing edited
-        // is exactly when edit detection could not run. Fall back to the
-        // conservative per-entry hold, which holds whatever it cannot prove
-        // is clean.
-        Err(_) => lock
-            .entries
-            .values()
-            .filter(|entry| crate::engine::edit_holds(env, scope, entry))
-            .map(|entry| (entry.kind, entry.name.clone(), entry.harness))
-            .collect(),
+        Ok(report) => {
+            let mut rows: Vec<(ItemKind, String, HarnessId)> = report
+                .drift
+                .iter()
+                .filter(|row| {
+                    matches!(
+                        row.cause,
+                        Some(
+                            crate::engine::DriftCause::LocalEdit | crate::engine::DriftCause::Both
+                        )
+                    )
+                })
+                .map(|row| (row.kind, row.name.clone(), row.harness))
+                .collect();
+            // A plan that produced does speak for what it produced; one it
+            // could not render — a fork whose own copy is gone, a source
+            // that would not read — rendered nothing to compare against, so
+            // its absence from the drift above is not cleanliness. Those
+            // items, and only those, fall back to the per-entry hold: the
+            // plan stays authoritative wherever it could actually look.
+            let unmeasured = report.unmeasured;
+            rows.extend(held(&|entry| {
+                unmeasured.contains(&(entry.kind, entry.name.clone()))
+            }));
+            rows
+        }
+        // A plan the scope cannot produce at all (a broken manifest) must
+        // not fail open either — reporting nothing edited is exactly when
+        // edit detection could not run.
+        Err(_) => held(&|_| true),
     };
     for (kind, name, harness) in rows {
         let harnesses = edited.entry((kind, name.clone())).or_default();

@@ -198,6 +198,13 @@ changes carry a **Breaking** call-out with their migration note inline.
 
 ### Fixed
 
+- A package whose own copy has gone missing no longer reports its files as
+  untouched. The check that notices hand edits needs the package's source
+  to compare against, and when that source cannot be read it now says so
+  instead of saying nothing — the place stays marked as changed by you,
+  which is what its buttons and badges have always meant.
+- Two projects whose folders share a name are told apart on Review, the way
+  they already are in the Library and on a package's own page.
 - A check for updates that cannot finish no longer looks like one that did.
   The versions already on screen stay there, and the page now says they are
   the last ones kendex could check, gives you the retry, and turns off

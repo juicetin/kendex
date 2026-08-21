@@ -112,6 +112,13 @@ pub struct DesiredState {
     /// these produced is the complete truth about them, so a lock entry
     /// they did not produce is stranded, not merely skipped this pass.
     pub processed: BTreeSet<(ItemKind, String)>,
+    /// The other half: declarations this pass looked at and could not
+    /// measure — the source did not resolve, could not be read, or no
+    /// longer carries the item — so nothing was rendered to compare what
+    /// is on disk against. They are absent from the drift for that reason
+    /// and not because they are clean, and a reader that takes the silence
+    /// for cleanliness reports an edited place as untouched.
+    pub unmeasured: BTreeSet<(ItemKind, String)>,
     /// Manifest with upstream skill additions merged in — present only when
     /// the merge changed something and must be written back.
     pub manifest_update: Option<Manifest>,
@@ -153,6 +160,7 @@ impl DesiredState {
     pub(super) fn unreadable(&mut self, kind: ItemKind, name: &str, note: String) {
         self.notes.push(note);
         self.processed.remove(&(kind, name.to_owned()));
+        self.unmeasured.insert((kind, name.to_owned()));
     }
 }
 

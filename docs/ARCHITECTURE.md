@@ -62,6 +62,12 @@ lives in one capability table read by core and UI.
    conflict, never one silent loss. A fork's bytes are held the same way;
    only its exits differ — keeping it as a fork is done, so the conflict
    names discarding, back to the copy the fork left in the local source.
+   A pass that could not measure a place says so rather than saying
+   nothing: an item whose source did not resolve rendered nothing to
+   compare disk against, so it is listed in `EngineReport::unmeasured` and
+   falls back to the per-entry hold. Absence from the drift is not
+   cleanliness — reading it that way is how a place gets reported
+   untouched when the thing that would have noticed could not run.
 2. Write-only-if-absent: never clobber a user-set value; never re-add a
    user removal. This protects manifest values and unrelated
    structured-config keys — managed generated content is replaceable
@@ -284,7 +290,11 @@ lives in one capability table read by core and UI.
   ever keeps a copy nobody has ruled on: every operation that rules on a
   draft outranks it and must reach the copy parked for the place it is
   about, not only the one on screen — a discard destroys that copy, a save
-  settles it against the file it just wrote.
+  settles it against the file it just wrote. And what parking holds is the
+  typing and nothing else: a place's inventory, its base, and a draft with
+  nothing typed in it belong to the file, so every read replaces them —
+  a form offering another project's choices, or showing settings a passing
+  rewrite has already changed, is wrong in a way no save can refuse.
 - **Every store that reads asynchronously ranks its overlapping reads, and
   the rank is its own.** Reads of the same thing overlap constantly — a
   scan finishes, the window regains focus, a page mounts — and unranked,

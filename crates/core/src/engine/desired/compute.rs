@@ -69,14 +69,19 @@ fn compute(
     for kind in crate::engine::expansion::PLANNED_KINDS {
         for (name, planned) in expansion.of(kind) {
             let decl = &planned.decl;
+            // Each of the three ways out below leaves this declaration
+            // unrendered, so nothing downstream may read its absence from
+            // the drift as proof that what is on disk is untouched.
             let Some((root, provenance, source_commit)) =
                 resolve_source(env, scope, name, decl, manifest, &mut state)?
             else {
+                state.unmeasured.insert((kind, name.clone()));
                 continue;
             };
             let Some((sealed, config)) =
                 read_catalog(&root, &provenance, name, &decl.source, &mut state)?
             else {
+                state.unmeasured.insert((kind, name.clone()));
                 continue;
             };
             crate::engine::catalog::notes(&config, &decl.source, &mut state);
@@ -84,6 +89,7 @@ fn compute(
                 state
                     .notes
                     .push(format!("{name}: not found in source '{}'", decl.source));
+                state.unmeasured.insert((kind, name.clone()));
                 continue;
             };
             state.processed.insert((kind, name.clone()));

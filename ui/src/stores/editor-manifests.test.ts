@@ -52,7 +52,12 @@ describe("reading every place's manifest", () => {
         status: "ok",
         data: { manifest: null, base: null },
       })
-      .mockResolvedValueOnce({ status: "error", error: "expected a table" });
+      .mockResolvedValueOnce({ status: "error", error: "expected a table" })
+      // The pass ends by re-reading the open place, whose draft is clean.
+      .mockResolvedValue({
+        status: "ok",
+        data: { manifest: null, base: null },
+      });
     await useEditorStore.getState().loadAll();
     const state = useEditorStore.getState();
     expect(state.manifestsLoaded).toBe(true);

@@ -226,6 +226,7 @@ pub fn plan_scope(
         sweepable,
         kept,
         safety,
+        unmeasured: state.unmeasured,
     };
     unmanaged_rows(env, scope, manifest, lock, &state.items, &mut report.drift);
     Ok(report)
@@ -378,6 +379,7 @@ pub fn plan_apply(env: &Env, scope: &Scope, options: &PlanOptions) -> Result<Eng
         sweepable: Vec::new(),
         kept: Vec::new(),
         safety: Vec::new(),
+        unmeasured: BTreeSet::new(),
     };
     // One fact, said once: files this build will read but not write. Which
     // of the two is legacy is kendex's problem, not the reader's.

@@ -1,6 +1,8 @@
 //! The types an engine pass hands back — drift rows, warnings, the report
 //! itself — and the options a plan is asked with.
 
+use std::collections::BTreeSet;
+
 use serde::{Deserialize, Serialize};
 use specta::Type;
 
@@ -92,6 +94,13 @@ pub struct EngineReport {
     /// Blocked rows also appear as conflicts in `drift`; the rest install
     /// and are worth reading first.
     pub safety: Vec<ItemSafety>,
+    /// Declarations this pass could not measure: their source did not
+    /// resolve, could not be read, or no longer carries the item, so
+    /// nothing was rendered to compare what is on disk against. They are
+    /// missing from `drift` for that reason and not because they are
+    /// clean — a reader that treats the silence as cleanliness reports an
+    /// edited place as untouched.
+    pub unmeasured: BTreeSet<(ItemKind, String)>,
 }
 
 #[derive(Debug, Clone, Default)]

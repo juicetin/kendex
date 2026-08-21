@@ -140,6 +140,14 @@ export const useEditorStore = create<EditorState>((set, get) => {
               }
             : {}),
         }));
+        // The pass answers for every place, the open one included. A draft
+        // with nothing typed in it is the file's, not the person's: another
+        // process can rewrite that place while the window is away, and
+        // holding a clean copy leaves the form showing values that are
+        // already gone. One with typing in it stays, and its save is still
+        // refused on its base. This read rather than the fold above,
+        // because only a read pairs a draft with the base it came from.
+        if (!get().dirty) await get().load();
       } catch (thrown) {
         // A rejected read is a read that failed, not one still running: a
         // pass that says nothing leaves every place reading as in-flight

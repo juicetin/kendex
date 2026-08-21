@@ -42,6 +42,57 @@ fn a_fork_edited_by_hand_says_so_instead_of_reading_as_untouched() {
     assert_eq!(gh.edited_harnesses, vec![HarnessId::Claude], "{gh:?}");
 }
 
+/// The measurement's own fail-open. With the fork's copy gone from the
+/// local source, the plan can render nothing to compare the installed files
+/// against and skips the item with a note — and a reader taking that
+/// silence for cleanliness reports an edited place as untouched, which is
+/// the fault this whole area exists to prevent.
+#[test]
+#[allow(clippy::unwrap_used)]
+fn a_fork_whose_copy_is_gone_still_says_its_files_were_edited() {
+    let w = world();
+    write_skill(&w.upstream, "gh", "Upstream.");
+    commit(&w.upstream, "one");
+    declare(&w, "[skills.gh]\nsource = \"cat\"\n");
+    sync_and_apply(&w);
+    fs::write(
+        skill_file(&w),
+        "---\nname: gh\ndescription: mine\n---\nMy fork.\n",
+    )
+    .unwrap();
+    let plan = fork::fork(&w.env, &w.scope, ItemKind::Skill, "gh", HarnessId::Claude).unwrap();
+    apply::execute(&w.env, &plan, None).unwrap();
+    let report = audit(&w.env, &w.scope).unwrap();
+    apply::execute(&w.env, &report.plan, None).unwrap();
+
+    fs::write(skill_file(&w), "edited after forking").unwrap();
+    // And now the copy the fork was made into is gone — the source the
+    // plan would have rendered from cannot answer for it.
+    let own = w
+        .home
+        .join("app")
+        .join(kendex_core::rename::LOCAL_SOURCE_DIR)
+        .join("skills")
+        .join("gh");
+    assert!(
+        own.is_dir(),
+        "the fork's own copy is where the discard reads"
+    );
+    fs::remove_dir_all(&own).unwrap();
+
+    let rows = kendex_core::package::updates::updates(&w.env, &w.scope)
+        .unwrap()
+        .rows;
+    let gh = rows.iter().find(|row| row.name == "gh").unwrap();
+    assert!(
+        gh.blocked_by_local_edit,
+        "an unmeasurable place read as untouched: {gh:?}"
+    );
+    assert_eq!(gh.edited_harnesses, vec![HarnessId::Claude], "{gh:?}");
+    // And the exit it offers matches: there is nothing left to put back.
+    assert!(!gh.can_discard, "{gh:?}");
+}
+
 #[test]
 #[allow(clippy::unwrap_used)]
 fn editing_your_own_fork_is_not_drift_and_offers_no_second_fork() {

@@ -85,13 +85,16 @@ describe("the sync refuses before it reads", () => {
   });
 
   it("keeps typing that arrives while the re-read is on its way", async () => {
-    // Read 1 answers loadAll; read 2 is the re-read of this place, and the
-    // typing lands while it is in flight.
+    // Something rewrote the file, which is what this is called about, so
+    // the reads answer with the file it is now. Read 1 answers the pass
+    // over every place; read 2 is its re-read of the open one, and the
+    // typing lands while that is in flight.
+    useEditorStore.setState({ base: "before" });
     let reads = 0;
     vi.mocked(commands.getManifest).mockImplementation(async () => {
       reads += 1;
       if (reads === 2) type();
-      return { status: "ok", data: { manifest: null, base: null } };
+      return { status: "ok", data: { manifest: null, base: "after" } };
     });
 
     await manifestRewritten(scope);

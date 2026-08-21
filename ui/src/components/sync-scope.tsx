@@ -1,6 +1,6 @@
 import { ChevronDown, ChevronRight } from "lucide-react";
 import { useState } from "react";
-import type { AuditView, DismissReason } from "@/bindings";
+import type { AuditView, DismissReason, Scope } from "@/bindings";
 import { ApplyDialog } from "@/components/apply-dialog";
 import { SafetyWarnings } from "@/components/safety-findings-affected";
 import { BlockedFindings } from "@/components/safety-findings-blocked";
@@ -32,12 +32,18 @@ import { useNavStore } from "@/stores/nav";
  */
 export function SyncScopeCard({
   view,
+  scopes,
   busy,
   onApply,
   onDismiss,
   onSeeUnmanaged,
 }: {
   view: AuditView;
+  /** Every place this page is showing. Two projects whose folders share a
+   *  name are told apart by their parent wherever several places are shown,
+   *  and this card is one of those places — the full path beside it is
+   *  hidden below the wide breakpoint. */
+  scopes: Scope[];
   busy: boolean;
   onApply: (removeOrphans: boolean, allowUnsafe?: string[]) => void;
   onDismiss: (tokens: string[], reason: DismissReason) => void;
@@ -95,7 +101,7 @@ export function SyncScopeCard({
           )}
           <span className="flex min-w-0 flex-col">
             <span className="truncate text-[15px] font-semibold tracking-tight">
-              {scopeName(view.scope)}
+              {scopeName(view.scope, scopes)}
             </span>
             <span className="truncate text-[13px] text-muted-foreground">
               {summary ?? NOTHING_TO_DO_HERE}
