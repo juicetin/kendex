@@ -158,10 +158,17 @@ impl TrashGuard {
 pub(super) fn stale_emitted(
     state: &desired::DesiredState,
     lock: &Lock,
+    options: &PlanOptions,
     guard: &mut TrashGuard,
     ops: &mut Vec<PlannedOp>,
 ) -> Result<()> {
     for item in &state.items {
+        // A plan restricted to one package writes nothing for this item, so
+        // taking its old path away would leave neither: the old files gone
+        // and the new ones never rendered.
+        if !options.acts_on(item.kind, &item.name) {
+            continue;
+        }
         let Some(entry) = lock.entries.get(&item.key) else {
             continue;
         };
@@ -326,3 +333,6 @@ fn origin_readable(
         ),
     }
 }
+
+#[cfg(test)]
+mod tests;

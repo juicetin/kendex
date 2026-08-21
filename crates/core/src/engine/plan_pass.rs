@@ -44,11 +44,7 @@ pub(super) fn plan_items(
         // Not this plan's package: its record carries forward and nothing
         // is planned for it, the same way a held item's does. Dropping the
         // record instead would write a lock that forgets what is installed.
-        if options
-            .only_names
-            .as_ref()
-            .is_some_and(|only| !only.iter().any(|(k, n)| *k == item.kind && n == &item.name))
-        {
+        if !options.acts_on(item.kind, &item.name) {
             if let Some(entry) = lock.entries.get(&item.key) {
                 sink.new_lock
                     .entries

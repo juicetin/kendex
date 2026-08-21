@@ -154,7 +154,7 @@ pub fn plan_scope(
     // planned, so anything still wanted is known, and no path goes to the
     // trash twice.
     let mut guard = removal::TrashGuard::new(&state.items);
-    removal::stale_emitted(&state, lock, &mut guard, &mut ops)?;
+    removal::stale_emitted(&state, lock, options, &mut guard, &mut ops)?;
 
     let refused_keys = plan_pass::plan_refusals(
         env,

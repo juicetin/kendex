@@ -74,6 +74,14 @@ export const saveManifest = async (): Promise<void> => {
     return;
   }
   if (onScreen()) useEditorStore.setState({ error: null });
+  // What is on screen is what the file now holds, so it is no longer
+  // unsaved — the Save bar comes down and the place chips come live. Only
+  // for the copy that was written: typing that arrived while the write was
+  // away is a newer draft, and it stays unsaved until its own save. `edit`
+  // builds a new draft rather than mutating, so identity is that test, and
+  // the re-read below leaves a newer draft alone for the same reason.
+  if (onScreen() && useEditorStore.getState().draft === draft)
+    useEditorStore.setState({ dirty: false });
   // Re-read the place that was written, never whichever is open now, or
   // its saved manifest keeps the pre-save content and its mark with it.
   await load(scope);
