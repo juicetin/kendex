@@ -362,12 +362,9 @@ enabled = true
 source = "."
 harnesses = [
     "claude",
-    "codex",
-    "pi",
 ]
 enabled = true
 
-# Per-agent frontmatter, carried over from this repo's v1 configuration.
 
 [agent-frontmatter.claude]
 generalist = { color = "green", model = "inherit", effort = "xhigh", deny-tools = ["Agent", "AskUserQuestion"], background = false }
