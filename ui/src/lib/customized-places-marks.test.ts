@@ -114,7 +114,7 @@ describe("uncheckedPlaces", () => {
     // A read on its way is not one a mark must apologise for: every launch
     // would otherwise open by calling places unchecked and then take it back.
     expect(
-      uncheckedPlaces(standings({ ...changedOne, updatesLoaded: false })),
+      uncheckedPlaces(standings({ ...changedOne, updatesRead: "pending" })),
     ).toBe(0);
     expect(
       uncheckedPlaces(

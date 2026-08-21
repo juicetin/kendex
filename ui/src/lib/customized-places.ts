@@ -38,6 +38,11 @@ export interface PlaceStanding {
   forked: boolean;
 }
 
+/** How a read went. Two states cannot answer the question, and they are
+ *  not the same answer: `pending` is still running and will land, `failed`
+ *  came back with nothing and will not retry on its own. */
+export type ReadState = "pending" | "ready" | "failed";
+
 /** Everything the standings are read from, gathered once per screen. */
 export interface PlacesSource {
   /** Each place's manifest as it stands on screen, keyed by scope. */
@@ -45,11 +50,13 @@ export interface PlacesSource {
   /** Update rows keyed by {@link placeKey} — the per-place hand-edit fact,
    *  absent for the places the engine cannot speak about. */
   rows: Map<string, UpdateRow>;
-  /** False while the update standing is stale — hand-edits are unread. */
-  updatesLoaded: boolean;
-  /** False until every place's manifest has been read once, so a manifest
-   *  missing from {@link manifests} is told apart from one that failed. */
-  manifestsLoaded: boolean;
+  /** How the read of the update standing went; hand edits are known only
+   *  once it is `ready`. */
+  updatesRead: ReadState;
+  /** How the read of every place's manifest went, so a manifest missing
+   *  from {@link manifests} is told apart from one that has not been asked
+   *  for yet. */
+  manifestsRead: ReadState;
 }
 
 const placeKey = (kind: ItemKind, name: string, scope: Scope): string =>
@@ -70,9 +77,8 @@ export function placeStandings(
     const overlay = manifest
       ? isCustomized(itemCustomization(manifest, kind, name))
       : null;
-    const handEdited = source.updatesLoaded
-      ? (row?.blockedByLocalEdit ?? null)
-      : null;
+    const handEdited =
+      source.updatesRead === "ready" ? (row?.blockedByLocalEdit ?? null) : null;
     const forked = manifest?.forks?.[kind]?.[name] != null;
     // A hand edit outranks an overlay: it is the one waiting on a decision.
     // A fork is the same kind of fact — this place's own bytes.
@@ -84,9 +90,10 @@ export function placeStandings(
           : null;
     // A read still on its way is not a read that came back empty: saying
     // "not checked" of a place nobody has asked about yet names the wrong
-    // cause, and this screen is the one that asks.
+    // cause, and a read that failed is not still running.
     const stillReading =
-      (overlay === null && !source.manifestsLoaded) || !source.updatesLoaded;
+      (overlay === null && source.manifestsRead === "pending") ||
+      source.updatesRead === "pending";
     const state: PlaceState =
       change != null
         ? "customized"
@@ -184,25 +191,33 @@ const indexFor = (rows: UpdateRow[]): Map<string, UpdateRow> => {
   return index;
 };
 
+/** A store's loaded/error pair as the one answer the join asks for. */
+export const readState = (loaded: boolean, error: string | null): ReadState =>
+  loaded ? "ready" : error ? "failed" : "pending";
+
 function usePlaces(withDraft: boolean): PlacesSource {
   const saved = useEditorStore((s) => s.saved);
   const scope = useEditorStore((s) => s.scope);
   const draft = useEditorStore((s) => s.draft);
   const manifestsLoaded = useEditorStore((s) => s.manifestsLoaded);
+  const manifestError = useEditorStore((s) => s.manifestError);
   const rows = useUpdatesStore((s) => s.rows);
   const updatesLoaded = useUpdatesStore((s) => s.loaded);
+  const updatesError = useUpdatesStore((s) => s.error);
   const manifests = useMemo(
     () => (withDraft ? manifestsOnScreen(saved, scope, draft) : saved),
     [withDraft, saved, scope, draft],
   );
+  const updatesRead = readState(updatesLoaded, updatesError);
+  const manifestsRead = readState(manifestsLoaded, manifestError);
   return useMemo(
     () => ({
       manifests,
       rows: indexFor(rows),
-      updatesLoaded,
-      manifestsLoaded,
+      updatesRead,
+      manifestsRead,
     }),
-    [manifests, rows, updatesLoaded, manifestsLoaded],
+    [manifests, rows, updatesRead, manifestsRead],
   );
 }
 

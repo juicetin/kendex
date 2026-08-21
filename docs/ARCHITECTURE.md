@@ -58,7 +58,9 @@ lives in one capability table read by core and UI.
    explicit option (`overwrite_edited` / `--discard-edits`). The anchor
    is the lock's rendered hash — what apply last put on disk — and a
    record that cannot prove which bytes are whose holds too: one
-   conflict, never one silent loss.
+   conflict, never one silent loss. A fork's own bytes are outside this:
+   both exits are already taken — no source to discard back to, nothing
+   left to keep — so the edit is measured but never named as a decision.
 2. Write-only-if-absent: never clobber a user-set value; never re-add a
    user removal. This protects manifest values and unrelated
    structured-config keys — managed generated content is replaceable

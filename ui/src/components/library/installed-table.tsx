@@ -3,8 +3,8 @@ import type { ItemKind, ProvenanceRow } from "@/bindings";
 import { InstalledRow } from "@/components/library/installed-row";
 import { InstalledSkeleton } from "@/components/library/installed-skeleton";
 import { LibraryLegend } from "@/components/library/library-legend";
-import { MarksNote } from "@/components/library/marks-note";
 import { TableEmptyRow } from "@/components/library/table-empty";
+import { MarksNote } from "@/components/marks-note";
 import {
   Table,
   TableBody,
@@ -59,9 +59,11 @@ export function InstalledTable({
 }) {
   const goToPackage = useNavStore((s) => s.goToPackage);
   const places = usePlacesSource();
-  // Joined once per change of its inputs, and every handler kept stable, so
-  // an updates reload that moves no standing re-renders no row: the rows
-  // are memoized and their props are the same values as before.
+  // One join per change of its inputs, and every handler kept stable, so a
+  // reload that moved nothing re-renders no row. That rests on both stores
+  // handing back their previous value when a re-read says the same thing
+  // (lib/same-read.ts): a fresh array of identical rows would defeat every
+  // memo below it.
   const rows = useMemo(
     () =>
       groups.map((group) => {

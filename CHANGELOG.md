@@ -168,6 +168,29 @@ changes carry a **Breaking** call-out with their migration note inline.
 
 ### Fixed
 
+- A package you forked and then edited no longer holds `kendex check` at
+  drift forever. Editing your own copy has no exits left to offer — nothing
+  to discard back to, nothing left to keep — so it is no longer reported as
+  a decision waiting on you, on the session-start check or on the app's Home
+  page. The edit is still shown on the package itself.
+- Keeping the same package as your own twice is refused instead of quietly
+  replacing the record of where it came from, which is kept nowhere else.
+- The Forked mark appears as soon as you press "Keep as my own copy",
+  instead of waiting for the window to lose and regain focus. Keeping a fork
+  or discarding edits is also refused while you have unsaved changes on the
+  Customize tab for that same project — saving them afterwards would have
+  written the old settings back over the new fork.
+- Places whose changes could not be checked say so instead of saying they
+  are still being checked. A check that failed does not retry on its own, so
+  the app now names it on the package page as well as in the Library, with a
+  way to try again, and a read that ends in an error rather than an answer
+  is reported the same way rather than leaving the screen waiting forever.
+- Marks no longer flicker or revert when several reads overlap. A background
+  refresh can no longer undo a project you just opened or a customization
+  you just saved, a refresh that fails for one project keeps the others'
+  marks instead of blanking them, and saving one project while switching to
+  another attributes the result — and any error — to the project it was
+  about.
 - The project-management skill's issue pipeline creates Linear issues
   directly in Backlog instead of the team's Triage default. Pipeline output
   is already fully triaged — project, labels, priority, relations — and a

@@ -1,7 +1,8 @@
 import { RefreshCw } from "lucide-react";
+import { toast } from "sonner";
 import { StatusNote } from "@/components/status-note";
 import { Button } from "@/components/ui/button";
-import { CHECK_FOR_UPDATES_LABEL } from "@/lib/copy";
+import { backgroundReadFailed, CHECK_FOR_UPDATES_LABEL } from "@/lib/copy";
 import {
   MARKS_UNREAD_MANIFESTS,
   MARKS_UNREAD_TITLE,
@@ -13,30 +14,39 @@ import { useUpdatesStore } from "@/stores/updates";
 
 /** Said out loud when a read behind the per-place marks failed. Without it
  *  a failed read renders as a table of packages with nothing marked, which
- *  reads as "nothing of yours is here" — the one thing it does not mean. */
-export function MarksNote() {
+ *  reads as "nothing of yours is here" — the one thing it does not mean.
+ *  It belongs on every surface the marks reach, not only the Library: the
+ *  Customize chips draw the same conclusion from the same two reads. */
+export function MarksNote({ className }: { className?: string }) {
   const updatesError = useUpdatesStore((s) => s.error);
   const checking = useUpdatesStore((s) => s.checking);
   const check = useUpdatesStore((s) => s.check);
   const manifestError = useEditorStore((s) => s.manifestError);
+  const reading = useEditorStore((s) => s.manifestsReading);
   const loadAll = useEditorStore((s) => s.loadAll);
   if (!updatesError && !manifestError) return null;
   return (
     <StatusNote
       tone="warning"
       title={MARKS_UNREAD_TITLE}
-      className="mb-3"
+      className={cn("mb-3", className)}
       action={
         <Button
           size="sm"
           variant="outline"
-          disabled={checking}
+          disabled={checking || reading}
           onClick={() => {
-            void check();
-            void loadAll();
+            // The retry says whether it worked: a rejection dropped here
+            // would leave this very note as the only sign anything ran.
+            const said = (thrown: unknown) =>
+              toast.error(backgroundReadFailed(String(thrown)));
+            void check().catch(said);
+            void loadAll().catch(said);
           }}
         >
-          <RefreshCw className={cn("size-3.5", checking && "animate-spin")} />
+          <RefreshCw
+            className={cn("size-3.5", (checking || reading) && "animate-spin")}
+          />
           {CHECK_FOR_UPDATES_LABEL}
         </Button>
       }

@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { Toaster } from "sonner";
+import { Toaster, toast } from "sonner";
 import { commands } from "@/bindings";
 import { ErrorDialog } from "@/components/error-dialog";
 import { NavBar } from "@/components/nav-bar";
@@ -7,6 +7,7 @@ import { Sidebar } from "@/components/sidebar";
 import { StatusFooter } from "@/components/status-footer";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { WindowControls } from "@/components/window-controls";
+import { backgroundReadFailed } from "@/lib/copy";
 import { AvailablePackagePage } from "@/pages/available-package";
 import { BundleDetailPage } from "@/pages/bundle-detail";
 import { CustomizePage } from "@/pages/customize";
@@ -99,6 +100,10 @@ function useMouseNavigation() {
   }, [back, forward]);
 }
 
+/** What a read started on the app's own account does when it rejects. */
+const said = (thrown: unknown) =>
+  toast.error(backgroundReadFailed(String(thrown)));
+
 function useScanTriggers() {
   const refresh = useScanStore((s) => s.refresh);
   const auditRefresh = useAuditStore((s) => s.refresh);
@@ -112,12 +117,14 @@ function useScanTriggers() {
   useEffect(() => {
     // Five independent reads, started together: the audit is the slow one
     // (it scores every installed file), and chaining it behind the scan
-    // meant the Library sat empty waiting on work it does not need.
-    void load();
-    void refresh();
-    void auditRefresh();
-    void updatesLoad();
-    void manifestsLoad();
+    // meant the Library sat empty waiting on work it does not need. None is
+    // awaited, so each carries its own catch — a rejection nobody observes
+    // is a screen that goes on waiting for an answer that never comes.
+    void load().catch(said);
+    void refresh().catch(said);
+    void auditRefresh().catch(said);
+    void updatesLoad().catch(said);
+    void manifestsLoad().catch(said);
     let last = Date.now();
     const onFocus = () => {
       if (Date.now() - last < FOCUS_RESCAN_DEBOUNCE_MS) return;
@@ -125,8 +132,8 @@ function useScanTriggers() {
       void refresh();
       // An update or edit could have landed while the window was away —
       // the badge should notice without a visit to the page.
-      void updatesLoad();
-      void manifestsLoad();
+      void updatesLoad().catch(said);
+      void manifestsLoad().catch(said);
     };
     window.addEventListener("focus", onFocus);
     return () => window.removeEventListener("focus", onFocus);

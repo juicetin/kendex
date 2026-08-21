@@ -41,7 +41,7 @@ export const source = (over: Partial<PlacesSource> = {}): PlacesSource => ({
       }),
     ),
   ),
-  updatesLoaded: true,
-  manifestsLoaded: true,
+  updatesRead: "ready",
+  manifestsRead: "ready",
   ...over,
 });

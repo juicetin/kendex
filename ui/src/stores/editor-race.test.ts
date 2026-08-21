@@ -1,5 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { Manifest_Serialize, Scope } from "@/bindings";
+import type {
+  AuditView_Serialize,
+  Manifest_Serialize,
+  Scope,
+} from "@/bindings";
 import { commands } from "@/bindings";
 import { useEditorStore } from "./editor";
 
@@ -11,8 +15,28 @@ vi.mock("@/bindings", () => ({
   },
 }));
 
+// A save ends by re-reading and re-scanning; those stores have their own
+// tests, and here they would only add IPC this file does not mock.
+vi.mock("./audit", () => ({
+  useAuditStore: { getState: () => ({ refresh: async () => {} }) },
+}));
+vi.mock("./scan", () => ({
+  useScanStore: { getState: () => ({ refresh: async () => {} }) },
+}));
+
 const A: Scope = { scope: "project", root: "/work/a" };
 const B: Scope = { scope: "project", root: "/work/b" };
+
+const audited = (): AuditView_Serialize => ({
+  scope: A,
+  drift: [],
+  plan: [],
+  notes: [],
+  warnings: [],
+  safety: [],
+  heldBack: [],
+  queued: [],
+});
 
 const manifest = (note: string): Manifest_Serialize => ({
   schema: 1,
@@ -104,5 +128,61 @@ describe("switching place while a read is in flight", () => {
     await useEditorStore.getState().setScope(B);
     await useEditorStore.getState().save();
     expect(vi.mocked(commands.updateManifest).mock.calls[0]?.[0]).toEqual(B);
+  });
+});
+
+// A save is a write followed by a re-read, and the place on screen can move
+// between the two. Everything after the await belongs to the place that was
+// written, not to whichever place is open when the response lands.
+describe("switching place while a save is in flight", () => {
+  const inFlight = () => {
+    const landing =
+      deferred<Awaited<ReturnType<typeof commands.updateManifest>>>();
+    vi.mocked(commands.updateManifest).mockImplementationOnce(
+      () => landing.promise,
+    );
+    return landing;
+  };
+
+  it("names the place a failed save was about, not the one on screen", async () => {
+    vi.mocked(commands.getManifest).mockResolvedValue({
+      status: "ok",
+      data: manifest("a"),
+    });
+    await useEditorStore.getState().setScope(A);
+    const landing = inFlight();
+    const saving = useEditorStore.getState().save();
+    await useEditorStore.getState().setScope(B);
+    landing.resolve({ status: "error", error: "read-only" });
+    await saving;
+
+    const state = useEditorStore.getState();
+    expect(state.scope).toEqual(B);
+    expect(state.error).toContain("read-only");
+    expect(state.error).toContain("/work/a");
+  });
+
+  it("re-reads the place it wrote, never whichever is open now", async () => {
+    vi.mocked(commands.getManifest).mockResolvedValue({
+      status: "ok",
+      data: manifest("before"),
+    });
+    await useEditorStore.getState().setScope(A);
+    const landing = inFlight();
+    const saving = useEditorStore.getState().save();
+    await useEditorStore.getState().setScope(B);
+    vi.mocked(commands.getManifest).mockResolvedValue({
+      status: "ok",
+      data: manifest("after"),
+    });
+    landing.resolve({ status: "ok", data: audited() });
+    await saving;
+
+    // A's mark reads its saved manifest, so a save that refreshed B instead
+    // would leave A showing the state it had before the write.
+    expect(
+      useEditorStore.getState().saved["/work/a"]?.["skill-instructions"],
+    ).toEqual({ gh: "after" });
+    expect(useEditorStore.getState().scope).toEqual(B);
   });
 });

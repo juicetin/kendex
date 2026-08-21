@@ -157,6 +157,14 @@ pub enum CoreError {
     )]
     ForkAmbiguous { name: String },
 
+    /// A second fork of the same package would overwrite the first's
+    /// provenance — which source it came from, and at which commit — and
+    /// that record lives nowhere but the manifest.
+    #[error(
+        "'{name}' is already your own copy — edit it in place, or discard the fork before keeping it again"
+    )]
+    AlreadyForked { name: String },
+
     /// Case 4 of naming a catalog: a qualifier that names no subscription
     /// refuses, listing what is subscribed — never a guess, never a
     /// download.

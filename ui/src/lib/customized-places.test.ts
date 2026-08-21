@@ -12,7 +12,6 @@ import {
   customizedPlaces,
   forkedPlaces,
   indexRows,
-  manifestsOnScreen,
   type PlacesSource,
   placeStandings,
   standingIn,
@@ -67,7 +66,7 @@ describe("placeStandings", () => {
   });
 
   it("says a place is still being checked while the reads are on their way", () => {
-    expect(states({ updatesLoaded: false })).toEqual([
+    expect(states({ updatesRead: "pending" })).toEqual([
       "checking",
       "checking",
       "checking",
@@ -76,9 +75,25 @@ describe("placeStandings", () => {
     expect(
       states({
         manifests: { global: emptyDraft(), "/work/vg": emptyDraft() },
-        manifestsLoaded: false,
+        manifestsRead: "pending",
       }),
     ).toEqual(["as-installed", "as-installed", "checking"]);
+  });
+
+  // A read that came back with nothing will not run again on its own, so
+  // calling it in-flight promises a resolution that is never coming.
+  it("says a failed read could not tell, never that it is still trying", () => {
+    expect(states({ updatesRead: "failed" })).toEqual([
+      "unknown",
+      "unknown",
+      "unknown",
+    ]);
+    expect(
+      states({
+        manifests: { global: emptyDraft(), "/work/vg": emptyDraft() },
+        manifestsRead: "failed",
+      }),
+    ).toEqual(["as-installed", "as-installed", "unknown"]);
   });
 
   it("leaves a place whose manifest could not be read unknown", () => {
@@ -145,7 +160,7 @@ describe("placeStandings", () => {
           "/work/vg": forkedHere(),
           "/work/hyprtrade": emptyDraft(),
         },
-        updatesLoaded: false,
+        updatesRead: "pending",
       }),
       "skill",
       "gh",
@@ -224,21 +239,5 @@ describe("placeStandings", () => {
     expect(
       placeStandings(source(), "skill", "orch", EVERYWHERE).map((s) => s.state),
     ).toEqual(["unknown", "unknown", "unknown"]);
-  });
-});
-
-describe("manifestsOnScreen", () => {
-  it("puts the draft in hand over the saved copy of the place being edited", () => {
-    const saved = { global: emptyDraft(), "/work/vg": emptyDraft() };
-    const manifests = manifestsOnScreen(saved, VG, changed());
-    expect(manifests["/work/vg"]["skill-instructions"]).toEqual({
-      gh: "use the CLI",
-    });
-    expect(manifests.global).toEqual(emptyDraft());
-  });
-
-  it("keeps every saved manifest when no draft is open", () => {
-    const saved = { global: emptyDraft() };
-    expect(manifestsOnScreen(saved, VG, null)).toBe(saved);
   });
 });

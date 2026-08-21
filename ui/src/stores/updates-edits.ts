@@ -1,8 +1,16 @@
 import { toast } from "sonner";
-import { commands, type UpdateRow } from "@/bindings";
-import { FORK_ERROR_TITLE, forkedToastLabel } from "@/lib/copy";
+import { commands, type Scope, type UpdateRow } from "@/bindings";
+import {
+  FORK_ERROR_TITLE,
+  forkedToastLabel,
+  UNSAVED_FIRST_BODY,
+  UNSAVED_FIRST_STEPS,
+  UNSAVED_FIRST_TITLE,
+} from "@/lib/copy";
 import { packageDisplayName } from "@/lib/labels";
+import { sameScope } from "@/lib/scope";
 import { useAuditStore } from "./audit";
+import { useEditorStore } from "./editor";
 import { useProblemsStore } from "./problems";
 import { useScanStore } from "./scan";
 import { useUpdatesStore } from "./updates";
@@ -11,7 +19,19 @@ import { useUpdatesStore } from "./updates";
  *  busy flag so every control on the page waits on the same one — a fork
  *  or a discard rewrites the scope's manifest like any update does. */
 
-const run = async (work: () => Promise<string | null>) => {
+const run = async (scope: Scope, work: () => Promise<string | null>) => {
+  // Both of these rewrite this scope's kendex.toml, which the Customize tab
+  // may be holding an older copy of. Saving that copy afterwards would put
+  // the pre-fork contents back, and the fork record lives nowhere else.
+  const editor = useEditorStore.getState();
+  if (editor.dirty && sameScope(editor.scope, scope)) {
+    useProblemsStore.getState().showError({
+      title: UNSAVED_FIRST_TITLE,
+      message: UNSAVED_FIRST_BODY,
+      steps: UNSAVED_FIRST_STEPS,
+    });
+    return;
+  }
   useUpdatesStore.setState({ busy: true });
   try {
     const error = await work();
@@ -22,6 +42,10 @@ const run = async (work: () => Promise<string | null>) => {
       return;
     }
     await useUpdatesStore.getState().load();
+    // A fork rewrites the manifest exactly as a save does, and the fork
+    // fact every mark reads comes from that file — without this the badge
+    // it just earned stays off until the window is refocused.
+    await useEditorStore.getState().loadAll();
     await useScanStore.getState().refresh();
     await useAuditStore.getState().refresh({ force: true });
   } finally {
@@ -35,7 +59,7 @@ const run = async (work: () => Promise<string | null>) => {
 export const keepAsOwn = async (row: UpdateRow): Promise<void> => {
   const harness = row.forkableHarness;
   if (!harness) return;
-  await run(async () => {
+  await run(row.scope, async () => {
     const response = await commands.packageFork(
       row.scope,
       row.kind,
@@ -51,7 +75,7 @@ export const keepAsOwn = async (row: UpdateRow): Promise<void> => {
 /** Drop an edited place's edits and take the newest version — moving the
  *  hold along when the place is held, in the same apply. */
 export const takeNewVersion = async (row: UpdateRow): Promise<void> => {
-  await run(async () => {
+  await run(row.scope, async () => {
     const response = await commands.applyDiscardEdits(
       row.scope,
       row.kind,

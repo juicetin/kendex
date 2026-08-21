@@ -67,6 +67,10 @@ export function CustomizePage() {
           <div className="flex items-center gap-2">
             <span className="text-[13px] text-muted-foreground">Editing</span>
             <Select
+              // Switching place mid-save would attribute the outcome to a
+              // place it is not about, the same reason the package page's
+              // chips are gated.
+              disabled={saving}
               value={scope.scope === "global" ? "global" : scope.root}
               onValueChange={(value) => {
                 if (value === null) return;

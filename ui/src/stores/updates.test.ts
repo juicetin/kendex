@@ -2,11 +2,12 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { UpdateRow } from "@/bindings";
 import { commands } from "@/bindings";
 import {
+  awaitingForkDecision,
   hiddenUpdates,
-  useUpdatesStore,
   visibleUpdateCount,
   visibleUpdates,
-} from "./updates";
+} from "@/lib/update-rows";
+import { useUpdatesStore } from "./updates";
 
 vi.mock("@/bindings", () => ({
   commands: {
@@ -88,6 +89,53 @@ describe("updates store", () => {
     expect(visibleUpdates(rows).map((r) => r.name)).toEqual(["gone", "split"]);
     expect(hiddenUpdates(rows).map((r) => r.name)).toEqual(["muted-gone"]);
     expect(visibleUpdateCount(rows)).toBe(2);
+  });
+
+  // Home asks you to decide what to do about an edited package. A fork is
+  // already the decision, so an edit to it is not a question — the drift
+  // report and the package page both say the same.
+  it("asks about an edited package, never about an edited fork", () => {
+    const mine = row({ blockedByLocalEdit: true, name: "gh" });
+    const fork = row({ blockedByLocalEdit: true, forked: true, name: "rev" });
+    expect(
+      awaitingForkDecision([mine, fork, row({})]).map((r) => r.name),
+    ).toEqual(["gh"]);
+  });
+
+  // Every screen joining on these rows memoizes on their identity, so a
+  // re-read that says the same thing must hand back the same array — an
+  // equal copy re-renders the whole table for news that is not news.
+  it("hands back the same rows when a re-read says the same thing", async () => {
+    const answer = {
+      status: "ok" as const,
+      data: { rows: [row({})], warnings: [] },
+    };
+    vi.mocked(commands.updatesOverview).mockResolvedValue(answer);
+    await useUpdatesStore.getState().load();
+    const first = useUpdatesStore.getState().rows;
+    // A fresh array off the wire, saying exactly what the last one did.
+    vi.mocked(commands.updatesOverview).mockResolvedValue({
+      status: "ok",
+      data: { rows: [row({})], warnings: [] },
+    });
+    await useUpdatesStore.getState().load();
+    expect(useUpdatesStore.getState().rows).toBe(first);
+
+    vi.mocked(commands.updatesOverview).mockResolvedValue({
+      status: "ok",
+      data: { rows: [row({ name: "rev" })], warnings: [] },
+    });
+    await useUpdatesStore.getState().load();
+    expect(useUpdatesStore.getState().rows).not.toBe(first);
+  });
+
+  it("treats a rejected read as a read that failed", async () => {
+    vi.mocked(commands.updatesOverview).mockRejectedValue(
+      new Error("no channel"),
+    );
+    await useUpdatesStore.getState().load();
+    expect(useUpdatesStore.getState().error).toContain("no channel");
+    expect(useUpdatesStore.getState().loaded).toBe(false);
   });
 
   // Hand edits reach the Library's marks only through this read, so a

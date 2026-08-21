@@ -216,7 +216,10 @@ impl ScopeCheck<'_> {
         let prefix = self.prefix;
         let name = shown(&package.name);
         let kind = package.kind.name();
-        if package.edited {
+        // A fork's own bytes being edited is not a decision anyone owes an
+        // answer to: there is no source to refresh from and nothing left to
+        // keep as a fork, so it is not drift and `check` stays clean.
+        if package.edited && !package.forked {
             sections.edited.push(drift(
                 format!(
                     "{prefix}{kind} '{name}' was edited on disk — keep it as a fork, or refresh with edits discarded"

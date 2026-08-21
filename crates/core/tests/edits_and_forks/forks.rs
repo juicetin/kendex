@@ -231,3 +231,52 @@ fn a_fork_edited_by_hand_says_so_instead_of_reading_as_untouched() {
     );
     assert_eq!(gh.edited_harnesses, vec![HarnessId::Claude], "{gh:?}");
 }
+
+#[test]
+#[allow(clippy::unwrap_used)]
+fn editing_your_own_fork_is_not_drift_and_offers_no_second_fork() {
+    let w = world();
+    write_skill(&w.upstream, "gh", "Upstream.");
+    commit(&w.upstream, "one");
+    declare(&w, "[skills.gh]\nsource = \"cat\"\n");
+    sync_and_apply(&w);
+    fs::write(
+        skill_file(&w),
+        "---\nname: gh\ndescription: mine\n---\nMine.\n",
+    )
+    .unwrap();
+    let plan = fork::fork(&w.env, &w.scope, ItemKind::Skill, "gh", HarnessId::Claude).unwrap();
+    apply::execute(&w.env, &plan, None).unwrap();
+    let report = audit(&w.env, &w.scope).unwrap();
+    apply::execute(&w.env, &report.plan, None).unwrap();
+
+    // Edit the fork's own bytes. There is no source to refresh from and
+    // nothing left to keep, so nothing is waiting on a decision.
+    fs::write(skill_file(&w), "edited after forking").unwrap();
+    kendex_core::drift::snapshot::record(&w.env, &w.scope).unwrap();
+    let checked = kendex_core::drift::report::check(&w.env, std::slice::from_ref(&w.scope));
+    let text = kendex_core::drift::report::render_plain(&checked);
+    assert!(!text.contains("kendex fork"), "{text}");
+    assert_eq!(
+        checked.status,
+        kendex_core::drift::report::CheckStatus::Clean,
+        "an edited fork must not hold `check` at drift forever: {text}"
+    );
+
+    // And forking again would write a fresh provenance over the recorded
+    // one, whose source and commit a local declaration cannot supply.
+    let again = fork::fork(&w.env, &w.scope, ItemKind::Skill, "gh", HarnessId::Claude);
+    assert!(
+        matches!(
+            again,
+            Err(kendex_core::error::CoreError::AlreadyForked { .. })
+        ),
+        "{again:?}"
+    );
+    let manifest = manifest::load_for_mutation(&manifest::manifest_path(&w.env, &w.scope))
+        .unwrap()
+        .unwrap();
+    let recorded = &manifest.forks[&ItemKind::Skill]["gh"];
+    assert_eq!(recorded.source, "cat", "{recorded:?}");
+    assert!(recorded.repo.is_some(), "{recorded:?}");
+}

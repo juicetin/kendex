@@ -189,6 +189,12 @@ export const hiddenUpdatesLabel = (count: number): string =>
 export const PINNED_UPDATE_TAG = "Held";
 export const EDITED_UPDATE_TAG = "Edited by you";
 export const UPDATE_ERROR_TITLE = "Couldn't update";
+
+// A read the app starts on its own still has to be able to fail out loud.
+// Dropped, its rejection leaves whatever it feeds looking like an answer:
+// a Library with nothing marked, chips still saying "being checked".
+export const backgroundReadFailed = (detail: string): string =>
+  `kendex couldn't finish reading your setup: ${detail}`;
 export const updatedToastLabel = (name: string): string => `Updated ${name}`;
 export const UPDATED_ALL_TOAST = "Everything is up to date";
 
@@ -216,6 +222,17 @@ export const DISCARD_EDITS_CONFIRM_BODY =
   "The catalog's version replaces your edits to this package, and your changes are gone. Keep them as your own copy instead if you're unsure.";
 export const DISCARD_EDITS_CONFIRM_LABEL = "Discard edits";
 export const FORK_ERROR_TITLE = "Couldn't keep the edits";
+
+// Keeping a fork and discarding edits both rewrite the same kendex.toml the
+// Customize tab is editing. Saving afterwards would write the older copy in
+// hand back over it, and the fork record lives nowhere else.
+export const UNSAVED_FIRST_TITLE = "Save your customization first";
+export const UNSAVED_FIRST_BODY =
+  "This rewrites the same settings file you have unsaved changes in, and saving those afterwards would put the old contents back.";
+export const UNSAVED_FIRST_STEPS = [
+  "Open the Customize tab and save or discard your changes",
+  "Then try this again",
+];
 export const forkedToastLabel = (name: string): string =>
   `${name} is yours now — updates are paused`;
 export const forkedAttentionTitle = (count: number): string =>

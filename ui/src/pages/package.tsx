@@ -2,9 +2,11 @@ import { useEffect, useMemo, useState } from "react";
 import type { HarnessId, Scope, VersionRow } from "@/bindings";
 import { ItemCustomize } from "@/components/customize/item-customize";
 import { SaveBar } from "@/components/customize/save-bar";
+import { MarksNote } from "@/components/marks-note";
 import { PackageActions } from "@/components/package/package-actions";
 import { PackageBody } from "@/components/package/package-body";
 import { PackageHeader } from "@/components/package/package-header";
+import { PackageTabs } from "@/components/package/package-tabs";
 import { RemoveDialog } from "@/components/package/remove-dialog";
 import {
   diffHarness,
@@ -16,8 +18,6 @@ import {
   usePackageData,
   usePackageDiff,
 } from "@/components/package/use-package-data";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { CUSTOMIZE_TAB, OVERVIEW_TAB } from "@/lib/copy-customize";
 import { canCustomize } from "@/lib/customization";
 import {
   headerStanding,
@@ -203,27 +203,24 @@ export function PackagePage() {
       />
       <div className={cn("min-h-0 flex-1 overflow-y-auto", PAGE_GUTTER)}>
         <div className={cn("pb-8", WIDE_CONTENT_WIDTH)}>
-          {customizable ? (
-            <Tabs value={tab} onValueChange={setTab}>
-              <TabsList>
-                <TabsTrigger value="overview">{OVERVIEW_TAB}</TabsTrigger>
-                <TabsTrigger value="customize">{CUSTOMIZE_TAB}</TabsTrigger>
-              </TabsList>
-              <TabsContent value="overview" className="pt-6">
-                {body}
-              </TabsContent>
-              <TabsContent value="customize" className="pt-6">
-                <ItemCustomize
-                  kind={group.kind}
-                  name={group.name}
-                  scopes={scopes}
-                  harnesses={group.harnesses as HarnessId[]}
-                />
-              </TabsContent>
-            </Tabs>
-          ) : (
-            body
-          )}
+          {/* The marks in the header and on the chips rest on the same two
+              reads the Library's do, so a failure has to be sayable here
+              too — this is where someone comes to act on one. */}
+          <MarksNote className="mt-3" />
+          <PackageTabs
+            customizable={customizable}
+            tab={tab}
+            onTabChange={setTab}
+            overview={body}
+            customize={
+              <ItemCustomize
+                kind={group.kind}
+                name={group.name}
+                scopes={scopes}
+                harnesses={group.harnesses as HarnessId[]}
+              />
+            }
+          />
         </div>
       </div>
       {dirty ? (

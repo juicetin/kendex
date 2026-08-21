@@ -6,40 +6,14 @@ import {
   nothingToUpdateToastLabel,
   updatedWithPlaceToastLabel,
 } from "@/lib/copy-updates";
+import { keepIfSame } from "@/lib/same-read";
 import { scopeKey } from "@/lib/scope";
-import {
-  packageCount,
-  placeName,
-  skippedPlaces,
-  updatablePlaces,
-} from "@/lib/update-groups";
+import { placeName, skippedPlaces, updatablePlaces } from "@/lib/update-groups";
+import { visibleUpdates } from "@/lib/update-rows";
 import { bulkUpdateToast } from "@/lib/update-toasts";
 import { useAuditStore } from "./audit";
 import { useProblemsStore } from "./problems";
 import { useScanStore } from "./scan";
-
-/** A row worth a line on the page: a newer version, a package gone from
- *  its source, or installs disagreeing on their version — each a standing
- *  fact someone can act on. */
-const noteworthy = (row: UpdateRow): boolean =>
-  row.updateAvailable || row.removedUpstream || row.mixed;
-
-/** The sidebar badge's number: packages with news someone would want to
- *  hear, counted once however many places they are installed in. Ignored
- *  ones asked not to be counted; held ones still count — a hold is "not
- *  yet", not "never tell me". */
-export const visibleUpdateCount = (rows: UpdateRow[]): number =>
-  packageCount(visibleUpdates(rows));
-
-/** The Updates page's main list: everything noteworthy that has not been
- *  muted. */
-export const visibleUpdates = (rows: UpdateRow[]): UpdateRow[] =>
-  rows.filter((row) => noteworthy(row) && !row.ignored);
-
-/** The collapsed "hidden updates" section: muted packages whose news is
- *  still real — with the way back out. */
-export const hiddenUpdates = (rows: UpdateRow[]): UpdateRow[] =>
-  rows.filter((row) => noteworthy(row) && row.ignored);
 
 interface UpdatesState {
   rows: UpdateRow[];
@@ -89,18 +63,29 @@ export const useUpdatesStore = create<UpdatesState>((set, get) => {
   };
 
   const reload = async () => {
-    const response = await commands.updatesOverview();
+    let response: Awaited<ReturnType<typeof commands.updatesOverview>>;
+    try {
+      response = await commands.updatesOverview();
+    } catch (thrown) {
+      // A rejected read is a read that failed. Left to reject it would end
+      // the pass with nothing said, and every place would read as still
+      // being checked with nothing running and no note to say otherwise.
+      set({ loaded: false, error: String(thrown) });
+      return;
+    }
     // A failed reload marks the data stale (loaded = false) rather than
     // leaving the last-good rows trusted — the package page gates the
     // Update button on `loaded`, and acting on rows we could not refresh
     // is exactly the fail-open this closes.
     if (response.status === "ok")
-      set({
-        rows: response.data.rows,
-        warnings: response.data.warnings,
+      set((state) => ({
+        // A re-read that changed nothing hands back what is already on
+        // screen: every screen joining on these rows memoizes on identity.
+        rows: keepIfSame(state.rows, response.data.rows),
+        warnings: keepIfSame(state.warnings, response.data.warnings),
         loaded: true,
         error: null,
-      });
+      }));
     else set({ loaded: false, error: response.error });
   };
 

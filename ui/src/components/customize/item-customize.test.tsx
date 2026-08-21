@@ -14,7 +14,10 @@ const HYPR: Scope = { scope: "project", root: "/work/hyprtrade" };
 const stub = vi.hoisted(() => ({
   saved: {} as Record<string, unknown>,
   manifestsLoaded: true,
+  manifestError: null as string | null,
   rows: [] as unknown[],
+  updatesLoaded: true,
+  updatesError: null as string | null,
 }));
 
 vi.mock("@/stores/editor", async (importOriginal) => {
@@ -26,6 +29,7 @@ vi.mock("@/stores/editor", async (importOriginal) => {
       draft: stub.saved["/work/vg"] ?? null,
       saved: stub.saved,
       manifestsLoaded: stub.manifestsLoaded,
+      manifestError: stub.manifestError,
     };
     return selector ? selector(state) : state;
   };
@@ -38,7 +42,8 @@ vi.mock("@/stores/updates", async (importOriginal) => {
     const state = {
       ...mod.useUpdatesStore.getState(),
       rows: stub.rows,
-      loaded: true,
+      loaded: stub.updatesLoaded,
+      error: stub.updatesError,
     };
     return selector ? selector(state) : state;
   };
@@ -63,6 +68,9 @@ const render = () =>
 beforeEach(() => {
   stub.saved = { "/work/vg": changed(), "/work/hyprtrade": emptyDraft() };
   stub.manifestsLoaded = true;
+  stub.manifestError = null;
+  stub.updatesLoaded = true;
+  stub.updatesError = null;
   stub.rows = [current(VG), current(HYPR)];
 });
 
@@ -78,6 +86,17 @@ describe("the Customize tab's place chips", () => {
   it("says a place is not checked rather than calling it untouched", () => {
     stub.rows = [current(VG)];
     expect(render()).toContain("hyprtrade — not checked for your changes");
+  });
+
+  it("says a read failed rather than promising one that is still coming", () => {
+    // A failed check will not retry on its own, so calling it in flight
+    // leaves the chips waiting on something nobody is doing.
+    stub.updatesLoaded = false;
+    stub.updatesError = "no network";
+    stub.saved = { "/work/vg": changed(), "/work/hyprtrade": emptyDraft() };
+    const html = render();
+    expect(html).toContain("hyprtrade — not checked for your changes");
+    expect(html).not.toContain("still being checked");
   });
 
   it("says a place is still being checked rather than blaming the read", () => {

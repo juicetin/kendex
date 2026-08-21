@@ -1,6 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { UpdateRow } from "@/bindings";
 import { commands } from "@/bindings";
+import { useEditorStore } from "./editor";
+import { useProblemsStore } from "./problems";
+import { useSettingsStore } from "./settings";
 import { useUpdatesStore } from "./updates";
 import { keepAsOwn, takeNewVersion } from "./updates-edits";
 
@@ -13,6 +16,7 @@ vi.mock("@/bindings", () => ({
     applyPlan: vi.fn(),
     applyDiscardEdits: vi.fn(),
     packageFork: vi.fn(),
+    getManifest: vi.fn(),
     scanMachine: vi.fn(),
     auditAll: vi.fn(),
   },
@@ -52,6 +56,15 @@ function row(overrides: Partial<UpdateRow>): UpdateRow {
 describe("updates store: edited places", () => {
   beforeEach(() => {
     useUpdatesStore.setState({ rows: [], busy: false, loaded: false });
+    useSettingsStore.setState({ settings: { schema: 1, projects: [] } });
+    useEditorStore.setState({
+      scope: { scope: "global" },
+      draft: null,
+      dirty: false,
+      saved: {},
+      manifestsLoaded: false,
+      manifestError: null,
+    });
     vi.clearAllMocks();
   });
 
@@ -139,5 +152,87 @@ describe("updates store: edited places", () => {
     );
     expect(busyDuring).toBe(true);
     expect(useUpdatesStore.getState().busy).toBe(false);
+  });
+
+  // A fork rewrites the scope's kendex.toml, and the fork fact every mark
+  // reads comes from that file. Nothing else re-reads it.
+  it("re-reads the manifests a fork rewrote, so the mark appears at once", async () => {
+    const view = {
+      scope: { scope: "global" } as const,
+      drift: [],
+      plan: [],
+      notes: [],
+      warnings: [],
+      safety: [],
+      heldBack: [],
+      queued: [],
+    };
+    vi.mocked(commands.packageFork).mockResolvedValue({
+      status: "ok",
+      data: view,
+    });
+    vi.mocked(commands.updatesOverview).mockResolvedValue({
+      status: "ok",
+      data: { rows: [], warnings: [] },
+    });
+    vi.mocked(commands.scanMachine).mockResolvedValue({
+      status: "ok",
+      data: { harnesses: [], items: [], missingProjects: [], warnings: [] },
+    });
+    vi.mocked(commands.auditAll).mockResolvedValue({ status: "ok", data: [] });
+    vi.mocked(commands.getManifest).mockResolvedValue({
+      status: "ok",
+      data: {
+        schema: 1,
+        install: {},
+        forks: { skill: { gh: { source: "cat", "forked-at": "2026-08-01" } } },
+      },
+    });
+
+    await keepAsOwn(
+      row({
+        blockedByLocalEdit: true,
+        editedHarnesses: ["claude"],
+        forkableHarness: "claude",
+      }),
+    );
+
+    expect(useEditorStore.getState().saved.global?.forks).toEqual({
+      skill: { gh: { source: "cat", "forked-at": "2026-08-01" } },
+    });
+  });
+
+  // The Customize tab holds a whole manifest. Saved after a fork, that copy
+  // puts the pre-fork file back and the fork record is gone for good.
+  it("refuses while an unsaved customization holds the same file", async () => {
+    useEditorStore.setState({
+      scope: { scope: "global" },
+      draft: { schema: 1, install: {} },
+      dirty: true,
+    });
+    await keepAsOwn(
+      row({
+        blockedByLocalEdit: true,
+        editedHarnesses: ["claude"],
+        forkableHarness: "claude",
+      }),
+    );
+    expect(commands.packageFork).not.toHaveBeenCalled();
+    expect(useProblemsStore.getState().dialog.title).toContain("Save your");
+
+    // Another place's unsaved work is not this place's problem.
+    useEditorStore.setState({ scope: { scope: "project", root: "/work/vg" } });
+    vi.mocked(commands.packageFork).mockResolvedValue({
+      status: "error",
+      error: "nope",
+    });
+    await keepAsOwn(
+      row({
+        blockedByLocalEdit: true,
+        editedHarnesses: ["claude"],
+        forkableHarness: "claude",
+      }),
+    );
+    expect(commands.packageFork).toHaveBeenCalled();
   });
 });
