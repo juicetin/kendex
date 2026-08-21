@@ -67,6 +67,7 @@ describe("a fork or discard beside an open Customize tab", () => {
       scope: { scope: "global" },
       draft: null,
       dirty: false,
+      held: {},
       saved: {},
       manifestsLoaded: false,
       manifestError: null,
@@ -120,6 +121,37 @@ describe("a fork or discard beside an open Customize tab", () => {
       }),
     );
     expect(commands.packageFork).toHaveBeenCalled();
+  });
+
+  // Moving between places parks typing rather than dropping it, so the
+  // copy that would undo this write can be behind another place. Whether
+  // the write is refused must not depend on where the person happens to be
+  // standing.
+  it("refuses while typing for this place waits behind another one", async () => {
+    useEditorStore.setState({
+      scope: { scope: "project", root: "/work/vg" },
+      draft: null,
+      dirty: false,
+      held: {
+        global: {
+          scope: { scope: "global" },
+          draft: { schema: 1, install: {} },
+          base: "read-earlier",
+        },
+      },
+    });
+    await keepAsOwn(
+      row({
+        blockedByLocalEdit: true,
+        editedHarnesses: ["claude"],
+        forkableHarness: "claude",
+      }),
+    );
+    expect(commands.packageFork).not.toHaveBeenCalled();
+    const dialog = useProblemsStore.getState().dialog;
+    expect(dialog.title).toContain("Save your");
+    // The unsaved copy is not on screen, so the way back to it is named.
+    expect(dialog.steps?.[0]).toContain("Personal");
   });
 
   // The refusal at entry guards a window that stays open for the whole

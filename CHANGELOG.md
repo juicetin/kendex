@@ -205,6 +205,10 @@ changes carry a **Breaking** call-out with their migration note inline.
   which is what its buttons and badges have always meant.
 - Two projects whose folders share a name are told apart on Review, the way
   they already are in the Library and on a package's own page.
+- Keeping a package as your own, or discarding its edits, now waits for
+  unsaved customization in that project even when you have moved to another
+  one — and says which project to go back to. Before, moving away let the
+  action through, and the settings you were typing could no longer be saved.
 - A package's From row says when it is showing the last answer kendex had.
   If the read of where your packages came from fails, the row keeps what it
   last knew rather than emptying, and marks it as last known instead of

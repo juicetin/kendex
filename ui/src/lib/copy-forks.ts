@@ -38,8 +38,13 @@ export const FORK_ERROR_TITLE = "Couldn't keep the edits";
 export const UNSAVED_FIRST_TITLE = "Save your customization first";
 export const UNSAVED_FIRST_BODY =
   "This rewrites the same settings file you have unsaved changes in, and saving those afterwards would put the old contents back.";
-export const UNSAVED_FIRST_STEPS = [
-  "Open the Customize tab and save or discard your changes",
+// The unsaved copy may be parked behind another place: moving between
+// places keeps typing rather than dropping it, so the steps have to name
+// where to go back to instead of pointing at the tab on screen.
+export const unsavedFirstSteps = (place: string | null): string[] => [
+  place === null
+    ? "Open the Customize tab and save or discard your changes"
+    : `Open ${place} and save or discard your changes on its Customize tab`,
   "Then try this again",
 ];
 

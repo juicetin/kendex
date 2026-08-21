@@ -4,11 +4,11 @@ import { forkedToastLabel } from "@/lib/copy";
 import {
   FORK_ERROR_TITLE,
   UNSAVED_FIRST_BODY,
-  UNSAVED_FIRST_STEPS,
   UNSAVED_FIRST_TITLE,
+  unsavedFirstSteps,
 } from "@/lib/copy-forks";
-import { packageDisplayName } from "@/lib/labels";
-import { sameScope } from "@/lib/scope";
+import { packageDisplayName, scopeName } from "@/lib/labels";
+import { sameScope, scopeKey } from "@/lib/scope";
 import { useAuditStore } from "./audit";
 import { useEditorStore } from "./editor";
 import { manifestRewritten } from "./manifest-sync";
@@ -25,11 +25,17 @@ const run = async (scope: Scope, work: () => Promise<string | null>) => {
   // may be holding an older copy of. Saving that copy afterwards would put
   // the pre-fork contents back, and the fork record lives nowhere else.
   const editor = useEditorStore.getState();
-  if (editor.dirty && sameScope(editor.scope, scope)) {
+  // Unsaved typing for this place refuses the write whether it is on screen
+  // or parked behind another one. Parking is not a ruling on a draft and
+  // this is: reaching only the copy on screen would let a move between
+  // places decide whether the write is refused, which is not something
+  // anyone chose. Anything parked is unsaved by construction.
+  const parked = editor.held[scopeKey(scope)] !== undefined;
+  if (parked || (editor.dirty && sameScope(editor.scope, scope))) {
     useProblemsStore.getState().showError({
       title: UNSAVED_FIRST_TITLE,
       message: UNSAVED_FIRST_BODY,
-      steps: UNSAVED_FIRST_STEPS,
+      steps: unsavedFirstSteps(parked ? scopeName(scope) : null),
     });
     return;
   }
