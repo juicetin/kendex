@@ -10,33 +10,44 @@ import {
   VG,
 } from "@/lib/places-test-source";
 import {
-  anyCustomized,
   customizedPlaces,
-  headerStanding,
   indexRows,
-  markTarget,
-  type PlacesSource,
   placeStandings,
-  rowIn,
-  uncheckedPlaces,
+  standingIn,
 } from "./customized-places";
 import { type Draft, emptyDraft } from "./editor-draft";
+import {
+  customizeNav,
+  headerStanding,
+  markTarget,
+  packageMarks,
+} from "./place-marks";
 
-// Everything a mark does once it is drawn: where it leads, which place it
-// speaks for, and how many places it must not speak for.
-
-describe("rowIn", () => {
-  it("hands back one place's row, so a page reads it instead of scanning", () => {
-    const places = source();
-    expect(rowIn(places, "skill", "gh", VG)?.scope).toEqual(VG);
-    expect(rowIn(places, "skill", "gh", { scope: "project", root: "/x" })).toBe(
-      null,
-    );
-    expect(rowIn(places, "agent", "gh", VG)).toBe(null);
-  });
-});
+// Where a mark leads once it is drawn, and which place each of a package
+// page's own marks speaks for.
 
 describe("markTarget", () => {
+  it("leads to the tab that holds the settings, even where the place is forked", () => {
+    // A fork is the standing state of this place; instructions typed on the
+    // Customize tab are the thing someone went and did. The mark must not
+    // walk past them to the overview.
+    const both = {
+      ...forkedHere(),
+      "skill-instructions": { gh: "use the CLI" },
+    };
+    const standings = placeStandings(
+      source({ manifests: { ...plainManifests(), "/work/vg": both } }),
+      "skill",
+      "gh",
+      EVERYWHERE,
+    );
+    expect(markTarget(standings)).toEqual({
+      scope: VG,
+      view: { mode: "customize" },
+    });
+    expect(standingIn(standings, VG)?.forked).toBe(true);
+  });
+
   const targetFor = (manifests: Record<string, Draft>) =>
     markTarget(
       placeStandings(source({ manifests }), "skill", "gh", EVERYWHERE),
@@ -88,45 +99,6 @@ describe("markTarget", () => {
   });
 });
 
-describe("anyCustomized", () => {
-  it("answers the colour key's question without building a list", () => {
-    const standings = (manifests: Record<string, Draft>) =>
-      placeStandings(source({ manifests }), "skill", "gh", EVERYWHERE);
-    expect(anyCustomized(standings(plainManifests()))).toBe(false);
-    expect(
-      anyCustomized(standings({ ...plainManifests(), "/work/vg": changed() })),
-    ).toBe(true);
-  });
-});
-
-describe("uncheckedPlaces", () => {
-  it("counts only the places a read came back unable to speak for", () => {
-    const standings = (over: Partial<PlacesSource>) =>
-      placeStandings(source(over), "skill", "gh", EVERYWHERE);
-    const changedOne = {
-      manifests: {
-        global: emptyDraft(),
-        "/work/vg": changed(),
-        "/work/hyprtrade": emptyDraft(),
-      },
-    };
-    expect(uncheckedPlaces(standings(changedOne))).toBe(0);
-    // A read on its way is not one a mark must apologise for: every launch
-    // would otherwise open by calling places unchecked and then take it back.
-    expect(
-      uncheckedPlaces(standings({ ...changedOne, updatesRead: "pending" })),
-    ).toBe(0);
-    expect(
-      uncheckedPlaces(
-        standings({
-          ...changedOne,
-          rows: indexRows([updateRow("gh", null, { updateAvailable: false })]),
-        }),
-      ),
-    ).toBe(1);
-  });
-});
-
 describe("headerStanding", () => {
   const standings = () =>
     placeStandings(
@@ -151,5 +123,51 @@ describe("headerStanding", () => {
       headerStanding(standings(), HYPR, { scope: "project", root: "/nowhere" })
         ?.scope,
     ).toEqual(HYPR);
+  });
+});
+
+describe("customizeNav", () => {
+  it("opens the tab that wrote what the index is listing", () => {
+    // Every row on the Customize index is an overlay written on that tab,
+    // so landing on the overview would be landing away from it.
+    expect(customizeNav({ kind: "skill", name: "gh", scope: VG })).toEqual([
+      { kind: "skill", name: "gh", scope: VG },
+      { mode: "customize" },
+    ]);
+  });
+});
+
+describe("packageMarks", () => {
+  const marks = (opened: typeof VG, editing: typeof VG | null) =>
+    packageMarks(
+      source({
+        manifests: { ...plainManifests(), "/work/vg": forkedHere() },
+        rows: indexRows([
+          updateRow("gh", null, { updateAvailable: false }),
+          updateRow("gh", "/work/vg", { updateAvailable: false }),
+          updateRow("gh", "/work/hyprtrade", {
+            updateAvailable: false,
+            blockedByLocalEdit: true,
+          }),
+        ]),
+      }),
+      "skill",
+      "gh",
+      EVERYWHERE,
+      opened,
+      editing,
+    );
+
+  it("speaks for the place the page was opened at until the editor points here", () => {
+    expect(marks(HYPR, null).selected?.scope).toEqual(HYPR);
+    expect(marks(HYPR, VG).selected?.scope).toEqual(VG);
+  });
+
+  it("reads the fork and the hand edit off the place the page is about", () => {
+    // Both are about the opened place, never the one the header names.
+    expect(marks(VG, HYPR).forkedHere).toBe(true);
+    expect(marks(HYPR, VG).forkedHere).toBe(false);
+    expect(marks(HYPR, VG).editedRow?.scope).toEqual(HYPR);
+    expect(marks(VG, HYPR).editedRow).toBe(null);
   });
 });

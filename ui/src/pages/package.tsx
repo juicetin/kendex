@@ -19,16 +19,11 @@ import {
   usePackageDiff,
 } from "@/components/package/use-package-data";
 import { canCustomize } from "@/lib/customization";
-import {
-  headerStanding,
-  placeStandings,
-  rowIn,
-  standingIn,
-  useEditingPlacesSource,
-} from "@/lib/customized-places";
-import { groupItems, groupScopes } from "@/lib/derive";
+import { useEditingPlacesSource } from "@/lib/customized-places";
+import { groupItems, groupScopes, installationIn } from "@/lib/derive";
 import { packageDisplayName } from "@/lib/labels";
 import { PAGE_GUTTER, WIDE_CONTENT_WIDTH } from "@/lib/layout";
+import { packageMarks } from "@/lib/place-marks";
 import { cn } from "@/lib/utils";
 import { installedRow, latestRow, versionRowLabel } from "@/lib/versions";
 import { useAuditStore } from "@/stores/audit";
@@ -99,7 +94,11 @@ export function PackagePage() {
   }, [ref, result, group, back]);
 
   if (!ref || !group) return null;
-  const primary = group.installations[0];
+  // Everything the page says about the package as installed — its path,
+  // its open actions, its broken-link state, which tool a comparison reads
+  // — is about one installation. That is the place the page was opened at,
+  // which a customized mark can name any of.
+  const primary = installationIn(group, ref.scope);
   if (!primary) return null;
 
   const displayName = packageDisplayName(ref);
@@ -111,15 +110,14 @@ export function PackagePage() {
   // has open, or the one this page was opened at while it loads. The body
   // is always about the place the page was opened at — its files, its
   // versions and its edited-files notice all belong to that one.
-  const standings = placeStandings(places, group.kind, group.name, scopes);
-  const selected = headerStanding(
-    standings,
+  const { selected, forkedHere, editedRow } = packageMarks(
+    places,
+    group.kind,
+    group.name,
+    scopes,
     ref.scope,
     pointed ? editorScope : null,
   );
-  const here = standingIn(standings, ref.scope);
-  const row = rowIn(places, group.kind, group.name, ref.scope);
-  const editedRow = row?.blockedByLocalEdit ? row : null;
   // Update waits for meta (held vs following) and the update standing, and
   // is off while edits are held.
   const canUpdate =
@@ -158,7 +156,7 @@ export function PackagePage() {
       group={group}
       primary={primary}
       meta={meta}
-      forked={here?.forked === true}
+      forked={forkedHere}
       editedRow={editedRow}
       versions={versions}
       files={files}

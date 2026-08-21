@@ -14,6 +14,7 @@ import { cn } from "@/lib/utils";
 import { useLibraryViewStore } from "@/stores/library-view";
 import { useNavStore } from "@/stores/nav";
 import {
+  indexOrigins,
   originFor,
   originLabel,
   useProvenanceStore,
@@ -77,6 +78,10 @@ export function InstalledView() {
     return () => setScrollTop(node.scrollTop);
   }, [setScrollTop]);
 
+  // Keyed once per read, then asked per group: scanning every provenance
+  // row for every group is the whole cost of this join at a few hundred
+  // packages.
+  const origins = useMemo(() => indexOrigins(provenance), [provenance]);
   const groups = useMemo(() => {
     if (!result) return [];
     const filtered = filterItems(result.items, {
@@ -91,10 +96,10 @@ export function InstalledView() {
     return grouped.filter(
       (group) =>
         originLabel(
-          originFor(provenance, group.kind, group.name, groupScopes(group)),
+          originFor(origins, group.kind, group.name, groupScopes(group)),
         ) === from,
     );
-  }, [result, scope, kind, harness, tag, from, search, provenance]);
+  }, [result, scope, kind, harness, tag, from, search, origins]);
 
   // The count the filtered total is measured against: every row the table
   // could show, not the ones left after the current narrowing.
@@ -157,7 +162,7 @@ export function InstalledView() {
             <NotManagedPanel />
             <InstalledTable
               groups={groups}
-              provenance={provenance}
+              origins={origins}
               scanning={scanning}
               hasAnyItems={hasAnyItems}
               onClearFilters={clearFilters}

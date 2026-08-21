@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { ProvenanceRow } from "@/bindings";
-import { originFor, originLabel, originTitle } from "./provenance";
+import {
+  indexOrigins,
+  originFor,
+  originLabel,
+  originTitle,
+} from "./provenance";
 
 const ROWS: ProvenanceRow[] = [
   {
@@ -26,9 +31,11 @@ const ROWS: ProvenanceRow[] = [
   },
 ];
 
+const INDEX = indexOrigins(ROWS);
+
 describe("the From column's join", () => {
   it("matches by kind, name, and any of the group's scopes", () => {
-    const origin = originFor(ROWS, "skill", "gh", [{ scope: "global" }]);
+    const origin = originFor(INDEX, "skill", "gh", [{ scope: "global" }]);
     expect(origin).toEqual({
       origin: "marketplace",
       source: "kendex",
@@ -37,10 +44,24 @@ describe("the From column's join", () => {
     // The same name in another scope answers with that scope's origin —
     // a fork there does not relabel the global install.
     expect(
-      originFor(ROWS, "skill", "gh", [{ scope: "project", root: "/work/app" }]),
+      originFor(INDEX, "skill", "gh", [
+        { scope: "project", root: "/work/app" },
+      ]),
     ).toEqual({ origin: "own", forkedFrom: "kendex" });
     // A same-named item of another kind never borrows this one's origin.
-    expect(originFor(ROWS, "hook", "gh", [{ scope: "global" }])).toBeNull();
+    expect(originFor(INDEX, "hook", "gh", [{ scope: "global" }])).toBeNull();
+  });
+
+  it("keeps the first row for a place, as the scan it replaced did", () => {
+    const twice = indexOrigins([
+      ...ROWS,
+      { ...ROWS[0], origin: { origin: "own", forkedFrom: "later" } },
+    ]);
+    expect(originFor(twice, "skill", "gh", [{ scope: "global" }])).toEqual({
+      origin: "marketplace",
+      source: "kendex",
+      repo: "acme/kendex",
+    });
   });
 
   it("labels origins in product words with the detail on hover", () => {

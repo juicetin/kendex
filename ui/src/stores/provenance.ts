@@ -27,22 +27,36 @@ export const useProvenanceStore = create<ProvenanceState>((set) => ({
   },
 }));
 
-/** The origin one library group shows: the first provenance row matching its
- * kind, name, and any of its scopes. Groups collapse installations that all
- * come from one place, so any match speaks for the group. */
+const originKey = (kind: ItemKind, name: string, scope: Scope): string =>
+  `${kind}:${name}:${scopeKey(scope)}`;
+
+/** Provenance keyed by the place it is about, built once per read. A table
+ *  asks per group, and scanning every row for every group is the whole cost
+ *  of the join at a few hundred packages. The first row for a place wins,
+ *  as the scan-order search it replaces did. */
+export function indexOrigins(rows: ProvenanceRow[]): Map<string, Origin> {
+  const index = new Map<string, Origin>();
+  for (const row of rows) {
+    const key = originKey(row.kind, row.name, row.scope);
+    if (!index.has(key)) index.set(key, row.origin);
+  }
+  return index;
+}
+
+/** The origin one library group shows. Groups collapse installations that
+ * all come from one place, so the first of its scopes with a row speaks for
+ * the group. */
 export function originFor(
-  rows: ProvenanceRow[],
+  index: Map<string, Origin>,
   kind: ItemKind,
   name: string,
   scopes: Scope[],
 ): Origin | null {
-  const keys = new Set(scopes.map(scopeKey));
-  return (
-    rows.find(
-      (row) =>
-        row.kind === kind && row.name === name && keys.has(scopeKey(row.scope)),
-    )?.origin ?? null
-  );
+  for (const scope of scopes) {
+    const found = index.get(originKey(kind, name, scope));
+    if (found) return found;
+  }
+  return null;
 }
 
 /** How an origin reads in the From column and its filter. */

@@ -93,18 +93,22 @@ changes carry a **Breaking** call-out with their migration note inline.
   A skill installed at your user level and in two projects, changed in one
   of them, reads "Customized in vg · 1 of 3 places" on its Library row and
   "Customized in vg" in its own header — and clicking the mark opens the
-  place it names, on the change itself: the Customize tab when you set it
-  there, the package overview beside its edited files when you edited them
-  by hand or forked it. The Customize tab's project chips carry a dot on
-  the places that hold changes and say in words what each place holds, and
-  the Forked mark now belongs to the place it was made in instead of
-  showing up on every copy. A place counts as customized whether you
-  changed it on the Customize tab, edited its installed files by hand, or
-  forked it, so a package you hand-edited is marked even when it is up to
-  date, and a fork you have since edited says so. Text you are still
+  place it names, on the change itself: the package overview beside its
+  edited files when you edited them by hand, the Customize tab when you
+  set something there, and the overview again for a place whose copy is
+  your own fork. The Customize tab's project chips carry a dot on the
+  places that hold changes and say in words what each place holds, and the
+  Forked mark now belongs to the place it was made in instead of showing
+  up on every copy. The page you land on is about that place too — its
+  path, its open actions and its file list, not the first project the
+  package happens to be installed in. A place counts as customized whether
+  you changed it on the Customize tab, edited its installed files by hand,
+  or forked it, so a package you hand-edited is marked even when it is up
+  to date, and a fork you have since edited says so. Text you are still
   typing is not a customization yet: the Library marks what is saved. Two
   projects with the same folder name are told apart by their parent folder
-  wherever they are named together. Where a package comes from a local
+  wherever they are named together — on the Library, the chips, a package
+  header, the scope pickers, and the problem and decision lists. Where a package comes from a local
   folder the app cannot check its files, and such a place says "not
   checked" rather than passing as untouched — while a place whose read is
   still on its way says it is still being checked instead. If the update

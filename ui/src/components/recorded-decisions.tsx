@@ -110,6 +110,12 @@ export function RecordedDecisions() {
 
   const rows = sortDecisions(view.decisions);
   if (rows.length === 0 && view.errors.length === 0) return null;
+  // Every place this list speaks about, so two projects sharing a folder
+  // name are told apart wherever one of them is named.
+  const among = [
+    ...rows.map((row) => row.scope),
+    ...view.errors.map((failed) => failed.scope),
+  ];
   const now = Date.now();
   const confirm = revoking ? confirmCopy(revoking) : null;
   return (
@@ -121,7 +127,7 @@ export function RecordedDecisions() {
         <StatusNote
           key={scopeKey(failed.scope)}
           tone="critical"
-          title={decisionsErrorTitle(scopeName(failed.scope))}
+          title={decisionsErrorTitle(scopeName(failed.scope, among))}
           className="mb-3"
         >
           {failed.error.message}
@@ -135,7 +141,7 @@ export function RecordedDecisions() {
           label={rowTitle(row)}
           description={
             <span className="flex flex-col gap-1">
-              <span>{describeDecision(row, now)}</span>
+              <span>{describeDecision(row, now, among)}</span>
               {decisionDetail(row) ? (
                 <span className="text-muted-foreground">
                   “{decisionDetail(row)}”

@@ -116,7 +116,26 @@ describe("switching place while a read is in flight", () => {
     expect(state.error).toBe(null);
   });
 
-  it("saves the place the draft on screen belongs to", async () => {
+  it("keeps the editor reading until the newest read lands", async () => {
+    const slow = deferred<Awaited<ReturnType<typeof commands.getManifest>>>();
+    const quick = deferred<Awaited<ReturnType<typeof commands.getManifest>>>();
+    vi.mocked(commands.getManifest)
+      .mockImplementationOnce(() => slow.promise)
+      .mockImplementationOnce(() => quick.promise);
+
+    const first = useEditorStore.getState().setScope(A);
+    const second = useEditorStore.getState().setScope(B);
+    slow.resolve({ status: "ok", data: manifest("a") });
+    await first;
+    // The superseded read came back; the one the editor is waiting on has
+    // not, so clearing the spinner here would say the place is on screen.
+    expect(useEditorStore.getState().loading).toBe(true);
+    quick.resolve({ status: "ok", data: manifest("b") });
+    await second;
+    expect(useEditorStore.getState().loading).toBe(false);
+  });
+
+  it("writes the place the draft on screen belongs to", async () => {
     vi.mocked(commands.getManifest).mockResolvedValue({
       status: "ok",
       data: manifest("b"),

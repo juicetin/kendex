@@ -5,6 +5,7 @@ import { updateRow } from "@/components/updates-test-rows";
 import { placeStandings } from "@/lib/customized-places";
 import { groupItems } from "@/lib/derive";
 import type { Draft } from "@/lib/editor-draft";
+import { markNav } from "@/lib/place-marks";
 import {
   changed,
   EVERYWHERE,
@@ -14,7 +15,7 @@ import {
   source,
   VG,
 } from "@/lib/places-test-source";
-import { InstalledTable, markNav } from "./installed-table";
+import { InstalledTable } from "./installed-table";
 
 // Static rendering reads a zustand store's initial snapshot, never one set
 // later, so both stores are wrapped to let a test stage what each place
@@ -78,7 +79,7 @@ const render = () =>
         install({ scope: "global" }),
         ...ROOTS.map((root) => install({ scope: "project", root })),
       ])}
-      provenance={[]}
+      origins={new Map()}
       scanning={false}
       hasAnyItems={true}
       onClearFilters={() => {}}

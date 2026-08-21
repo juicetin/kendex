@@ -111,9 +111,9 @@ function Row({
           wants to wrap rather than run out of the row and get cut mid-word. */}
       <TableCell className="max-w-[22rem] font-medium whitespace-normal">
         <span className="flex items-start gap-2">
-          {/* The one place colour says something other than "which tool":
-              the Library's legend names it, and the Where cell says the
-              same in words for anyone who cannot see the difference. */}
+          {/* The kind icon carries the customization colour, the legend
+              above the table names what it means, and the Where cell in
+              this same row repeats it in words. */}
           <span title={mark ?? undefined} className="mt-0.5 shrink-0">
             <Icon
               className={cn(

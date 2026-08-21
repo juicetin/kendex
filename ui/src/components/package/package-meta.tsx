@@ -17,6 +17,7 @@ import { versionLabel } from "@/lib/versions";
 import { subscription } from "@/stores/marketplaces";
 import { useNavStore } from "@/stores/nav";
 import {
+  indexOrigins,
   originFor,
   originTitle,
   useProvenanceStore,
@@ -53,7 +54,7 @@ export function PackageMetaBlock({
     if (!loadedProvenance) void loadProvenance();
   }, [loadedProvenance, loadProvenance]);
   const origin = originFor(
-    provenance,
+    indexOrigins(provenance),
     group.kind,
     group.name,
     groupScopes(group),

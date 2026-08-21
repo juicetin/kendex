@@ -12,7 +12,6 @@ import { isCustomized, itemCustomization } from "@/lib/customization";
 import type { Draft } from "@/lib/editor-draft";
 import { sameScope, scopeKey } from "@/lib/scope";
 import { useEditorStore } from "@/stores/editor";
-import type { PackageView } from "@/stores/nav";
 import { useUpdatesStore } from "@/stores/updates";
 
 /** What is known about one place's copy of a package. `unknown` is a real
@@ -22,9 +21,11 @@ import { useUpdatesStore } from "@/stores/updates";
  *  about yet has not been given up on. */
 export type PlaceState = "customized" | "as-installed" | "checking" | "unknown";
 
-/** What makes a place yours, and so where its mark leads: settings live on
- *  the Customize tab, files on the overview beside the edited-files notice
- *  that offers the decision. */
+/** Where a place's change is shown, and so where its mark leads. Settings
+ *  live on the Customize tab. `files` is this place's own bytes — a hand
+ *  edit, or a fork — and the overview is where both are: the notice
+ *  offering the keep-or-discard decision for an edit, the Forked badge for
+ *  a fork, whose decision is already made. */
 export type PlaceChange = "files" | "settings";
 
 export interface PlaceStanding {
@@ -80,14 +81,20 @@ export function placeStandings(
     const handEdited =
       source.updatesRead === "ready" ? (row?.blockedByLocalEdit ?? null) : null;
     const forked = manifest?.forks?.[kind]?.[name] != null;
-    // A hand edit outranks an overlay: it is the one waiting on a decision.
-    // A fork is the same kind of fact — this place's own bytes.
+    // Ranked by which fact has something to land on. A hand edit comes
+    // first: it is the one still waiting on a decision, and the notice
+    // offering it is on the overview. Then an overlay, on the Customize
+    // tab that wrote it. A fork last — it is the standing state of this
+    // place rather than anything to act on, so it must never send someone
+    // to the overview past instructions they typed on the other tab.
     const change: PlaceChange | null =
-      handEdited === true || forked
+      handEdited === true
         ? "files"
         : overlay === true
           ? "settings"
-          : null;
+          : forked
+            ? "files"
+            : null;
     // A read still on its way is not a read that came back empty: saying
     // "not checked" of a place nobody has asked about yet names the wrong
     // cause, and a read that failed is not still running.
@@ -132,36 +139,24 @@ export const rowIn = (
   scope: Scope,
 ): UpdateRow | null => source.rows.get(placeKey(kind, name, scope)) ?? null;
 
+/** This place's row only when its files were edited by hand: the one fact
+ *  that holds an update back and puts the keep-or-discard notice on screen.
+ *  Any other row means neither. */
+export const editedRowIn = (
+  source: PlacesSource,
+  kind: ItemKind,
+  name: string,
+  scope: Scope,
+): UpdateRow | null => {
+  const row = rowIn(source, kind, name, scope);
+  return row?.blockedByLocalEdit ? row : null;
+};
+
 export const standingIn = (
   standings: PlaceStanding[],
   scope: Scope,
 ): PlaceStanding | null =>
   standings.find((one) => sameScope(one.scope, scope)) ?? null;
-
-/** The place a package page's header marks are about: the one the
- *  Customize tab has open, once the editor is pointed at this package, and
- *  the place the page was opened at until then — the editor carries over
- *  the last package edited, which is not this one. */
-export const headerStanding = (
-  standings: PlaceStanding[],
-  opened: Scope,
-  editing: Scope | null,
-): PlaceStanding | null =>
-  (editing ? standingIn(standings, editing) : null) ??
-  standingIn(standings, opened);
-
-/** Where a mark leads: the first place carrying a change, and what the
- *  package page opens showing — the surface that holds that change, not
- *  whichever tab the page defaults to. Null when nothing is changed. */
-export function markTarget(
-  standings: PlaceStanding[],
-): { scope: Scope; view?: PackageView } | null {
-  const found = standings.find((one) => one.change != null);
-  if (!found) return null;
-  if (found.change === "settings")
-    return { scope: found.scope, view: { mode: "customize" } };
-  return { scope: found.scope };
-}
 
 /** Every place's manifest as it stands on screen: saved everywhere, and the
  *  draft in hand for the one place being edited — so a chip, a row, and the
@@ -178,55 +173,47 @@ export function manifestsOnScreen(
 export const indexRows = (rows: UpdateRow[]): Map<string, UpdateRow> =>
   new Map(rows.map((row) => [placeKey(row.kind, row.name, row.scope), row]));
 
-// One index per rows array, shared by every screen that reads it: the
-// store replaces the array whenever the rows change, so identity is the
-// whole test — nothing here can go stale behind the store.
-let indexedRows: UpdateRow[] | null = null;
-let index: Map<string, UpdateRow> = new Map();
-const indexFor = (rows: UpdateRow[]): Map<string, UpdateRow> => {
-  if (rows !== indexedRows) {
-    indexedRows = rows;
-    index = indexRows(rows);
-  }
-  return index;
-};
-
 /** A store's loaded/error pair as the one answer the join asks for. */
 export const readState = (loaded: boolean, error: string | null): ReadState =>
   loaded ? "ready" : error ? "failed" : "pending";
 
-function usePlaces(withDraft: boolean): PlacesSource {
-  const saved = useEditorStore((s) => s.saved);
-  const scope = useEditorStore((s) => s.scope);
-  const draft = useEditorStore((s) => s.draft);
+/** Everything both variants read, and the identity of what it builds. The
+ *  stores hand back their previous value when a re-read says the same
+ *  thing, so this changes only when a fact does. */
+function useJoined(manifests: Record<string, Draft>): PlacesSource {
   const manifestsLoaded = useEditorStore((s) => s.manifestsLoaded);
   const manifestError = useEditorStore((s) => s.manifestError);
   const rows = useUpdatesStore((s) => s.rows);
   const updatesLoaded = useUpdatesStore((s) => s.loaded);
   const updatesError = useUpdatesStore((s) => s.error);
-  const manifests = useMemo(
-    () => (withDraft ? manifestsOnScreen(saved, scope, draft) : saved),
-    [withDraft, saved, scope, draft],
-  );
+  const indexed = useMemo(() => indexRows(rows), [rows]);
   const updatesRead = readState(updatesLoaded, updatesError);
   const manifestsRead = readState(manifestsLoaded, manifestError);
   return useMemo(
-    () => ({
-      manifests,
-      rows: indexFor(rows),
-      updatesRead,
-      manifestsRead,
-    }),
-    [manifests, rows, updatesRead, manifestsRead],
+    () => ({ manifests, rows: indexed, updatesRead, manifestsRead }),
+    [manifests, indexed, updatesRead, manifestsRead],
   );
 }
 
 /** What is actually customized: saved manifests and the update standing.
- *  The Library's question, and the one a mark on a row answers. */
-export const usePlacesSource = (): PlacesSource => usePlaces(false);
+ *  The Library's question, and the one a mark on a row answers. Deliberately
+ *  no subscription to the draft — a keystroke in the editor is not news
+ *  here, and this is what the whole Library table joins on. */
+export function usePlacesSource(): PlacesSource {
+  return useJoined(useEditorStore((s) => s.saved));
+}
 
 /** The same, with the manifest being typed overlaid on the place it
  *  belongs to — so the header, the chips and the box you are typing in
  *  never disagree. Only the editor's own surfaces want this: text you have
  *  not saved has changed nothing yet. */
-export const useEditingPlacesSource = (): PlacesSource => usePlaces(true);
+export function useEditingPlacesSource(): PlacesSource {
+  const saved = useEditorStore((s) => s.saved);
+  const scope = useEditorStore((s) => s.scope);
+  const draft = useEditorStore((s) => s.draft);
+  const manifests = useMemo(
+    () => manifestsOnScreen(saved, scope, draft),
+    [saved, scope, draft],
+  );
+  return useJoined(manifests);
+}

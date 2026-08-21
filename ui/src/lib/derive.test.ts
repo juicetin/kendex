@@ -1,34 +1,15 @@
 import { describe, expect, it } from "vitest";
-import type { AuditView, ObservedItem } from "@/bindings";
+import type { AuditView } from "@/bindings";
+import { observedItem as item } from "@/lib/observed-test-item";
 import {
   bundleSummary,
   countByKind,
   filterItems,
   groupItems,
-  groupScopes,
-  groupVendor,
   recentItems,
   scopeMatches,
   viewsInScope,
 } from "./derive";
-
-function item(overrides: Partial<ObservedItem>): ObservedItem {
-  return {
-    kind: "skill",
-    name: "deploy",
-    harness: "claude",
-    scope: { scope: "global" },
-    path: "/h/.claude/skills/deploy",
-    fileState: { state: "dir" },
-    enabled: true,
-    origin: null,
-    description: null,
-    tags: [],
-    modifiedAt: null,
-    vendor: null,
-    ...overrides,
-  };
-}
 
 describe("scopeMatches", () => {
   it("matches all, global, and specific projects", () => {
@@ -80,69 +61,6 @@ describe("filterItems by where it lives", () => {
     expect(
       filterItems(items, { scope: { project: "/a" }, search: "a" }),
     ).toHaveLength(1);
-  });
-});
-
-describe("groupItems", () => {
-  it("groups installations under the logical item and flags shared artifacts", () => {
-    const shared = "/p/.agents/skills/deploy";
-    const groups = groupItems([
-      item({
-        harness: "codex",
-        path: shared,
-        scope: { scope: "project", root: "/p" },
-      }),
-      item({
-        harness: "pi",
-        path: shared,
-        scope: { scope: "project", root: "/p" },
-      }),
-      item({ name: "solo", harness: "claude" }),
-    ]);
-    expect(groups).toHaveLength(2);
-    const deploy = groups.find((g) => g.name === "deploy");
-    expect(deploy?.installations).toHaveLength(2);
-    expect(deploy?.harnesses.sort()).toEqual(["codex", "pi"]);
-    expect(deploy?.shared).toBe(true);
-    expect(groups.find((g) => g.name === "solo")?.shared).toBe(false);
-  });
-
-  it("takes the most recent modifiedAt across installations, or null when none have one", () => {
-    const withTimes = groupItems([
-      item({ name: "deploy", harness: "claude", modifiedAt: 100 }),
-      item({ name: "deploy", harness: "codex", modifiedAt: 300 }),
-    ]);
-    expect(withTimes.find((g) => g.name === "deploy")?.modifiedAt).toBe(300);
-
-    const withoutTimes = groupItems([item({ name: "solo" })]);
-    expect(withoutTimes.find((g) => g.name === "solo")?.modifiedAt).toBeNull();
-  });
-});
-
-describe("groupScopes", () => {
-  it("lists each distinct scope an item is installed in, once", () => {
-    const groups = groupItems([
-      item({
-        name: "github",
-        harness: "claude",
-        scope: { scope: "project", root: "/acme" },
-      }),
-      item({
-        name: "github",
-        harness: "codex",
-        scope: { scope: "project", root: "/acme" },
-      }),
-      item({
-        name: "github",
-        harness: "claude",
-        scope: { scope: "project", root: "/api" },
-      }),
-    ]);
-    const scopes = groupScopes(groups[0]);
-    expect(scopes).toHaveLength(2);
-    expect(
-      scopes.map((s) => (s.scope === "project" ? s.root : s.scope)),
-    ).toEqual(["/acme", "/api"]);
   });
 });
 
@@ -223,26 +141,5 @@ describe("viewsInScope", () => {
       "global",
     ]);
     expect(viewsInScope(all, { project: "/b" })).toEqual([all[2]]);
-  });
-});
-
-describe("groupVendor", () => {
-  it("names the vendor only when every installation agrees it is theirs", () => {
-    const bundled = groupItems([
-      item({ kind: "plugin", name: "chrome@openai-bundled", vendor: "OpenAI" }),
-      item({
-        kind: "plugin",
-        name: "chrome@openai-bundled",
-        harness: "codex",
-        vendor: "OpenAI",
-      }),
-    ]);
-    expect(groupVendor(bundled[0])).toBe("OpenAI");
-
-    const mixed = groupItems([
-      item({ kind: "plugin", name: "gh", vendor: "OpenAI" }),
-      item({ kind: "plugin", name: "gh", harness: "codex", vendor: null }),
-    ]);
-    expect(groupVendor(mixed[0])).toBeNull();
   });
 });

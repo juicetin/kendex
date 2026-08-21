@@ -274,16 +274,17 @@ lives in one capability table read by core and UI.
   package can be changed in one project and untouched at user level, so
   "Customized" unqualified answers a question nobody asks.
   `lib/customized-places.ts` joins the three facts that make a place yours
-  — that place's manifest overlay, its files edited by hand
-  (`UpdateRow::blocked_by_local_edit`), and a fork, read from that place's
-  own `forks` table so it never rests on an update check having succeeded
-  — into one `PlaceStanding` every mark reads. Which fact it was decides
-  where the mark leads: an overlay to that place's Customize tab, a hand
-  edit or fork to the overview and its notice offering the decision.
-  Neither unmarked state is a default: `checking` while a read is on its
-  way, `unknown` once one came back and could not say — no update row for
-  a path or local source, a failed check, an unparseable manifest. Neither
-  counts as untouched, and the Library names the read it is missing.
+  — that place's overlay, its files edited by hand
+  (`UpdateRow::blocked_by_local_edit`), and a fork read from its own
+  `forks` table, so no mark rests on an update check — into one
+  `PlaceStanding`. Ranked by which has a surface to land on, they decide
+  where the mark leads: a hand edit to the overview and its notice, an
+  overlay to the Customize tab that wrote it, a fork to the overview where
+  its own copy is — no notice, that decision already made. Neither
+  unmarked state is a default: `checking` while a read is on its way,
+  `unknown` once one came back and could not say — no update row for a
+  path or local source, a failed check, an unparseable manifest — and
+  neither counts as untouched; the Library names the read it is missing.
 - Hook events have one vocabulary — Claude Code's names, in
   `core/hook.rs::EVENTS` — and every other harness's map is keyed by it.
   The picker offers that list, the validator rejects anything outside it,

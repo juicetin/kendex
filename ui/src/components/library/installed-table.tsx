@@ -1,5 +1,5 @@
 import { useCallback, useMemo } from "react";
-import type { ItemKind, ProvenanceRow } from "@/bindings";
+import type { Origin } from "@/bindings";
 import { InstalledRow } from "@/components/library/installed-row";
 import { InstalledSkeleton } from "@/components/library/installed-skeleton";
 import { LibraryLegend } from "@/components/library/library-legend";
@@ -15,42 +15,28 @@ import {
 import { TAGS_ROW_LABEL } from "@/lib/copy";
 import {
   anyCustomized,
-  markTarget,
   type PlaceStanding,
   placeStandings,
   usePlacesSource,
 } from "@/lib/customized-places";
 import { groupScopes, type ItemGroup } from "@/lib/derive";
-import { type PackageRef, type PackageView, useNavStore } from "@/stores/nav";
+import { markNav } from "@/lib/place-marks";
+import { useNavStore } from "@/stores/nav";
 import { originFor } from "@/stores/provenance";
-
-/** Where the customized mark goes, as the two arguments the nav takes: the
- *  place the mark names — never the row's own first install — and the
- *  surface holding what was changed there. Null when nothing is changed. */
-export function markNav(
-  group: { kind: ItemKind; name: string },
-  standings: PlaceStanding[],
-): [PackageRef, PackageView | undefined] | null {
-  const target = markTarget(standings);
-  if (!target) return null;
-  return [
-    { kind: group.kind, name: group.name, scope: target.scope },
-    target.view,
-  ];
-}
 
 /** The Library's table: one row per package, each carrying what is known
  *  about every place it is installed in. */
 export function InstalledTable({
   groups,
-  provenance,
+  origins,
   scanning,
   hasAnyItems,
   onClearFilters,
   onBrowse,
 }: {
   groups: ItemGroup[];
-  provenance: ProvenanceRow[];
+  /** Provenance keyed by place, so the join asks rather than scans. */
+  origins: Map<string, Origin>;
   /** Nothing has been counted yet — distinct from "counted, found none". */
   scanning: boolean;
   hasAnyItems: boolean;
@@ -71,10 +57,10 @@ export function InstalledTable({
         return {
           group,
           standings: placeStandings(places, group.kind, group.name, scopes),
-          origin: originFor(provenance, group.kind, group.name, scopes),
+          origin: originFor(origins, group.kind, group.name, scopes),
         };
       }),
-    [groups, places, provenance],
+    [groups, places, origins],
   );
   const openRow = useCallback(
     (group: ItemGroup) => {
