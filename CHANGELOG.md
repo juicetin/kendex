@@ -205,6 +205,13 @@ changes carry a **Breaking** call-out with their migration note inline.
   which is what its buttons and badges have always meant.
 - Two projects whose folders share a name are told apart on Review, the way
   they already are in the Library and on a package's own page.
+- The Updates page says it is checking instead of "Everything is up to
+  date" before the first check has answered.
+- A package whose own copy can no longer be read says so, instead of
+  offering to put back a copy that is not there.
+- A project whose settings could not be re-read is no longer marked from the
+  copy kendex last had. Its mark says the place could not be checked, which
+  is what the count of unchecked places has always meant.
 - Every action that rewrites a project's settings now waits for unsaved
   customization in that project — switching a package's version, holding or
   following one, toggling, removing, applying — and says which project to go

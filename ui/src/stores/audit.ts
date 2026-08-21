@@ -14,10 +14,9 @@ import {
   TAKEN_BACK_TOAST,
   UNDO_LABEL,
 } from "@/lib/copy-decisions";
+import { auditMutation } from "./audit-mutate";
 import { manifestRewritten } from "./manifest-sync";
-import { type ErrorAction, useProblemsStore } from "./problems";
-import { useScanStore } from "./scan";
-import { refusesForUnsaved } from "./unsaved-first";
+import { useProblemsStore } from "./problems";
 
 interface AuditState {
   views: AuditView[];
@@ -61,7 +60,7 @@ interface AuditState {
 /** How long an audit answers for before a visit pays for a fresh one. */
 const AUDIT_FRESH_FOR_MS = 60_000;
 
-function replaceView(views: AuditView[], fresh: AuditView): AuditView[] {
+export function replaceView(views: AuditView[], fresh: AuditView): AuditView[] {
   return views.map((view) =>
     sameScope(view.scope, fresh.scope) ? fresh : view,
   );
@@ -73,54 +72,7 @@ export function sameScope(a: Scope, b: Scope): boolean {
 }
 
 export const useAuditStore = create<AuditState>((set, get) => {
-  // A row that vanishes with no word said is indistinguishable from a
-  // button that did nothing — every outcome here speaks up, success or
-  // failure, on top of the state update the page renders from. Failure is a
-  // modal, not a toast: these are all user-initiated, so the user is looking
-  // right at the button that just broke.
-  const run = async (
-    // Every action through here rewrites this scope's kendex.toml, and the
-    // editor holds a whole copy of it that a save would write back.
-    scope: Scope,
-    action: () => Promise<
-      { status: "ok"; data: AuditView } | { status: "error"; error: string }
-    >,
-    opts: { title: string; successMessage?: string; steps?: string[] },
-  ) => {
-    // Apply, adopt, toggle and remove all rewrite this scope's kendex.toml,
-    // so unsaved customization for it refuses them the way a fork or a
-    // discard is refused — before anything is written, and wherever the
-    // typing is waiting.
-    if (refusesForUnsaved(scope)) return;
-    set({ busy: true });
-    // Busy is one of the flags holding the Customize tab's Save bar down, so
-    // it stays up until the editor has been told its copy is stale — clearing
-    // it any earlier leaves a window where a save passes the outdated check
-    // and writes the pre-action manifest back.
-    try {
-      const response = await action();
-      if (response.status === "ok") {
-        set({ views: replaceView(get().views, response.data), error: null });
-        if (opts.successMessage) toast.success(opts.successMessage);
-        await manifestRewritten(scope);
-        await useScanStore.getState().refresh();
-        return;
-      }
-      set({ error: response.error });
-      const retry: ErrorAction = {
-        label: "Retry",
-        onClick: () => void run(scope, action, opts),
-      };
-      useProblemsStore.getState().showError({
-        title: opts.title,
-        message: response.error,
-        steps: opts.steps,
-        actions: [retry],
-      });
-    } finally {
-      set({ busy: false });
-    }
-  };
+  const run = auditMutation(set, get);
 
   return {
     views: [],

@@ -43,5 +43,6 @@ export const source = (over: Partial<PlacesSource> = {}): PlacesSource => ({
   ),
   updatesRead: "ready",
   manifestsRead: "ready",
+  unreadPlaces: new Set<string>(),
   ...over,
 });

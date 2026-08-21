@@ -46,6 +46,11 @@ export const nothingToUpdateToastLabel = (skipped: number): string =>
 
 // A check that failed leaves the last rows on screen rather than blanking
 // the page. They are not current, and nothing may be applied off them.
+// Before the first read answers there is nothing to be up to date about.
+// Saying so anyway is the same claim as a place marked untouched when
+// nobody had looked, which is the fault these pages exist to stop making.
+export const UPDATES_CHECKING = "Checking for updates…";
+
 export const UPDATES_UNCONFIRMED_TITLE =
   "These are the last versions kendex could check";
 export const UPDATES_UNCONFIRMED_BODY =

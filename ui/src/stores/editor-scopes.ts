@@ -29,6 +29,10 @@ async function everyScope(): Promise<Scope[]> {
 export async function readManifests(): Promise<{
   read: [string, Draft][];
   failed: string[];
+  /** Keys of the places whose read failed. The last manifest that loaded
+   *  for them is kept, so without this the join cannot tell a manifest it
+   *  just read from one it read some time ago and could not re-check. */
+  unread: string[];
 }> {
   const scopes = await everyScope();
   // Each read answers for its own place. Left to reject, one bad manifest
@@ -44,9 +48,11 @@ export async function readManifests(): Promise<{
   );
   const read: [string, Draft][] = [];
   const failed: string[] = [];
+  const unread: string[] = [];
   for (const [index, response] of loaded.entries()) {
     if (response.status !== "ok") {
       failed.push(`${named(scopes[index])}: ${response.error}`);
+      unread.push(scopeKey(scopes[index]));
       continue;
     }
     read.push([
@@ -54,5 +60,5 @@ export async function readManifests(): Promise<{
       response.data.manifest ? toDraft(response.data.manifest) : emptyDraft(),
     ]);
   }
-  return { read, failed };
+  return { read, failed, unread };
 }

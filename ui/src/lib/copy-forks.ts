@@ -24,6 +24,12 @@ export const DERIVED_FORK_NOTE =
 // spent. What is left is the copy you kept: the app can put it back.
 export const FORKED_NOTICE_DETAIL =
   "Updates are paused so your edits stay. Discard them to go back to the copy you kept.";
+// The copy a discard would put back cannot be read — emptied, replaced, or
+// past what a catalog tree may be. The button is not offered, so the line
+// must not offer it either: naming an exit that refuses is worse than
+// naming none. `kendex check` says the same of this row.
+export const FORKED_UNREADABLE_DETAIL =
+  "Updates are paused so your edits stay. The copy you kept can no longer be read, so there is nothing to put back — the files on disk are what you have.";
 export const FORKED_DISCARD_CONFIRM_BODY =
   "The copy you kept replaces your edits to this package, and your changes are gone.";
 export const DISCARD_EDITS_CONFIRM_TITLE = "Discard your edits?";

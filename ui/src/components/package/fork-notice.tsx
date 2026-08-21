@@ -15,6 +15,7 @@ import {
   FORK_NOTICE_TITLE,
   FORKED_DISCARD_CONFIRM_BODY,
   FORKED_NOTICE_DETAIL,
+  FORKED_UNREADABLE_DETAIL,
   KEEP_AS_FORK_LABEL,
   MULTI_TOOL_FORK_NOTE,
   unforkableCopyNote,
@@ -61,7 +62,9 @@ export function ForkNotice({
             ? `${editedInToolsLabel(row.editedHarnesses.map(harnessName))} `
             : null}
           {row.forked
-            ? FORKED_NOTICE_DETAIL
+            ? row.canDiscard
+              ? FORKED_NOTICE_DETAIL
+              : FORKED_UNREADABLE_DETAIL
             : row.forkableHarness
               ? FORK_NOTICE_DETAIL
               : whyNoFork}

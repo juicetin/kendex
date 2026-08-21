@@ -8,6 +8,7 @@ import { useEffect, useState } from "react";
 import type { UpdateRow } from "@/bindings";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { EmptyState } from "@/components/empty-state";
+import { DotSpinner } from "@/components/loading";
 import { PageHeader } from "@/components/page-header";
 import { StatusNote } from "@/components/status-note";
 import { Button } from "@/components/ui/button";
@@ -25,6 +26,7 @@ import {
 } from "@/lib/copy";
 import {
   FOLLOW_SOURCE_HELP,
+  UPDATES_CHECKING,
   UPDATES_UNCONFIRMED_BODY,
   UPDATES_UNCONFIRMED_TITLE,
   updatesSubtitle,
@@ -40,6 +42,8 @@ import { canApplyUpdates, useUpdatesStore } from "@/stores/updates";
 export function UpdatesPage() {
   const { rows, warnings, busy, checking, error, check, updateRows } =
     useUpdatesStore();
+  // Nothing has answered yet, so there is nothing to call up to date.
+  const loaded = useUpdatesStore((s) => s.loaded);
   const canApply = useUpdatesStore(canApplyUpdates);
   const load = useUpdatesStore((s) => s.load);
   const [showHidden, setShowHidden] = useState(false);
@@ -59,6 +63,16 @@ export function UpdatesPage() {
   // "You're up to date" over a read that failed is the same claim as a
   // place marked untouched when nobody had looked: the note below says what
   // actually happened, and offers the retry.
+  if (!loaded && !error) {
+    return (
+      <div className="flex min-h-full items-center justify-center">
+        <p className="flex items-center gap-2 text-sm text-muted-foreground">
+          <DotSpinner />
+          {UPDATES_CHECKING}
+        </p>
+      </div>
+    );
+  }
   if (
     visible.length === 0 &&
     hidden.length === 0 &&
@@ -157,7 +171,7 @@ export function UpdatesPage() {
               </span>
             </StatusNote>
           ) : null}
-          {visible.length === 0 && !error ? (
+          {visible.length === 0 && loaded && !error ? (
             <EmptyState icon={CheckCircle2} title={UPDATES_EMPTY}>
               {UPDATES_EMPTY_BODY}
             </EmptyState>

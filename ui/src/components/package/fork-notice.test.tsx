@@ -135,4 +135,20 @@ describe("package page edited notice", () => {
     );
     expect(html).toContain(">View changes<");
   });
+  // The copy a discard would put back cannot be read, so no button is
+  // offered. A line still promising that exit would name one that refuses,
+  // which is what `kendex check` already declines to do for this row.
+  it("does not offer a discard whose copy can no longer be read", () => {
+    const html = render(
+      edited({
+        forked: true,
+        editedHarnesses: ["claude"],
+        forkableHarness: null,
+        canDiscard: false,
+      }),
+    );
+    expect(html).not.toContain(">Discard edits…<");
+    expect(html).not.toContain("Discard them to go back");
+    expect(html).toContain("can no longer be read");
+  });
 });

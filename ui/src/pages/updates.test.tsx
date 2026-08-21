@@ -101,3 +101,26 @@ describe("the Updates page after a check that did not finish", () => {
     expect(html).toContain(UPDATES_UNCONFIRMED_TITLE);
   });
 });
+
+// A page that has asked nothing yet has nothing to report. "Everything is
+// up to date" before the first read answers is the same claim as a place
+// marked untouched when nobody had looked.
+describe("the Updates page before the first read answers", () => {
+  it("says it is checking rather than that nothing needs doing", () => {
+    stub.rows = [];
+    stub.loaded = false;
+    stub.error = null;
+    const html = renderToStaticMarkup(<UpdatesPage />);
+    expect(html).not.toContain("Everything is up to date");
+    expect(html).toContain("Checking for updates");
+  });
+
+  it("says nothing needs doing once the read comes back empty", () => {
+    stub.rows = [];
+    stub.loaded = true;
+    stub.error = null;
+    expect(renderToStaticMarkup(<UpdatesPage />)).toContain(
+      "Everything is up to date",
+    );
+  });
+});

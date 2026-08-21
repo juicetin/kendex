@@ -32,6 +32,11 @@ interface EditorState {
   /** Why a place's manifest could not be read on the last {@link loadAll},
    *  naming the places. Null when every one of them was read. */
   manifestError: string | null;
+  /** Places whose last manifest read failed. The manifest they had is kept
+   *  so a mark does not vanish, but it is last-known rather than current —
+   *  the join reads these places as unknown instead of taking the old
+   *  answer for a fresh one. */
+  unreadPlaces: string[];
   /** True while a {@link loadAll} pass is running, so a retry cannot be
    *  pressed on top of the read it is waiting for. */
   manifestsReading: boolean;
@@ -83,6 +88,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
     saved: {},
     manifestsLoaded: false,
     manifestError: null,
+    unreadPlaces: [],
     manifestsReading: false,
     outdated: null,
     dirty: false,
@@ -127,7 +133,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
         if (passes === 0) set({ manifestsReading: false });
       };
       try {
-        const { read, failed } = await readManifests();
+        const { read, failed, unread } = await readManifests();
         set((state) => ({
           // A place whose manifest would not load keeps the last one that
           // did, rather than being dropped from `saved` and taking a mark
@@ -137,6 +143,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
             ? {
                 manifestsLoaded: true,
                 manifestError: failed.length > 0 ? failed.join("\n") : null,
+                unreadPlaces: unread,
               }
             : {}),
         }));

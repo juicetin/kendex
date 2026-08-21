@@ -58,6 +58,10 @@ export interface PlacesSource {
    *  from {@link manifests} is told apart from one that has not been asked
    *  for yet. */
   manifestsRead: ReadState;
+  /** Places whose last manifest read failed. Their manifest is still in
+   *  {@link manifests} so a mark does not disappear, but it answers for an
+   *  earlier moment — this join must not read it as current. */
+  unreadPlaces: ReadonlySet<string>;
 }
 
 const placeKey = (kind: ItemKind, name: string, scope: Scope): string =>
@@ -70,7 +74,13 @@ export function placeStandings(
   scopes: Scope[],
 ): PlaceStanding[] {
   return scopes.map((scope) => {
-    const manifest = source.manifests[scopeKey(scope)];
+    // A manifest kept from before a failed re-read is last-known, not
+    // read. Taking it for current is the whole fault these marks exist to
+    // avoid, one level down from the badge.
+    const key = scopeKey(scope);
+    const manifest = source.unreadPlaces.has(key)
+      ? undefined
+      : source.manifests[key];
     const row = source.rows.get(placeKey(kind, name, scope));
     // Null is "could not be read", which is why neither reads as false: a
     // manifest that failed to load and a place with no update row both
@@ -197,9 +207,17 @@ function useJoined(manifests: Record<string, Draft>): PlacesSource {
   const indexed = useMemo(() => indexRows(rows), [rows]);
   const updatesRead = readState(updatesLoaded, updatesError);
   const manifestsRead = readState(manifestsLoaded, manifestError);
+  const unread = useEditorStore((s) => s.unreadPlaces);
+  const unreadPlaces = useMemo(() => new Set(unread), [unread]);
   return useMemo(
-    () => ({ manifests, rows: indexed, updatesRead, manifestsRead }),
-    [manifests, indexed, updatesRead, manifestsRead],
+    () => ({
+      manifests,
+      rows: indexed,
+      updatesRead,
+      manifestsRead,
+      unreadPlaces,
+    }),
+    [manifests, indexed, updatesRead, manifestsRead, unreadPlaces],
   );
 }
 
