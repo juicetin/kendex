@@ -89,6 +89,23 @@ export const applyMany = async (wanted: UpdateRow[]): Promise<void> => {
       toast.info(nothingToUpdateToastLabel(skipped));
       return;
     }
+    // What every way out of here owes: the tables re-read, the success
+    // named only if nothing stopped, and the rest of the app told. An exit
+    // that skipped it would leave the page showing the world as it was
+    // before the button was pressed.
+    const finish = async (succeeded: boolean) => {
+      await reload();
+      if (succeeded)
+        toast.success(
+          bulkUpdateToast(
+            rows,
+            skipped,
+            visibleUpdates(useUpdatesStore.getState().rows),
+          ),
+        );
+      await useScanStore.getState().refresh();
+      await useAuditStore.getState().refresh({ force: true });
+    };
     // Every place this touches is asked before the first one is written.
     // Asked per row inside the loops below, the first refusal would leave
     // the set half updated — some places current, one untouched, from a
@@ -111,6 +128,9 @@ export const applyMany = async (wanted: UpdateRow[]): Promise<void> => {
       ok = false;
       break;
     }
+    // Whatever stopped the loop above stops this one too: a failure or a
+    // refusal there is a reason not to write anywhere else either.
+    if (!ok) return finish(false);
     const scopes = new Map(
       rows
         .filter((row) => !row.pinned && !applied.has(scopeKey(row.scope)))
@@ -122,7 +142,7 @@ export const applyMany = async (wanted: UpdateRow[]): Promise<void> => {
       // a window someone could have typed in — this loop reaches the
       // command directly rather than through `apply`, so it owes the
       // question itself.
-      if (ok && refusesForUnsaved(row.scope)) {
+      if (refusesForUnsaved(row.scope)) {
         ok = false;
         break;
       }
@@ -134,17 +154,7 @@ export const applyMany = async (wanted: UpdateRow[]): Promise<void> => {
       }
       await manifestRewritten(row.scope);
     }
-    await reload();
-    if (ok)
-      toast.success(
-        bulkUpdateToast(
-          rows,
-          skipped,
-          visibleUpdates(useUpdatesStore.getState().rows),
-        ),
-      );
-    await useScanStore.getState().refresh();
-    await useAuditStore.getState().refresh({ force: true });
+    await finish(ok);
   } finally {
     set({ busy: false });
   }

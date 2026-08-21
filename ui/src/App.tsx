@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { Toaster, toast } from "sonner";
 import { commands } from "@/bindings";
 import { ErrorDialog } from "@/components/error-dialog";
@@ -8,6 +8,7 @@ import { StatusFooter } from "@/components/status-footer";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { WindowControls } from "@/components/window-controls";
 import { backgroundReadFailed } from "@/lib/copy";
+import { placesChanged } from "@/lib/places-changed";
 import { AvailablePackagePage } from "@/pages/available-package";
 import { BundleDetailPage } from "@/pages/bundle-detail";
 import { CustomizePage } from "@/pages/customize";
@@ -138,6 +139,19 @@ function useScanTriggers() {
     window.addEventListener("focus", onFocus);
     return () => window.removeEventListener("focus", onFocus);
   }, [refresh, auditRefresh, updatesLoad, manifestsLoad, load]);
+
+  // Adding or removing a project changes which places exist, and both of
+  // the reads behind a package's per-place marks are per place. Without
+  // this they next run on a focus, so a project added mid-session shows
+  // its packages as unchecked until the window has been away and come
+  // back — a place nobody looked at, when looking is a read away.
+  const projects = useSettingsStore((s) => s.settings?.projects);
+  const known = useRef<string | null>(null);
+  useEffect(() => {
+    if (!placesChanged(known, projects)) return;
+    void updatesLoad().catch(said);
+    void manifestsLoad().catch(said);
+  }, [projects, updatesLoad, manifestsLoad]);
 }
 
 export default function App() {

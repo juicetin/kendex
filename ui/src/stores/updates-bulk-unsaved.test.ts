@@ -160,3 +160,47 @@ describe("typing that arrives while a bulk update is running", () => {
     expect(commands.applyPlan).not.toHaveBeenCalled();
   });
 });
+
+// A hold that failed is a reason not to write anywhere else either. The
+// follower loop reaches its command directly, so nothing but this stops it.
+describe("a bulk update whose first place fails", () => {
+  const acme = { scope: "project", root: "/home/x/acme" } as const;
+  const shop = { scope: "project", root: "/home/x/shop" } as const;
+
+  beforeEach(() => {
+    useUpdatesStore.setState({ rows: [], busy: false, loaded: false });
+    useEditorStore.setState({
+      scope: acme,
+      draft: null,
+      dirty: false,
+      held: {},
+    });
+    vi.clearAllMocks();
+    vi.mocked(commands.updatesOverview).mockResolvedValue({
+      status: "ok",
+      data: { rows: [], warnings: [] },
+    });
+    vi.mocked(commands.scanMachine).mockResolvedValue({
+      status: "ok",
+      data: { harnesses: [], items: [], missingProjects: [], warnings: [] },
+    });
+    vi.mocked(commands.auditAll).mockResolvedValue({ status: "ok", data: [] });
+  });
+
+  it("writes nowhere else", async () => {
+    vi.mocked(commands.packageSetRev).mockResolvedValue({
+      status: "error",
+      error: "the source would not answer",
+    });
+    await useUpdatesStore
+      .getState()
+      .updateRows([
+        row({ name: "gh", scope: acme, pinned: true }),
+        row({ name: "lint", scope: shop }),
+      ]);
+    expect(commands.packageSetRev).toHaveBeenCalledTimes(1);
+    expect(commands.applyPlan).not.toHaveBeenCalled();
+    // The tables still re-read: stopping is not the same as saying nothing.
+    expect(commands.updatesOverview).toHaveBeenCalled();
+  });
+});

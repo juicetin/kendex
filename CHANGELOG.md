@@ -211,6 +211,12 @@ changes carry a **Breaking** call-out with their migration note inline.
 - Keeping a package as your own tells you how to get its files back if the
   step that renders them did not run. It named two ways out that both
   assume the files are there.
+- A project added while the app is open shows its packages' marks straight
+  away, instead of reading as unchecked until the window has been away and
+  come back.
+- Update all stops everywhere when the first package it tries fails. It
+  went on updating the rest, and stopped asking about unsaved settings
+  while it did.
 - Update all waits for every project it would touch: if any one has unsaved
   customization, none is updated. It used to update the others and skip
   that one.
