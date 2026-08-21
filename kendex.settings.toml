@@ -149,7 +149,7 @@ REVIEW_GATE_OVERRIDE_CONTEXT = "kendex-reviewer-outage"
 # wherever PR workflows hold statuses:write, PR content can mint statuses
 # through github-actions[bot] — list it; the override must then come from a
 # non-Actions identity. Empty disables.
-REVIEW_GATE_STATUS_PUBLISHER_REJECT = ""
+REVIEW_GATE_STATUS_PUBLISHER_REJECT = "github-actions[bot]"
 
 # Logins whose review objects at the exact head count as evidence. Empty =
 # any non-author — on repos with outside collaborators, set the list so a
