@@ -111,10 +111,17 @@ export const saveManifest = async (): Promise<void> => {
   // away is a newer draft, and it stays unsaved until its own save. `edit`
   // builds a new draft rather than mutating, so identity is that test, and
   // the re-read below leaves a newer draft alone for the same reason.
-  if (onScreen() && useEditorStore.getState().draft === draft)
-    // The file is what was just written, so that is the base the next save
-    // carries — without waiting for the re-read below to bring it.
-    useEditorStore.setState({ dirty: false, base: response.data.base });
+  if (onScreen()) {
+    // The base describes the file, and the file is what was just written —
+    // so it moves whether or not the copy on screen is still the one that
+    // went. Typing that arrived mid-write descends from this write like any
+    // other edit does, and leaving the old base behind would have its save
+    // refused for a change it made itself.
+    useEditorStore.setState({ base: response.data.base });
+    // What is on screen is that file only while nothing was typed over it.
+    if (useEditorStore.getState().draft === draft)
+      useEditorStore.setState({ dirty: false });
+  }
   // Re-read the place that was written, never whichever is open now, or
   // its saved manifest keeps the pre-save content and its mark with it.
   await load(scope);

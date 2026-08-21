@@ -37,11 +37,31 @@ export const useUpdatesStore = create<UpdatesState>((set) => {
   // or a discard lands, resolving after it, would otherwise put its
   // pre-resolution rows back — and the marks, the notice and the Review
   // count all read those rows, so a state someone just resolved reappears.
+  //
+  // Two kinds of read, and one counter cannot rank them. A poll reads what
+  // the mirrors already say; Check for updates fetches first, so its answer
+  // is the newer one however the two land. Sharing a ticket, a poll issued
+  // during a check takes the newer number and commits the pre-fetch rows,
+  // and the check the person asked for is thrown away with the screen still
+  // showing what it was asked to replace.
   let reads = 0;
-  const ticket = () => {
+  let checks = 0;
+  let checking = 0;
+  const ticket = (fetched = false) => {
     reads += 1;
     const mine = reads;
-    return () => mine === reads;
+    if (fetched) {
+      checks += 1;
+      checking += 1;
+    }
+    const mineCheck = checks;
+    return fetched
+      ? // Only a later fetch answers for one: a poll that started after it
+        // is reading the older truth, whenever it happens to land.
+        () => mineCheck === checks
+      : // And a poll lands only while it is the newest read and no fetch is
+        // on its way with a better answer.
+        () => mine === reads && checking === 0;
   };
 
   const reload = async () => {
@@ -87,7 +107,7 @@ export const useUpdatesStore = create<UpdatesState>((set) => {
 
     check: async () => {
       set({ checking: true });
-      const newest = ticket();
+      const newest = ticket(true);
       try {
         let response: Awaited<ReturnType<typeof commands.updatesRefresh>>;
         try {
@@ -115,6 +135,7 @@ export const useUpdatesStore = create<UpdatesState>((set) => {
           showError(UPDATE_ERROR_TITLE, response.error);
         }
       } finally {
+        checking -= 1;
         set({ checking: false });
       }
     },

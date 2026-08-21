@@ -98,7 +98,7 @@ describe("a save pressed the moment the busy flag comes down", () => {
     useProblemsStore.getState().closeError();
     vi.mocked(commands.getManifest).mockResolvedValue({
       status: "ok",
-      data: { manifest: null, base: null },
+      data: { manifest: null, base: "rewritten" },
     });
     vi.mocked(commands.editorInventory).mockResolvedValue({
       status: "ok",

@@ -361,4 +361,38 @@ impl Plan {
     pub fn is_empty(&self) -> bool {
         self.ops.is_empty()
     }
+
+    /// Bind every write of one path to `pre`, whichever pass planned it.
+    ///
+    /// A caller writing a whole file from a copy someone has been holding
+    /// binds the write to the file that copy came from. The plan may carry
+    /// its own write of the same path — a schema upgrade, a repository
+    /// move — bound to what the file was when the plan ran, which is a
+    /// later question and a weaker one: it accepts a file that replaced the
+    /// copy. The strictest precondition is the caller's, so it is the one
+    /// that stands.
+    pub fn bind_writes(&mut self, path: &Path, pre: &Pre) {
+        for planned in &mut self.ops {
+            match &mut planned.op {
+                Op::WriteManifest {
+                    path: at,
+                    pre: bound,
+                    ..
+                }
+                | Op::WriteFile {
+                    path: at,
+                    pre: bound,
+                    ..
+                }
+                | Op::EditFile {
+                    path: at,
+                    pre: bound,
+                    ..
+                } if at == path => {
+                    *bound = pre.clone();
+                }
+                _ => {}
+            }
+        }
+    }
 }

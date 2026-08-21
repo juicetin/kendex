@@ -86,7 +86,7 @@ describe("a subscription mutation tells the editor before it re-reads", () => {
     useProblemsStore.getState().closeError();
     vi.mocked(commands.getManifest).mockResolvedValue({
       status: "ok",
-      data: { manifest: null, base: null },
+      data: { manifest: null, base: "rewritten" },
     });
     vi.mocked(commands.editorInventory).mockResolvedValue({
       status: "ok",
@@ -162,7 +162,7 @@ describe("keeping a fork tells the editor before it re-reads", () => {
     useProblemsStore.getState().closeError();
     vi.mocked(commands.getManifest).mockResolvedValue({
       status: "ok",
-      data: { manifest: null, base: null },
+      data: { manifest: null, base: "rewritten" },
     });
     vi.mocked(commands.editorInventory).mockResolvedValue({
       status: "ok",
@@ -203,7 +203,7 @@ describe("holding a version tells the editor before it re-reads", () => {
     useProblemsStore.getState().closeError();
     vi.mocked(commands.getManifest).mockResolvedValue({
       status: "ok",
-      data: { manifest: null, base: null },
+      data: { manifest: null, base: "rewritten" },
     });
     vi.mocked(commands.editorInventory).mockResolvedValue({
       status: "ok",

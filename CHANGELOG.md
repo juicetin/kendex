@@ -228,15 +228,20 @@ changes carry a **Breaking** call-out with their migration note inline.
   action starts and comes off only once the tab has caught up, so a save
   pressed anywhere in between cannot slip through — and typing you start
   while the tab is catching up is kept rather than replaced by the file it
-  read. Underneath, the save itself now sends the settings file it was
-  opened on, and kendex refuses to write over a file that has changed
-  since: your work is protected even where nothing in the app noticed the
-  change, and the refusal reads the same, with the same Reload.
+  read, and only where the settings file actually changed — an ordinary
+  update rewrites installed files, not your settings, and no longer
+  interrupts you. Underneath, the save itself now sends the settings file
+  it was opened on, and kendex refuses to write over a file that has
+  changed since: your work is protected even where nothing in the app
+  noticed the change, and the refusal reads the same, with the same
+  Reload.
 - Keeping a fork or discarding edits is refused while you have unsaved
   changes on the Customize tab for that same project: saving them afterwards
   would have written the old settings back over the new fork, losing it
   silently. Where the tab is open and clean, it re-reads after the change so
   a later save cannot undo it either.
+- Check for updates is no longer thrown away by a window you came back to
+  while it was running: the fetched results are what stay on screen.
 - A failed update check no longer looks like one still running. It does not
   retry on its own, so the app names it on the package page as well as in
   the Library, with a way to try again, and a read that ends in an error

@@ -75,7 +75,7 @@ describe("a fork or discard beside an open Customize tab", () => {
     // Every path here ends by re-reading the place it rewrote.
     vi.mocked(commands.getManifest).mockResolvedValue({
       status: "ok",
-      data: { manifest: null, base: null },
+      data: { manifest: null, base: "rewritten" },
     });
     vi.mocked(commands.editorInventory).mockResolvedValue({
       status: "ok",

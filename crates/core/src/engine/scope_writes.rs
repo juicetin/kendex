@@ -290,6 +290,7 @@ pub(super) fn plan_repo_move_write(
 pub(super) fn plan_settings_seed(
     scope: &Scope,
     state: &DesiredState,
+    options: &super::PlanOptions,
     new_lock: &mut crate::lock::Lock,
     ops: &mut Vec<PlannedOp>,
     drift: &mut Vec<DriftRow>,
@@ -297,7 +298,17 @@ pub(super) fn plan_settings_seed(
     let Scope::Project { root } = scope else {
         return Ok(());
     };
-    if state.settings_env.is_empty() {
+    // Each default is shipped by a declared skill, so a plan restricted to
+    // some packages seeds only what those packages ship: the file and its
+    // ledger belong to the scope, and a command about one package rewriting
+    // both is that command touching another's.
+    let seeds: Vec<crate::settings_seed::SeededEnv> = state
+        .settings_env
+        .iter()
+        .filter(|seeded| options.acts_on(ItemKind::Skill, &seeded.owner))
+        .cloned()
+        .collect();
+    if seeds.is_empty() {
         return Ok(());
     }
     let path = crate::settings_seed::settings_file_path(root);
@@ -320,24 +331,24 @@ pub(super) fn plan_settings_seed(
     }
     let current = crate::fs::read_if_exists(&path)?;
     let (text, added, updated) = match current.as_deref() {
-        None => match crate::settings_seed::merge(None, &state.settings_env) {
+        None => match crate::settings_seed::merge(None, &seeds) {
             Some((text, added)) => (text, added, Vec::new()),
             None => return Ok(()),
         },
         Some(original) => {
             let (refreshed, updated) = crate::settings_seed::refresh_comments(
                 original,
-                &state.settings_env,
+                &seeds,
                 &mut new_lock.settings_seeds,
             );
-            match crate::settings_seed::merge(Some(&refreshed), &state.settings_env) {
+            match crate::settings_seed::merge(Some(&refreshed), &seeds) {
                 Some((text, added)) => (text, added, updated),
                 None if !updated.is_empty() => (refreshed, Vec::new(), updated),
                 None => return Ok(()),
             }
         }
     };
-    crate::settings_seed::record_seeds(&mut new_lock.settings_seeds, &state.settings_env, &added);
+    crate::settings_seed::record_seeds(&mut new_lock.settings_seeds, &seeds, &added);
     let mut said = Vec::new();
     if !added.is_empty() {
         said.push(format!("seed {}", added.join(", ")));

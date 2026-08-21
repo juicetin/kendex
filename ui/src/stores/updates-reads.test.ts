@@ -166,3 +166,55 @@ describe("reading the update standing", () => {
     expect(state.checking).toBe(false);
   });
 });
+
+// Check for updates fetches before it answers; a poll reads what the
+// mirrors already say. Ranked by one counter the poll wins on arrival, and
+// the check the person pressed is thrown away with the screen still showing
+// exactly what they asked to replace.
+describe("a check and a poll in flight together", () => {
+  it("keeps the fetched rows when a poll lands in the middle", async () => {
+    let landRefresh!: (
+      answer: Awaited<ReturnType<typeof commands.updatesRefresh>>,
+    ) => void;
+    vi.mocked(commands.updatesRefresh).mockReturnValue(
+      new Promise((resolve) => {
+        landRefresh = resolve;
+      }),
+    );
+    vi.mocked(commands.updatesOverview).mockResolvedValue({
+      status: "ok",
+      data: { rows: [row({ name: "before-the-fetch" })], warnings: [] },
+    });
+
+    const checking = useUpdatesStore.getState().check();
+    // The window returns focus while the fetch is still running.
+    await useUpdatesStore.getState().load();
+    landRefresh({
+      status: "ok",
+      data: { rows: [row({ name: "fetched" })], warnings: [] },
+    });
+    await checking;
+
+    expect(useUpdatesStore.getState().rows.map((r) => r.name)).toEqual([
+      "fetched",
+    ]);
+  });
+
+  it("still lets a poll after the check land", async () => {
+    vi.mocked(commands.updatesRefresh).mockResolvedValue({
+      status: "ok",
+      data: { rows: [row({ name: "fetched" })], warnings: [] },
+    });
+    vi.mocked(commands.updatesOverview).mockResolvedValue({
+      status: "ok",
+      data: { rows: [row({ name: "polled-after" })], warnings: [] },
+    });
+
+    await useUpdatesStore.getState().check();
+    await useUpdatesStore.getState().load();
+
+    expect(useUpdatesStore.getState().rows.map((r) => r.name)).toEqual([
+      "polled-after",
+    ]);
+  });
+});

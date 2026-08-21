@@ -1,4 +1,5 @@
 import type { Scope } from "@/bindings";
+import { commands } from "@/bindings";
 import { sameScope } from "@/lib/scope";
 import { useEditorStore } from "./editor";
 
@@ -24,9 +25,16 @@ export async function manifestRewritten(scope: Scope): Promise<void> {
   const after = useEditorStore.getState();
   if (!sameScope(after.scope, scope)) return;
   // Typing that arrived while the manifests were being read is newer than
-  // the file this is about, so it is kept and the mark stands.
+  // the file this is about, so it is kept — and now the mark is measured
+  // rather than assumed. Most of these actions rewrite installed files and
+  // the lock and never touch kendex.toml: an ordinary update is one. A file
+  // that is still the one the draft came from has nothing under it, and
+  // refusing that save would teach people to reload away their own typing.
   if (after.dirty) {
-    after.outdate(scope);
+    const read = await commands.getManifest(scope);
+    const moved = read.status !== "ok" || read.data.base !== after.base;
+    if (moved) after.outdate(scope);
+    else after.current(scope);
     return;
   }
   // Marked again before the re-read, since the editor may have moved here

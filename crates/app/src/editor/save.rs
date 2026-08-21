@@ -68,10 +68,11 @@ pub struct ManifestWritten {
 pub fn get_manifest(scope: Scope) -> Result<ManifestRead, String> {
     let env = env()?;
     let path = manifest::manifest_path(&env, &scope);
-    Ok(ManifestRead {
-        manifest: manifest::load_for_mutation(&path).map_err(|e| e.to_string())?,
-        base: manifest::base(&path).map_err(|e| e.to_string())?,
-    })
+    // One read for both halves: read apart, the manifest could be the old
+    // file's and the base the new one's, and the write that follows would
+    // be accepted over the writer in between.
+    let (manifest, base) = manifest::read_for_mutation(&path).map_err(|e| e.to_string())?;
+    Ok(ManifestRead { manifest, base })
 }
 
 /// Validate an edited manifest the way a hand-written file is validated, so
@@ -120,6 +121,10 @@ pub fn update_manifest(
 ) -> Result<ManifestWritten, WriteRefused> {
     let env = env()?;
     let path = manifest::manifest_path(&env, &scope);
+    let held = match &base {
+        Some(hash) => Pre::HashIs { hash: hash.clone() },
+        None => Pre::Absent,
+    };
     if manifest::check_base(&path, base.as_deref()).is_err() {
         return Err(WriteRefused::Stale);
     }
@@ -144,18 +149,20 @@ pub fn update_manifest(
             PlannedOp {
                 description: "Save kendex.toml".into(),
                 op: Op::WriteManifest {
-                    // The same base the check above read, so nothing that
-                    // lands between the two can slip through either.
-                    pre: match &base {
-                        Some(hash) => Pre::HashIs { hash: hash.clone() },
-                        None => Pre::Absent,
-                    },
+                    pre: held.clone(),
                     path: path.clone(),
                     manifest: Box::new(manifest),
                 },
             },
         );
     }
+    // Whoever planned the write, it is the copy on screen that is being
+    // written, so every write of this file binds to the file that copy came
+    // from. A plan that carries its own manifest write — a schema upgrade,
+    // a repository move, skills an agent gained upstream — binds to what
+    // the file was when the plan ran, which would accept a writer that
+    // landed between the check above and here.
+    report.plan.bind_writes(&path, &held);
     apply::execute(&env, &report.plan, None).map_err(|e| e.to_string())?;
     Ok(ManifestWritten {
         view: view(&env, &scope),

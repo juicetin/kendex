@@ -115,6 +115,42 @@ describe("the sync refuses before it reads", () => {
     expect(after.outdated).toBeNull();
   });
 
+  // Most of what calls this rewrites installed files and the lock and never
+  // touches kendex.toml — an ordinary update is one. The mark is about the
+  // file having moved under the copy in hand, so it is measured, not
+  // assumed: a protection that cries wolf teaches people to reload away
+  // their own typing.
+  it("leaves a draft alone when the file never moved", async () => {
+    useEditorStore.setState({ base: "unmoved" });
+    type();
+    vi.mocked(commands.getManifest).mockResolvedValue({
+      status: "ok",
+      data: { manifest: null, base: "unmoved" },
+    });
+
+    await manifestRewritten(scope);
+
+    const after = useEditorStore.getState();
+    expect(after.outdated).toBeNull();
+    expect(after.draft).toEqual(typed);
+    // And the save it was about to refuse reaches the write.
+    await useEditorStore.getState().save();
+    expect(commands.updateManifest).toHaveBeenCalled();
+  });
+
+  it("marks it when the file did move", async () => {
+    useEditorStore.setState({ base: "before" });
+    type();
+    vi.mocked(commands.getManifest).mockResolvedValue({
+      status: "ok",
+      data: { manifest: null, base: "after" },
+    });
+
+    await manifestRewritten(scope);
+
+    expect(useEditorStore.getState().outdated).toBe("global");
+  });
+
   it("leaves a place it is not about alone", async () => {
     type();
     await manifestRewritten({ scope: "project", root: "/w/app" });

@@ -9,7 +9,8 @@ mod decisions;
 mod file;
 mod validate;
 pub use file::{
-    ManifestFile, base, check_base, load, load_for_mutation, manifest_path, parse_text, save, seed,
+    ManifestFile, base, check_base, load, load_for_mutation, manifest_path, parse_text,
+    parse_with_base, read_for_mutation, save, seed,
 };
 pub use validate::{Finding, validate};
 

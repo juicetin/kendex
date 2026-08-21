@@ -123,6 +123,17 @@ pub fn plan_scope(
     let mut written = tree_plan::Written::default();
     let mut config_edits = config_edits::ConfigEditPlan::default();
 
+    // Every pass below that writes or removes, and what each does with
+    // `only_names` — a plan restricted to some packages. Asked, in order:
+    // `plan_items` (writes for the named items, others carried forward),
+    // `plan_settings_seed` (seeds only what the named packages ship),
+    // `stale_emitted` (sweeps only their old paths), `plan_refusals` (takes
+    // only their refused renderings off disk). Not asked, deliberately:
+    // `plan_manifest_write`, which maintains the scope's own manifest and
+    // belongs to no package, and `orphans`, which removes only under
+    // `remove_orphans` or `sweep_unneeded` — a verb asking for exactly that,
+    // and never a restricted plan, which passes neither.
+    // `plan_lock_write` records what the passes above decided.
     plan_manifest_write(env, scope, repo_moved, manifest, &state, &mut ops)?;
 
     // What earlier installs put on disk under another kind's name. A path
@@ -148,7 +159,7 @@ pub fn plan_scope(
         &mut written,
     )?;
 
-    plan_settings_seed(scope, &state, &mut new_lock, &mut ops, &mut drift)?;
+    plan_settings_seed(scope, &state, options, &mut new_lock, &mut ops, &mut drift)?;
 
     // Trash ops all pass one guard: writes for this pass are already
     // planned, so anything still wanted is known, and no path goes to the

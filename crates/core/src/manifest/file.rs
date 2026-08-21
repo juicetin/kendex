@@ -100,14 +100,49 @@ pub fn load_for_mutation(path: &Path) -> Result<Option<Manifest>> {
     }
 }
 
-/// What the file at this path is right now, as the copy read from it will
-/// remember it — `None` when nothing is there. A whole-manifest write from
-/// a copy someone is holding sends this back with it, and the write is
+/// What a copy read from these bytes remembers about the file it came
+/// from. Taken over the bytes themselves, never over the path a second
+/// time: the base and the manifest have to describe the same read.
+fn digest(text: &str) -> String {
+    crate::hash::hash_bytes(text.as_bytes())
+}
+
+/// What the file at this path is right now — `None` when nothing is there,
+/// which is itself an answer a copy can hold. A whole-manifest write from a
+/// copy someone is holding sends this back with it, and the write is
 /// refused if the file has become something else in between.
 pub fn base(path: &Path) -> Result<Option<String>> {
-    match path.is_file() {
-        true => Ok(Some(crate::hash::hash_tree(path)?)),
-        false => Ok(None),
+    Ok(read_if_exists(path)?.as_deref().map(digest))
+}
+
+/// A manifest and the base of the file it came from, from one read.
+///
+/// Two reads would pair a manifest with the base of whatever replaced it:
+/// a writer landing between them hands the caller old content under the new
+/// file's name, and the write that follows is accepted over that writer —
+/// the one thing a base exists to prevent. So the text is read once and
+/// both answers come from it.
+pub fn read_for_mutation(path: &Path) -> Result<(Option<Manifest>, Option<String>)> {
+    crate::rename::refuse_both_generations(path)?;
+    let Some(text) = read_if_exists(path)? else {
+        return Ok((None, None));
+    };
+    parse_with_base(path, &text)
+}
+
+/// [`read_for_mutation`] for text the caller already read, and where the
+/// pairing is provable: the base is taken over exactly these bytes.
+pub fn parse_with_base(path: &Path, text: &str) -> Result<(Option<Manifest>, Option<String>)> {
+    let base = Some(digest(text));
+    match parse_text(path, text)? {
+        ManifestFile::Absent => Ok((None, base)),
+        ManifestFile::Legacy { .. } => Err(CoreError::LegacyManifest {
+            path: path.to_path_buf(),
+        }),
+        ManifestFile::Current(mut manifest) => {
+            manifest.schema = MANIFEST_SCHEMA;
+            Ok((Some(*manifest), base))
+        }
     }
 }
 

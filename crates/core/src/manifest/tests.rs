@@ -156,6 +156,31 @@ mod stale_writes {
         path
     }
 
+    /// The pairing, where it can be seen: the base is taken over the exact
+    /// bytes the manifest was parsed from. Read apart — parse the file,
+    /// then hash it — a writer landing in between hands back the old
+    /// manifest under the new file's base, and the write that follows is
+    /// accepted over that writer.
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn the_base_belongs_to_the_bytes_the_manifest_came_from() {
+        use super::super::{base, parse_with_base, read_for_mutation};
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("kendex.toml");
+        let text = "schema = 5\n";
+        std::fs::write(&path, text).unwrap();
+
+        let (parsed, paired) = parse_with_base(&path, text).unwrap();
+        assert!(parsed.is_some());
+        // The same bytes, whether they came from the file or the caller.
+        assert_eq!(paired, base(&path).unwrap());
+        assert_eq!(read_for_mutation(&path).unwrap().1, paired);
+
+        // Bytes that are not the file's answer for themselves, never for it.
+        let (_, other) = parse_with_base(&path, "schema = 5\n# later\n").unwrap();
+        assert_ne!(other, paired);
+    }
+
     #[test]
     #[allow(clippy::unwrap_used)]
     fn a_copy_of_the_file_it_came_from_writes() {

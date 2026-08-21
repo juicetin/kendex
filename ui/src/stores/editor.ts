@@ -53,6 +53,9 @@ interface EditorState {
   edit: (change: (draft: Draft) => Draft) => void;
   /** Say that this place's manifest was rewritten under the copy in hand. */
   outdate: (scope: Scope) => void;
+  /** Take that back: the file turned out to be the one the copy came from
+   *  after all. Only for the place it was said about. */
+  current: (scope: Scope) => void;
   save: () => Promise<void>;
 }
 
@@ -178,6 +181,11 @@ export const useEditorStore = create<EditorState>((set, get) => {
     },
 
     outdate: (scope) => set({ outdated: scopeKey(scope) }),
+
+    current: (scope) =>
+      set((state) => ({
+        outdated: state.outdated === scopeKey(scope) ? null : state.outdated,
+      })),
 
     openScope: async (scope) => {
       const state = get();

@@ -42,7 +42,7 @@ describe("an install redirected into a project", () => {
     });
     vi.mocked(commands.getManifest).mockResolvedValue({
       status: "ok",
-      data: { manifest: null, base: null },
+      data: { manifest: null, base: "rewritten" },
     });
     vi.mocked(commands.editorInventory).mockResolvedValue({
       status: "ok",

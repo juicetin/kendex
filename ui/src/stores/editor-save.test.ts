@@ -138,6 +138,9 @@ describe("saving a customization", () => {
     expect(after.draft?.["skill-instructions"]).toEqual({ gh: "second" });
     // Newer than the file, so it is still the user's to save.
     expect(after.dirty).toBe(true);
+    // And it descends from the write that just landed, so that is the file
+    // its save carries — refusing it would refuse a change it made itself.
+    expect(after.base).toBe("written");
   });
 
   it("leaves the draft unsaved when the write is refused", async () => {
