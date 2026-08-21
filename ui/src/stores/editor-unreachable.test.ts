@@ -126,3 +126,26 @@ describe("how each place's read went", () => {
     expect(useEditorStore.getState().saved.global).toBeDefined();
   });
 });
+
+// The two reads answer different questions, so one failing must not speak
+// for the other: an inventory kendex could not fetch says nothing about
+// whether this place's manifest was read.
+describe("when only the inventory read fails", () => {
+  it("keeps the manifest and leaves the place readable", async () => {
+    vi.mocked(commands.getManifest).mockResolvedValue({
+      status: "ok",
+      data: { manifest: null, base: "read" },
+    });
+    vi.mocked(commands.editorInventory).mockRejectedValue(
+      new Error("the bridge went away"),
+    );
+
+    await useEditorStore.getState().load({ scope: "global" });
+
+    const state = useEditorStore.getState();
+    expect(state.unreadPlaces).not.toContain("global");
+    expect(state.saved.global).toBeDefined();
+    // The failure is still said out loud rather than swallowed.
+    expect(state.error).toContain("bridge went away");
+  });
+});

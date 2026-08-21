@@ -68,14 +68,29 @@ export const loadManifest = async (
   const onScreen = () =>
     claim === screenReads && sameScope(state().scope, scope);
   if (onScreen()) useEditorStore.setState({ loading: true });
+  // Started together and settled apart. They answer different questions —
+  // what this place declares, and what the form may offer — and joining
+  // their failures makes one speak for the other: an inventory that could
+  // not be fetched would say the manifest was not read, and the marks for
+  // a place kendex just read fine would be masked on its account.
+  // Called through this rather than directly: `allSettled` takes promises,
+  // so a call that throws where it stands would throw past it, and the
+  // whole read would end with nothing said — the silent failure this store
+  // exists to avoid.
+  const attempt = <T>(call: () => Promise<T>) => Promise.resolve().then(call);
+  const [read_manifest, read_inventory] = await Promise.allSettled([
+    attempt(() => commands.getManifest(scope)),
+    attempt(() => commands.editorInventory(scope)),
+  ]);
+  const inventory: Awaited<ReturnType<typeof commands.editorInventory>> =
+    read_inventory.status === "fulfilled"
+      ? read_inventory.value
+      : { status: "error", error: String(read_inventory.reason) };
   let manifest: Awaited<ReturnType<typeof commands.getManifest>>;
-  let inventory: Awaited<ReturnType<typeof commands.editorInventory>>;
-  try {
-    [manifest, inventory] = await Promise.all([
-      commands.getManifest(scope),
-      commands.editorInventory(scope),
-    ]);
-  } catch (thrown) {
+  if (read_manifest.status === "fulfilled") {
+    manifest = read_manifest.value;
+  } else {
+    const thrown = read_manifest.reason;
     // A transport failure rejects rather than answering, and a read that
     // ends with nothing said is the silent failure this store exists to
     // avoid — the editor says it could not open rather than sitting empty.
