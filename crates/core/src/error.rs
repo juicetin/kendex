@@ -161,7 +161,7 @@ pub enum CoreError {
     /// provenance — which source it came from, and at which commit — and
     /// that record lives nowhere but the manifest.
     #[error(
-        "'{name}' is already your own copy — edit it in place, or discard the fork before keeping it again"
+        "'{name}' is already your own copy — edit it in place, or remove it and install it again to go back to the source"
     )]
     AlreadyForked { name: String },
 

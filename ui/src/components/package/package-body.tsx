@@ -24,7 +24,6 @@ export function PackageBody({
   group,
   primary,
   meta,
-  forked,
   editedRow,
   versions,
   files,
@@ -43,10 +42,9 @@ export function PackageBody({
   group: ItemGroup;
   primary: ObservedItem;
   meta: PackageMeta_Serialize | null;
-  /** This page's own place, as the per-place join reports it: its fork,
-   *  and its update row when its files were edited by hand. One owner, so
-   *  the page cannot say two things about one place. */
-  forked: boolean;
+  /** This page's own place's update row, when its files were edited by
+   *  hand — from the same join the header's badges read, so the page
+   *  cannot say two things about one place. */
   editedRow: UpdateRow | null;
   versions: VersionRow[];
   files: PackageFile[];
@@ -65,7 +63,6 @@ export function PackageBody({
     <>
       <EditedNotice
         row={editedRow}
-        alreadyForked={forked}
         onViewChanges={(harness) => {
           if (!installed) return;
           setView({

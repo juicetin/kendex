@@ -100,11 +100,6 @@ pub fn fork(
     })
 }
 
-/// The ops that move the edited bytes into the local source: an earlier
-/// local copy goes to the trash (never overwritten in place), the bytes
-/// are captured under the same name, and the edited artifact itself goes
-/// to the trash — bound to the exact bytes just captured (invariant 7) —
-/// so the follow-up apply renders the fork in its place.
 /// Which file holds the bytes being kept: a skill's managed tree, or the
 /// one agent rendering that reads back as source. The kinds with neither
 /// refuse here rather than capturing something apply cannot re-render.
@@ -172,6 +167,11 @@ fn edited_artifact(
     Ok(edited)
 }
 
+/// The ops that move the edited bytes into the local source: an earlier
+/// local copy goes to the trash (never overwritten in place), the bytes
+/// are captured under the same name, and the edited artifact itself goes
+/// to the trash — bound to the exact bytes just captured (invariant 7) —
+/// so the follow-up apply renders the fork in its place.
 fn capture_ops(
     env: &Env,
     scope: &Scope,

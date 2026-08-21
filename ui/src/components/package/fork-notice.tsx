@@ -13,12 +13,14 @@ import {
   editedInToolsLabel,
   FORK_NOTICE_DETAIL,
   FORK_NOTICE_TITLE,
+  FORKED_DISCARD_CONFIRM_BODY,
+  FORKED_NOTICE_DETAIL,
   KEEP_AS_FORK_LABEL,
   MULTI_TOOL_FORK_NOTE,
   unforkableCopyNote,
   VIEW_CHANGES_LABEL,
   viewChangesInLabel,
-} from "@/lib/copy";
+} from "@/lib/copy-forks";
 import { harnessName } from "@/lib/labels";
 import { useUpdatesStore } from "@/stores/updates";
 import { keepAsOwn, takeNewVersion } from "@/stores/updates-edits";
@@ -58,7 +60,11 @@ export function ForkNotice({
           {several
             ? `${editedInToolsLabel(row.editedHarnesses.map(harnessName))} `
             : null}
-          {row.forkableHarness ? FORK_NOTICE_DETAIL : whyNoFork}
+          {row.forked
+            ? FORKED_NOTICE_DETAIL
+            : row.forkableHarness
+              ? FORK_NOTICE_DETAIL
+              : whyNoFork}
         </p>
       </div>
       <div className="flex shrink-0 flex-wrap gap-2">
@@ -106,7 +112,9 @@ export function ForkNotice({
         open={confirmDiscard}
         onOpenChange={setConfirmDiscard}
         title={DISCARD_EDITS_CONFIRM_TITLE}
-        description={DISCARD_EDITS_CONFIRM_BODY}
+        description={
+          row.forked ? FORKED_DISCARD_CONFIRM_BODY : DISCARD_EDITS_CONFIRM_BODY
+        }
         confirmLabel={DISCARD_EDITS_CONFIRM_LABEL}
         destructive
         busy={busy}
@@ -121,23 +129,23 @@ export function ForkNotice({
   );
 }
 
-/** The page-level wrapper: shows the notice exactly when this package has
- *  edits on disk and is not already a fork. Both facts arrive from the
- *  page's own per-place join, so the notice, the header badge and the
+/** The page-level wrapper: shows the notice exactly when this place's files
+ *  were edited by hand. A fork gets it too — the keep-as-your-own half is
+ *  spent, but its own copy is still there to put back, and a held state
+ *  with no way out is not a state to leave someone in. The row arrives from
+ *  the page's own per-place join, so the notice, the header badge and the
  *  Update button can never disagree about one place. */
 export function EditedNotice({
   row,
-  alreadyForked,
   onViewChanges,
   onResolved,
 }: {
   /** This place's update row when its files were edited by hand, else null. */
   row: UpdateRow | null;
-  alreadyForked: boolean;
   onViewChanges: (harness?: HarnessId) => void;
   onResolved: () => void;
 }) {
-  if (!row || alreadyForked) return null;
+  if (!row) return null;
   return (
     <div className="mb-6">
       <ForkNotice

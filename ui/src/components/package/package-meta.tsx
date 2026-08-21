@@ -10,7 +10,7 @@ import { StatusLine } from "@/components/status-note";
 import { TagBadges } from "@/components/tag-badge";
 import { Badge } from "@/components/ui/badge";
 import { TAGS_ROW_LABEL } from "@/lib/copy";
-import { groupScopes, type ItemGroup } from "@/lib/derive";
+import type { ItemGroup } from "@/lib/derive";
 import { kindLabel, scopeName } from "@/lib/labels";
 import { relativeTime } from "@/lib/relative-time";
 import { versionLabel } from "@/lib/versions";
@@ -53,12 +53,12 @@ export function PackageMetaBlock({
   useEffect(() => {
     if (!loadedProvenance) void loadProvenance();
   }, [loadedProvenance, loadProvenance]);
-  const origin = originFor(
-    indexOrigins(provenance),
-    group.kind,
-    group.name,
-    groupScopes(group),
-  );
+  // This place's origin, not any place's: the same package can come from a
+  // marketplace here and be your own copy in the next project, and the link
+  // below navigates to whichever this line names.
+  const origin = originFor(indexOrigins(provenance), group.kind, group.name, [
+    primary.scope,
+  ]);
   return (
     <div className="space-y-2.5">
       <SectionHeading>Details</SectionHeading>

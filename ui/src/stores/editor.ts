@@ -1,9 +1,9 @@
 import { create } from "zustand";
 import { commands, type EditorInventory, type Scope } from "@/bindings";
 import { type Draft, emptyDraft, toDraft } from "@/lib/editor-draft";
-import { keepIfSame } from "@/lib/same-read";
 import { sameScope, scopeKey } from "@/lib/scope";
 import { useAuditStore } from "./audit";
+import { manifestFold } from "./editor-order";
 import { named, readManifests } from "./editor-scopes";
 import { useScanStore } from "./scan";
 
@@ -47,36 +47,34 @@ export const useEditorStore = create<EditorState>((set, get) => {
   // without tickets the pass that happens to land last wins, reverting a
   // place someone just read or just saved.
   let reads = 0;
-  // The ticket behind each place's saved manifest, so an older read landing
-  // late is dropped for that place alone rather than for the whole pass.
-  const behind = new Map<string, number>();
+  const fold = manifestFold();
+  // Which read the editor on screen is waiting for. Only a read that can
+  // answer for it takes one: the manifest pass and the re-read a save ends
+  // with draw no editor, and counting them here would leave the surface
+  // spinning on a read that was never going to fill it.
+  let screenReads = 0;
+  // How many manifest passes are still running, so the reading flag comes
+  // down when the last one lands rather than the first, and which of them
+  // owns what the status says.
+  let passes = 0;
+  let latestPass = 0;
   let writes = 0;
-
-  /** Fold freshly read manifests into the saved ones, skipping any place a
-   *  later read already answered for, and keeping the object already on
-   *  screen when nothing moved. */
-  const fold = (
-    previous: Record<string, Draft>,
-    read: [string, Draft][],
-    token: number,
-  ): Record<string, Draft> => {
-    const next = { ...previous };
-    for (const [key, draft] of read) {
-      if ((behind.get(key) ?? 0) > token) continue;
-      behind.set(key, token);
-      next[key] = draft;
-    }
-    return keepIfSame(previous, next);
-  };
 
   const load = async (target?: Scope) => {
     const scope = target ?? get().scope;
     reads += 1;
     const token = reads;
+    // A read answers for the editor only when it reads the place the editor
+    // is pointed at; one for somewhere else — the re-read a save ends with —
+    // feeds the marks and nothing more, and must not leave the surface
+    // waiting on itself.
+    const drawing = sameScope(get().scope, scope);
+    if (drawing) screenReads += 1;
+    const claim = drawing ? screenReads : 0;
     // This read speaks for the editor on screen only while it is the newest
-    // and the editor still points at the place it read: a save ends by
-    // re-reading the place it wrote, which may no longer be that one.
-    const onScreen = () => token === reads && sameScope(get().scope, scope);
+    // that could, and the editor still points at the place it read.
+    const onScreen = () =>
+      claim === screenReads && sameScope(get().scope, scope);
     if (onScreen()) set({ loading: true });
     let manifest: Awaited<ReturnType<typeof commands.getManifest>>;
     let inventory: Awaited<ReturnType<typeof commands.editorInventory>>;
@@ -191,7 +189,18 @@ export const useEditorStore = create<EditorState>((set, get) => {
     loadAll: async () => {
       reads += 1;
       const token = reads;
+      // Passes overlap — startup waits on settings first, the focus handler
+      // fires on every return, and a fork adds one — so the status belongs
+      // to the newest, not to whichever lands last. The saved fold is safe
+      // either way: it is per place and already ticketed.
+      const newest = () => token === latestPass;
+      latestPass = token;
+      passes += 1;
       set({ manifestsReading: true });
+      const done = () => {
+        passes -= 1;
+        if (passes === 0) set({ manifestsReading: false });
+      };
       try {
         const { read, failed } = await readManifests();
         set((state) => ({
@@ -199,19 +208,21 @@ export const useEditorStore = create<EditorState>((set, get) => {
           // did, rather than being dropped from `saved` and taking a mark
           // that was right with it.
           saved: fold(state.saved, read, token),
-          manifestsLoaded: true,
-          manifestError: failed.length > 0 ? failed.join("\n") : null,
-          manifestsReading: false,
+          ...(newest()
+            ? {
+                manifestsLoaded: true,
+                manifestError: failed.length > 0 ? failed.join("\n") : null,
+              }
+            : {}),
         }));
       } catch (thrown) {
         // A rejected read is a read that failed, not one still running: a
         // pass that says nothing leaves every place reading as in-flight
         // forever, with no note and no retry.
-        set({
-          manifestsLoaded: false,
-          manifestError: String(thrown),
-          manifestsReading: false,
-        });
+        if (newest())
+          set({ manifestsLoaded: false, manifestError: String(thrown) });
+      } finally {
+        done();
       }
     },
 

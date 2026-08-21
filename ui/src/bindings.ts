@@ -2411,7 +2411,9 @@ export type UpdateRow = {
 	ignored: boolean,
 	/**
 	 *  The installed files were edited by hand; updating is blocked until
-	 *  the edit is kept as a fork or discarded.
+	 *  the edit is settled. A package from a source settles it by being
+	 *  kept as a fork or discarded; a fork, already kept, only by
+	 *  discarding back to the copy it put in the local source.
 	 */
 	blockedByLocalEdit: boolean,
 	/**

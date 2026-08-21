@@ -156,18 +156,22 @@ export function groupScopes(group: ItemGroup): Scope[] {
   return [...seen.values()];
 }
 
-/** The installation a page about one place is about: the one in that place,
- *  or the first when the page was opened without one. Every route used to
- *  arrive at the first install, so what the page said about it was always
- *  right; a mark that names a project can open any of them. */
+/** The installation a page about one place is about. With no place named,
+ *  the first — that is what "this package" means with nothing narrowing it.
+ *  With one named and nothing installed there, null: substituting another
+ *  place's installation would let the page describe a location the reader
+ *  never asked about, which is reachable whenever nav state outlives a
+ *  scope. Every route used to arrive at the first install; a mark that
+ *  names a project can open any of them. */
 export function installationIn(
   group: ItemGroup,
   scope: Scope | null,
 ): ObservedItem | null {
-  const here = scope
-    ? group.installations.find((install) => sameScope(install.scope, scope))
-    : null;
-  return here ?? group.installations[0] ?? null;
+  if (!scope) return group.installations[0] ?? null;
+  return (
+    group.installations.find((install) => sameScope(install.scope, scope)) ??
+    null
+  );
 }
 
 export function countByKind(items: ObservedItem[]): Map<ItemKind, number> {

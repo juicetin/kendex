@@ -1,11 +1,15 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { ProvenanceRow } from "@/bindings";
+import { commands } from "@/bindings";
 import {
   indexOrigins,
   originFor,
   originLabel,
   originTitle,
+  useProvenanceStore,
 } from "./provenance";
+
+vi.mock("@/bindings", () => ({ commands: { libraryProvenance: vi.fn() } }));
 
 const ROWS: ProvenanceRow[] = [
   {
@@ -80,5 +84,24 @@ describe("the From column's join", () => {
     expect(originTitle({ origin: "own", forkedFrom: null })).toBeUndefined();
     expect(originLabel({ origin: "unmanaged" })).toBe("Not managed");
     expect(originLabel(null)).toBe("");
+  });
+});
+
+describe("re-reading the join", () => {
+  it("hands back the same rows when a read says the same thing", async () => {
+    vi.mocked(commands.libraryProvenance).mockResolvedValue({
+      status: "ok",
+      data: ROWS,
+    });
+    await useProvenanceStore.getState().load();
+    const first = useProvenanceStore.getState().rows;
+    // A fresh array off the wire, saying exactly what the last one did: the
+    // table keys these per place and memoizes on identity.
+    vi.mocked(commands.libraryProvenance).mockResolvedValue({
+      status: "ok",
+      data: ROWS.map((row) => ({ ...row })),
+    });
+    await useProvenanceStore.getState().load();
+    expect(useProvenanceStore.getState().rows).toBe(first);
   });
 });

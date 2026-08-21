@@ -1,12 +1,12 @@
 import { toast } from "sonner";
 import { commands, type Scope, type UpdateRow } from "@/bindings";
+import { forkedToastLabel } from "@/lib/copy";
 import {
   FORK_ERROR_TITLE,
-  forkedToastLabel,
   UNSAVED_FIRST_BODY,
   UNSAVED_FIRST_STEPS,
   UNSAVED_FIRST_TITLE,
-} from "@/lib/copy";
+} from "@/lib/copy-forks";
 import { packageDisplayName } from "@/lib/labels";
 import { sameScope } from "@/lib/scope";
 import { useAuditStore } from "./audit";
@@ -46,6 +46,13 @@ const run = async (scope: Scope, work: () => Promise<string | null>) => {
     // fact every mark reads comes from that file — without this the badge
     // it just earned stays off until the window is refocused.
     await useEditorStore.getState().loadAll();
+    // The pass fills `saved`; the copy in hand for the place being edited
+    // is a different read, and every editor surface joins through it. Left
+    // stale it hides the new fork, and a later Save would write the
+    // pre-fork manifest back over it. Safe to re-read: an unsaved draft was
+    // refused above, so there is nothing here to lose.
+    if (sameScope(useEditorStore.getState().scope, scope))
+      await useEditorStore.getState().load(scope);
     await useScanStore.getState().refresh();
     await useAuditStore.getState().refresh({ force: true });
   } finally {

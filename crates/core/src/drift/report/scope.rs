@@ -216,20 +216,32 @@ impl ScopeCheck<'_> {
         let prefix = self.prefix;
         let name = shown(&package.name);
         let kind = package.kind.name();
-        // A fork's own bytes being edited is not a decision anyone owes an
-        // answer to: there is no source to refresh from and nothing left to
-        // keep as a fork, so it is not drift and `check` stays clean.
-        if package.edited && !package.forked {
-            sections.edited.push(drift(
-                format!(
-                    "{prefix}{kind} '{name}' was edited on disk — keep it as a fork, or refresh with edits discarded"
-                ),
-                Some(Remedy::Fork {
-                    kind: package.kind,
-                    name: package.name.clone(),
-                    global: self.global,
-                }),
-            ));
+        if package.edited {
+            // A fork has already been kept: the exit left is to put its own
+            // copy back, which the engine holds in the local source. Naming
+            // the fork exit there would name one that now refuses.
+            let (line, remedy) = if package.forked {
+                (
+                    format!(
+                        "{prefix}{kind} '{name}' was edited on disk since your fork was rendered — refresh with edits discarded to re-render from your own copy"
+                    ),
+                    Remedy::Refresh {
+                        global: self.global,
+                    },
+                )
+            } else {
+                (
+                    format!(
+                        "{prefix}{kind} '{name}' was edited on disk — keep it as a fork, or refresh with edits discarded"
+                    ),
+                    Remedy::Fork {
+                        kind: package.kind,
+                        name: package.name.clone(),
+                        global: self.global,
+                    },
+                )
+            };
+            sections.edited.push(drift(line, Some(remedy)));
         } else if package.removed_upstream {
             sections.removed.push(drift(
                 format!("{prefix}{kind} '{name}' is no longer offered by its source"),

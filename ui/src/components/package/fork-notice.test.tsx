@@ -19,12 +19,7 @@ vi.mock("@/stores/updates", async (importOriginal) => {
 // place with no hand edit hands it nothing.
 const render = (row: UpdateRow | null) =>
   renderToStaticMarkup(
-    <EditedNotice
-      row={row}
-      alreadyForked={false}
-      onViewChanges={() => {}}
-      onResolved={() => {}}
-    />,
+    <EditedNotice row={row} onViewChanges={() => {}} onResolved={() => {}} />,
   );
 
 const edited = (extra: Partial<UpdateRow>) =>
@@ -96,5 +91,24 @@ describe("package page edited notice", () => {
     );
     expect(html).not.toContain(">Discard edits…<");
     expect(html).toContain(">View changes<");
+  });
+
+  // A fork has already been kept as your own, so that half of the choice is
+  // spent — but the copy you kept is still there, and a held state with no
+  // way out is not a state to leave someone in.
+  it("offers a fork the way back to the copy it kept, and no second fork", () => {
+    const html = render(
+      edited({
+        forked: true,
+        editedHarnesses: ["claude"],
+        forkableHarness: null,
+        canDiscard: true,
+        canTakeLatest: false,
+      }),
+    );
+    expect(html).not.toContain(">Keep as my own<");
+    expect(html).toContain(">Discard edits…<");
+    expect(html).toContain("go back to the copy you kept");
+    expect(html).not.toContain("can&#x27;t be kept as your own");
   });
 });

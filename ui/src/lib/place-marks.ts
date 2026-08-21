@@ -1,4 +1,4 @@
-import type { ItemKind, Scope, UpdateRow } from "@/bindings";
+import type { ItemKind, ObservedItem, Scope, UpdateRow } from "@/bindings";
 import {
   editedRowIn,
   type PlaceStanding,
@@ -6,6 +6,7 @@ import {
   placeStandings,
   standingIn,
 } from "@/lib/customized-places";
+import { groupScopes, type ItemGroup, installationIn } from "@/lib/derive";
 import type { PackageRef, PackageView } from "@/stores/nav";
 
 // Where a mark leads. A mark that says a place is yours is only worth
@@ -61,26 +62,28 @@ export const customizeNav = (ref: PackageRef): [PackageRef, PackageView] => [
   { mode: "customize" },
 ];
 
-/** Everything a package page's marks are about, from one join: the place
- *  its header speaks for, whether the place it was opened at holds a fork,
- *  and that place's row when its files were edited by hand. One owner, so
- *  the page cannot say two things about one place. */
+/** Everything a package page derives about one place before it renders:
+ *  the installation it is about, the place its header speaks for, and the
+ *  row behind its edited-files notice. All three are about the place the
+ *  page was opened at — which a customized mark can name any of — so they
+ *  are derived together and the page cannot say two things about one
+ *  place. `primary` is null when nothing is installed at that place, which
+ *  is the page's cue to leave the way the reader came. */
 export function packageMarks(
   source: PlacesSource,
-  kind: ItemKind,
-  name: string,
-  scopes: Scope[],
+  group: ItemGroup,
   opened: Scope,
   editing: Scope | null,
 ): {
+  primary: ObservedItem | null;
   selected: PlaceStanding | null;
-  forkedHere: boolean;
   editedRow: UpdateRow | null;
 } {
-  const standings = placeStandings(source, kind, name, scopes);
+  const { kind, name } = group;
+  const standings = placeStandings(source, kind, name, groupScopes(group));
   return {
+    primary: installationIn(group, opened),
     selected: headerStanding(standings, opened, editing),
-    forkedHere: standingIn(standings, opened)?.forked === true,
     editedRow: editedRowIn(source, kind, name, opened),
   };
 }

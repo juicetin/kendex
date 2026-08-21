@@ -8,7 +8,7 @@ import {
   DISCARD_EDITS_CONFIRM_TITLE,
   DISCARD_EDITS_LABEL,
   KEEP_AS_FORK_LABEL,
-} from "@/lib/copy";
+} from "@/lib/copy-forks";
 import {
   CUSTOMIZED_HERE_LABEL,
   DERIVED_EDIT_NOTE,

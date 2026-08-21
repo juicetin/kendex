@@ -58,9 +58,9 @@ lives in one capability table read by core and UI.
    explicit option (`overwrite_edited` / `--discard-edits`). The anchor
    is the lock's rendered hash — what apply last put on disk — and a
    record that cannot prove which bytes are whose holds too: one
-   conflict, never one silent loss. A fork's own bytes are outside this:
-   both exits are already taken — no source to discard back to, nothing
-   left to keep — so the edit is measured but never named as a decision.
+   conflict, never one silent loss. A fork's bytes are held the same way;
+   only its exits differ — keeping it as a fork is done, so the conflict
+   names discarding, back to the copy the fork left in the local source.
 2. Write-only-if-absent: never clobber a user-set value; never re-add a
    user removal. This protects manifest values and unrelated
    structured-config keys — managed generated content is replaceable
@@ -276,15 +276,15 @@ lives in one capability table read by core and UI.
   `lib/customized-places.ts` joins the three facts that make a place yours
   — that place's overlay, its files edited by hand
   (`UpdateRow::blocked_by_local_edit`), and a fork read from its own
-  `forks` table, so no mark rests on an update check — into one
-  `PlaceStanding`. Ranked by which has a surface to land on, they decide
-  where the mark leads: a hand edit to the overview and its notice, an
-  overlay to the Customize tab that wrote it, a fork to the overview where
-  its own copy is — no notice, that decision already made. Neither
-  unmarked state is a default: `checking` while a read is on its way,
-  `unknown` once one came back and could not say — no update row for a
-  path or local source, a failed check, an unparseable manifest — and
-  neither counts as untouched; the Library names the read it is missing.
+  `forks` table, so the fork fact never rests on an update check — into
+  one `PlaceStanding`. Ranked by which has a surface to land on, they
+  decide where the mark leads: a hand edit to the overview and the notice
+  offering its exit, an overlay to the Customize tab that wrote it, a fork
+  to the overview where its own copy is. Neither unmarked state is a
+  default: `checking` while a read is on its way, `unknown` once one came
+  back and could not say — no update row for a path or local source, a
+  failed check, an unparseable manifest — and neither counts as untouched;
+  the Library names the read it is missing.
 - Hook events have one vocabulary — Claude Code's names, in
   `core/hook.rs::EVENTS` — and every other harness's map is keyed by it.
   The picker offers that list, the validator rejects anything outside it,

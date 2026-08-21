@@ -95,13 +95,18 @@ describe("installationIn", () => {
     ).toBe("/api/.claude/skills/github");
   });
 
-  it("falls back to the first only with no place, or a place it is not in", () => {
+  it("is the first install only when no place was named", () => {
     expect(installationIn(group(), null)?.path).toBe(
       "/home/me/.claude/skills/github",
     );
+  });
+
+  it("is nothing where the named place has no install", () => {
+    // Substituting another place's would let the page describe a location
+    // nobody asked about — reachable whenever nav state outlives a scope.
     expect(
-      installationIn(group(), { scope: "project", root: "/nowhere" })?.path,
-    ).toBe("/home/me/.claude/skills/github");
+      installationIn(group(), { scope: "project", root: "/nowhere" }),
+    ).toBe(null);
   });
 });
 

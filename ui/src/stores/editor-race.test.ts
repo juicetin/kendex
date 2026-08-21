@@ -72,7 +72,6 @@ beforeEach(() => {
   });
 });
 
-// The per-place marks read `scope` and `draft` as one answer, and a save
 // sends that pair to a file. A read that lands after a newer one must not
 // be able to make them disagree.
 describe("switching place while a read is in flight", () => {

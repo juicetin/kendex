@@ -20,7 +20,7 @@ import {
 } from "@/components/package/use-package-data";
 import { canCustomize } from "@/lib/customization";
 import { useEditingPlacesSource } from "@/lib/customized-places";
-import { groupItems, groupScopes, installationIn } from "@/lib/derive";
+import { groupItems, groupScopes } from "@/lib/derive";
 import { packageDisplayName } from "@/lib/labels";
 import { PAGE_GUTTER, WIDE_CONTENT_WIDTH } from "@/lib/layout";
 import { packageMarks } from "@/lib/place-marks";
@@ -80,44 +80,36 @@ export function PackagePage() {
   }, [ref, result]);
 
   const { meta, files, versions, load: reload } = usePackageData(ref);
+  // Everything this page says is about one place: the one it was opened at,
+  // which a customized mark can name any of. Its installation carries the
+  // path, the open actions, the broken-link state and the tool a comparison
+  // reads; the standing carries the header's badges; the row carries the
+  // edited-files notice.
+  const { primary, selected, editedRow } =
+    group && ref
+      ? packageMarks(places, group, ref.scope, pointed ? editorScope : null)
+      : { primary: null, selected: null, editedRow: null };
   const diff = usePackageDiff(
     ref,
     view,
-    diffHarness(view, group?.installations[0]?.harness ?? null),
+    diffHarness(view, primary?.harness ?? null),
   );
   const updatesLoaded = useUpdatesStore((s) => s.loaded);
 
-  // The scan no longer knows this package (removed, renamed): leave the
-  // way the user came.
+  // The scan no longer knows this package here — removed from this project,
+  // renamed, or nav state that outlived the scope. Either way this page has
+  // nothing to say about the place it was asked for.
   useEffect(() => {
-    if (ref && result && !group) back();
-  }, [ref, result, group, back]);
+    if (ref && result && !primary) back();
+  }, [ref, result, primary, back]);
 
-  if (!ref || !group) return null;
-  // Everything the page says about the package as installed — its path,
-  // its open actions, its broken-link state, which tool a comparison reads
-  // — is about one installation. That is the place the page was opened at,
-  // which a customized mark can name any of.
-  const primary = installationIn(group, ref.scope);
-  if (!primary) return null;
+  if (!ref || !group || !primary) return null;
 
   const displayName = packageDisplayName(ref);
   const installed = installedRow(versions);
   const latest = latestRow(versions);
   const customizable = canCustomize(group.kind);
   const scopes = groupScopes(group);
-  // Every mark in the header is about one place: the one the Customize tab
-  // has open, or the one this page was opened at while it loads. The body
-  // is always about the place the page was opened at — its files, its
-  // versions and its edited-files notice all belong to that one.
-  const { selected, forkedHere, editedRow } = packageMarks(
-    places,
-    group.kind,
-    group.name,
-    scopes,
-    ref.scope,
-    pointed ? editorScope : null,
-  );
   // Update waits for meta (held vs following) and the update standing, and
   // is off while edits are held.
   const canUpdate =
@@ -156,7 +148,6 @@ export function PackagePage() {
       group={group}
       primary={primary}
       meta={meta}
-      forked={forkedHere}
       editedRow={editedRow}
       versions={versions}
       files={files}

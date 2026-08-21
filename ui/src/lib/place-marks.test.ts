@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
+import type { Scope } from "@/bindings";
 import { updateRow } from "@/components/updates-test-rows";
+import { groupItems } from "@/lib/derive";
+import { observedItem } from "@/lib/observed-test-item";
 import {
   changed,
   EVERYWHERE,
@@ -27,6 +30,35 @@ import {
 // page's own marks speaks for.
 
 describe("markTarget", () => {
+  it("leads a hand edit to its notice, even where the place is forked and overlaid", () => {
+    // The notice renders for a fork too — its keep-as-your-own half is
+    // spent, but the copy it kept is still there to put back — so the hand
+    // edit outranks the overlay here as it does anywhere else.
+    const both = {
+      ...forkedHere(),
+      "skill-instructions": { gh: "use the CLI" },
+    };
+    const standings = placeStandings(
+      source({
+        manifests: { ...plainManifests(), "/work/vg": both },
+        rows: indexRows([
+          updateRow("gh", null, { updateAvailable: false }),
+          updateRow("gh", "/work/vg", {
+            updateAvailable: false,
+            forked: true,
+            blockedByLocalEdit: true,
+            canDiscard: true,
+          }),
+          updateRow("gh", "/work/hyprtrade", { updateAvailable: false }),
+        ]),
+      }),
+      "skill",
+      "gh",
+      EVERYWHERE,
+    );
+    expect(markTarget(standings)).toEqual({ scope: VG });
+  });
+
   it("leads to the tab that holds the settings, even where the place is forked", () => {
     // A fork is the standing state of this place; instructions typed on the
     // Customize tab are the thing someone went and did. The mark must not
@@ -137,8 +169,15 @@ describe("customizeNav", () => {
   });
 });
 
+// Every fact a package page derives before it renders, from one call. Each
+// case is one of the reverts that used to pass green.
 describe("packageMarks", () => {
-  const marks = (opened: typeof VG, editing: typeof VG | null) =>
+  const installs = [
+    observedItem({ name: "gh", scope: { scope: "global" }, path: "/h/gh" }),
+    observedItem({ name: "gh", scope: VG, path: "/work/vg/gh" }),
+    observedItem({ name: "gh", scope: HYPR, path: "/work/hyprtrade/gh" }),
+  ];
+  const marks = (opened: Scope, editing: Scope | null, items = installs) =>
     packageMarks(
       source({
         manifests: { ...plainManifests(), "/work/vg": forkedHere() },
@@ -151,23 +190,30 @@ describe("packageMarks", () => {
           }),
         ]),
       }),
-      "skill",
-      "gh",
-      EVERYWHERE,
+      groupItems(items)[0],
       opened,
       editing,
     );
+
+  it("is about the place the page was opened at, not the first install", () => {
+    expect(marks(HYPR, null).primary?.path).toBe("/work/hyprtrade/gh");
+    expect(marks(VG, null).primary?.path).toBe("/work/vg/gh");
+  });
 
   it("speaks for the place the page was opened at until the editor points here", () => {
     expect(marks(HYPR, null).selected?.scope).toEqual(HYPR);
     expect(marks(HYPR, VG).selected?.scope).toEqual(VG);
   });
 
-  it("reads the fork and the hand edit off the place the page is about", () => {
-    // Both are about the opened place, never the one the header names.
-    expect(marks(VG, HYPR).forkedHere).toBe(true);
-    expect(marks(HYPR, VG).forkedHere).toBe(false);
+  it("reads the hand edit off the place the page is about", () => {
+    // The notice is about the opened place, never the one the header names.
     expect(marks(HYPR, VG).editedRow?.scope).toEqual(HYPR);
     expect(marks(VG, HYPR).editedRow).toBe(null);
+  });
+
+  it("has no installation to speak for where the place holds none", () => {
+    // The page's cue to leave the way the reader came, rather than
+    // describing a location nobody asked about.
+    expect(marks(HYPR, null, installs.slice(0, 2)).primary).toBe(null);
   });
 });

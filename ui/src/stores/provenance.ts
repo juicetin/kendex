@@ -6,6 +6,7 @@ import {
   type ProvenanceRow,
   type Scope,
 } from "@/bindings";
+import { keepIfSame } from "@/lib/same-read";
 import { scopeKey } from "@/lib/scope";
 
 interface ProvenanceState {
@@ -22,7 +23,13 @@ export const useProvenanceStore = create<ProvenanceState>((set) => ({
   load: async () => {
     const response = await commands.libraryProvenance();
     if (response.status === "ok") {
-      set({ rows: response.data, loaded: true });
+      // A re-read that says the same thing hands back the array already on
+      // screen: the Library keys these per place and memoizes on identity,
+      // so an equal copy re-derives and re-renders the whole table.
+      set((state) => ({
+        rows: keepIfSame(state.rows, response.data),
+        loaded: true,
+      }));
     }
   },
 }));

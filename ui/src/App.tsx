@@ -129,7 +129,7 @@ function useScanTriggers() {
     const onFocus = () => {
       if (Date.now() - last < FOCUS_RESCAN_DEBOUNCE_MS) return;
       last = Date.now();
-      void refresh();
+      void refresh().catch(said);
       // An update or edit could have landed while the window was away —
       // the badge should notice without a visit to the page.
       void updatesLoad().catch(said);

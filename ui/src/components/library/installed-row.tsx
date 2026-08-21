@@ -10,13 +10,14 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import { bundledWithLabel, FORKED_BADGE_LABEL, vendorHelp } from "@/lib/copy";
+import { bundledWithLabel, vendorHelp } from "@/lib/copy";
 import {
   customizedPlacesLabel,
   forkedInLabel,
   placeStateLine,
   STATUS_LABELS,
 } from "@/lib/copy-customize";
+import { FORKED_BADGE_LABEL } from "@/lib/copy-forks";
 import {
   customizedPlaces,
   forkedPlaces,
