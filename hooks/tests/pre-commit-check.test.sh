@@ -391,6 +391,58 @@ printf 'src/big.rs\t1200\n' >"$REPO_G/ci/ratchet.tsv"
 run_hook "$REPO_G" RATCHET_EXIT=1
 assert_eq "$rc" "2" "settings-relocated baseline still adopts the ratchet lane"
 
+# A commit aimed at another repository is checked there, not here. A session
+# working in a git worktree runs `git -C <path> commit` or `cd <path> && git
+# commit` while the hook starts in the project directory; reading the staged
+# set from here would lint whatever the main checkout happens to be holding.
+# The target repo stages no Rust, so a passing run can only mean the hook
+# read the target's staged set and not this one's.
+REPO_W="$TMP_ROOT/worktree"
+mkdir -p "$REPO_W"
+git -C "$REPO_W" init -q
+git -C "$REPO_W" config user.email t@t
+git -C "$REPO_W" config user.name t
+printf 'notes\n' >"$REPO_W/NOTES.md"
+git -C "$REPO_W" add NOTES.md
+
+printf 'fn other() {}\n' >"$REPO_G/dirty.rs"
+git -C "$REPO_G" add dirty.rs
+
+aimed_at() {
+  set +e
+  out=$( (cd "$REPO_G" && env -u KENDEX_PRE_COMMIT_RUST_CLIPPY \
+    PATH="$BIN_DIR:$PATH" CARGO_LOG="$CARGO_LOG" CARGO_CLIPPY_EXIT=1 \
+    bash "$HOOK" <<<"{\"command\": \"$1\"}") 2>"$ERR_FILE")
+  rc=$?
+  set -e
+  err="$(cat "$ERR_FILE")"
+}
+
+# Control: with no target named, the hook answers for the repo it starts in,
+# whose staged Rust fails the lane.
+aimed_at "git commit -m test"
+assert_eq "$rc" "2" "with no target named the hook answers for its own repo"
+
+aimed_at "git -C $REPO_W commit -m test"
+assert_eq "$rc" "0" "git -C names the repo the hook checks"
+
+aimed_at "cd $REPO_W && git commit -m test"
+assert_eq "$rc" "0" "a cd prefix names the repo the hook checks"
+
+# The command matcher allows git's own options between `git` and `commit`.
+# A pattern demanding the two words be adjacent skipped `git -C <path>
+# commit` entirely, so every lane here fail-opened for it. Staging Rust in
+# the repo the hook starts in makes a skipped run indistinguishable from a
+# clean one only if the matcher fires: rc 2 proves it ran.
+aimed_at "git -C $REPO_G commit -m test"
+assert_eq "$rc" "2" "git -C with an explicit path still reaches the lanes"
+
+aimed_at "git --no-pager commit -m test"
+assert_eq "$rc" "2" "a git option before commit still reaches the lanes"
+
+aimed_at "git log --oneline"
+assert_eq "$rc" "0" "a command that is not a commit is left alone"
+
 echo
 printf 'pass: %d   fail: %d\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]

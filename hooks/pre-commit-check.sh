@@ -12,9 +12,28 @@ set -euo pipefail
 INPUT=$(cat)
 COMMAND=$(echo "$INPUT" | grep -o '"command"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed 's/.*"command"[[:space:]]*:[[:space:]]*"//;s/"$//' 2>/dev/null || true)
 
-# Only relevant for git commit commands
-if ! echo "$COMMAND" | grep -qE 'git[[:space:]]+commit'; then
+# Only relevant for git commit commands. `git` and `commit` are matched with
+# git's own options allowed between them: `git -C <path> commit` is how a
+# session working outside its own checkout commits, and a pattern demanding
+# the two words be adjacent skips those commits silently — every check here
+# fails open for the one caller most likely to need them.
+if ! echo "$COMMAND" | grep -qE 'git[[:space:]]+([-][^[:space:]]+([[:space:]]+[^[:space:]]+)?[[:space:]]+)*commit'; then
   exit 0
+fi
+
+# Check the repository the command commits in, which is not always the one
+# this hook starts in: a session working in a git worktree commits with
+# `git -C <path>` or a `cd <path> &&` prefix while the hook's own cwd stays
+# at the project directory. Reading the staged set and linting from there
+# would answer for whatever is uncommitted in the main checkout instead —
+# another repository's work, blocking a commit it has nothing to do with.
+# `block-repo-copy.sh` walks a command's `cd` segments for the same reason.
+TARGET_DIR=$(echo "$COMMAND" | sed -n 's/.*git[[:space:]]\+-C[[:space:]]\+\([^[:space:]]\+\).*/\1/p' | head -1)
+if [ -z "$TARGET_DIR" ]; then
+  TARGET_DIR=$(echo "$COMMAND" | sed -n 's/^[[:space:]]*cd[[:space:]]\+\([^[:space:]]\+\)[[:space:]]*&&.*/\1/p' | head -1)
+fi
+if [ -n "$TARGET_DIR" ] && [ -d "$TARGET_DIR" ]; then
+  cd "$TARGET_DIR" || exit 0
 fi
 
 # Check staged files
