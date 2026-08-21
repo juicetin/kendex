@@ -38,12 +38,16 @@ export function auditMutation(
       { status: "ok"; data: AuditView } | { status: "error"; error: string }
     >,
     opts: { title: string; successMessage?: string; steps?: string[] },
+    // Whether the machine took it. A caller running one action over
+    // several places cannot read that off a void: it would carry on to the
+    // next place after the first refused or failed, and leave the package
+    // changed in some of them.
   ) => {
     // Apply, adopt, toggle and remove all rewrite this scope's kendex.toml,
     // so unsaved customization for it refuses them the way a fork or a
     // discard is refused — before anything is written, and wherever the
     // typing is waiting.
-    if (refusesForUnsaved(scope)) return;
+    if (refusesForUnsaved(scope)) return false;
     set({ busy: true });
     // Busy is one of the flags holding the Customize tab's Save bar down, so
     // it stays up until the editor has been told its copy is stale — clearing
@@ -56,7 +60,7 @@ export function auditMutation(
         if (opts.successMessage) toast.success(opts.successMessage);
         await manifestRewritten(scope);
         await useScanStore.getState().refresh();
-        return;
+        return true;
       }
       set({ error: response.error });
       const retry: ErrorAction = {
@@ -69,6 +73,7 @@ export function auditMutation(
         steps: opts.steps,
         actions: [retry],
       });
+      return false;
     } finally {
       set({ busy: false });
     }

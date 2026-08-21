@@ -197,6 +197,7 @@ describe("a package-wide action while someone types mid-run", () => {
           },
         },
       });
+      return true;
     });
     expect(done).toEqual(["/work/vg"]);
   });
@@ -206,7 +207,21 @@ describe("a package-wide action while someone types mid-run", () => {
     const done: string[] = [];
     await inEveryPlace([VG, globalScope], async (scope) => {
       done.push(scope.scope === "global" ? "global" : scope.root);
+      return true;
     });
     expect(done).toEqual(["/work/vg", "global"]);
+  });
+
+  // A place the machine would not take is a reason to stop too: the
+  // action has already said why, and going on would change the package in
+  // some places and not others under one click.
+  it("stops at the place the machine would not take", async () => {
+    useEditorStore.setState({ scope: VG, draft: null, dirty: false, held: {} });
+    const done: string[] = [];
+    await inEveryPlace([VG, globalScope], async (scope) => {
+      done.push(scope.scope === "global" ? "global" : scope.root);
+      return false;
+    });
+    expect(done).toEqual(["/work/vg"]);
   });
 });

@@ -54,9 +54,9 @@ export function UnmanagedPage() {
                 busy={busy}
                 title={several ? scopeName(view.scope, among) : null}
                 foldable={false}
-                onAdopt={(kind, name, harness, opts) =>
-                  adopt(view.scope, kind, name, harness, opts)
-                }
+                onAdopt={(kind, name, harness, opts) => {
+                  void adopt(view.scope, kind, name, harness, opts);
+                }}
               />
             ))
           )}

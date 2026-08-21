@@ -35,21 +35,24 @@ interface AuditState {
     scope: Scope,
     removeOrphans: boolean,
     allowUnsafe?: string[],
-  ) => Promise<void>;
+  ) => Promise<boolean>;
   adopt: (
     scope: Scope,
     kind: ItemKind,
     name: string,
     harness: HarnessId,
     opts?: { silent?: boolean },
-  ) => Promise<void>;
+  ) => Promise<boolean>;
+  /** Every one of these answers whether the machine took it, so a caller
+   *  running one action over several places can stop rather than carry on
+   *  to the next after a refusal or a failure. */
   toggle: (
     scope: Scope,
     kind: ItemKind,
     name: string,
     enabled: boolean,
-  ) => Promise<void>;
-  removeItem: (scope: Scope, kind: ItemKind, name: string) => Promise<void>;
+  ) => Promise<boolean>;
+  removeItem: (scope: Scope, kind: ItemKind, name: string) => Promise<boolean>;
   /** Rule that these findings are not problems. The toast offers Undo,
    *  which takes back exactly the records this call wrote. */
   dismiss: (
@@ -60,7 +63,7 @@ interface AuditState {
   /** Take back an acceptance or a dismissal. It rewrites the place's
    *  kendex.toml like every other action here, so it belongs here: a write
    *  held in a component keeps its busy flag out of the shared gate. */
-  revokeDecision: (row: RecordedDecision) => Promise<void>;
+  revokeDecision: (row: RecordedDecision) => Promise<boolean>;
 }
 
 /** How long an audit answers for before a visit pays for a fresh one. */

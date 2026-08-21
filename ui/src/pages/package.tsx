@@ -114,7 +114,7 @@ export function PackagePage() {
     updatesLoaded &&
     editedRow == null;
 
-  const inEveryScope = (act: (scope: Scope) => Promise<void>) =>
+  const inEveryScope = (act: (scope: Scope) => Promise<boolean>) =>
     inEveryPlace(scopes, act);
 
   const { switchTo, updateToLatest, follow } = packageVersionActions(

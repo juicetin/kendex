@@ -223,6 +223,11 @@ changes carry a **Breaking** call-out with their migration note inline.
 - Update all waits for every project it would touch: if any one has unsaved
   customization, none is updated. It used to update the others and skip
   that one.
+- A package-wide toggle or removal stops when one project refuses it,
+  rather than carrying on and leaving the package changed in some projects
+  and not others.
+- A project that could not be read stops reading as unchecked as soon as it
+  can be read again, instead of waiting for a whole pass to succeed.
 - Turning a package on or off across every project it is in now waits for
   all of them: if any one has unsaved customization, none is changed. It
   used to change the others and quietly skip that one.

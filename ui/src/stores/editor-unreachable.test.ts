@@ -75,3 +75,29 @@ describe("a pass that could not reach any place", () => {
     expect(state.unreadPlaces).toContain("global");
   });
 });
+
+// The mark exists so a manifest kept from before a failure is not taken
+// for current. A place whose own read then lands is current, and leaving
+// the mark on would keep masking a place kendex can see.
+describe("a place read on its own after a pass failed", () => {
+  it("is no longer unread", async () => {
+    vi.mocked(commands.getManifest).mockResolvedValue({
+      status: "ok",
+      data: { manifest: null, base: null },
+    });
+    await useEditorStore.getState().loadAll();
+    useSettingsStore.setState({ settings: null });
+    vi.mocked(commands.capabilityTable).mockResolvedValue([]);
+    vi.mocked(commands.windowZoomState).mockResolvedValue({
+      percent: 100,
+      launchRefused: false,
+    });
+    vi.mocked(commands.getSettings).mockRejectedValue(new Error("no settings"));
+    await useEditorStore.getState().loadAll();
+    expect(useEditorStore.getState().unreadPlaces).toContain("global");
+
+    // Its own read lands.
+    await useEditorStore.getState().load({ scope: "global" });
+    expect(useEditorStore.getState().unreadPlaces).not.toContain("global");
+  });
+});

@@ -80,11 +80,15 @@ export function refusesForUnsavedIn(scopes: Scope[]): boolean {
  *  would be the same loss one place along. */
 export async function inEveryPlace(
   scopes: Scope[],
-  act: (scope: Scope) => Promise<void>,
+  act: (scope: Scope) => Promise<boolean>,
 ): Promise<void> {
   if (refusesForUnsavedIn(scopes)) return;
   for (const scope of scopes) {
     if (refusesForUnsaved(scope)) return;
-    await act(scope);
+    // And stop when the machine would not take it. The action has already
+    // said why; going on to the next place would leave the package changed
+    // in some of them and not others, under one click that reported a
+    // single failure and looked otherwise done.
+    if (!(await act(scope))) return;
   }
 }
