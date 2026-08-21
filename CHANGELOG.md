@@ -297,6 +297,9 @@ changes carry a **Breaking** call-out with their migration note inline.
   If the read of where your packages came from fails, the row keeps what it
   last knew rather than emptying, and marks it as last known instead of
   presenting it as current.
+- Update and Follow wait while a check for updates is still running.
+  Pressing them acted on the versions from before the check, and threw the
+  check's answer away to do it.
 - A check for updates that cannot finish no longer looks like one that did.
   The versions already on screen stay there, and the page now says they are
   the last ones kendex could check, gives you the retry, and turns off

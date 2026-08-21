@@ -10,6 +10,7 @@ import { UpdatesPage } from "./updates";
 const stub = vi.hoisted(() => ({
   rows: [] as unknown[],
   loaded: true,
+  checking: false,
   error: null as string | null,
 }));
 
@@ -21,7 +22,7 @@ vi.mock("@/stores/updates", async (importOriginal) => {
       rows: stub.rows,
       warnings: [],
       busy: false,
-      checking: false,
+      checking: stub.checking,
       loaded: stub.loaded,
       error: stub.error,
       load: async () => {},
@@ -43,6 +44,7 @@ const updateButtons = (html: string) =>
 beforeEach(() => {
   stub.rows = [updateRow("gh", "/work/vg"), updateRow("gh", "/work/api")];
   stub.loaded = true;
+  stub.checking = false;
   stub.error = null;
 });
 
@@ -122,5 +124,18 @@ describe("the Updates page before the first read answers", () => {
     expect(renderToStaticMarkup(<UpdatesPage />)).toContain(
       "Everything is up to date",
     );
+  });
+});
+
+// A check is fetching newer versions. Applying now acts on the revision
+// the row had before it — and the read that follows the write retires the
+// check, so the answer the person asked for is thrown away to apply the
+// one it was replacing.
+describe("the Updates page while a check is still fetching", () => {
+  it("takes the updates away until it finishes", () => {
+    stub.checking = true;
+    const buttons = updateButtons(renderToStaticMarkup(<UpdatesPage />));
+    expect(buttons.length).toBeGreaterThan(0);
+    expect(buttons.every((one) => one.includes(' disabled=""'))).toBe(true);
   });
 });

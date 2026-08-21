@@ -1,7 +1,7 @@
 //! The per-item planning pass and the refusal pass — the two walks over
 //! the desired state that turn it into drift rows and ops.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use crate::apply::PlannedOp;
@@ -39,6 +39,14 @@ pub(super) fn plan_items(
     // same silence behind.
     rendered: &mut BTreeSet<(ItemKind, String)>,
 ) -> Result<()> {
+    // A package can target several tools, and each is its own item here.
+    // The set below is asked per package, so a package counts as rendered
+    // only when every item under it was: one tool refused while another
+    // installs leaves edited files exactly where they are, and a caller
+    // told the package was restored would be reading one tool's success
+    // as all of them.
+    let mut wanted: BTreeMap<(ItemKind, String), usize> = BTreeMap::new();
+    let mut done: BTreeMap<(ItemKind, String), usize> = BTreeMap::new();
     for item in &state.items {
         let mut sink = item_plan::PlanSink {
             drift,
@@ -50,6 +58,7 @@ pub(super) fn plan_items(
         // Not this plan's package: its record carries forward and nothing
         // is planned for it, the same way a held item's does. Dropping the
         // record instead would write a lock that forgets what is installed.
+        *wanted.entry((item.kind, item.name.clone())).or_default() += 1;
         if !state.acts_on(item.kind, &item.name) {
             if let Some(entry) = lock.entries.get(&item.key) {
                 sink.new_lock
@@ -77,7 +86,12 @@ pub(super) fn plan_items(
         // returns without one when the target conflicts, and recording it
         // anyway would tell a caller its package was put back.
         if plan_item(env, item, scope, lock, emitted_paths, &mut sink)? {
-            rendered.insert((item.kind, item.name.clone()));
+            *done.entry((item.kind, item.name.clone())).or_default() += 1;
+        }
+    }
+    for (key, count) in wanted {
+        if done.get(&key) == Some(&count) {
+            rendered.insert(key);
         }
     }
     Ok(())

@@ -276,3 +276,73 @@ fn a_target_that_conflicts_is_not_counted_as_rendered() {
         "a conflict left it unwritten, so nothing may call it rendered"
     );
 }
+
+/// A package can target several tools, and each is its own item in the
+/// plan. One tool refused while another installs leaves the edited files
+/// exactly where they are, so a caller told the package was restored would
+/// be reading one tool's success as all of them.
+#[test]
+#[allow(clippy::unwrap_used)]
+fn a_package_is_rendered_only_when_every_tool_is() {
+    let f = fixture();
+    let granted = grant(&f);
+    let report = plan(&f, &[granted.as_str()]);
+    apply::execute(&f.env, &report.plan, None).unwrap();
+
+    // Two tools for the same package from here on.
+    let manifest_path = kendex_core::manifest::manifest_path(&f.env, &f.scope);
+    let text = std::fs::read_to_string(&manifest_path).unwrap();
+    std::fs::write(
+        &manifest_path,
+        text.replace(
+            "harnesses = [\"claude\"]",
+            "harnesses = [\"claude\", \"codex\"]",
+        ),
+    )
+    .unwrap();
+
+    let manifest = manifest_of(&f);
+    let lock = load_lock(&lock_path(&f.env, &f.scope)).unwrap();
+    let both = plan_scope(
+        &f.env,
+        &f.scope,
+        &manifest,
+        &lock,
+        &PlanOptions {
+            only_names: Some(vec![(ItemKind::Skill, "clean".to_owned())]),
+            ..PlanOptions::default()
+        },
+    )
+    .unwrap();
+    // The control: with nothing holding either tool, the package renders.
+    assert!(
+        both.rendered
+            .contains(&(ItemKind::Skill, "clean".to_owned())),
+        "the control: both tools rendered"
+    );
+
+    // Now one tool's installation conflicts and the other does not.
+    let mut split = lock.clone();
+    for entry in split.entries.values_mut() {
+        if entry.name == "clean" && entry.harness == kendex_core::model::HarnessId::Claude {
+            entry.source_repo = "someone/else".to_owned();
+        }
+    }
+    let partial = plan_scope(
+        &f.env,
+        &f.scope,
+        &manifest,
+        &split,
+        &PlanOptions {
+            only_names: Some(vec![(ItemKind::Skill, "clean".to_owned())]),
+            ..PlanOptions::default()
+        },
+    )
+    .unwrap();
+    assert!(
+        !partial
+            .rendered
+            .contains(&(ItemKind::Skill, "clean".to_owned())),
+        "one tool held, so the package is not restored — whatever the other did"
+    );
+}

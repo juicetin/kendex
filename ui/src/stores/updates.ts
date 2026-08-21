@@ -38,11 +38,16 @@ interface UpdatesState {
  *  last good rows rather than blanking the page, which is right for reading
  *  — but a button that applies a revision off a row nobody could confirm is
  *  the mark that called a place untouched when nobody had looked. `loaded`
- *  is the read having succeeded; `busy` is one already running. */
+ *  is the read having succeeded; `busy` is one already running; and
+ *  `checking` is a fetch of newer versions still in flight. Applying
+ *  during that fetch acts on the revision the row had before it — and the
+ *  read that follows the write retires the check, so the answer the person
+ *  asked for is thrown away to apply the one it was replacing. */
 export const canApplyUpdates = (state: {
   loaded: boolean;
   busy: boolean;
-}): boolean => state.loaded && !state.busy;
+  checking: boolean;
+}): boolean => state.loaded && !state.busy && !state.checking;
 
 export const useUpdatesStore = create<UpdatesState>((set) => {
   const showError = (title: string, message: string) =>
