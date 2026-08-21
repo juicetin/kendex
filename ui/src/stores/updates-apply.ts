@@ -13,6 +13,7 @@ import { useAuditStore } from "./audit";
 import { manifestRewritten } from "./manifest-sync";
 import { useProblemsStore } from "./problems";
 import { useScanStore } from "./scan";
+import { refusesForUnsaved } from "./unsaved-first";
 import { useUpdatesStore } from "./updates";
 
 // Bringing places current, under the updates store's busy flag so every
@@ -25,6 +26,10 @@ const set = (partial: { busy: boolean }) => useUpdatesStore.setState(partial);
 const reload = () => useUpdatesStore.getState().load();
 
 const apply = async (row: UpdateRow): Promise<boolean> => {
+  // Both branches below rewrite this place's kendex.toml, so unsaved
+  // customization for it refuses them — the guard every writer of that
+  // file asks, wherever the typing is waiting.
+  if (refusesForUnsaved(row.scope)) return false;
   // Held packages move by moving the hold; following ones come current
   // by applying the scope — which is what following means, and brings
   // any other pending changes in that scope along.
@@ -99,6 +104,10 @@ export const applyMany = async (wanted: UpdateRow[]): Promise<void> => {
         .map((row) => [scopeKey(row.scope), row] as const),
     );
     for (const row of scopes.values()) {
+      if (refusesForUnsaved(row.scope)) {
+        ok = false;
+        continue;
+      }
       const response = await commands.applyPlan(row.scope, false, []);
       if (response.status === "error") {
         showError(UPDATE_ERROR_TITLE, response.error);

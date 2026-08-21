@@ -2,7 +2,6 @@ import { toast } from "sonner";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppSettings } from "@/bindings";
 import { commands } from "@/bindings";
-import { useEditorStore } from "./editor";
 import { useProblemsStore } from "./problems";
 import { useScanStore } from "./scan";
 import { useSettingsStore } from "./settings";
@@ -182,66 +181,5 @@ describe("settings store", () => {
     expect(dialog.open).toBe(true);
     expect(dialog.title).toBe("Couldn't search that folder");
     expect(dialog.message).toBe("/nope is not a directory");
-  });
-});
-
-// Adding the session drift report declares a hook in that project's
-// kendex.toml, so the Customize tab holding a copy of that file has to
-// hear about it like it does for every other write.
-describe("adding the drift report to a project", () => {
-  const root = "/work/vg";
-
-  beforeEach(() => {
-    vi.clearAllMocks();
-    useSettingsStore.setState({ settings: null });
-    useEditorStore.setState({
-      scope: { scope: "project", root },
-      draft: { schema: 1, install: {}, "skill-instructions": { gh: "mine" } },
-      dirty: true,
-      outdated: null,
-      saved: {},
-    });
-    vi.mocked(commands.registerProject).mockResolvedValue({
-      status: "ok",
-      data: { ...settings, projects: [root] },
-    });
-    vi.mocked(commands.scanMachine).mockResolvedValue({
-      status: "ok",
-      data: { harnesses: [], items: [], missingProjects: [], warnings: [] },
-    });
-    vi.mocked(commands.installDriftHook).mockResolvedValue({
-      status: "ok",
-      data: true,
-    });
-    vi.mocked(commands.getManifest).mockResolvedValue({
-      status: "ok",
-      data: { manifest: null, base: "rewritten" },
-    });
-    vi.mocked(commands.editorInventory).mockResolvedValue({
-      status: "ok",
-      data: {
-        declaredAgents: [],
-        declaredSkills: [],
-        availableSkills: [],
-        harnesses: [],
-        hookEvents: [],
-      },
-    });
-  });
-
-  it("tells the editor the project's settings were written", async () => {
-    await useSettingsStore.getState().registerProject(root);
-    // The offer is a toast action, and taking it is what writes.
-    const offer = vi.mocked(toast.success).mock.calls.at(-1)?.[1] as
-      | { action?: { onClick: () => void } }
-      | undefined;
-    offer?.action?.onClick();
-    await vi.waitUntil(() => useEditorStore.getState().outdated !== null);
-
-    expect(commands.installDriftHook).toHaveBeenCalled();
-    // Unsaved typing is kept and the place is marked, so the next save is
-    // refused rather than writing the hook declaration back out.
-    expect(useEditorStore.getState().outdated).toBe(root);
-    expect(useEditorStore.getState().dirty).toBe(true);
   });
 });

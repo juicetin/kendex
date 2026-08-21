@@ -4,6 +4,7 @@ import { UPDATE_ERROR_TITLE } from "@/lib/copy";
 import { keepIfSame } from "@/lib/same-read";
 import { manifestRewritten } from "./manifest-sync";
 import { useProblemsStore } from "./problems";
+import { refusesForUnsaved } from "./unsaved-first";
 import { applyMany, applyOne } from "./updates-apply";
 
 interface UpdatesState {
@@ -169,6 +170,9 @@ export const useUpdatesStore = create<UpdatesState>((set) => {
       // never fall through to null, which means "follow" (the opposite).
       const hold = row.current?.commit ?? null;
       if (!auto && hold === null) return;
+      // Before the flag goes up: a refusal after it would leave every
+      // control on the page waiting on work that never started.
+      if (refusesForUnsaved(row.scope)) return;
       set({ busy: true });
       try {
         const response = await commands.packageSetRev(

@@ -11,6 +11,7 @@ import { manifestRewritten } from "./manifest-sync";
 import { useProblemsStore } from "./problems";
 import { useScanStore } from "./scan";
 import { type ZoomSlice, zoomActions } from "./settings-zoom";
+import { refusesForUnsaved } from "./unsaved-first";
 
 interface SettingsState extends ZoomSlice {
   settings: AppSettings | null;
@@ -163,6 +164,10 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
         action: {
           label: "Add session drift report",
           onClick: () => {
+            // The declaration lands in that project's kendex.toml, so
+            // unsaved customization for it refuses this the way every
+            // other writer of that file is refused.
+            if (refusesForUnsaved({ scope: "project", root })) return;
             void commands
               .installDriftHook({ scope: "project", root })
               .then(async (result) => {

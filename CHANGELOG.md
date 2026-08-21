@@ -213,10 +213,12 @@ changes carry a **Breaking** call-out with their migration note inline.
   copy kendex last had. Its mark says the place could not be checked, which
   is what the count of unchecked places has always meant.
 - Every action that rewrites a project's settings now waits for unsaved
-  customization in that project — switching a package's version, holding or
-  following one, toggling, removing, applying — and says which project to go
-  back to. Only keeping and discarding edits did. The same goes for the
-  Customize Save button while an install or subscription change is running.
+  customization in that project, and says which project to go back to —
+  updating, switching a package's version, holding or following one,
+  toggling, removing, applying, settling a finding, taking a decision back,
+  subscribing, unsubscribing, installing from a marketplace, and adding the
+  session drift report. Only keeping and discarding edits did. The same goes
+  for the Customize Save button while any of them is running.
 - The Customize page holds its Save button down while an apply, adopt,
   toggle or remove you started elsewhere is still running, the way a
   package's own page already did. Saving into that window wrote a copy of

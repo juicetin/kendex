@@ -17,6 +17,7 @@ import {
 import { auditMutation } from "./audit-mutate";
 import { manifestRewritten } from "./manifest-sync";
 import { useProblemsStore } from "./problems";
+import { refusesForUnsaved } from "./unsaved-first";
 
 interface AuditState {
   views: AuditView[];
@@ -148,6 +149,9 @@ export const useAuditStore = create<AuditState>((set, get) => {
     // busy stays up — the Save bar with it — until the editor has been told
     // the copy it holds is stale.
     dismiss: async (scope, tokens, reason) => {
+      // Settling a finding writes this place's kendex.toml like every other
+      // action here, and went round the funnel that asks for them.
+      if (refusesForUnsaved(scope)) return;
       set({ busy: true });
       try {
         const response = await commands.dismissFindings(scope, tokens, reason);

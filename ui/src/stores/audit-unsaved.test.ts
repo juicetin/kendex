@@ -12,6 +12,7 @@ vi.mock("@/bindings", () => ({
     adoptItem: vi.fn(),
     toggleItem: vi.fn(),
     removeItem: vi.fn(),
+    dismissFindings: vi.fn(),
   },
 }));
 
@@ -84,5 +85,29 @@ describe("an audit mutation beside unsaved customization", () => {
     });
     await useAuditStore.getState().toggle(globalScope, "skill", "gh", false);
     expect(commands.toggleItem).toHaveBeenCalled();
+  });
+});
+
+// Settling a finding writes the same file the rest of them write, and it
+// went round the funnel rather than through it.
+describe("a dismissal beside unsaved customization", () => {
+  it("refuses while typing for that place waits behind another one", async () => {
+    useAuditStore.setState({ views: [], busy: false, error: null });
+    useEditorStore.setState({
+      scope: { scope: "project", root: "/work/vg" },
+      draft: null,
+      dirty: false,
+      held: {
+        global: {
+          scope: globalScope,
+          draft: { schema: 1, install: {} },
+          base: "read-earlier",
+        },
+      },
+    });
+    vi.clearAllMocks();
+    await useAuditStore.getState().dismiss(globalScope, ["t"], "intended");
+    expect(commands.dismissFindings).not.toHaveBeenCalled();
+    expect(useAuditStore.getState().busy).toBe(false);
   });
 });

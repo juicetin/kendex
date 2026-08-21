@@ -16,6 +16,7 @@ import {
   openLead,
   refreshDownstream,
 } from "./marketplaces-shared";
+import { refusesForUnsaved } from "./unsaved-first";
 
 /** The slice of the store these mutations read and write. */
 interface SubscriptionSlice {
@@ -36,6 +37,8 @@ export function subscriptionOps(set: Set, get: Get) {
       reference: string,
       name: string | null,
     ): Promise<boolean> => {
+      // Subscribing writes this place's kendex.toml.
+      if (refusesForUnsaved(scope)) return false;
       set({ busy: true });
       try {
         const response = await commands.marketplaceSubscribe(
@@ -77,6 +80,8 @@ export function subscriptionOps(set: Set, get: Get) {
       keep: boolean,
       discardEdits: boolean,
     ): Promise<boolean> => {
+      // Unsubscribing rewrites this place's kendex.toml.
+      if (refusesForUnsaved(scope)) return false;
       set({ busy: true });
       try {
         const response = await commands.marketplaceUnsubscribe(
@@ -111,6 +116,8 @@ export function subscriptionOps(set: Set, get: Get) {
       source: string,
       enabled: boolean,
     ): Promise<void> => {
+      // Turning a source off rewrites this place's kendex.toml.
+      if (refusesForUnsaved(scope)) return;
       set({ busy: true });
       try {
         const response = await commands.sourceToggle(scope, source, enabled);

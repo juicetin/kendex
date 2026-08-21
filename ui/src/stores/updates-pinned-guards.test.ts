@@ -165,3 +165,55 @@ describe("a pinned update beside an open Customize tab", () => {
     expect(commands.packageSetRev).toHaveBeenCalled();
   });
 });
+
+// An update writes the place's kendex.toml — moving a hold writes the
+// revision, applying writes whatever the plan settled — so it waits for
+// unsaved customization there like every other writer of that file.
+describe("an update beside unsaved customization", () => {
+  beforeEach(() => {
+    useUpdatesStore.setState({ busy: false });
+    useEditorStore.setState({
+      scope: { scope: "project", root: "/work/vg" },
+      draft: null,
+      dirty: false,
+      held: {},
+    });
+    vi.clearAllMocks();
+  });
+
+  it("refuses a pinned update while that place's typing waits elsewhere", async () => {
+    useEditorStore.setState({
+      held: {
+        global: {
+          scope: { scope: "global" },
+          draft: { schema: 1, install: {} },
+          base: "read-earlier",
+        },
+      },
+    });
+    await applyOne(
+      row({
+        pinned: true,
+        latest: { commit: "b".repeat(40), label: "v2", date: null },
+      }),
+    );
+    expect(commands.packageSetRev).not.toHaveBeenCalled();
+    expect(commands.applyPlan).not.toHaveBeenCalled();
+    expect(useUpdatesStore.getState().busy).toBe(false);
+  });
+
+  it("refuses switching a package off following the same way", async () => {
+    useEditorStore.setState({
+      held: {
+        global: {
+          scope: { scope: "global" },
+          draft: { schema: 1, install: {} },
+          base: "read-earlier",
+        },
+      },
+    });
+    await useUpdatesStore.getState().setAutoUpdate(row({}), false);
+    expect(commands.packageSetRev).not.toHaveBeenCalled();
+    expect(useUpdatesStore.getState().busy).toBe(false);
+  });
+});

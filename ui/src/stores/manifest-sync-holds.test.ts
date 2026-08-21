@@ -7,10 +7,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { commands } from "@/bindings";
 import { updateRow } from "@/components/updates-test-rows";
 import { useEditorStore } from "./editor";
-import { useMarketplacesStore } from "./marketplaces";
 import { useProblemsStore } from "./problems";
 import { useSettingsStore } from "./settings";
-import { keepAsOwn } from "./updates-edits";
+import { useUpdatesStore } from "./updates";
 
 vi.mock("@/bindings", () => ({
   commands: {
@@ -74,9 +73,9 @@ const refused = () => {
   );
 };
 
-// Each of these rewrites the scope's kendex.toml and then re-reads the
-// marketplace tables. The save pressed during that re-read is the window.
-describe("a subscription mutation tells the editor before it re-reads", () => {
+// Switching a place between following its source and holding at what is
+// installed writes that place's kendex.toml, like every other version move.
+describe("holding a version tells the editor before it re-reads", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     useSettingsStore.setState({ settings: { schema: 1, projects: [] } });
@@ -98,96 +97,12 @@ describe("a subscription mutation tells the editor before it re-reads", () => {
       status: "error",
       error: { kind: "failed", message: "should never be reached" },
     });
-    // The tables re-read after the manifest was rewritten: the save lands
-    // in that window.
-    vi.mocked(commands.marketplacesOverview).mockImplementation(async () => {
-      press();
-      return { status: "ok", data: [] };
-    });
-  });
-
-  it("refuses the save after subscribing", async () => {
-    vi.mocked(commands.marketplaceSubscribe).mockImplementation(async () => {
+    vi.mocked(commands.packageSetRev).mockImplementation(async () => {
       type();
       return {
         status: "ok",
-        data: {
-          name: "kit",
-          reference: "acme/kit",
-          rev: null,
-          notes: [],
-          lead: null,
-        },
+        data: view,
       };
-    });
-    await useMarketplacesStore.getState().subscribe(scope, "acme/kit", null);
-
-    refused();
-  });
-
-  it("refuses the save after unsubscribing", async () => {
-    vi.mocked(commands.marketplaceUnsubscribe).mockImplementation(async () => {
-      type();
-      return {
-        status: "ok",
-        data: null,
-      };
-    });
-    await useMarketplacesStore
-      .getState()
-      .unsubscribe(scope, "kit", false, false);
-
-    refused();
-  });
-
-  it("refuses the save after turning a subscription off", async () => {
-    vi.mocked(commands.sourceToggle).mockImplementation(async () => {
-      type();
-      return {
-        status: "ok",
-        data: [],
-      };
-    });
-    await useMarketplacesStore.getState().toggle(scope, "kit", false);
-
-    refused();
-  });
-});
-
-// Keeping an edited place as a fork writes the fork record into the same
-// kendex.toml the Customize tab holds a copy of, and then re-reads the
-// updates table. The record lives nowhere else, so a save landing in that
-// read would take it back.
-describe("keeping a fork tells the editor before it re-reads", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    useSettingsStore.setState({ settings: { schema: 1, projects: [] } });
-    // Clean at the start: the tab refuses the fork outright while unsaved.
-    useEditorStore.setState({
-      scope,
-      draft: { schema: 1, install: {} },
-      dirty: false,
-      outdated: null,
-      saved: {},
-    });
-    useProblemsStore.getState().closeError();
-    vi.mocked(commands.getManifest).mockResolvedValue({
-      status: "ok",
-      data: { manifest: null, base: "rewritten" },
-    });
-    vi.mocked(commands.editorInventory).mockResolvedValue({
-      status: "ok",
-      data: inventory,
-    });
-    vi.mocked(commands.updateManifest).mockResolvedValue({
-      status: "error",
-      error: { kind: "failed", message: "should never be reached" },
-    });
-    // Typing arrives while the fork is being written, and the save lands
-    // in the updates read that follows it.
-    vi.mocked(commands.packageFork).mockImplementation(async () => {
-      type();
-      return { status: "ok", data: view };
     });
     vi.mocked(commands.updatesOverview).mockImplementation(async () => {
       press();
@@ -195,10 +110,12 @@ describe("keeping a fork tells the editor before it re-reads", () => {
     });
   });
 
-  it("refuses the save after keeping an edited place as a fork", async () => {
-    await keepAsOwn(updateRow("gh", null, { forkableHarness: "claude" }));
+  it("refuses the save after turning following off", async () => {
+    await useUpdatesStore
+      .getState()
+      .setAutoUpdate(updateRow("gh", null, { updateAvailable: false }), false);
 
-    expect(commands.packageFork).toHaveBeenCalled();
+    expect(commands.packageSetRev).toHaveBeenCalled();
     refused();
   });
 });

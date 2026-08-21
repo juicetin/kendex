@@ -54,15 +54,24 @@ describe("an install redirected into a project", () => {
         hookEvents: [],
       },
     });
-    vi.mocked(commands.marketplaceInstall).mockResolvedValue({
-      status: "ok",
-      data: [],
+    // Typing arrives while the install is being written — the window this
+    // file is about. Typing that was already unsaved when it started would
+    // refuse the install outright, which the guard tests cover.
+    vi.mocked(commands.marketplaceInstall).mockImplementation(async () => {
+      useEditorStore.setState({
+        draft: { schema: 1, install: {}, "skill-instructions": { gh: "mine" } },
+        dirty: true,
+      });
+      return { status: "ok", data: [] };
     });
-    // The project's Customize tab, open with unsaved typing in it.
+    // The project's Customize tab, open and clean. Unsaved typing for the
+    // place an install writes now refuses the install itself, which the
+    // guard tests cover; this file is about which place gets marked.
     useEditorStore.setState({
       scope: project,
-      draft: { schema: 1, install: {}, "skill-instructions": { gh: "mine" } },
-      dirty: true,
+      draft: { schema: 1, install: {} },
+      dirty: false,
+      held: {},
       outdated: null,
       saved: {},
     });

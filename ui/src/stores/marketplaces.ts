@@ -20,6 +20,7 @@ import {
   subscription,
 } from "./marketplaces-shared";
 import { subscriptionOps } from "./marketplaces-subscriptions";
+import { refusesForUnsaved } from "./unsaved-first";
 
 export {
   bundleKey,
@@ -134,6 +135,10 @@ export const useMarketplacesStore = create<MarketplacesState>((set, get) => ({
   },
 
   install: async ({ scope, source, items, bundle = null, destination }) => {
+    // The install writes the destination's kendex.toml, so unsaved
+    // customization for that place refuses it — before the flag goes up,
+    // or a refusal would leave every control waiting on nothing.
+    if (refusesForUnsaved(destination ?? scope)) return false;
     set({ busy: true });
     let response: Awaited<ReturnType<typeof commands.marketplaceInstall>>;
     try {

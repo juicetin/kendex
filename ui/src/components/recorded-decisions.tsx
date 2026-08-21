@@ -25,6 +25,7 @@ import { scopeKey } from "@/lib/scope";
 import { useAuditStore } from "@/stores/audit";
 import { manifestRewritten } from "@/stores/manifest-sync";
 import { useProblemsStore } from "@/stores/problems";
+import { refusesForUnsaved } from "@/stores/unsaved-first";
 
 // A hook keeps its full id here — event, matcher, script — because seven
 // hooks in one settings file all shorten to the same word, and a list of
@@ -80,6 +81,8 @@ export function RecordedDecisions() {
   const revoke = async (row: RecordedDecision) => {
     setBusy(true);
     try {
+      // Taking a decision back rewrites that place's kendex.toml.
+      if (refusesForUnsaved(row.scope)) return;
       const response =
         row.record.kind === "accepted"
           ? await commands.revokeSafetyOverride(row.scope, row.key)
