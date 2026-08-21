@@ -225,3 +225,54 @@ fn a_discard_aimed_at_a_refused_package_plans_nothing() {
         "and the edit is still there, which is why saying it was discarded would be false"
     );
 }
+
+/// `plan_item` returns without a rendering when the target conflicts —
+/// installed from one place and now declared from another — and records a
+/// conflict instead. Counted as rendered, that would tell a discard its
+/// package was put back while the edited bytes stayed.
+#[test]
+#[allow(clippy::unwrap_used)]
+fn a_target_that_conflicts_is_not_counted_as_rendered() {
+    let f = fixture();
+    let granted = grant(&f);
+    let report = plan(&f, &[granted.as_str()]);
+    apply::execute(&f.env, &report.plan, None).unwrap();
+    assert!(installed(&f, "clean"), "the control: it is on disk");
+
+    // The lock says it came from this source; the manifest now names
+    // another. `plan_item` refuses to write over that and says so.
+    let lock_file = lock_path(&f.env, &f.scope);
+    let mut lock = load_lock(&lock_file).unwrap();
+    for entry in lock.entries.values_mut() {
+        if entry.name == "clean" {
+            entry.source_repo = "someone/else".to_owned();
+        }
+    }
+    let manifest = manifest_of(&f);
+    let planned = plan_scope(
+        &f.env,
+        &f.scope,
+        &manifest,
+        &lock,
+        &PlanOptions {
+            overwrite_edited_names: Some(vec![(ItemKind::Skill, "clean".to_owned())]),
+            only_names: Some(vec![(ItemKind::Skill, "clean".to_owned())]),
+            ..PlanOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert!(
+        planned
+            .drift
+            .iter()
+            .any(|row| row.name == "clean" && row.state == DriftState::Conflict),
+        "the control: the target conflicts"
+    );
+    assert!(
+        !planned
+            .rendered
+            .contains(&(ItemKind::Skill, "clean".to_owned())),
+        "a conflict left it unwritten, so nothing may call it rendered"
+    );
+}

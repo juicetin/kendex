@@ -212,6 +212,16 @@ pub fn apply_discard_edits(
             },
         )
         .map_err(|e| e.to_string())?;
+        // The same question the path below asks: a plan can carry the
+        // revision change and no rendering for the package — the new
+        // version can be held back by the safety gate — and applying that
+        // would move the record while the edited files stayed, under a
+        // line saying the content was replaced.
+        if !report.rendered.contains(&(kind, name.clone())) {
+            return Err(format!(
+                "{name} was edited, and nothing here rendered the version you chose to put in its place — Review reports what is holding it"
+            ));
+        }
         apply::execute(&env, &report.plan, None).map_err(|e| e.to_string())?;
         return Ok(view(&env, &scope));
     }

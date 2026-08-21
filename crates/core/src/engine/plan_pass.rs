@@ -73,8 +73,12 @@ pub(super) fn plan_items(
         if !discard && holds::hold_local_edit(env, item, scope, lock, &mut sink) {
             continue;
         }
-        plan_item(env, item, scope, lock, emitted_paths, &mut sink)?;
-        rendered.insert((item.kind, item.name.clone()));
+        // Only when the rendering is actually accounted for: `plan_item`
+        // returns without one when the target conflicts, and recording it
+        // anyway would tell a caller its package was put back.
+        if plan_item(env, item, scope, lock, emitted_paths, &mut sink)? {
+            rendered.insert((item.kind, item.name.clone()));
+        }
     }
     Ok(())
 }

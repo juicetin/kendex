@@ -236,6 +236,9 @@ changes carry a **Breaking** call-out with their migration note inline.
   its edits rather than to keep it as its own copy. Keeping it was never
   possible — it has no entry of its own to record a fork under — so the fix
   the report printed refused when run.
+- Choosing a newer version to replace a package's edits says so when that
+  version is itself held back, instead of moving the record and leaving the
+  edited files where they were.
 - Discarding a package's edits says so plainly when something is holding
   the package back — a safety finding, say — instead of reporting the
   content restored while your edited files are still there. The app's
