@@ -49,6 +49,25 @@ describe("anyCustomized", () => {
 // The fork fact is about this package in this place, not about the place.
 
 describe("the fork behind a standing", () => {
+  it("falls back to the engine's row where the manifest could not be read", () => {
+    // The two used to disagree here, and the surfaces reading one of them
+    // offered actions the engine, reading the other, refuses.
+    const standings = placeStandings(
+      source({
+        manifests: { global: emptyDraft(), "/work/hyprtrade": emptyDraft() },
+        rows: indexRows([
+          updateRow("gh", null, { updateAvailable: false }),
+          updateRow("gh", "/work/vg", { updateAvailable: false, forked: true }),
+          updateRow("gh", "/work/hyprtrade", { updateAvailable: false }),
+        ]),
+      }),
+      "skill",
+      "gh",
+      EVERYWHERE,
+    );
+    expect(forkedPlaces(standings)).toEqual([VG]);
+  });
+
   it("reads the fork of this package, never of whatever else that place forked", () => {
     const otherFork = {
       ...emptyDraft(),

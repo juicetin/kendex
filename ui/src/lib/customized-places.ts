@@ -80,7 +80,15 @@ export function placeStandings(
       : null;
     const handEdited =
       source.updatesRead === "ready" ? (row?.blockedByLocalEdit ?? null) : null;
-    const forked = manifest?.forks?.[kind]?.[name] != null;
+    // One fact, one source. The manifest answers when it was read — that is
+    // what keeps a fork's badge through a failed update check. Where it was
+    // not, the engine's row carries the same fact, read from the same file
+    // by the side that also knows whether this place has a row at all: two
+    // readers disagreeing is how a surface offers an action the engine has
+    // already refused.
+    const forked = manifest
+      ? manifest.forks?.[kind]?.[name] != null
+      : row?.forked === true;
     // Ranked by which fact has something to land on. A hand edit comes
     // first: it is the one still waiting on a decision, and the notice
     // offering it is on the overview. Then an overlay, on the Customize
