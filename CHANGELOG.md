@@ -261,6 +261,11 @@ changes carry a **Breaking** call-out with their migration note inline.
   unsaved customization in that project even when you have moved to another
   one — and says which project to go back to. Before, moving away let the
   action through, and the settings you were typing could no longer be saved.
+- The Library's From column says when it is showing the last answer kendex
+  had, the way a package's own page already did.
+- A package that came with something else and is no longer offered by it is
+  told plainly that nothing can put it back, rather than being given a
+  discard that would refuse.
 - A package's From row says when it is showing the last answer kendex had.
   If the read of where your packages came from fails, the row keeps what it
   last knew rather than emptying, and marks it as last known instead of

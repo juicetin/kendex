@@ -22,7 +22,7 @@ import {
 import { groupScopes, type ItemGroup } from "@/lib/derive";
 import { markNav } from "@/lib/place-marks";
 import { useNavStore } from "@/stores/nav";
-import { originFor } from "@/stores/provenance";
+import { originFor, useProvenanceStore } from "@/stores/provenance";
 
 /** The Library's table: one row per package, each carrying what is known
  *  about every place it is installed in. */
@@ -50,6 +50,10 @@ export function InstalledTable({
   // handing back their previous value when a re-read says the same thing
   // (lib/same-read.ts): a fresh array of identical rows would defeat every
   // memo below it.
+  // The join keeps its rows when a re-read fails, so the origins below are
+  // still worth drawing — and are the last ones kendex could read rather
+  // than the ones it just confirmed. The package page says so; so does this.
+  const originError = useProvenanceStore((s) => s.error);
   const rows = useMemo(
     () =>
       groups.map((group) => {
@@ -103,6 +107,7 @@ export function InstalledTable({
               key={group.key}
               group={group}
               origin={origin}
+              originError={originError}
               standings={standings}
               onOpen={openRow}
               onOpenPlace={openMark}

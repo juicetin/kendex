@@ -10,7 +10,12 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import { bundledWithLabel, vendorHelp } from "@/lib/copy";
+import {
+  bundledWithLabel,
+  ORIGIN_UNCONFIRMED,
+  originUnconfirmedTitle,
+  vendorHelp,
+} from "@/lib/copy";
 import {
   customizedPlacesLabel,
   forkedInLabel,
@@ -61,12 +66,17 @@ const STATUS_TONES: Record<GroupStatus, "good" | "warning" | "critical"> = {
 function Row({
   group,
   origin,
+  originError,
   standings,
   onOpen,
   onOpenPlace,
 }: {
   group: ItemGroup;
   origin: Origin | null;
+  /** Why the join could not be re-read, or null. The origin shown is then
+   *  the last one that loaded, and saying so is the difference between an
+   *  answer kept and an answer confirmed. */
+  originError: string | null;
   /** What is known about each place this package is installed in. */
   standings: PlaceStanding[];
   /** Opens the package where it was installed from. Handed the row's own
@@ -188,8 +198,18 @@ function Row({
         )}
         <span className="sr-only">{whereTitle}</span>
       </TableCell>
-      <TableCell title={originTitle(origin)} className="text-muted-foreground">
+      <TableCell
+        title={
+          originError
+            ? originUnconfirmedTitle(originError)
+            : originTitle(origin)
+        }
+        className="text-muted-foreground"
+      >
         {originLabel(origin) || "—"}
+        {originError && origin ? (
+          <span className="ml-1.5 text-xs">{ORIGIN_UNCONFIRMED}</span>
+        ) : null}
       </TableCell>
       <TableCell className="text-right text-xs text-muted-foreground">
         {group.modifiedAt != null

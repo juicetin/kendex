@@ -46,6 +46,7 @@ const render = (places: PlacesSource) => {
         <InstalledRow
           group={one}
           origin={null}
+          originError={null}
           standings={placeStandings(
             places,
             one.kind,
@@ -163,5 +164,61 @@ describe("the Library row's customized mark", () => {
     markClick(open)({ stopPropagation });
     expect(stopPropagation).toHaveBeenCalledOnce();
     expect(open).toHaveBeenCalledOnce();
+  });
+});
+
+// The join keeps its rows when a re-read fails, so the From column still
+// has something to draw. Drawn plainly it reads as confirmed, which is the
+// one thing a failed read cannot make it.
+describe("the From column when the join could not be re-read", () => {
+  const from = (html: string): string => {
+    const at = html.indexOf("kendex-store");
+    return at === -1 ? html : html.slice(at - 400, at + 200);
+  };
+
+  it("says the origin is the last one known", () => {
+    const html = renderToStaticMarkup(
+      <table>
+        <tbody>
+          <InstalledRow
+            group={group()}
+            origin={{
+              origin: "marketplace",
+              source: "kendex-store",
+              repo: "o/r",
+            }}
+            originError="provenance read failed"
+            standings={[]}
+            onOpen={() => {}}
+            onOpenPlace={() => {}}
+          />
+        </tbody>
+      </table>,
+    );
+    expect(from(html)).toContain("kendex-store");
+    expect(from(html)).toContain("last known");
+  });
+
+  it("says nothing extra while the read stands", () => {
+    const html = renderToStaticMarkup(
+      <table>
+        <tbody>
+          <InstalledRow
+            group={group()}
+            origin={{
+              origin: "marketplace",
+              source: "kendex-store",
+              repo: "o/r",
+            }}
+            originError={null}
+            standings={[]}
+            onOpen={() => {}}
+            onOpenPlace={() => {}}
+          />
+        </tbody>
+      </table>,
+    );
+    expect(html).toContain("kendex-store");
+    expect(html).not.toContain("last known");
   });
 });

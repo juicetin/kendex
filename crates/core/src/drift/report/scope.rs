@@ -241,6 +241,17 @@ impl ScopeCheck<'_> {
                         global: self.global,
                     }),
                 )
+            } else if package.derived && !package.can_discard {
+                // Carried by something else, and its source no longer holds
+                // it — so there is no declaration to fork under and nothing
+                // to render over the edit either. Both exits refuse, and
+                // naming one that refuses is worse than naming none.
+                (
+                    format!(
+                        "{prefix}{kind} '{name}' was edited on disk, and the source it came with no longer offers it — nothing here can put it back"
+                    ),
+                    None,
+                )
             } else if package.derived {
                 // Installed because something else needs it, so there is no
                 // declaration to write a fork under and `fork` refuses one.

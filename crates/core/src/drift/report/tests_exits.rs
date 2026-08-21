@@ -169,3 +169,36 @@ fn an_edited_derived_package_is_offered_the_discard_it_can_take() {
         "the line has to say why forking is not offered: {text}"
     );
 }
+
+/// Carried by something else and no longer offered by it: there is no
+/// declaration to fork under, and nothing to render over the edit either.
+/// Both exits refuse, so the line names neither.
+#[test]
+fn an_edited_derived_package_its_source_dropped_is_offered_no_exit() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = env_in(tmp.path());
+    let scope = project_scope(tmp.path());
+    write_manifest(&env, &scope, &manifest_with_remote());
+    snapshot_with(
+        &env,
+        &scope,
+        vec![PackageSnapshot {
+            edited: true,
+            derived: true,
+            can_discard: false,
+            ..package("dropped-one")
+        }],
+    );
+
+    let text = render_plain(&check(&env, std::slice::from_ref(&scope)));
+    assert!(text.contains("'dropped-one'"), "{text}");
+    assert!(
+        !text.contains("kendex discard-edits skill dropped-one"),
+        "it names an exit that refuses: {text}"
+    );
+    assert!(!text.contains("kendex fork"), "{text}");
+    assert!(
+        text.contains("no longer offers it"),
+        "the line has to say why nothing is offered: {text}"
+    );
+}
