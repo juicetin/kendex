@@ -89,3 +89,74 @@ describe("a bulk update where one place has unsaved customization", () => {
     expect(useUpdatesStore.getState().busy).toBe(false);
   });
 });
+
+// The preflight speaks for the set as it stood when the button was
+// pressed. Every await after it is a window someone can type in, and the
+// place still to be written is the one their typing is about.
+describe("typing that arrives while a bulk update is running", () => {
+  const acme = { scope: "project", root: "/home/x/acme" } as const;
+  const shop = { scope: "project", root: "/home/x/shop" } as const;
+
+  beforeEach(() => {
+    useUpdatesStore.setState({ rows: [], busy: false, loaded: false });
+    useEditorStore.setState({
+      scope: acme,
+      draft: null,
+      dirty: false,
+      held: {},
+    });
+    vi.clearAllMocks();
+  });
+
+  it("stops before writing the place it is about", async () => {
+    const view = {
+      scope: acme,
+      drift: [],
+      plan: [],
+      notes: [],
+      warnings: [],
+      safety: [],
+      heldBack: [],
+      queued: [],
+    };
+    // The first place is written; someone types about the second while it
+    // is in flight.
+    vi.mocked(commands.packageSetRev).mockImplementation(async () => {
+      useEditorStore.setState({
+        held: {
+          [shop.root]: {
+            scope: shop,
+            draft: { schema: 1, install: {} },
+            base: "read-earlier",
+          },
+        },
+      });
+      return { status: "ok", data: view };
+    });
+    vi.mocked(commands.applyPlan).mockResolvedValue({
+      status: "ok",
+      data: view,
+    });
+    vi.mocked(commands.updatesOverview).mockResolvedValue({
+      status: "ok",
+      data: { rows: [], warnings: [] },
+    });
+    vi.mocked(commands.scanMachine).mockResolvedValue({
+      status: "ok",
+      data: { harnesses: [], items: [], missingProjects: [], warnings: [] },
+    });
+    vi.mocked(commands.auditAll).mockResolvedValue({ status: "ok", data: [] });
+
+    await useUpdatesStore
+      .getState()
+      .updateRows([
+        row({ name: "gh", scope: acme, pinned: true }),
+        row({ name: "lint", scope: shop }),
+      ]);
+
+    // The first went, because nothing was unsaved when it was asked.
+    expect(commands.packageSetRev).toHaveBeenCalledTimes(1);
+    // The second did not: its place is the one the typing is about.
+    expect(commands.applyPlan).not.toHaveBeenCalled();
+  });
+});
