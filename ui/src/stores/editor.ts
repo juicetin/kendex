@@ -97,7 +97,12 @@ export const useEditorStore = create<EditorState>((set, get) => {
     error: null,
 
     setScope: async (scope) => {
-      set({ ...pointAt(get(), scope), error: null });
+      // The draft comes with the move; the choices do not. Held across the
+      // switch they belong to where the editor was, so the form would offer
+      // one project's skills, harnesses and hooks while its draft and its
+      // save are about another — for as long as the read takes, and for
+      // good if that read fails. Empty until this place answers for itself.
+      set({ ...pointAt(get(), scope), inventory: null, error: null });
       await loadManifest();
     },
 

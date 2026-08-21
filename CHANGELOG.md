@@ -226,6 +226,10 @@ changes carry a **Breaking** call-out with their migration note inline.
 - A package-wide toggle or removal stops when one project refuses it,
   rather than carrying on and leaving the package changed in some projects
   and not others.
+- Moving between projects empties the Customize form until the one you
+  moved to has answered for itself. It briefly offered the last project's
+  skills and hooks, and kept offering them if the new project would not
+  read.
 - Coming back to a project whose skill list will not load offers nothing
   rather than the last project's, so a save here cannot write choices made
   about somewhere else.

@@ -200,3 +200,45 @@ describe("returning to a parked draft when its inventory will not read", () => {
     expect(state.error).toContain("would not read");
   });
 });
+
+// The move itself, before any read answers. The draft travels with the
+// person; the choices belong to the place, so between leaving one and
+// hearing from the other the form has nothing of its own to offer — and a
+// manifest read that fails leaves it that way rather than stocked from
+// where you were.
+describe("the moment of moving between places", () => {
+  const stocked = {
+    declaredAgents: [],
+    declaredSkills: ["from-the-other-place"],
+    availableSkills: ["from-the-other-place"],
+    harnesses: [],
+    hookEvents: [],
+  };
+
+  it("offers nothing until this place answers, and after it fails to", async () => {
+    vi.mocked(commands.getManifest).mockResolvedValue({
+      status: "ok",
+      data: { manifest: null, base: "read" },
+    });
+    vi.mocked(commands.editorInventory).mockResolvedValue({
+      status: "ok",
+      data: stocked,
+    });
+    await useEditorStore.getState().setScope({ scope: "global" });
+    expect(useEditorStore.getState().inventory).toEqual(stocked);
+
+    // The next place's manifest will not read at all.
+    vi.mocked(commands.getManifest).mockResolvedValue({
+      status: "error",
+      error: "would not parse",
+    });
+    const moving = useEditorStore
+      .getState()
+      .setScope({ scope: "project", root: "/work/vg" });
+    // Before anything lands: the form is already this place's, and empty.
+    expect(useEditorStore.getState().inventory).toBeNull();
+    await moving;
+    // And a failed read leaves it empty rather than stocked from before.
+    expect(useEditorStore.getState().inventory).toBeNull();
+  });
+});
