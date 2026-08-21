@@ -226,6 +226,8 @@ changes carry a **Breaking** call-out with their migration note inline.
 - A package-wide toggle or removal stops when one project refuses it,
   rather than carrying on and leaving the package changed in some projects
   and not others.
+- A project whose settings fail to re-read on their own says so straight
+  away, rather than going on showing what kendex last knew as current.
 - A project that could not be read stops reading as unchecked as soon as it
   can be read again, instead of waiting for a whole pass to succeed.
 - Turning a package on or off across every project it is in now waits for

@@ -3,7 +3,7 @@ import type { EditorInventory, Scope } from "@/bindings";
 import type { Draft } from "@/lib/editor-draft";
 import { sameScope, scopeKey } from "@/lib/scope";
 import { type Held, pointAt } from "./editor-held";
-import { fold, loadManifest, nextRead } from "./editor-read";
+import { fold, foldUnread, loadManifest, nextRead } from "./editor-read";
 import { saveManifest } from "./editor-save";
 import { readManifests } from "./editor-scopes";
 
@@ -139,11 +139,23 @@ export const useEditorStore = create<EditorState>((set, get) => {
           // did, rather than being dropped from `saved` and taking a mark
           // that was right with it.
           saved: fold(state.saved, read, token),
+          // And how each place's read went folds the same way, under the
+          // same token: this pass answers for the places it reached, and
+          // for none of the others. Replacing the whole list instead let a
+          // pass that failed put back a mark a newer read of one place had
+          // already cleared.
+          unreadPlaces: foldUnread(
+            state.unreadPlaces,
+            [
+              ...read.map(([key]) => [key, false] as [string, boolean]),
+              ...unread.map((key) => [key, true] as [string, boolean]),
+            ],
+            token,
+          ),
           ...(newest()
             ? {
                 manifestsLoaded: true,
                 manifestError: failed.length > 0 ? failed.join("\n") : null,
-                unreadPlaces: unread,
               }
             : {}),
         }));
@@ -168,7 +180,11 @@ export const useEditorStore = create<EditorState>((set, get) => {
           set((state) => ({
             manifestsLoaded: false,
             manifestError: String(thrown),
-            unreadPlaces: Object.keys(state.saved),
+            unreadPlaces: foldUnread(
+              state.unreadPlaces,
+              Object.keys(state.saved).map((key) => [key, true]),
+              token,
+            ),
           }));
       } finally {
         done();

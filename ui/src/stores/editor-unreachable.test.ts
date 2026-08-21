@@ -101,3 +101,28 @@ describe("a place read on its own after a pass failed", () => {
     expect(useEditorStore.getState().unreadPlaces).not.toContain("global");
   });
 });
+
+// The mark travels with the reads, so it is ordered per place like the
+// manifests are: a pass answers for the places it reached and for no
+// others, and a read that lands about one place is not undone by an older
+// pass that failed.
+describe("how each place's read went", () => {
+  it("marks a place whose own read failed, so its kept manifest is masked", async () => {
+    vi.mocked(commands.getManifest).mockResolvedValue({
+      status: "ok",
+      data: { manifest: null, base: null },
+    });
+    await useEditorStore.getState().loadAll();
+    expect(useEditorStore.getState().unreadPlaces).toEqual([]);
+
+    vi.mocked(commands.getManifest).mockResolvedValue({
+      status: "error",
+      error: "would not parse",
+    });
+    await useEditorStore.getState().load({ scope: "global" });
+
+    expect(useEditorStore.getState().unreadPlaces).toContain("global");
+    // Kept, so no mark vanishes mid-read — and masked, so it cannot speak.
+    expect(useEditorStore.getState().saved.global).toBeDefined();
+  });
+});

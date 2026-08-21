@@ -3,7 +3,7 @@ import { type Draft, emptyDraft, toDraft } from "@/lib/editor-draft";
 import { sameScope, scopeKey } from "@/lib/scope";
 import { useEditorStore } from "./editor";
 import { dropHeld } from "./editor-held";
-import { manifestFold } from "./editor-order";
+import { manifestFold, unreadFold } from "./editor-order";
 
 // Every manifest read takes a ticket. Three readers overlap — one place
 // at a time, every place at once, and the re-read a save ends with — and
@@ -18,16 +18,8 @@ export const nextRead = (): number => {
   return reads;
 };
 export const fold = manifestFold();
+export const foldUnread = unreadFold();
 
-/** A place whose own read just landed is no longer unread, whatever the
- *  pass that marked it found. The mark is there so a manifest kept from
- *  before a failure is not taken for current — and this manifest is
- *  current, so leaving the mark on would keep masking a place kendex can
- *  see, until some later whole pass happened to succeed. */
-const read_here = (unread: string[], scope: Scope): string[] => {
-  const key = scopeKey(scope);
-  return unread.includes(key) ? unread.filter((one) => one !== key) : unread;
-};
 // Which read the editor on screen is waiting for. Only a read that can
 // answer for it takes one: the manifest pass and the re-read a save ends
 // with draw no editor, and counting them here would leave the surface
@@ -93,6 +85,15 @@ export const loadManifest = async (
         error: String(thrown),
         ...(takes() ? { draft: null, base: null, dirty: false } : {}),
       });
+    // However it went for the screen, this place's manifest was not read:
+    // whatever is still in `saved` for it answers for an earlier moment.
+    useEditorStore.setState((current) => ({
+      unreadPlaces: foldUnread(
+        current.unreadPlaces,
+        [[scopeKey(scope), true]],
+        token,
+      ),
+    }));
     return;
   }
   if (onScreen()) useEditorStore.setState({ loading: false });
@@ -102,6 +103,13 @@ export const loadManifest = async (
         error: manifest.error,
         ...(takes() ? { draft: null, base: null, dirty: false } : {}),
       });
+    useEditorStore.setState((current) => ({
+      unreadPlaces: foldUnread(
+        current.unreadPlaces,
+        [[scopeKey(scope), true]],
+        token,
+      ),
+    }));
     return;
   }
   // With no manifest here yet the editor still opens, on an empty one:
@@ -123,7 +131,11 @@ export const loadManifest = async (
       // the draft, a form for one project offers another project's skills
       // and hides its own, which saves the wrong thing rather than
       // refusing it.
-      unreadPlaces: read_here(current.unreadPlaces, scope),
+      unreadPlaces: foldUnread(
+        current.unreadPlaces,
+        [[scopeKey(scope), false]],
+        token,
+      ),
       ...(onScreen() && inventory.status === "ok"
         ? { inventory: inventory.data }
         : {}),
@@ -138,7 +150,11 @@ export const loadManifest = async (
     base: manifest.data.base,
     inventory: inventory.status === "ok" ? inventory.data : current.inventory,
     saved: fold(current.saved, read, token),
-    unreadPlaces: read_here(current.unreadPlaces, scope),
+    unreadPlaces: foldUnread(
+      current.unreadPlaces,
+      [[scopeKey(scope), false]],
+      token,
+    ),
     dirty: false,
     // What is in hand is this read's, so whatever rewrote the file before
     // it is no longer under it.

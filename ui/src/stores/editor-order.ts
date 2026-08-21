@@ -25,3 +25,38 @@ export function manifestFold() {
     return keepIfSame(previous, next);
   };
 }
+
+/** Fold how each place's read went, under the same per-place ordering the
+ *  manifests get.
+ *
+ *  The mark says a manifest in hand answers for a moment nobody re-checked,
+ *  so it travels with the reads themselves: set when a place's read fails,
+ *  cleared when one lands. Kept as a whole-list replacement it went wrong
+ *  twice over — a pass that failed put back marks a newer targeted read had
+ *  already cleared, and a single place's failure never set one at all,
+ *  leaving its stale manifest reading as current. Per place, newest wins,
+ *  exactly as `saved` does. */
+export function unreadFold() {
+  const behind = new Map<string, number>();
+  return (
+    previous: string[],
+    read: [string, boolean][],
+    token: number,
+  ): string[] => {
+    const next = new Set(previous);
+    for (const [key, unread] of read) {
+      if ((behind.get(key) ?? 0) > token) continue;
+      behind.set(key, token);
+      if (unread) next.add(key);
+      else next.delete(key);
+    }
+    const grown = [...next].sort();
+    // The same identity the manifests keep: a list that says what it said
+    // before is the list already on screen, and the marks derived from it
+    // do not re-render.
+    return grown.length === previous.length &&
+      grown.every((key, at) => key === previous[at])
+      ? previous
+      : grown;
+  };
+}
