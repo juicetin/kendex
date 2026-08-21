@@ -123,7 +123,7 @@ REVIEW_GATE_CONTEXT = "Review gate"
 # findings). SECURITY: matched by NAME and anyone can publish under any
 # name — list only trusted bots' checks. github-actions-published check-runs
 # are rejected automatically. Empty = source disabled.
-REVIEW_GATE_TRUSTED_STATUS_CONTEXTS = ""
+REVIEW_GATE_TRUSTED_STATUS_CONTEXTS = "CodeRabbit;copilot-pull-request-reviewer"
 
 # A trusted "pass" whose output contains one of these substrings never ran
 # (e.g. "Review rate limited") and is NOT-EVIDENCE. Empty disables.
@@ -132,7 +132,7 @@ REVIEW_GATE_CHECKRUN_SKIP_PATTERNS = "rate limited;skipped;queued"
 # 'login:binding-pattern' pairs for bots whose clean pass is only an issue
 # comment binding a commit sha (e.g. "bot[bot]:Reviewed commit:").
 # SECURITY: trust keys on the author LOGIN. Empty disables.
-REVIEW_GATE_COMMENT_REVIEWERS = ""
+REVIEW_GATE_COMMENT_REVIEWERS = "chatgpt-codex-connector[bot]:Reviewed commit:;bmethod:REVIEWED-CLEAN"
 
 # Shortest sha prefix (4–40) a comment-form reviewer may bind evidence to.
 REVIEW_GATE_SHA_PREFIX_FLOOR = "7"
@@ -154,7 +154,7 @@ REVIEW_GATE_STATUS_PUBLISHER_REJECT = ""
 # Logins whose review objects at the exact head count as evidence. Empty =
 # any non-author — on repos with outside collaborators, set the list so a
 # drive-by review cannot satisfy the gate.
-REVIEW_GATE_REVIEW_OBJECT_TRUSTED_LOGINS = ""
+REVIEW_GATE_REVIEW_OBJECT_TRUSTED_LOGINS = "coderabbitai[bot];copilot-pull-request-reviewer[bot];qodo-code-review[bot];chatgpt-codex-connector[bot];bmethod"
 
 # "any", or "approved" (an APPROVED at head not withdrawn by a later
 # CHANGES_REQUESTED from the same login).
