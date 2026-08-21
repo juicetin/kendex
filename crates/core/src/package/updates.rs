@@ -250,15 +250,21 @@ fn same_artifact(
 /// know it is a fork, and whether its files have been edited since. A fork
 /// is the one local source with a row, so a hardcoded "not edited" here
 /// would be the only place the measured edit is thrown away.
-/// Where a fork's own copy lives. Discarding an edit re-renders from it,
-/// so whether it is still there is the whole question of whether the exit
-/// exists — a local source someone cleared by hand has nothing to put back.
-fn local_copy(env: &Env, scope: &Scope, kind: ItemKind, name: &str) -> std::path::PathBuf {
+/// Whether a fork's own copy can still be re-rendered from. Discarding an
+/// edit reads the local source the way installing does, so the question is
+/// not whether a path is there but whether the artifact the catalog reads
+/// is: a skill directory emptied of its `SKILL.md`, an agent file replaced
+/// by a directory, and a symlink where content belongs all read as present
+/// and all refuse when the discard runs.
+fn local_copy_resolves(env: &Env, scope: &Scope, kind: ItemKind, name: &str) -> bool {
     let root = crate::source::local_source_root(env, scope);
-    match kind {
-        ItemKind::Skill => root.join("skills").join(name),
+    let artifact = match kind {
+        ItemKind::Skill => root.join("skills").join(name).join("SKILL.md"),
         _ => root.join("agents").join(format!("{name}.md")),
-    }
+    };
+    // symlink_metadata, so a link is judged as a link rather than as
+    // whatever it points at — the source store holds content, not links.
+    std::fs::symlink_metadata(&artifact).is_ok_and(|meta| meta.is_file())
 }
 
 fn fork_row(
@@ -289,7 +295,7 @@ fn fork_row(
         // edit to it can be put back from there, as long as it is still
         // there to put back. Measured like every other row's, never asserted.
         forkable_harness: None,
-        can_discard: local_copy(env, scope, kind, name).exists(),
+        can_discard: local_copy_resolves(env, scope, kind, name),
         can_take_latest: false,
         derived: false,
         forked: true,

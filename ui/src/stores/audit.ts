@@ -14,6 +14,7 @@ import {
   TAKEN_BACK_TOAST,
   UNDO_LABEL,
 } from "@/lib/copy-decisions";
+import { manifestRewritten } from "./manifest-sync";
 import { type ErrorAction, useProblemsStore } from "./problems";
 import { useScanStore } from "./scan";
 
@@ -77,6 +78,9 @@ export const useAuditStore = create<AuditState>((set, get) => {
   // modal, not a toast: these are all user-initiated, so the user is looking
   // right at the button that just broke.
   const run = async (
+    // Every action through here rewrites this scope's kendex.toml, and the
+    // editor holds a whole copy of it that a save would write back.
+    scope: Scope,
     action: () => Promise<
       { status: "ok"; data: AuditView } | { status: "error"; error: string }
     >,
@@ -92,12 +96,13 @@ export const useAuditStore = create<AuditState>((set, get) => {
     if (response.status === "ok") {
       set({ views: replaceView(get().views, response.data), error: null });
       if (opts.successMessage) toast.success(opts.successMessage);
+      await manifestRewritten(scope);
       await useScanStore.getState().refresh();
     } else {
       set({ error: response.error });
       const retry: ErrorAction = {
         label: "Retry",
-        onClick: () => void run(action, opts),
+        onClick: () => void run(scope, action, opts),
       };
       useProblemsStore.getState().showError({
         title: opts.title,
@@ -149,7 +154,7 @@ export const useAuditStore = create<AuditState>((set, get) => {
     },
 
     applyPlan: (scope, removeOrphans, allowUnsafe = []) =>
-      run(() => commands.applyPlan(scope, removeOrphans, allowUnsafe), {
+      run(scope, () => commands.applyPlan(scope, removeOrphans, allowUnsafe), {
         title: "Couldn't apply these changes",
         steps: [
           "Nothing was changed — try again",
@@ -160,18 +165,18 @@ export const useAuditStore = create<AuditState>((set, get) => {
     // each is its own backend call, but they're one thing to the user, so
     // only the first speaks up with a toast.
     adopt: (scope, kind, name, harness, opts) =>
-      run(() => commands.adoptItem(scope, kind, name, harness), {
+      run(scope, () => commands.adoptItem(scope, kind, name, harness), {
         title: `Couldn't start managing ${name}`,
         successMessage: opts?.silent ? undefined : adoptedToastLabel(name),
         steps: ["Try again"],
       }),
     toggle: (scope, kind, name, enabled) =>
-      run(() => commands.toggleItem(scope, kind, name, enabled), {
+      run(scope, () => commands.toggleItem(scope, kind, name, enabled), {
         title: `Couldn't ${enabled ? "turn on" : "turn off"} ${name}`,
         steps: ["Try again"],
       }),
     removeItem: (scope, kind, name) =>
-      run(() => commands.removeItem(scope, kind, name), {
+      run(scope, () => commands.removeItem(scope, kind, name), {
         title: `Couldn't remove ${name}`,
         steps: ["Try again"],
       }),
@@ -207,6 +212,7 @@ export const useAuditStore = create<AuditState>((set, get) => {
           label: UNDO_LABEL,
           onClick: () =>
             void run(
+              scope,
               async () => {
                 let latest: Awaited<
                   ReturnType<typeof commands.revokeDismissal>

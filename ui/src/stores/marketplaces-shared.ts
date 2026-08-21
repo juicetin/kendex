@@ -8,6 +8,7 @@ import type {
   Scope,
 } from "@/bindings";
 import { useAuditStore } from "./audit";
+import { manifestRewritten } from "./manifest-sync";
 import { resetPreinstallSafety } from "./preinstall-safety";
 import { useScanStore } from "./scan";
 
@@ -91,8 +92,11 @@ export const catalogLabel = (catalog: Catalog | undefined): string | null =>
       ? catalog.source
       : catalog.repo;
 
-/** What lands after any mutation: the tables everywhere else stay current. */
-export async function refreshDownstream() {
+/** What lands after any mutation: the tables everywhere else stay current,
+ *  and the editor learns that this scope's kendex.toml was rewritten under
+ *  the whole copy of it a save would write back. */
+export async function refreshDownstream(scope: Scope) {
+  await manifestRewritten(scope);
   await useScanStore.getState().refresh();
   await useAuditStore.getState().refresh();
 }

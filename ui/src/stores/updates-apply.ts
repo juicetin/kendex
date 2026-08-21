@@ -10,6 +10,7 @@ import { placeName, skippedPlaces, updatablePlaces } from "@/lib/update-groups";
 import { visibleUpdates } from "@/lib/update-rows";
 import { bulkUpdateToast } from "@/lib/update-toasts";
 import { useAuditStore } from "./audit";
+import { manifestRewritten } from "./manifest-sync";
 import { useProblemsStore } from "./problems";
 import { useScanStore } from "./scan";
 import { useUpdatesStore } from "./updates";
@@ -40,6 +41,9 @@ const apply = async (row: UpdateRow): Promise<boolean> => {
     showError(UPDATE_ERROR_TITLE, response.error);
     return false;
   }
+  // Both branches rewrite this scope's kendex.toml — moving a hold writes
+  // the revision, applying writes whatever the plan settled.
+  await manifestRewritten(row.scope);
   return true;
 };
 
@@ -99,7 +103,9 @@ export const applyMany = async (wanted: UpdateRow[]): Promise<void> => {
       if (response.status === "error") {
         showError(UPDATE_ERROR_TITLE, response.error);
         ok = false;
+        continue;
       }
+      await manifestRewritten(row.scope);
     }
     await reload();
     if (ok)

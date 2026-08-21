@@ -16,6 +16,7 @@ import {
 import { versionRowLabel } from "@/lib/versions";
 import { useAuditStore } from "@/stores/audit";
 import { useEditorStore } from "@/stores/editor";
+import { manifestRewritten } from "@/stores/manifest-sync";
 import type { PackageView as OpenedAt, PackageRef } from "@/stores/nav";
 import { useProblemsStore } from "@/stores/problems";
 import { useScanStore } from "@/stores/scan";
@@ -149,6 +150,9 @@ export function packageVersionActions(
       .showError({ title: VERSION_ERROR_TITLE, message });
   const afterChange = () => {
     reload();
+    // Each of these rewrites this place's kendex.toml, and the editor holds
+    // a whole copy of it that a save would write back.
+    void manifestRewritten(ref.scope);
     void useScanStore.getState().refresh();
     void useAuditStore.getState().refresh({ force: true });
   };

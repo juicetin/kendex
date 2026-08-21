@@ -213,13 +213,37 @@ fn a_fork_whose_own_copy_is_gone_offers_no_discard() {
     };
     assert!(row(&w).can_discard, "the copy is there to put back");
 
-    // Clear the local source by hand. Discarding re-renders from it, so
-    // with it gone there is nothing to restore and the button behind
-    // `can_discard` would apply into a failure.
+    // Break the local source in the three ways a path check reads as fine.
+    // Discarding re-renders from it, so each of these would offer the
+    // button and then refuse.
     let Scope::Project { root } = &w.scope else {
         unreachable!("the test world is a project")
     };
-    fs::remove_dir_all(root.join(".kendex-local/skills/gh")).unwrap();
+    let skill = root.join(".kendex-local/skills/gh");
+
+    // The directory outlives the file the catalog reads.
+    fs::remove_file(skill.join("SKILL.md")).unwrap();
+    assert!(skill.is_dir(), "the path is still there");
+    assert!(!row(&w).can_discard, "{:?}", row(&w));
+
+    // A symlink where content belongs: the source store holds neither.
+    std::os::unix::fs::symlink(
+        w.upstream.join("skills/gh/SKILL.md"),
+        skill.join("SKILL.md"),
+    )
+    .unwrap();
+    assert!(
+        skill.join("SKILL.md").exists(),
+        "it resolves, and is a link"
+    );
+    assert!(!row(&w).can_discard, "{:?}", row(&w));
+
+    // And the artifact replaced by a directory of the same name.
+    fs::remove_file(skill.join("SKILL.md")).unwrap();
+    fs::create_dir(skill.join("SKILL.md")).unwrap();
+    assert!(!row(&w).can_discard, "{:?}", row(&w));
+
+    fs::remove_dir_all(&skill).unwrap();
     let gone = row(&w);
     assert!(!gone.can_discard, "nothing left to put back: {gone:?}");
     assert!(gone.forked, "still this place's own copy: {gone:?}");

@@ -11,6 +11,7 @@ import { packageDisplayName } from "@/lib/labels";
 import { sameScope } from "@/lib/scope";
 import { useAuditStore } from "./audit";
 import { useEditorStore } from "./editor";
+import { manifestRewritten } from "./manifest-sync";
 import { useProblemsStore } from "./problems";
 import { useScanStore } from "./scan";
 import { useUpdatesStore } from "./updates";
@@ -42,26 +43,7 @@ const run = async (scope: Scope, work: () => Promise<string | null>) => {
       return;
     }
     await useUpdatesStore.getState().load();
-    // A fork rewrites the manifest exactly as a save does, and the fork
-    // fact every mark reads comes from that file — without this the badge
-    // it just earned stays off until the window is refocused.
-    await useEditorStore.getState().loadAll();
-    // The pass fills `saved`; the copy in hand for the place being edited
-    // is a different read, and every editor surface joins through it. Left
-    // stale it hides the new fork, and a later Save would write the
-    // pre-fork manifest back over it.
-    //
-    // The refusal above is a check at entry, and this runs seconds later
-    // with nothing stopping someone typing in between — so the dirty flag
-    // is read again here, not assumed. Typing that arrived since is kept
-    // and the place is marked outdated instead: what is in hand was read
-    // before this rewrite, and saving it would put the old file back over
-    // the record just made. The save refuses and says so rather than this
-    // choosing silently between the two losses.
-    const editor = useEditorStore.getState();
-    if (!sameScope(editor.scope, scope)) return;
-    if (editor.dirty) editor.outdate(scope);
-    else await editor.load(scope);
+    await manifestRewritten(scope);
     await useScanStore.getState().refresh();
     await useAuditStore.getState().refresh({ force: true });
   } finally {

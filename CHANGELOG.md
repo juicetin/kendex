@@ -179,8 +179,9 @@ changes carry a **Breaking** call-out with their migration note inline.
   badge both reported a state nothing could clear. The package now says
   "discard the edits and go back to the copy you kept", `kendex check`
   prints `kendex refresh --discard-edits` as its fix, and that command does
-  exactly what the line says. The offer disappears if the copy you kept is
-  no longer there to restore. Keeping the same package as your own twice is
+  exactly what the line says. The offer disappears when the copy you kept can
+  no longer be re-rendered from — removed, replaced by a directory, or left
+  as a link where content belongs. Keeping the same package as your own twice is
   refused rather than quietly replacing the record of where it came from,
   which is kept nowhere else.
 - Review no longer files a package it cannot act on under "Ready to apply".
@@ -191,9 +192,12 @@ changes carry a **Breaking** call-out with their migration note inline.
   could not write, are listed without a link, since there is no page to
   open for them.
 - Saving the Customize tab is refused, with the reason and a way to reload,
-  when keeping a fork or discarding edits rewrote that project's settings
-  while you were typing. Before, the save put the older copy back and the
-  new fork record was lost silently.
+  when something else rewrote that project's settings while you were typing.
+  Before, the save put the older copy back and whatever had just been
+  recorded was lost silently. Every action that writes those settings now
+  tells the editor: keeping a fork, discarding edits, moving or following a
+  version, adopting, enabling and disabling, removing, applying, and
+  subscribing to or installing from a marketplace.
 - Keeping a fork or discarding edits is refused while you have unsaved
   changes on the Customize tab for that same project: saving them afterwards
   would have written the old settings back over the new fork, losing it

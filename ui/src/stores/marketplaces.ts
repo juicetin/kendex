@@ -11,6 +11,7 @@ import {
   type InstallItem,
   type Scope,
 } from "@/bindings";
+import { manifestRewritten } from "./manifest-sync";
 import { catalogReads } from "./marketplaces-reads";
 import {
   cachedRepoCatalogs,
@@ -138,6 +139,7 @@ export const useMarketplacesStore = create<MarketplacesState>((set, get) => ({
       ),
     }));
     await get().load();
+    await manifestRewritten(scope);
     if (response.data.lead) {
       await openLead(scope, response.data.name, response.data.lead);
     }
@@ -171,7 +173,7 @@ export const useMarketplacesStore = create<MarketplacesState>((set, get) => ({
     // A page carried on as this subscription must stop pointing at it.
     set({ summaries: {} });
     await get().load();
-    await refreshDownstream();
+    await refreshDownstream(scope);
     return true;
   },
 
@@ -184,7 +186,7 @@ export const useMarketplacesStore = create<MarketplacesState>((set, get) => ({
     dropCatalogCaches(set);
     dropSummariesHeldBy(set, get().rows, scope, source);
     await get().load();
-    await refreshDownstream();
+    await refreshDownstream(scope);
   },
 
   checkForUpdates: async () => {
@@ -242,7 +244,7 @@ export const useMarketplacesStore = create<MarketplacesState>((set, get) => ({
         ? items[0].name
         : `${items.length} packages`;
     toast.success(`Installed ${what}`);
-    await refreshDownstream();
+    await refreshDownstream(scope);
     return true;
   },
 }));
