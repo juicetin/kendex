@@ -1622,8 +1622,14 @@ export type ManifestWritten_Deserialize = {
 	/**
 	 *  What the file is now, as the apply that wrote it saw it before
 	 *  letting the scope go — the base for the next write from this copy.
+	 * 
+	 *  Absent where the write landed and the file could not be read back.
+	 *  The copy on screen has nothing to carry then, so its next save asks
+	 *  for a reload rather than writing against a base nobody vouched for;
+	 *  what it must not do is read the file itself, which is the pairing
+	 *  this whole protection exists to prevent.
 	 */
-	base: Base,
+	base: Base | null,
 };
 
 /**
@@ -1636,8 +1642,14 @@ export type ManifestWritten_Serialize = {
 	/**
 	 *  What the file is now, as the apply that wrote it saw it before
 	 *  letting the scope go — the base for the next write from this copy.
+	 * 
+	 *  Absent where the write landed and the file could not be read back.
+	 *  The copy on screen has nothing to carry then, so its next save asks
+	 *  for a reload rather than writing against a base nobody vouched for;
+	 *  what it must not do is read the file itself, which is the pairing
+	 *  this whole protection exists to prevent.
 	 */
-	base: Base,
+	base: Base | null,
 };
 
 export type Manifest_Deserialize = {

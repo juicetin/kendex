@@ -138,16 +138,71 @@ fn the_apply_answers_for_the_file_it_left() {
 
     // The bytes this apply left, not a later reading of the path.
     let (_, after) = manifest::read_for_mutation(&path).unwrap();
-    assert_eq!(outcome.manifest_base, after);
+    assert_eq!(outcome.manifest_base, Some(after));
 
     // Someone else writes, as they may the moment the scope is free. The
     // base the apply handed back still describes what the apply wrote, so
     // the next write carrying it is refused rather than landing on top.
     write(&path, "schema = 5\n\n[forks.skill.gh]\nsource = \"cat\"\n");
-    assert!(manifest::check_base(&path, &outcome.manifest_base).is_err());
+    let left = outcome.manifest_base.clone().unwrap();
+    assert!(manifest::check_base(&path, &left).is_err());
 
     let mut next = planned_by_the_engine(&scope, &path, Pre::Any);
-    next.bind_writes(&path, &Pre::from(&outcome.manifest_base));
-    assert!(kendex_core::apply::execute(&env, &next, None).is_err());
+    next.bind_writes(&path, &Pre::from(&left));
+    // And it refuses by naming the file that moved, which is what tells a
+    // caller this is the answer it already knows how to offer — a reload —
+    // rather than a failure it can only print.
+    let refused = kendex_core::apply::execute(&env, &next, None);
+    let Err(kendex_core::error::CoreError::RolledBack { cause, .. }) = &refused else {
+        panic!("{refused:?}");
+    };
+    assert!(
+        matches!(cause.as_ref(), kendex_core::error::CoreError::PlanStale { path: at } if at == &path),
+        "the rollback has to keep what stopped it, or a caller can only print it: {cause:?}"
+    );
     assert!(fs::read_to_string(&path).unwrap().contains("forks"));
+}
+
+/// The read that says what the file is now happens after every op has run
+/// and the journal is clear. There is nothing left to roll back by then, so
+/// a read that fails costs the answer and never the apply: reporting a
+/// committed change as failed is how someone comes to run it twice.
+#[test]
+#[allow(clippy::unwrap_used)]
+fn a_file_that_cannot_be_read_back_costs_the_answer_not_the_apply() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().canonicalize().unwrap();
+    let env = Env::fake(&home, FakeOs::Linux);
+    let scope = Scope::Global;
+    let path = manifest::manifest_path(&env, &scope);
+    write(&path, "schema = 5\n");
+
+    // A plan that writes something else in this scope, so the manifest is
+    // free to become unreadable the moment the ops are done.
+    let elsewhere = home.join(".claude/skills/gh/SKILL.md");
+    fs::create_dir_all(elsewhere.parent().unwrap()).unwrap();
+    let plan = Plan {
+        scope: scope.clone(),
+        ops: vec![PlannedOp {
+            description: "Write skill gh's files".into(),
+            op: Op::WriteFile {
+                path: elsewhere.clone(),
+                bytes: b"---\nname: gh\n---\nBody.\n".to_vec(),
+                pre: Pre::Any,
+            },
+        }],
+    };
+    // What an editor replacing the file mid-write leaves behind for an
+    // instant: something that is there and cannot be read as text.
+    fs::remove_file(&path).unwrap();
+    fs::create_dir(&path).unwrap();
+
+    let outcome = kendex_core::apply::execute(&env, &plan, None).unwrap();
+
+    assert_eq!(outcome.applied, 1, "the op ran");
+    assert!(elsewhere.is_file(), "and its bytes are on disk");
+    assert_eq!(
+        outcome.manifest_base, None,
+        "with the one thing it could not answer said, not raised"
+    );
 }

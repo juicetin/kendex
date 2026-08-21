@@ -104,7 +104,13 @@ pub struct ApplyOutcome {
     /// reads the file back is pairing its own copy with whatever landed in
     /// between, and the next write carrying that pair is accepted over
     /// that writer.
-    pub manifest_base: crate::manifest::Base,
+    ///
+    /// `None` where it could not be read. By then every op has run and the
+    /// journal is clear, so there is nothing left to roll back: an apply
+    /// that reported failure here would be reporting a committed change as
+    /// undone, and someone would run it again. Not knowing what the file
+    /// is now is a smaller thing than that, and it is sayable.
+    pub manifest_base: Option<crate::manifest::Base>,
 }
 
 /// Execute a plan transactionally. If recovery runs first, the plan
@@ -125,24 +131,28 @@ pub fn execute(env: &Env, plan: &Plan, fail_after: Option<usize>) -> Result<Appl
     if !plan.ops.is_empty() {
         let _ = crate::drift::snapshot::invalidate(env, &plan.scope);
     }
-    // Still under `_guard`: this is the last moment the file is provably
-    // the one this apply left.
-    let manifest_base = manifest_base(env, &plan.scope)?;
     Ok(ApplyOutcome {
         applied,
         recovered_first,
-        manifest_base,
+        // Still under `_guard`: the last moment the file is provably the
+        // one this apply left. Its own failure is not this apply's — the
+        // ops are committed either way.
+        manifest_base: manifest_base(env, &plan.scope),
     })
 }
 
 /// The scope's manifest as it stands, for an apply that still holds the
-/// lock. Derived from the bytes read here, like every other base.
-pub(super) fn manifest_base(env: &Env, scope: &Scope) -> Result<crate::manifest::Base> {
+/// lock. Derived from the bytes read here, like every other base, and
+/// `None` where they could not be read — every caller of this is past the
+/// point of undoing anything, so a read that fails costs the answer and
+/// never the apply.
+pub(super) fn manifest_base(env: &Env, scope: &Scope) -> Option<crate::manifest::Base> {
     let path = crate::manifest::manifest_path(env, scope);
-    Ok(match crate::fs::read_if_exists(&path)? {
-        Some(text) => crate::manifest::Base::of(&text),
-        None => crate::manifest::Base::absent(),
-    })
+    match crate::fs::read_if_exists(&path) {
+        Ok(Some(text)) => Some(crate::manifest::Base::of(&text)),
+        Ok(None) => Some(crate::manifest::Base::absent()),
+        Err(_) => None,
+    }
 }
 
 /// The one transaction engine, under a lock the caller already holds for
@@ -169,12 +179,14 @@ fn run_journaled(
             journal::rollback(&journal_dir)?;
             return Err(CoreError::RolledBack {
                 reason: format!("injected fault before '{}'", planned.description),
+                cause: Box::new(CoreError::Injected),
             });
         }
         if let Err(error) = planned.op.run(env) {
             journal::rollback(&journal_dir)?;
             return Err(CoreError::RolledBack {
                 reason: format!("'{}' failed: {error}", planned.description),
+                cause: Box::new(error),
             });
         }
     }

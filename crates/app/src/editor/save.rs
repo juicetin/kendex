@@ -8,11 +8,13 @@
 
 use kendex_core::apply::{self, Op, PlannedOp, Pre};
 use kendex_core::engine::{self, PlanOptions, ops};
+use kendex_core::error::CoreError;
 use kendex_core::lock::{load as load_lock, lock_path};
 use kendex_core::manifest::{self, Finding, Manifest};
 use kendex_core::model::Scope;
 use serde::Serialize;
 use specta::Type;
+use std::path::Path;
 
 use super::env;
 use crate::audit::{AuditView, view};
@@ -60,7 +62,13 @@ pub struct ManifestWritten {
     pub view: AuditView,
     /// What the file is now, as the apply that wrote it saw it before
     /// letting the scope go — the base for the next write from this copy.
-    pub base: manifest::Base,
+    ///
+    /// Absent where the write landed and the file could not be read back.
+    /// The copy on screen has nothing to carry then, so its next save asks
+    /// for a reload rather than writing against a base nobody vouched for;
+    /// what it must not do is read the file itself, which is the pairing
+    /// this whole protection exists to prevent.
+    pub base: Option<manifest::Base>,
 }
 
 #[tauri::command(async)]
@@ -73,6 +81,19 @@ pub fn get_manifest(scope: Scope) -> Result<ManifestRead, String> {
     // be accepted over the writer in between.
     let (manifest, base) = manifest::read_for_mutation(&path).map_err(|e| e.to_string())?;
     Ok(ManifestRead { manifest, base })
+}
+
+/// Whether an apply refused because this file moved under it. The write is
+/// bound to the file the copy on screen came from, so a rollback with that
+/// precondition underneath is the same answer `check_base` gives a moment
+/// earlier — and it reaches the person the same way, as a reload to take,
+/// rather than as an apply error they can do nothing with.
+fn stale_at(error: &CoreError, path: &Path) -> bool {
+    match error {
+        CoreError::PlanStale { path: moved } => moved == path,
+        CoreError::RolledBack { cause, .. } => stale_at(cause, path),
+        _ => false,
+    }
 }
 
 /// Validate an edited manifest the way a hand-written file is validated, so
@@ -163,7 +184,19 @@ pub fn update_manifest(
     // the file was when the plan ran, which would accept a writer that
     // landed between the check above and here.
     report.plan.bind_writes(&path, &held);
-    let outcome = apply::execute(&env, &report.plan, None).map_err(|e| e.to_string())?;
+    // The bound precondition refuses a file that moved between the check
+    // above and the write itself, and that refusal is the same answer the
+    // check gives — so it reaches the editor as the same choice. Told as a
+    // failure it would reach them as a message they cannot act on, which
+    // is the whole reason the refusal is a shape and not a string.
+    let outcome = apply::execute(&env, &report.plan, None).map_err(|error| {
+        match stale_at(&error, &path) {
+            true => WriteRefused::Stale,
+            false => WriteRefused::Failed {
+                message: error.to_string(),
+            },
+        }
+    })?;
     Ok(ManifestWritten {
         view: view(&env, &scope),
         // From the apply, which read it before letting the scope go. Read
@@ -176,6 +209,49 @@ pub fn update_manifest(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The write is bound to the file the copy on screen came from, so a
+    /// rollback with that precondition underneath is the same refusal the
+    /// check gives — and the editor already knows what to do with it. Told
+    /// as an apply failure it reaches the person as a message with no
+    /// choice in it.
+    #[test]
+    fn a_rollback_on_this_file_is_the_refusal_the_editor_can_offer() {
+        let path = std::path::PathBuf::from("/w/app/kendex.toml");
+        let moved = CoreError::PlanStale { path: path.clone() };
+        assert!(stale_at(&moved, &path));
+        assert!(stale_at(
+            &CoreError::RolledBack {
+                reason: "'Save kendex.toml' failed".into(),
+                cause: Box::new(moved),
+            },
+            &path
+        ));
+    }
+
+    /// Everything else is a failure, and says so. A precondition that
+    /// found another file changed is not this file's story, and neither is
+    /// a disk that would not take the write.
+    #[test]
+    fn every_other_rollback_stays_a_failure() {
+        let path = std::path::PathBuf::from("/w/app/kendex.toml");
+        assert!(!stale_at(
+            &CoreError::PlanStale {
+                path: "/w/app/.claude/settings.json".into()
+            },
+            &path
+        ));
+        assert!(!stale_at(
+            &CoreError::RolledBack {
+                reason: "'Write skill gh's files' failed".into(),
+                cause: Box::new(CoreError::io(
+                    &path,
+                    std::io::Error::other("read-only file system")
+                )),
+            },
+            &path
+        ));
+    }
     use kendex_core::manifest::{
         DEFAULT_SOURCE_NAME, DEFAULT_SOURCE_REPO, ItemDecl, MANIFEST_SCHEMA, SourceDecl,
     };

@@ -112,13 +112,24 @@ export const saveManifest = async (): Promise<void> => {
   // builds a new draft rather than mutating, so identity is that test, and
   // the re-read below leaves a newer draft alone for the same reason.
   if (onScreen()) {
-    // The base describes the file, and the file is what was just written —
-    // so it moves whether or not the copy on screen is still the one that
-    // went. Typing that arrived mid-write descends from this write like any
-    // other edit does, and leaving the old base behind would have its save
-    // refused for a change it made itself.
-    useEditorStore.setState({ base: response.data.base });
-    // What is on screen is that file only while nothing was typed over it.
+    const written = response.data.base;
+    if (written === null) {
+      // The write landed and the file could not be read back to say what
+      // it is now. Nothing to carry, so the place is marked and the next
+      // save asks for a reload — what this must never do is read the file
+      // here to find out, which pairs a base with content nobody read
+      // with it.
+      useEditorStore.getState().outdate(scope);
+    } else {
+      // The base describes the file, and the file is what was just
+      // written — so it moves whether or not the copy on screen is still
+      // the one that went. Typing that arrived mid-write descends from
+      // this write like any other edit does, and leaving the old base
+      // behind would have its save refused for a change it made itself.
+      useEditorStore.setState({ base: written });
+    }
+    // Either way the write landed, so what is on screen is saved — while
+    // nothing was typed over it.
     if (useEditorStore.getState().draft === draft)
       useEditorStore.setState({ dirty: false });
   }
