@@ -16,6 +16,9 @@ pub fn kendex(home: &Path, cwd: &Path, args: &[&str]) -> Output {
         .current_dir(cwd)
         .env_clear()
         .env("HOME", home)
+        // The fixture home is the one this means: without saying so, a
+        // debug build sandboxes itself and drives the dev home instead.
+        .env("KENDEX_REAL_HOME", "1")
         .env("PATH", std::env::var("PATH").unwrap_or_default())
         .output()
         .expect("kendex binary runs")

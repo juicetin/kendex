@@ -254,6 +254,7 @@ mod tests {
             upstream_skills: None,
             emitted: None,
             registration: None,
+            left_pi_reserved_name: false,
             reasons: reasons.iter().cloned().collect(),
         }
     }

@@ -6,7 +6,7 @@ use crate::env::Env;
 use crate::error::Result;
 use crate::lock::{Lock, LockFile, lock_path};
 use crate::manifest::{self, Manifest, ManifestFile};
-use crate::model::{ItemKind, Scope};
+use crate::model::Scope;
 
 pub mod adopt;
 mod adopt_shared;
@@ -28,18 +28,23 @@ mod desired_source;
 pub mod detach;
 mod expansion;
 pub use expansion::plans_kind;
+mod edited;
 pub mod fork;
 mod gate;
 mod gemini;
 mod holds;
 mod item_plan;
+pub use edited::{EditedHere, edited_here};
+mod item_record;
 mod manifest_write;
 pub use manifest_write::persists_manifest;
 mod item_source;
 mod observed;
 pub mod ops;
 mod owned;
+pub(crate) mod pi_hooks_move;
 mod plan_pass;
+mod plan_writes;
 mod planned;
 mod removal;
 mod review_hash;
@@ -113,13 +118,7 @@ pub fn plan_scope(
     let state = state;
     let mut drift = Vec::new();
     let mut ops: Vec<PlannedOp> = Vec::new();
-    let mut new_lock = Lock {
-        version: crate::lock::LOCK_VERSION,
-        entries: BTreeMap::new(),
-        sources: source_revisions(manifest, lock, &state),
-        // Evidence carried forward; only seeding and refresh may move it.
-        settings_seeds: lock.settings_seeds.clone(),
-    };
+    let mut new_lock = fresh_lock(manifest, lock, &state);
     let mut written = tree_plan::Written::default();
     let mut config_edits = config_edits::ConfigEditPlan::default();
 
@@ -151,29 +150,23 @@ pub fn plan_scope(
         env, scope, repo_moved, manifest, &state, options, &mut ops,
     )?;
 
-    // What earlier installs put on disk under another kind's name. A path
-    // one of them wrote is ours to replace, whichever entry holds it now.
-    let emitted_paths: BTreeSet<PathBuf> = lock
-        .entries
-        .values()
-        .filter_map(|entry| entry.emitted.as_ref())
-        .flat_map(|emitted| emitted.paths.iter().cloned())
-        .collect();
-
-    let mut rendered: BTreeSet<(ItemKind, String)> = BTreeSet::new();
-    plan_pass::plan_items(
+    // Answered before anything is planned, and read again when the move
+    // is planned: a pi hook whose copy under the name pi reserved is not
+    // this pass's to take holds whole, so the fresh rendering never
+    // quietly takes over from bytes the person kept.
+    let legacy_pi = pi_hooks_move::preflight(env, scope, lock, options, &state);
+    let rendered = plan_writes::plan_item_writes(
         env,
-        &state,
         scope,
         lock,
+        &state,
         options,
-        &emitted_paths,
+        &legacy_pi,
         &mut drift,
         &mut ops,
         &mut config_edits,
         &mut new_lock,
         &mut written,
-        &mut rendered,
     )?;
 
     plan_settings_seed(scope, &state, &mut new_lock, &mut ops, &mut drift)?;
@@ -182,6 +175,20 @@ pub fn plan_scope(
     // planned, so anything still wanted is known, and no path goes to the
     // trash twice.
     let mut guard = removal::TrashGuard::new(&state.items);
+
+    let mut moved_notes = Vec::new();
+    let moved_out = plan_writes::plan_reserved_name_move(
+        env,
+        scope,
+        manifest,
+        lock,
+        &state,
+        &legacy_pi,
+        &mut ops,
+        &mut guard,
+        &mut config_edits,
+        &mut moved_notes,
+    )?;
     removal::stale_emitted(&state, lock, &mut guard, &mut ops)?;
 
     let refused_keys = plan_pass::plan_refusals(
@@ -189,6 +196,7 @@ pub fn plan_scope(
         scope,
         lock,
         &state,
+        &legacy_pi,
         &mut guard,
         &mut drift,
         &mut ops,
@@ -203,6 +211,7 @@ pub fn plan_scope(
         lock,
         &state,
         options,
+        &legacy_pi,
         &refused_keys,
         &mut guard,
         &mut drift,
@@ -211,7 +220,10 @@ pub fn plan_scope(
         &mut new_lock,
     )?;
 
-    plan_config_edits(config_edits, &mut ops)?;
+    // Written here and nowhere else: every entry this pass keeps is in
+    // the record by now, the sweep's carry-forwards included.
+    pi_hooks_move::record_finished(&mut new_lock, &moved_out);
+    plan_config_edits(env, scope, config_edits, &mut ops)?;
     let set_changes = set_changes(scope, lock, &new_lock);
     let kept = kept_members(scope, lock, &new_lock, &options.uninstalled_bundles);
     plan_lock_write(env, scope, disk_lock, new_lock, &mut ops)?;
@@ -233,8 +245,31 @@ pub fn plan_scope(
         unmeasured: state.unmeasured,
         rendered,
     };
+    report.notes.extend(moved_notes);
     unmanaged_rows(env, scope, manifest, lock, &state.items, &mut report.drift);
     Ok(report)
+}
+
+/// The record this pass will write, before any of it is filled in: the
+/// per-source resolutions it just made, and the seeding evidence carried
+/// forward — only seeding and refresh may move that.
+fn fresh_lock(manifest: &Manifest, lock: &Lock, state: &desired::DesiredState) -> Lock {
+    Lock {
+        version: crate::lock::LOCK_VERSION,
+        entries: BTreeMap::new(),
+        sources: source_revisions(manifest, lock, state),
+        settings_seeds: lock.settings_seeds.clone(),
+    }
+}
+
+/// What earlier installs put on disk under another kind's name. A path
+/// one of them wrote is ours to replace, whichever entry holds it now.
+fn emitted_paths(lock: &Lock) -> BTreeSet<PathBuf> {
+    lock.entries
+        .values()
+        .filter_map(|entry| entry.emitted.as_ref())
+        .flat_map(|emitted| emitted.paths.iter().cloned())
+        .collect()
 }
 
 /// A scope still under the old product name renames first: everything
@@ -254,43 +289,6 @@ fn prepend_rename_generation(env: &Env, scope: &Scope, ops: &mut Vec<PlannedOp>)
 /// unmanaged items; nothing is planned that would touch a legacy file.
 pub fn audit(env: &Env, scope: &Scope) -> Result<EngineReport> {
     plan_apply(env, scope, &PlanOptions::default())
-}
-
-/// Whether this package's installed files are held here as edited by hand
-/// — the fact behind the edited notice, the drift report's line, and a
-/// row's `can_discard`. Discarding is planned as a scope plan carrying a
-/// permission for one package, so a caller that does not ask this first
-/// applies whatever else the scope had pending under a line about this
-/// package. Absent, undeclared, and clean all answer false.
-/// Whether this place's copy of one package was edited by hand.
-///
-/// Three answers, not two. A pass that could not render the declaration —
-/// its source unresolved, unreadable, or no longer carrying the item —
-/// emits no edit drift for it, and reading that silence as "clean" is how
-/// a command tells someone there is nothing to discard while their edited
-/// bytes sit on disk.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EditedHere {
-    Yes,
-    No,
-    /// Nothing was rendered to compare against, so nobody can say.
-    Unmeasured,
-}
-
-pub fn edited_here(env: &Env, scope: &Scope, kind: ItemKind, name: &str) -> Result<EditedHere> {
-    let report = audit(env, scope)?;
-    if report.drift.iter().any(|row| {
-        row.kind == kind
-            && row.name == name
-            && row.state == DriftState::Conflict
-            && matches!(row.cause, Some(DriftCause::LocalEdit | DriftCause::Both))
-    }) {
-        return Ok(EditedHere::Yes);
-    }
-    if report.unmeasured.contains(&(kind, name.to_owned())) {
-        return Ok(EditedHere::Unmeasured);
-    }
-    Ok(EditedHere::No)
 }
 
 /// What a refresh would do: regenerate everything declared, and re-derive

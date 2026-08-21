@@ -180,6 +180,34 @@ lives in one capability table read by core and UI.
     case is a near-miss (`tests` for `testing`) that would otherwise look
     like a tag and do nothing.
 
+16. A debug build gets its own machine. Every root `core/env.rs` resolves
+    hangs off `Env::home`, and a build with `debug_assertions` roots that
+    at `<data>/kendex-dev` instead of the real home, so a branch cannot
+    leave lock records, harness files or caches an installed kendex will
+    not read. Inherited vars naming a harness root are dropped with it
+    (`env/sandbox.rs`); vars naming a git host or a read-only policy file
+    are kept, because dropping those sends the build to the real ones.
+    `KENDEX_REAL_HOME=1`, and only that value, opts back out.
+
+    Two things a sandbox cannot move, and both ask `env/sandbox.rs`
+    directly rather than inferring: the OS credential store is keyed by
+    name, not path, so its service name carries the sandbox — otherwise a
+    debug `logout` deletes the sign-in the installed app holds. And the
+    real home stays reachable as `Env::real_home()`, because it is where
+    the person lives: project discovery stops there so it never calls the
+    home a project, and a `~` someone typed means their home. Anything new
+    that is keyed by name, or that answers a question about the person
+    rather than about this build's state, belongs on that list.
+
+    The boundary is the home this process resolves, not the whole machine,
+    and three things sit outside it. A project path handed to a debug build
+    is still that project: `--scope project` reads and writes the repository
+    it was pointed at. A harness root set to an explicit absolute path is
+    used as written, because that setting exists to say where a root is. And
+    a child process inherits this process's environment (`process/mod.rs`),
+    so `npm` run for a Pi package sees the real home — the sandbox rebases
+    `Env`, which nothing outside this process reads.
+
 ## Decisions
 
 - Tauri 2 · React 19 · Vite · Tailwind v4 · shadcn/ui · zustand ·
@@ -367,10 +395,9 @@ lives in one capability table read by core and UI.
   `settings.json`, where it also covers the main session. A custom hook's
   name is its identity (lock key `hook:<name>:<harness>`, same shape as a
   catalog hook's); the editor derives one from command + event on first
-  save and writes it back, and a script-less registration records its
-  event + command in the lock so removal can reverse an entry whose
-  manifest line is already gone. Custom hook commands pass the same safety
-  gate as catalog hook scripts.
+  save and writes it back, and what it registered is recorded like any
+  other hook's, so removal can reverse an entry whose manifest line is
+  gone. Custom hook commands pass the same safety gate as catalog scripts.
 - A section with nothing in it is not rendered. An empty state earns its
   place only when the page would otherwise be blank.
 - "Nothing here" and "not counted yet" are different sentences. A list
@@ -593,18 +620,44 @@ lives in one capability table read by core and UI.
   uninstall — while anything else in it stays where it is, named. A
   worktree git lists as prunable is dead here: its lease is reaped, its
   config never asked for.
+- **A registration is reconciled, not added to.** What a hook registered
+  is recorded (`engine::item_record`), so a catalog moving it to another
+  event is a move: retire the entry the record names — where the document
+  still has it, which the document is asked — apply what is rendered,
+  record that, whichever way round the pass names its entry. A first
+  install has no past to retire and no business looking for one; otherwise
+  a hook fires twice, or keeps firing with nothing naming it. Removal
+  reads the same record, an editor rewrites only what its own registration
+  names, and an entry no edit of kendex's can reach is neither reconciled
+  nor retired — proven by applying and reading back.
 - **Pi hooks are enforced through the carrier.** Pi has no per-hook
   artifact: the `pi-hooks` extension package hosts native listeners, and
   hook content rides in the registry kendex renders beside them
-  (`hooks/<name>.sh` plus `hooks.json`, keyed by Pi's own listener names —
-  tool call, tool result, turn end, session start). An event outside that
-  map cannot fire on Pi and installs nothing there, said as a note —
-  honesty over stale advisory prose. The capability row says what the
-  mechanism supports; the surfaces that label an installation read carrier
-  reality (`pi_ext::carrier`), and Pi loads project and global settings
-  both, so a project-installed hook with only a global carrier is still
-  enforced — the v1 #1407 lesson, carried as behavior. A scope with no
-  carrier registered anywhere Pi loads gets the downgrade said per item.
+  (`kendex/hooks/<name>.sh` plus `kendex/hooks.json`, keyed by Pi's own
+  listener names — tool call, tool result, turn end, session start). Pi
+  reserved `hooks/` beside every root it loads and warns on that name
+  whatever it holds, so the storage sits one level down under `kendex/`;
+  `engine::pi_hooks_move` retires the old layout, taking only what this
+  scope's lock names and its bytes prove, holding whole what it cannot —
+  installation and registration together — and saying why;
+  [docs/adapters/pi.md](adapters/pi.md) carries the rules in full. A
+  finished move is a fact about the past, recorded in the lock
+  (`LockEntry::left_pi_reserved_name`) and written only where proven,
+  since a wrong one cannot be taken back. Every consumer reads that one
+  record (`Preflight`) rather than re-deriving the answer from the scope's
+  lock, and past it nothing under the reserved name is asked about, the
+  directory included. What authorizes a deletion
+  asks for a plain file and binds the type it proved with the hash
+  (`claims::provenance`, `preflight::discardable`, `Pre::PlainHashIs`),
+  and every hold reaches the conflict row through one rendering
+  (`Hold::row`). A hook held that way runs from the old registry and
+  nowhere else, so Pi's hook surface list carries that registry too while
+  an installation of kendex's is still under the reserved name
+  (`pi_hooks_move::legacy_registry_lives`). The capability row says what
+  the mechanism supports; the surfaces that label an installation read
+  carrier reality (`pi_ext::carrier`), and Pi loads project and global
+  settings both, so a project-installed hook with only a global carrier is
+  still enforced — the v1 #1407 lesson, carried as behavior.
   The session-start drift report rides the same mechanism: same script,
   same kill-switch, fire-and-forget into session start, and a reloaded or
   resumed session never repeats it.

@@ -1,14 +1,13 @@
 import { describe, expect, it } from "vitest";
-import type { AuditView } from "@/bindings";
 import { observedItem as item } from "@/lib/observed-test-item";
 import {
   bundleSummary,
   countByKind,
   filterItems,
   groupItems,
+  groupVendor,
   recentItems,
   scopeMatches,
-  viewsInScope,
 } from "./derive";
 
 describe("scopeMatches", () => {
@@ -118,28 +117,23 @@ describe("bundleSummary", () => {
   });
 });
 
-describe("viewsInScope", () => {
-  const view = (scope: AuditView["scope"]): AuditView => ({
-    scope,
-    drift: [],
-    plan: [],
-    notes: [],
-    warnings: [],
-    safety: [],
-    heldBack: [],
-    queued: [],
-  });
-  const all = [
-    view({ scope: "global" }),
-    view({ scope: "project", root: "/a" }),
-    view({ scope: "project", root: "/b" }),
-  ];
-
-  it("narrows to the picked scope and nothing else", () => {
-    expect(viewsInScope(all, "all")).toHaveLength(3);
-    expect(viewsInScope(all, "global").map((v) => v.scope.scope)).toEqual([
-      "global",
+describe("groupVendor", () => {
+  it("names the vendor only when every installation agrees it is theirs", () => {
+    const bundled = groupItems([
+      item({ kind: "plugin", name: "chrome@openai-bundled", vendor: "OpenAI" }),
+      item({
+        kind: "plugin",
+        name: "chrome@openai-bundled",
+        harness: "codex",
+        vendor: "OpenAI",
+      }),
     ]);
-    expect(viewsInScope(all, { project: "/b" })).toEqual([all[2]]);
+    expect(groupVendor(bundled[0])).toBe("OpenAI");
+
+    const mixed = groupItems([
+      item({ kind: "plugin", name: "gh", vendor: "OpenAI" }),
+      item({ kind: "plugin", name: "gh", harness: "codex", vendor: null }),
+    ]);
+    expect(groupVendor(mixed[0])).toBeNull();
   });
 });

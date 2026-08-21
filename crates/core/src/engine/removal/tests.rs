@@ -14,6 +14,8 @@ use crate::model::{HarnessId, ItemKind};
 #[allow(clippy::unwrap_used)]
 fn moved(old: &std::path::Path, new: &std::path::Path) -> (desired::DesiredState, Lock) {
     let entry = LockEntry {
+        // Not what this fixture is about: it never left the reserved name.
+        left_pi_reserved_name: false,
         name: "ship".to_owned(),
         kind: ItemKind::Command,
         harness: HarnessId::Codex,

@@ -155,6 +155,23 @@ for f in $(printf '%s\n' $files | grep -E '^ui/src/.*\.tsx$' | grep -v '\.test\.
   grep -q 'manifestRewritten(' "$f" &&
     say "$f rewrites a manifest from a component — move the write to a store, whose busy flag the shared gate can see"
 done
+# A command that hands the binary a fixture home must say on the spot that
+# the home it gave is the one it means: without that, a debug build sandboxes
+# itself and the command drives the dev home instead of the fixture. Checked
+# per call site — one compliant builder must not vouch for the rest of a file
+# that holds several.
+hits=$(grep -rlE '\.env\("HOME"' crates/*/tests 2>/dev/null | while IFS= read -r f; do
+  awk -v file="$f" '
+    pending && /^[[:space:]]*(\/\/|$)/ { next }
+    pending { if ($0 !~ /KENDEX_REAL_HOME/) print file ":" pending; pending = 0 }
+    /\.env\("HOME"/ { pending = NR }
+    END { if (pending) print file ":" pending }
+  ' "$f"
+done)
+[ -n "$hits" ] && {
+  echo "$hits" | head -5
+  say 'fixture HOME without KENDEX_REAL_HOME on the next line — that command would run in the dev sandbox'
+}
 
 # Structural invariants.
 [ "$(readlink .claude/CLAUDE.md 2>/dev/null)" = "../AGENTS.md" ] ||

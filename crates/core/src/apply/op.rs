@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::journal;
-use super::pre::Pre;
+pub use super::pre::Pre;
 use crate::env::Env;
 use crate::error::{CoreError, Result};
 use crate::lock::Lock;
