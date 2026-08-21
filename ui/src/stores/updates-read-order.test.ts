@@ -149,3 +149,53 @@ describe("a check and a poll in flight together", () => {
     ]);
   });
 });
+
+// A read that follows a write this app made is not a poll: the file moved
+// and this is the reading of it. A check already in flight was reading the
+// world before that write, so it must not put its rows back afterwards.
+describe("a read after a write, with a check already running", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useUpdatesStore.setState({
+      rows: [],
+      busy: false,
+      checking: false,
+      loaded: false,
+      error: null,
+    });
+  });
+
+  it("lands, and the older check does not undo it", async () => {
+    let landRefresh!: (
+      answer: Awaited<ReturnType<typeof commands.updatesRefresh>>,
+    ) => void;
+    vi.mocked(commands.updatesRefresh).mockReturnValue(
+      new Promise((resolve) => {
+        landRefresh = resolve;
+      }),
+    );
+    vi.mocked(commands.updatesOverview).mockResolvedValue({
+      status: "ok",
+      data: { rows: [row({ name: "after-the-write" })], warnings: [] },
+    });
+
+    // A check is already running when the write happens.
+    const checking = useUpdatesStore.getState().check();
+    await useUpdatesStore.getState().load({ afterWrite: true });
+
+    expect(useUpdatesStore.getState().rows.map((r) => r.name)).toEqual([
+      "after-the-write",
+    ]);
+
+    // The check answers for a world that no longer exists.
+    landRefresh({
+      status: "ok",
+      data: { rows: [row({ name: "before-the-write" })], warnings: [] },
+    });
+    await checking;
+
+    expect(useUpdatesStore.getState().rows.map((r) => r.name)).toEqual([
+      "after-the-write",
+    ]);
+  });
+});

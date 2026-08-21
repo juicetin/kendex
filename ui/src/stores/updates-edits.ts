@@ -32,7 +32,9 @@ const run = async (scope: Scope, work: () => Promise<string | null>) => {
     // and every await between the write and this is a window where saving
     // the copy in hand puts the pre-fork file back.
     await manifestRewritten(scope);
-    await useUpdatesStore.getState().load();
+    // This read follows the write above, so it is not a poll: a check that
+    // was already running must not put the pre-fork rows back over it.
+    await useUpdatesStore.getState().load({ afterWrite: true });
     await useScanStore.getState().refresh();
     await useAuditStore.getState().refresh({ force: true });
   } finally {

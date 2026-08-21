@@ -217,6 +217,9 @@ changes carry a **Breaking** call-out with their migration note inline.
 - Update all stops everywhere when the first package it tries fails. It
   went on updating the rest, and stopped asking about unsaved settings
   while it did.
+- Keeping a package as your own, or discarding its edits, no longer has the
+  old state come back a moment later when a check for updates happened to be
+  running at the time.
 - Update all waits for every project it would touch: if any one has unsaved
   customization, none is updated. It used to update the others and skip
   that one.

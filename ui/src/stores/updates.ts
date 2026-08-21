@@ -20,7 +20,11 @@ interface UpdatesState {
    *  own at startup, so it cannot open the error modal a click may — the
    *  screens that read the standing say what happened instead. */
   error: string | null;
-  load: () => Promise<void>;
+  /** Re-read the standing. `afterWrite` marks a read that follows a write
+   *  this app just made: it lands whatever polls are in flight, and puts
+   *  every older check out of date, because it is reading a file that
+   *  moved rather than guessing whether it did. */
+  load: (opts?: { afterWrite?: boolean }) => Promise<void>;
   check: () => Promise<void>;
   updateOne: (row: UpdateRow) => Promise<void>;
   /** Bring every updatable place among `rows` current — the page-level
@@ -58,12 +62,20 @@ export const useUpdatesStore = create<UpdatesState>((set) => {
   let reads = 0;
   let checks = 0;
   let checking = 0;
-  const ticket = (fetched = false) => {
+  // A read that follows a write this app just made. It is not a poll —
+  // nobody is guessing, the file moved and this is the reading of it — so
+  // it must land, and a check that was already in flight must not put the
+  // pre-write rows back over it afterwards. Counting it as a check does
+  // both: it lands on the fetched predicate, and every older check finds
+  // its own count superseded and declines.
+  const ticket = (fetched = false, afterWrite = false) => {
     reads += 1;
     const mine = reads;
     if (fetched) {
       checks += 1;
       checking += 1;
+    } else if (afterWrite) {
+      checks += 1;
     }
     const mineCheck = checks;
     // Whether a fetch was already running when this read began. A poll that
@@ -72,7 +84,7 @@ export const useUpdatesStore = create<UpdatesState>((set) => {
     // exactly that poll once the fetch has finished — and puts the rows the
     // person asked to replace back over the fetched ones.
     const during = checking > 0;
-    return fetched
+    return fetched || afterWrite
       ? // Only a later fetch answers for one: a poll that started after it
         // is reading the older truth, whenever it happens to land.
         () => mineCheck === checks
@@ -81,8 +93,8 @@ export const useUpdatesStore = create<UpdatesState>((set) => {
         () => mine === reads && !during && mineCheck === checks;
   };
 
-  const reload = async () => {
-    const newest = ticket();
+  const reload = async (afterWrite = false) => {
+    const newest = ticket(false, afterWrite);
     let response: Awaited<ReturnType<typeof commands.updatesOverview>>;
     try {
       response = await commands.updatesOverview();
@@ -118,8 +130,8 @@ export const useUpdatesStore = create<UpdatesState>((set) => {
     loaded: false,
     error: null,
 
-    load: async () => {
-      await reload();
+    load: async (opts) => {
+      await reload(opts?.afterWrite === true);
     },
 
     check: async () => {
@@ -190,7 +202,7 @@ export const useUpdatesStore = create<UpdatesState>((set) => {
           // file back over what this just recorded.
           await manifestRewritten(row.scope);
         }
-        await reload();
+        await reload(true);
       } finally {
         set({ busy: false });
       }

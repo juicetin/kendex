@@ -23,7 +23,9 @@ const showError = (title: string, message: string) =>
   useProblemsStore.getState().showError({ title, message });
 
 const set = (partial: { busy: boolean }) => useUpdatesStore.setState(partial);
-const reload = () => useUpdatesStore.getState().load();
+// Every use of this follows a write, so it reads a file that moved rather
+// than guessing whether it did.
+const reload = () => useUpdatesStore.getState().load({ afterWrite: true });
 
 const apply = async (row: UpdateRow): Promise<boolean> => {
   // Both branches below rewrite this place's kendex.toml, so unsaved
