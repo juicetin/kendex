@@ -1,6 +1,6 @@
 use clap::Args;
 
-use kendex_core::engine::{PlanOptions, edited_here, plan_scope, planned_declarations};
+use kendex_core::engine::{EditedHere, PlanOptions, edited_here, plan_scope, planned_declarations};
 use kendex_core::env::Env;
 use kendex_core::lock::{load as load_lock, lock_path};
 use kendex_core::manifest::{load_for_mutation, manifest_path};
@@ -75,13 +75,29 @@ pub fn run(env: &Env, args: DiscardArgs) -> CliResult {
     // package's alone: with no edit to overwrite, the permission does
     // nothing and executing would apply whatever else the scope had
     // pending under a line saying this package was restored.
-    if !edited_here(env, &scope, kind, &args.name)? {
-        say(&format!(
-            "{} '{}' has no edits to discard — nothing was applied",
-            kind.name(),
-            args.name
-        ));
-        return Ok(());
+    match edited_here(env, &scope, kind, &args.name)? {
+        EditedHere::Yes => {}
+        EditedHere::No => {
+            say(&format!(
+                "{} '{}' has no edits to discard — nothing was applied",
+                kind.name(),
+                args.name
+            ));
+            return Ok(());
+        }
+        // Nothing was rendered to compare its files against, so whether
+        // they were edited is not known. Reporting the clean line here
+        // would tell someone their edits are gone while the bytes stand,
+        // and the discard itself has nothing to put back either way.
+        EditedHere::Unmeasured => {
+            return Err(format!(
+                "{} '{}' could not be read from its source, so there is nothing to put its files back to — fix the source, or remove it with 'kendex remove {}'",
+                kind.name(),
+                args.name,
+                args.name
+            )
+            .into());
+        }
     }
     let report = plan_scope(
         env,

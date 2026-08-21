@@ -144,9 +144,12 @@ export function packageVersionActions(
   ref: PackageRef,
   displayName: string,
   held: boolean,
-  setBusy: (busy: boolean) => void,
   reload: () => void,
 ) {
+  // The flag lives in a store, not in the page. These writes outlive the
+  // page: someone can start one and walk to Customize, and a flag that
+  // unmounts with the page takes the Save bar's reason to wait with it.
+  const setBusy = (busy: boolean) => useUpdatesStore.setState({ busy });
   const showError = (message: string) =>
     useProblemsStore
       .getState()
@@ -220,22 +223,18 @@ export function packageVersionActions(
 
 /** One gate for every control that rewrites this scope's manifest: the
  *  audit store's apply, a version switch in flight, the updates store's
- *  fork or discard, a marketplace install or subscription change, and the
- *  editor's save all touch the same file. Every writer of kendex.toml
- *  belongs here — a writer left out is a control that stays live while the
- *  file moves under it. */
-export function useManifestBusy(switching: boolean): boolean {
+ *  fork or discard, a marketplace install or subscription change, the
+ *  settings store's drift-report install, and the editor's save all touch
+ *  the same file. Every writer of kendex.toml belongs here — a writer left
+ *  out is a control that stays live while the file moves under it.
+ *
+ *  It takes no argument on purpose. A flag passed in from a page is a flag
+ *  that ends when the page does, and these writes outlive the page. */
+export function useManifestBusy(): boolean {
   const auditBusy = useAuditStore((s) => s.busy);
   const updatesBusy = useUpdatesStore((s) => s.busy);
   const marketBusy = useMarketplacesStore((s) => s.busy);
   const settingsBusy = useSettingsStore((s) => s.busy);
   const saving = useEditorStore((s) => s.saving);
-  return (
-    auditBusy ||
-    switching ||
-    updatesBusy ||
-    marketBusy ||
-    settingsBusy ||
-    saving
-  );
+  return auditBusy || updatesBusy || marketBusy || settingsBusy || saving;
 }

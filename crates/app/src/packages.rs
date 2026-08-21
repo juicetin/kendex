@@ -218,8 +218,17 @@ pub fn apply_discard_edits(
     // The plan below is the scope's, and the permission it carries is this
     // package's alone: with no edit to overwrite, executing it would apply
     // whatever else the scope had pending under an action about this one.
-    if !engine::edited_here(&env, &scope, kind, &name).map_err(|e| e.to_string())? {
-        return Ok(view(&env, &scope));
+    match engine::edited_here(&env, &scope, kind, &name).map_err(|e| e.to_string())? {
+        engine::EditedHere::Yes => {}
+        engine::EditedHere::No => return Ok(view(&env, &scope)),
+        // Nothing was rendered to compare against, so there is nothing to
+        // put the files back to. Returning the view would report the
+        // discard as done with the edited bytes still there.
+        engine::EditedHere::Unmeasured => {
+            return Err(format!(
+                "{name} could not be read from its source, so its files cannot be put back"
+            ));
+        }
     }
     let manifest = manifest::load_for_mutation(&manifest::manifest_path(&env, &scope))
         .map_err(|e| e.to_string())?

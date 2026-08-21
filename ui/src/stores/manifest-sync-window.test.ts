@@ -12,6 +12,7 @@ import { useAuditStore } from "./audit";
 import { useEditorStore } from "./editor";
 import { useProblemsStore } from "./problems";
 import { useSettingsStore } from "./settings";
+import { useUpdatesStore } from "./updates";
 
 vi.mock("@/bindings", () => ({
   commands: {
@@ -127,13 +128,15 @@ describe("a save pressed the moment the busy flag comes down", () => {
       return { status: "ok", data: emptyView };
     });
     const save = saveOnce();
+    // The flag lives in the updates store now rather than in the page, so
+    // the window is watched the same way the audit one is.
+    const stop = useUpdatesStore.subscribe((state, previous) => {
+      if (previous.busy && !state.busy) save.press();
+    });
     const actions = packageVersionActions(
       { scope, kind: "skill", name: "gh" },
       "gh",
       true,
-      (busy) => {
-        if (!busy) save.press();
-      },
       () => {},
     );
 
@@ -146,6 +149,7 @@ describe("a save pressed the moment the busy flag comes down", () => {
       newerThanInstalled: true,
     });
     await vi.waitUntil(() => save.pressed);
+    stop();
 
     refused(save);
   });

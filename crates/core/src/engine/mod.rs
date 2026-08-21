@@ -258,13 +258,35 @@ pub fn audit(env: &Env, scope: &Scope) -> Result<EngineReport> {
 /// permission for one package, so a caller that does not ask this first
 /// applies whatever else the scope had pending under a line about this
 /// package. Absent, undeclared, and clean all answer false.
-pub fn edited_here(env: &Env, scope: &Scope, kind: ItemKind, name: &str) -> Result<bool> {
-    Ok(audit(env, scope)?.drift.iter().any(|row| {
+/// Whether this place's copy of one package was edited by hand.
+///
+/// Three answers, not two. A pass that could not render the declaration —
+/// its source unresolved, unreadable, or no longer carrying the item —
+/// emits no edit drift for it, and reading that silence as "clean" is how
+/// a command tells someone there is nothing to discard while their edited
+/// bytes sit on disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditedHere {
+    Yes,
+    No,
+    /// Nothing was rendered to compare against, so nobody can say.
+    Unmeasured,
+}
+
+pub fn edited_here(env: &Env, scope: &Scope, kind: ItemKind, name: &str) -> Result<EditedHere> {
+    let report = audit(env, scope)?;
+    if report.drift.iter().any(|row| {
         row.kind == kind
             && row.name == name
             && row.state == DriftState::Conflict
             && matches!(row.cause, Some(DriftCause::LocalEdit | DriftCause::Both))
-    }))
+    }) {
+        return Ok(EditedHere::Yes);
+    }
+    if report.unmeasured.contains(&(kind, name.to_owned())) {
+        return Ok(EditedHere::Unmeasured);
+    }
+    Ok(EditedHere::No)
 }
 
 /// What a refresh would do: regenerate everything declared, and re-derive

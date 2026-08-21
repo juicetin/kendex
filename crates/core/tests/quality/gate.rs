@@ -2,7 +2,7 @@
 //! what never reaches the disk.
 
 use kendex_core::apply;
-use kendex_core::engine::{DriftState, PlanOptions, edited_here, plan_scope};
+use kendex_core::engine::{DriftState, EditedHere, PlanOptions, edited_here, plan_scope};
 use kendex_core::lock::{load as load_lock, lock_path};
 use kendex_core::model::ItemKind;
 use kendex_core::quality::Verdict;
@@ -68,7 +68,10 @@ fn a_package_the_gate_holds_back_is_not_an_edited_one() {
     assert_eq!(row.state, DriftState::Conflict, "the control: a conflict");
     assert!(row.cause.is_none(), "and not an edit: {row:?}");
 
-    assert!(!edited_here(&f.env, &f.scope, ItemKind::Skill, "hostile").unwrap());
+    assert_eq!(
+        edited_here(&f.env, &f.scope, ItemKind::Skill, "hostile").unwrap(),
+        EditedHere::No
+    );
 }
 
 /// A refusal takes the refused installation off disk, and that removal

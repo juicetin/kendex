@@ -205,6 +205,11 @@ changes carry a **Breaking** call-out with their migration note inline.
   which is what its buttons and badges have always meant.
 - Two projects whose folders share a name are told apart on Review, the way
   they already are in the Library and on a package's own page.
+- `kendex discard-edits` on a package whose source cannot be read says so
+  and stops, instead of reporting "no edits to discard" while your edited
+  files are still there. The app's discard says the same.
+- Walking away from a package page while its version is being switched no
+  longer re-enables the Customize Save button before the change has landed.
 - The Updates page says it is checking instead of "Everything is up to
   date" before the first check has answered.
 - A package whose own copy can no longer be read says so, instead of

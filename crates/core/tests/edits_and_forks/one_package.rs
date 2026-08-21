@@ -30,6 +30,7 @@ fn edited_here_answers_for_the_package_asked_about() {
     sync_and_apply(&w);
     let edited = |name: &str| {
         kendex_core::engine::edited_here(&w.env, &w.scope, ItemKind::Skill, name).unwrap()
+            == kendex_core::engine::EditedHere::Yes
     };
 
     assert!(!edited("gh"), "nothing edited yet");

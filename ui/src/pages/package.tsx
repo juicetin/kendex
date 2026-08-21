@@ -50,8 +50,7 @@ export function PackagePage() {
   const [view, setView] = useState<PackageView>(() => openingView(initialView));
   const [tab, setTab] = useState(() => openingTab(initialView));
   const [confirmRemove, setConfirmRemove] = useState(false);
-  const [switching, setSwitching] = useState(false);
-  const mutating = useManifestBusy(switching);
+  const mutating = useManifestBusy();
   useEffect(() => {
     if (initialView) clearPackageView();
   }, [initialView, clearPackageView]);
@@ -122,7 +121,6 @@ export function PackagePage() {
     ref,
     displayName,
     meta?.rev != null,
-    setSwitching,
     reload,
   );
 

@@ -59,7 +59,7 @@ export function CustomizePage() {
   // still in flight when someone walks in here, and a save landing on top
   // of it carries a draft the file no longer matches. The package page
   // gates on the same thing; this page reads the manifest just as much.
-  const mutating = useManifestBusy(false);
+  const mutating = useManifestBusy();
 
   // Unsaved edits made on a package's own page live in this same draft.
   // The read declines to replace typing in hand — only a deliberate
