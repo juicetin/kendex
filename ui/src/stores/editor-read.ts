@@ -32,11 +32,16 @@ export const loadManifest = async (
   const state = () => useEditorStore.getState();
   const scope = target ?? state().scope;
   // Typing that arrives while this read is on its way is newer than the
-  // bytes it reads, so only a deliberate discard replaces it. Every other
-  // reader still feeds the marks from what it read, and leaves whatever
+  // bytes it reads, so it is never replaced. Every reader that must not
+  // take still feeds the marks from what it read, and leaves whatever
   // outdated mark the place carries standing — so a save of the older
   // copy is still refused rather than quietly winning.
-  const takes = () => opts?.discardEdits === true || !state().dirty;
+  //
+  // A discard rules on the typing that was there when it was given, which
+  // is why it clears `dirty` below rather than being asserted here:
+  // keystrokes that land after the instruction are newer than it, and
+  // taking them too would destroy work nobody ruled on.
+  const takes = () => !state().dirty;
   // An instruction to throw typing away outranks parking, and it lands
   // before anything is awaited: a move made while this read is in flight
   // parks nothing, so the discarded edits cannot come back with it.

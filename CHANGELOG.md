@@ -205,6 +205,9 @@ changes carry a **Breaking** call-out with their migration note inline.
   which is what its buttons and badges have always meant.
 - Two projects whose folders share a name are told apart on Review, the way
   they already are in the Library and on a package's own page.
+- Discarding your unsaved customization no longer takes typing you did
+  after pressing it. The reload that follows leaves anything newer than the
+  instruction alone, instead of replacing it without a word.
 - Keeping a package as your own, or discarding its edits, now waits for
   unsaved customization in that project even when you have moved to another
   one — and says which project to go back to. Before, moving away let the

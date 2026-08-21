@@ -101,6 +101,39 @@ describe("switching place while a read is in flight", () => {
     expect(state.saved["/work/a"]?.["skill-instructions"]).toEqual({ gh: "a" });
   });
 
+  // Discard rules on the typing that was there when it was pressed. Anyone
+  // who keeps typing afterwards is writing something newer than the
+  // instruction, and a read that lands later must not carry it away —
+  // that is work nobody ruled on.
+  it("keeps typing that arrives after a discard was pressed", async () => {
+    useEditorStore.setState({
+      scope: A,
+      draft: { schema: 1, install: {}, "skill-instructions": { gh: "old" } },
+      dirty: true,
+    });
+    const slow = deferred<Awaited<ReturnType<typeof commands.getManifest>>>();
+    vi.mocked(commands.getManifest).mockImplementationOnce(() => slow.promise);
+
+    const reading = useEditorStore.getState().discard();
+    // The instruction landed: what was on screen when it was pressed is gone.
+    expect(useEditorStore.getState().dirty).toBe(false);
+    // Someone types again while the read is still on its way.
+    useEditorStore.getState().edit((draft) => ({
+      ...draft,
+      "skill-instructions": { gh: "typed after" },
+    }));
+    slow.resolve({ status: "ok", data: read("from file") });
+    await reading;
+
+    const state = useEditorStore.getState();
+    expect(state.draft?.["skill-instructions"]).toEqual({ gh: "typed after" });
+    expect(state.dirty).toBe(true);
+    // The read still knows its own place, so the marks take it.
+    expect(state.saved["/work/a"]?.["skill-instructions"]).toEqual({
+      gh: "from file",
+    });
+  });
+
   it("never lets a superseded failure blank the draft on screen", async () => {
     const slow = deferred<Awaited<ReturnType<typeof commands.getManifest>>>();
     const quick = deferred<Awaited<ReturnType<typeof commands.getManifest>>>();
