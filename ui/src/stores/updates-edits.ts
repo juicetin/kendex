@@ -42,8 +42,11 @@ const run = async (scope: Scope, work: () => Promise<string | null>) => {
         .showError({ title: FORK_ERROR_TITLE, message: error });
       return;
     }
-    await useUpdatesStore.getState().load();
+    // First, before the tables re-read: the manifest is already rewritten,
+    // and every await between the write and this is a window where saving
+    // the copy in hand puts the pre-fork file back.
     await manifestRewritten(scope);
+    await useUpdatesStore.getState().load();
     await useScanStore.getState().refresh();
     await useAuditStore.getState().refresh({ force: true });
   } finally {

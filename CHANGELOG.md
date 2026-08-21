@@ -90,8 +90,10 @@ changes carry a **Breaking** call-out with their migration note inline.
 - `kendex discard-edits <kind> <name>` puts one package's declared content
   back over the edits made to its installed files — the exit beside
   `kendex fork`, and the one `kendex check` names for an edited package.
-  With nothing edited there it changes nothing and says so, rather than
-  running whatever else the project had waiting.
+  It touches that package and nothing else: with nothing edited there it
+  changes nothing and says so, and where there is, it puts that package
+  back without installing or re-rendering whatever else the project had
+  waiting.
   `kendex refresh --discard-edits` still does the whole scope, which is
   what it is for.
 - Catalog authors can settle a reviewed safety finding:

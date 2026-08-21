@@ -127,4 +127,12 @@ pub struct PlanOptions {
     /// "discard" the app offers, which must never take a neighbour's
     /// edits with it, even one that shares a name across kinds.
     pub overwrite_edited_names: Option<Vec<(ItemKind, String)>>,
+    /// Plan writes for these items only. Every other declared item is
+    /// carried forward exactly as the lock records it — no op, no change
+    /// to what is installed. A plan is always the scope's, so a command
+    /// naming one package would otherwise install, update, and re-render
+    /// whatever else the scope had pending, under that package's name.
+    /// What is not an item's write still runs: the manifest kendex
+    /// maintains, and the safety gate taking a refused rendering off disk.
+    pub only_names: Option<Vec<(ItemKind, String)>>,
 }

@@ -62,7 +62,12 @@ pub fn run(env: &Env, args: DiscardArgs) -> CliResult {
         &manifest,
         &lock,
         &PlanOptions {
+            // Two halves of one promise: permission to overwrite this
+            // package's edited bytes, and writes planned for this package
+            // alone. Without the second the plan is the scope's, and a
+            // command naming one package installs and updates the rest.
             overwrite_edited_names: Some(vec![(kind, args.name.clone())]),
+            only_names: Some(vec![(kind, args.name.clone())]),
             ..PlanOptions::default()
         },
     )?;

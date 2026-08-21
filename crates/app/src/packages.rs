@@ -207,6 +207,7 @@ pub fn apply_discard_edits(
             Some(&rev),
             &engine::PlanOptions {
                 overwrite_edited_names: Some(vec![(kind, name.clone())]),
+                only_names: Some(vec![(kind, name.clone())]),
                 ..Default::default()
             },
         )
@@ -231,7 +232,8 @@ pub fn apply_discard_edits(
         &manifest,
         &lock,
         &engine::PlanOptions {
-            overwrite_edited_names: Some(vec![(kind, name)]),
+            overwrite_edited_names: Some(vec![(kind, name.clone())]),
+            only_names: Some(vec![(kind, name)]),
             ..Default::default()
         },
     )

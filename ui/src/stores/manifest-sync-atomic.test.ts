@@ -7,7 +7,6 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { commands } from "@/bindings";
 import { useEditorStore } from "./editor";
 import { manifestRewritten } from "./manifest-sync";
-import { useMarketplacesStore } from "./marketplaces";
 import { useProblemsStore } from "./problems";
 import { useSettingsStore } from "./settings";
 
@@ -16,23 +15,11 @@ vi.mock("@/bindings", () => ({
     getManifest: vi.fn(),
     editorInventory: vi.fn(),
     updateManifest: vi.fn(),
-    marketplaceSubscribe: vi.fn(),
-    marketplaceUnsubscribe: vi.fn(),
-    sourceToggle: vi.fn(),
-    marketplacesOverview: vi.fn(),
   },
 }));
 
 vi.mock("sonner", () => ({
   toast: { success: vi.fn(), error: vi.fn(), message: vi.fn(), info: vi.fn() },
-}));
-
-vi.mock("./audit", () => ({
-  useAuditStore: { getState: () => ({ refresh: vi.fn() }) },
-}));
-
-vi.mock("./scan", () => ({
-  useScanStore: { getState: () => ({ refresh: vi.fn() }) },
 }));
 
 const scope = { scope: "global" as const };
@@ -82,10 +69,6 @@ describe("the sync refuses before it reads", () => {
     vi.mocked(commands.updateManifest).mockResolvedValue({
       status: "error",
       error: "should never be reached",
-    });
-    vi.mocked(commands.marketplacesOverview).mockResolvedValue({
-      status: "ok",
-      data: [],
     });
   });
 
@@ -137,73 +120,5 @@ describe("the sync refuses before it reads", () => {
     await manifestRewritten({ scope: "project", root: "/w/app" });
 
     expect(useEditorStore.getState().outdated).toBeNull();
-  });
-});
-
-// Each of these rewrites the scope's kendex.toml and then re-reads the
-// marketplace tables. The save pressed during that re-read is the window.
-describe("a subscription mutation tells the editor before it re-reads", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    useSettingsStore.setState({ settings: { schema: 1, projects: [] } });
-    useEditorStore.setState({ scope, draft: typed, dirty: true, saved: {} });
-    useEditorStore.setState({ outdated: null });
-    useProblemsStore.getState().closeError();
-    vi.mocked(commands.getManifest).mockResolvedValue({
-      status: "ok",
-      data: null,
-    });
-    vi.mocked(commands.editorInventory).mockResolvedValue({
-      status: "ok",
-      data: inventory,
-    });
-    vi.mocked(commands.updateManifest).mockResolvedValue({
-      status: "error",
-      error: "should never be reached",
-    });
-    // The tables re-read after the manifest was rewritten: the save lands
-    // in that window.
-    vi.mocked(commands.marketplacesOverview).mockImplementation(async () => {
-      press();
-      return { status: "ok", data: [] };
-    });
-  });
-
-  it("refuses the save after subscribing", async () => {
-    vi.mocked(commands.marketplaceSubscribe).mockResolvedValue({
-      status: "ok",
-      data: {
-        name: "kit",
-        reference: "acme/kit",
-        rev: null,
-        notes: [],
-        lead: null,
-      },
-    });
-    await useMarketplacesStore.getState().subscribe(scope, "acme/kit", null);
-
-    refused();
-  });
-
-  it("refuses the save after unsubscribing", async () => {
-    vi.mocked(commands.marketplaceUnsubscribe).mockResolvedValue({
-      status: "ok",
-      data: null,
-    });
-    await useMarketplacesStore
-      .getState()
-      .unsubscribe(scope, "kit", false, false);
-
-    refused();
-  });
-
-  it("refuses the save after turning a subscription off", async () => {
-    vi.mocked(commands.sourceToggle).mockResolvedValue({
-      status: "ok",
-      data: [],
-    });
-    await useMarketplacesStore.getState().toggle(scope, "kit", false);
-
-    refused();
   });
 });

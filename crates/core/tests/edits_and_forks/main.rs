@@ -8,6 +8,7 @@ mod edited_harness;
 
 mod edited_forks;
 mod forks;
+mod one_package;
 
 use std::fs;
 use std::path::{Path, PathBuf};

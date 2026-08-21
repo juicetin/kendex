@@ -221,3 +221,53 @@ fn an_undeclared_target_refuses_and_applies_nothing() {
         "my lint edit"
     );
 }
+
+// The target genuinely has edits, and the scope has work waiting that
+// nobody asked this command about. The permission to overwrite one
+// package's bytes does not narrow the plan those bytes are written by, so
+// the plan has to be narrowed too.
+#[test]
+#[allow(clippy::unwrap_used)]
+fn an_edited_target_leaves_the_scope_pending_work_alone() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path();
+    let project = project_with_two_skills(home);
+    assert!(kendex(home, &project, &["apply", "-y"]).status.success());
+
+    let gh = project.join(".claude/skills/gh/SKILL.md");
+    let lint = project.join(".claude/skills/lint/SKILL.md");
+    fs::write(&gh, "my gh edit").unwrap();
+    fs::write(&lint, "my lint edit").unwrap();
+    declare_pending_work(&project);
+    let notes = project.join(".claude/skills/notes/SKILL.md");
+
+    let output = kendex(home, &project, &["discard-edits", "skill", "gh"]);
+    let said = String::from_utf8_lossy(&output.stderr).into_owned()
+        + &String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{said}");
+
+    assert!(
+        fs::read_to_string(&gh).unwrap().contains("Upstream gh."),
+        "the package asked for came back: {said}"
+    );
+    assert!(
+        !notes.exists(),
+        "and installed a package nobody asked about: {said}"
+    );
+    assert_eq!(
+        fs::read_to_string(&lint).unwrap(),
+        "my lint edit",
+        "and took another package's edits"
+    );
+    assert!(
+        !said.contains("notes"),
+        "the line names one package: {said}"
+    );
+
+    // The record still knows both installs — a plan that forgot them would
+    // reinstall or sweep them on the next pass.
+    let listed = kendex(home, &project, &["list"]);
+    let table = String::from_utf8_lossy(&listed.stderr).into_owned()
+        + &String::from_utf8_lossy(&listed.stdout);
+    assert!(table.contains("gh") && table.contains("lint"), "{table}");
+}

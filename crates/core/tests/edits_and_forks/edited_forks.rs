@@ -314,30 +314,3 @@ fn a_fork_the_sealed_source_cannot_collect_offers_no_discard() {
     fs::write(deep.join("note.md"), "deep").unwrap();
     assert!(!row(&w).can_discard, "{:?}", row(&w));
 }
-
-// The one fact both discard exits rest on — the CLI's `discard-edits` and
-// the app's targeted apply. Each plans the whole scope carrying a
-// permission for one package, so this is what stands between "put this
-// package back" and "run whatever the scope had waiting".
-#[test]
-#[allow(clippy::unwrap_used)]
-fn edited_here_answers_for_the_package_asked_about() {
-    let w = world();
-    write_skill(&w.upstream, "gh", "Upstream gh.");
-    write_skill(&w.upstream, "lint", "Upstream lint.");
-    commit(&w.upstream, "one");
-    declare(
-        &w,
-        "[skills.gh]\nsource = \"cat\"\n\n[skills.lint]\nsource = \"cat\"\n",
-    );
-    sync_and_apply(&w);
-    let edited = |name: &str| {
-        kendex_core::engine::edited_here(&w.env, &w.scope, ItemKind::Skill, name).unwrap()
-    };
-
-    assert!(!edited("gh"), "nothing edited yet");
-    fs::write(skill_file(&w), "my gh edit").unwrap();
-    assert!(edited("gh"), "the edit this exit is for");
-    assert!(!edited("lint"), "a sibling's clean copy is not this edit");
-    assert!(!edited("nope"), "nothing is declared by that name");
-}

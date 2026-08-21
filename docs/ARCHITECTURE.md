@@ -119,11 +119,11 @@ lives in one capability table read by core and UI.
     runs before its first durable write — not merely before the apply
     it guards — and a rejected operation leaves manifest, lock, and
     install tree byte-identical. No failure path leaves persistent
-    state changed. A plan is always a scope's and a per-package option is
-    a permission inside it (`overwrite_edited_names`, `allow_unsafe`), so
-    a per-package command measures that its package needs the work
-    (`engine::edited_here`, `refuse_unmatched_grants`) before planning any
-    — or it applies what the scope had pending under one name. Output is
+    state changed. A plan is always a scope's, so a per-package command
+    measures that its package needs the work (`engine::edited_here`,
+    `refuse_unmatched_grants`) and restricts the plan to it (`only_names`)
+    — a per-package option is otherwise only a permission inside a plan
+    that installs and re-renders the rest under one name. Output is
     checked on the same side of the write: every rendering is read back
     through the target harness's own format rules inside plan preview,
     and one the harness's loader would reject is refused there, with the
