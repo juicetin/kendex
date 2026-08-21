@@ -46,7 +46,7 @@ export function SyncScopeCard({
 }) {
   const goToPackage = useNavStore((s) => s.goToPackage);
   const [applyOpen, setApplyOpen] = useState(false);
-  const { changes, conflicts } = reviewLists(view.drift);
+  const { changes, conflicts } = reviewLists(view.drift, view.heldBack);
   const unmanaged = mergeDriftRows(
     view.drift.filter((row) => row.state === "unmanaged"),
   );

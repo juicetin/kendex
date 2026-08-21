@@ -1,6 +1,6 @@
 use clap::Args;
 
-use kendex_core::engine::{PlanOptions, edited_here, plan_scope};
+use kendex_core::engine::{PlanOptions, edited_here, plan_scope, planned_declarations};
 use kendex_core::env::Env;
 use kendex_core::lock::{load as load_lock, lock_path};
 use kendex_core::manifest::{load_for_mutation, manifest_path};
@@ -45,10 +45,28 @@ pub fn run(env: &Env, args: DiscardArgs) -> CliResult {
         .entries
         .values()
         .any(|entry| entry.kind == kind && entry.name == args.name);
-    if !manifest.declared(kind).contains_key(&args.name) && !installed_here {
+    let declared = manifest.declared(kind).contains_key(&args.name);
+    if !declared && !installed_here {
         return Err(format!(
             "no {} named '{}' is installed in this scope",
             kind.name(),
+            args.name
+        )
+        .into());
+    }
+    // Installed here is not the same as wanted here. A dependency whose
+    // parent stopped requiring it, or a member a bundle dropped, keeps its
+    // lock entry and its edited files while the closure holds nothing to
+    // render over them — so the plan below would carry it forward untouched
+    // and the line at the end would say its content was restored.
+    let wanted = planned_declarations(env, &scope, &manifest)
+        .iter()
+        .any(|item| item.kind == kind && item.name == args.name);
+    if !declared && !wanted {
+        return Err(format!(
+            "{} '{}' is installed here but nothing needs it any more — there is no declared content to put it back to; remove it with 'kendex remove {}'",
+            kind.name(),
+            args.name,
             args.name
         )
         .into());

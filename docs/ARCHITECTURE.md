@@ -280,7 +280,11 @@ lives in one capability table read by core and UI.
   `stores/editor-held.ts` parks the copy in hand at the place it was read
   from, base included, and gives it back when that place is opened again.
   Both editing surfaces name what is parked — work that survives a move
-  and that nobody can see is the same loss one step later.
+  and that nobody can see is the same loss one step later. Parking only
+  ever keeps a copy nobody has ruled on: every operation that rules on a
+  draft outranks it and must reach the copy parked for the place it is
+  about, not only the one on screen — a discard destroys that copy, a save
+  settles it against the file it just wrote.
 - **A whole-manifest write carries the file it came from, and every other
   writer tells the editor.** A draft is a whole manifest, so a save landing
   after another writer puts the old file back. Two answers, failing

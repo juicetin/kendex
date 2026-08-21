@@ -2,6 +2,7 @@ import { commands, type Scope } from "@/bindings";
 import { type Draft, emptyDraft, toDraft } from "@/lib/editor-draft";
 import { sameScope, scopeKey } from "@/lib/scope";
 import { useEditorStore } from "./editor";
+import { dropHeld } from "./editor-held";
 import { manifestFold } from "./editor-order";
 
 // Every manifest read takes a ticket. Three readers overlap — one place
@@ -36,6 +37,14 @@ export const loadManifest = async (
   // outdated mark the place carries standing — so a save of the older
   // copy is still refused rather than quietly winning.
   const takes = () => opts?.discardEdits === true || !state().dirty;
+  // An instruction to throw typing away outranks parking, and it lands
+  // before anything is awaited: a move made while this read is in flight
+  // parks nothing, so the discarded edits cannot come back with it.
+  if (opts?.discardEdits === true)
+    useEditorStore.setState((current) => ({
+      held: dropHeld(current.held, scope),
+      ...(sameScope(current.scope, scope) ? { dirty: false } : {}),
+    }));
   const token = nextRead();
   // A read answers for the editor only when it reads the place the editor
   // is pointed at; one for somewhere else — the re-read a save ends with —

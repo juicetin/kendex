@@ -55,13 +55,19 @@ export const useUpdatesStore = create<UpdatesState>((set) => {
       checking += 1;
     }
     const mineCheck = checks;
+    // Whether a fetch was already running when this read began. A poll that
+    // started mid-fetch is reading the pre-fetch mirrors however long it
+    // takes to return, so asking what is in flight when it *lands* accepts
+    // exactly that poll once the fetch has finished — and puts the rows the
+    // person asked to replace back over the fetched ones.
+    const during = checking > 0;
     return fetched
       ? // Only a later fetch answers for one: a poll that started after it
         // is reading the older truth, whenever it happens to land.
         () => mineCheck === checks
-      : // And a poll lands only while it is the newest read and no fetch is
-        // on its way with a better answer.
-        () => mine === reads && checking === 0;
+      : // And a poll lands only while it is the newest read, with no fetch
+        // running when it started and none started since.
+        () => mine === reads && !during && mineCheck === checks;
   };
 
   const reload = async () => {
@@ -136,7 +142,10 @@ export const useUpdatesStore = create<UpdatesState>((set) => {
         }
       } finally {
         checking -= 1;
-        set({ checking: false });
+        // The spinner belongs to every fetch, not to whichever finishes
+        // first: two overlapping checks and the first to land would take it
+        // down with the other still running.
+        set({ checking: checking > 0 });
       }
     },
 

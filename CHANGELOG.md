@@ -96,9 +96,11 @@ changes carry a **Breaking** call-out with their migration note inline.
   that is not installed yet, since a package restored without what it needs
   cannot run — and leaves whatever else the project had waiting alone. It
   works on any installed package, including one installed because something
-  else required it or because a bundle carries it.
-  `kendex refresh --discard-edits` still does the whole scope, which is
-  what it is for.
+  else required it or because a bundle carries it — but not one nothing
+  needs any more, where there is no declared content to put back: that says
+  so and names `kendex remove` instead of reporting a restore that did not
+  happen. `kendex refresh --discard-edits` still does the whole scope, which
+  is what it is for.
 - Catalog authors can settle a reviewed safety finding:
   `kendex dismiss --catalog <dir> --reason intended '<token>'` records the
   decision in a committed `kendex-reviews.toml`, and `kendex check --catalog`
@@ -196,6 +198,12 @@ changes carry a **Breaking** call-out with their migration note inline.
 
 ### Fixed
 
+- Review no longer counts a standoff as work it can do. A package whose
+  files you edited, or whose copy is your own, has no button behind it —
+  its way out is on the package's own page — so it is no longer added to
+  "changes ready to apply" on Home. An install the safety check held back
+  is listed once, where its accept-or-dismiss decision is, instead of a
+  second time under a link to a page that cannot settle it.
 - Text you were typing is no longer thrown away by moving to another
   location. Opening a package in a different project, or picking another
   project on the Customize page, used to clear whatever was in the box

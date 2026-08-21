@@ -8,6 +8,7 @@ import {
 import { sameScope, scopeKey } from "@/lib/scope";
 import { useAuditStore } from "./audit";
 import { useEditorStore } from "./editor";
+import { settleHeld } from "./editor-held";
 import { named } from "./editor-scopes";
 import { useProblemsStore } from "./problems";
 import { useScanStore } from "./scan";
@@ -105,6 +106,15 @@ export const saveManifest = async (): Promise<void> => {
     return;
   }
   if (onScreen()) useEditorStore.setState({ error: null });
+  const written = response.data.base;
+  // The write landed on one place's file, so it settles that place's copy
+  // wherever that copy is. A move made while the write was away parks it,
+  // and a parked copy left carrying the base from before its own write has
+  // its next save refused — the person told to reload over typing that is
+  // already on disk.
+  useEditorStore.setState((current) => ({
+    held: settleHeld(current.held, scope, written, draft),
+  }));
   // What is on screen is what the file now holds, so it is no longer
   // unsaved — the Save bar comes down and the place chips come live. Only
   // for the copy that was written: typing that arrived while the write was
@@ -112,7 +122,6 @@ export const saveManifest = async (): Promise<void> => {
   // builds a new draft rather than mutating, so identity is that test, and
   // the re-read below leaves a newer draft alone for the same reason.
   if (onScreen()) {
-    const written = response.data.base;
     if (written === null) {
       // The write landed and the file could not be read back to say what
       // it is now. Nothing to carry, so the place is marked and the next
@@ -132,6 +141,11 @@ export const saveManifest = async (): Promise<void> => {
     // nothing was typed over it.
     if (useEditorStore.getState().draft === draft)
       useEditorStore.setState({ dirty: false });
+  } else if (written === null) {
+    // The same fact off screen: the file was written and could not be read
+    // back, so the place is marked and whatever is parked there asks for a
+    // reload when it is opened rather than writing blind.
+    useEditorStore.getState().outdate(scope);
   }
   // Re-read the place that was written, never whichever is open now, or
   // its saved manifest keeps the pre-save content and its mark with it.

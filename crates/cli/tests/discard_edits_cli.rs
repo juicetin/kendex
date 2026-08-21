@@ -307,3 +307,48 @@ fn a_dependency_nobody_declared_can_still_be_discarded() {
         "the discard the app offers is the one the CLI refused: {said}"
     );
 }
+
+/// The edge of the same rule. A dependency whose parent stopped requiring
+/// it keeps its lock entry and its edited files, and nothing in the closure
+/// can render over them — so accepting the target would print a line saying
+/// its content was restored over an edit still sitting on disk.
+#[test]
+#[allow(clippy::unwrap_used)]
+fn a_target_nothing_needs_any_more_says_so_instead_of_doing_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path();
+    let project = project_with_two_skills(home);
+    let catalog = home.join("catalog");
+    write(
+        &catalog,
+        "skills/gh/SKILL.md",
+        "---\nname: gh\ndescription: about gh\ndependencies:\n  required: [helper]\n---\nUpstream gh.\n",
+    );
+    skill(&catalog, "helper", "Upstream helper.");
+    assert!(kendex(home, &project, &["apply", "-y"]).status.success());
+
+    let helper = project.join(".claude/skills/helper/SKILL.md");
+    assert!(helper.is_file(), "the dependency is installed");
+    // gh stops requiring it: the lock entry and the files stay, the closure
+    // no longer holds anything for it.
+    skill(&catalog, "gh", "Upstream gh.");
+    fs::write(&helper, "my helper edit").unwrap();
+
+    let output = kendex(home, &project, &["discard-edits", "skill", "helper"]);
+    let said = String::from_utf8_lossy(&output.stderr).into_owned()
+        + &String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !output.status.success(),
+        "accepted a target it cannot discard: {said}"
+    );
+    assert!(said.contains("nothing needs it any more"), "{said}");
+    assert!(
+        said.contains("kendex remove helper"),
+        "and named no way out: {said}"
+    );
+    assert_eq!(
+        fs::read_to_string(&helper).unwrap(),
+        "my helper edit",
+        "the edit is still there, whatever was said about it"
+    );
+}

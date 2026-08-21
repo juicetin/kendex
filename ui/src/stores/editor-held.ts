@@ -2,6 +2,17 @@ import type { Scope } from "@/bindings";
 import type { Draft } from "@/lib/editor-draft";
 import { scopeKey } from "@/lib/scope";
 
+// What parking is allowed to do.
+//
+// Parking keeps a copy nobody has ruled on. A move between places is not a
+// ruling — the typing is still someone's, and still theirs to save — so it
+// survives the move. Every operation that does rule on a place's draft
+// outranks parking, and must reach the copy parked for that place and not
+// only the one on screen: `dropHeld` for an instruction to destroy it,
+// `settleHeld` for a write that landed on its file. The next operation that
+// comes to rule on a draft owes the same — park what nobody has ruled on,
+// never what someone has ruled against.
+
 /** Typing waiting at the place it was read from, with the base it was read
  *  against — so a file rewritten while it waited still refuses its save,
  *  the same refusal it would have met without the wait. */
@@ -21,6 +32,41 @@ interface Pointed {
   base: string | null;
   dirty: boolean;
   held: Held;
+}
+
+/** Throw away the copy parked at a place: the person said to destroy it.
+ *  Taken before the read that replaces it is awaited, so a move made in
+ *  that window parks nothing and cannot bring the edits back. */
+export function dropHeld(held: Held, scope: Scope): Held {
+  const key = scopeKey(scope);
+  if (!held[key]) return held;
+  const next = { ...held };
+  delete next[key];
+  return next;
+}
+
+/** Settle the copy parked at a place against a write that just landed
+ *  there. `saved` is the draft that went; `written` is what the file is
+ *  now, or null when it could not be read back. */
+export function settleHeld(
+  held: Held,
+  scope: Scope,
+  written: string | null,
+  saved: Draft,
+): Held {
+  const key = scopeKey(scope);
+  const waiting = held[key];
+  if (!waiting) return held;
+  const next = { ...held };
+  // The parked copy is the one that was written: it is on disk now, so it
+  // is not unsaved any more and opening its place reads the file.
+  if (waiting.draft === saved) delete next[key];
+  // Typing that arrived after the write left descends from it, so it takes
+  // that file's base or its own save is refused for a change it made
+  // itself. With no base to take, the caller marks the place instead.
+  else if (written !== null) next[key] = { ...waiting, base: written };
+  else return held;
+  return next;
 }
 
 /** Point the editor at another place.
