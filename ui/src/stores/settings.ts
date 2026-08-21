@@ -15,6 +15,10 @@ import { refusesForUnsaved } from "./unsaved-first";
 
 interface SettingsState extends ZoomSlice {
   settings: AppSettings | null;
+  /** A write to some project's kendex.toml is in flight from here. It is
+   *  one of the flags holding the Customize Save bar down: every writer of
+   *  that file belongs in that gate, and this store is one. */
+  busy: boolean;
   capabilities: CapabilityRow[];
   load: () => Promise<void>;
   setAppearance: (appearance: Appearance) => Promise<void>;
@@ -30,6 +34,7 @@ async function rescan() {
 }
 
 export const useSettingsStore = create<SettingsState>((set, get) => ({
+  busy: false,
   settings: null,
   capabilities: [],
   ...zoomActions(set, get),
@@ -168,6 +173,10 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
             // unsaved customization for it refuses this the way every
             // other writer of that file is refused.
             if (refusesForUnsaved({ scope: "project", root })) return;
+            // Down only once the editor has been told, below: clearing it
+            // any earlier leaves a window where a save passes the outdated
+            // check and writes the pre-hook file back over the declaration.
+            set({ busy: true });
             void commands
               .installDriftHook({ scope: "project", root })
               .then(async (result) => {
@@ -189,7 +198,8 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
                     message: result.error,
                   });
                 }
-              });
+              })
+              .finally(() => set({ busy: false }));
           },
         },
       });

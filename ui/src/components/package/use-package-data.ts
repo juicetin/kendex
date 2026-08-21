@@ -21,6 +21,7 @@ import { useMarketplacesStore } from "@/stores/marketplaces";
 import type { PackageView as OpenedAt, PackageRef } from "@/stores/nav";
 import { useProblemsStore } from "@/stores/problems";
 import { useScanStore } from "@/stores/scan";
+import { useSettingsStore } from "@/stores/settings";
 import { refusesForUnsaved } from "@/stores/unsaved-first";
 import { useUpdatesStore } from "@/stores/updates";
 
@@ -227,6 +228,14 @@ export function useManifestBusy(switching: boolean): boolean {
   const auditBusy = useAuditStore((s) => s.busy);
   const updatesBusy = useUpdatesStore((s) => s.busy);
   const marketBusy = useMarketplacesStore((s) => s.busy);
+  const settingsBusy = useSettingsStore((s) => s.busy);
   const saving = useEditorStore((s) => s.saving);
-  return auditBusy || switching || updatesBusy || marketBusy || saving;
+  return (
+    auditBusy ||
+    switching ||
+    updatesBusy ||
+    marketBusy ||
+    settingsBusy ||
+    saving
+  );
 }

@@ -10,6 +10,7 @@ const editor = vi.hoisted(() => ({
 }));
 const audit = vi.hoisted(() => ({ busy: false }));
 const market = vi.hoisted(() => ({ busy: false }));
+const settings = vi.hoisted(() => ({ busy: false, settings: null }));
 
 vi.mock("@/stores/editor", async (importOriginal) => {
   const mod = await importOriginal<typeof import("@/stores/editor")>();
@@ -30,6 +31,17 @@ vi.mock("@/stores/marketplaces", async (importOriginal) => {
       (selector?: (state: typeof market) => unknown) =>
         selector ? selector(market) : market,
       { getState: () => market },
+    ),
+  };
+});
+vi.mock("@/stores/settings", async (importOriginal) => {
+  const mod = await importOriginal<typeof import("@/stores/settings")>();
+  return {
+    ...mod,
+    useSettingsStore: Object.assign(
+      (selector?: (state: typeof settings) => unknown) =>
+        selector ? selector(settings) : settings,
+      { getState: () => settings },
     ),
   };
 });
@@ -57,6 +69,7 @@ const saveButton = (html: string): string => {
 beforeEach(() => {
   audit.busy = false;
   market.busy = false;
+  settings.busy = false;
   editor.state = {
     scope: { scope: "global" },
     draft: emptyDraft(),
@@ -102,6 +115,14 @@ describe("the Customize page's Save bar", () => {
   // writer like any other, and the gate names every writer or it names none.
   it("is held down while a marketplace write is in flight", () => {
     market.busy = true;
+    expect(saveButton(renderToStaticMarkup(<CustomizePage />))).toContain(
+      'disabled=""',
+    );
+  });
+
+  // Adding the session drift report writes a project's settings file too.
+  it("is held down while the drift report is being added", () => {
+    settings.busy = true;
     expect(saveButton(renderToStaticMarkup(<CustomizePage />))).toContain(
       'disabled=""',
     );
