@@ -205,6 +205,9 @@ changes carry a **Breaking** call-out with their migration note inline.
   which is what its buttons and badges have always meant.
 - Two projects whose folders share a name are told apart on Review, the way
   they already are in the Library and on a package's own page.
+- Taking back a dismissal or an acceptance now waits for unsaved
+  customization in that project, and holds the Customize Save button while
+  it runs, like every other change to a project's settings.
 - `kendex discard-edits` on a package whose source cannot be read says so
   and stops, instead of reporting "no edits to discard" while your edited
   files are still there. The app's discard says the same.

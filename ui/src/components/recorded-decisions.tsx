@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useState } from "react";
-import { toast } from "sonner";
 import type { DecisionsView, RecordedDecision } from "@/bindings";
 import { commands } from "@/bindings";
 import { ConfirmDialog } from "@/components/confirm-dialog";
@@ -12,7 +11,6 @@ import {
   decisionsErrorTitle,
   NO_LONGER_INSTALLED,
   noLongerApplies,
-  TAKEN_BACK_TOAST,
 } from "@/lib/copy-decisions";
 import {
   decisionDetail,
@@ -23,9 +21,6 @@ import {
 import { harnessName, kindLabel, scopeName } from "@/lib/labels";
 import { scopeKey } from "@/lib/scope";
 import { useAuditStore } from "@/stores/audit";
-import { manifestRewritten } from "@/stores/manifest-sync";
-import { useProblemsStore } from "@/stores/problems";
-import { refusesForUnsaved } from "@/stores/unsaved-first";
 
 // A hook keeps its full id here — event, matcher, script — because seven
 // hooks in one settings file all shorten to the same word, and a list of
@@ -68,7 +63,9 @@ export function RecordedDecisions() {
     errors: [],
   });
   const [revoking, setRevoking] = useState<RecordedDecision | null>(null);
-  const [busy, setBusy] = useState(false);
+  // The same flag every other writer of these files raises, so this list
+  // waits on their work as they wait on its.
+  const busy = useAuditStore((s) => s.busy);
 
   const load = useCallback(async () => {
     const response = await commands.listDecisions();
@@ -78,39 +75,14 @@ export function RecordedDecisions() {
     void load();
   }, [load]);
 
+  // The write lives in the audit store: it rewrites the same kendex.toml
+  // every other action there does, and a busy flag held in this component
+  // would be one the shared Save-bar gate cannot see.
   const revoke = async (row: RecordedDecision) => {
-    setBusy(true);
     try {
-      // Taking a decision back rewrites that place's kendex.toml.
-      if (refusesForUnsaved(row.scope)) return;
-      const response =
-        row.record.kind === "accepted"
-          ? await commands.revokeSafetyOverride(row.scope, row.key)
-          : await commands.revokeDismissal(
-              row.scope,
-              row.key,
-              row.record.fingerprint,
-              row.record.dismissedAt,
-            );
-      if (response.status === "ok") {
-        toast.success(
-          row.record.kind === "accepted"
-            ? `${row.name} is held back again`
-            : TAKEN_BACK_TOAST,
-        );
-        // Taking a decision back rewrites that place's kendex.toml, under
-        // the whole copy of it the Customize tab may be holding.
-        await manifestRewritten(row.scope);
-        await load();
-        await useAuditStore.getState().refresh({ force: true });
-      } else {
-        useProblemsStore.getState().showError({
-          title: "Couldn't take this decision back",
-          message: response.error,
-        });
-      }
+      await useAuditStore.getState().revokeDecision(row);
+      await load();
     } finally {
-      setBusy(false);
       setRevoking(null);
     }
   };

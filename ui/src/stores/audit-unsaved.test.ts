@@ -13,6 +13,8 @@ vi.mock("@/bindings", () => ({
     toggleItem: vi.fn(),
     removeItem: vi.fn(),
     dismissFindings: vi.fn(),
+    revokeDismissal: vi.fn(),
+    revokeSafetyOverride: vi.fn(),
   },
 }));
 
@@ -108,6 +110,36 @@ describe("a dismissal beside unsaved customization", () => {
     vi.clearAllMocks();
     await useAuditStore.getState().dismiss(globalScope, ["t"], "intended");
     expect(commands.dismissFindings).not.toHaveBeenCalled();
+    expect(useAuditStore.getState().busy).toBe(false);
+  });
+});
+
+// Taking a decision back rewrites the same file, so it runs through the
+// same funnel — the guard, the busy flag the Save bar watches, and the
+// telling — rather than keeping its own in a component.
+describe("taking a decision back", () => {
+  it("refuses while typing for that place waits behind another one", async () => {
+    useAuditStore.setState({ views: [], busy: false, error: null });
+    useEditorStore.setState({
+      scope: { scope: "project", root: "/work/vg" },
+      draft: null,
+      dirty: false,
+      held: {
+        global: {
+          scope: globalScope,
+          draft: { schema: 1, install: {} },
+          base: "read-earlier",
+        },
+      },
+    });
+    vi.clearAllMocks();
+    await useAuditStore.getState().revokeDecision({
+      scope: globalScope,
+      key: "skill:gh",
+      name: "gh",
+      record: { kind: "dismissed", fingerprint: "f", dismissedAt: "then" },
+    } as never);
+    expect(commands.revokeDismissal).not.toHaveBeenCalled();
     expect(useAuditStore.getState().busy).toBe(false);
   });
 });

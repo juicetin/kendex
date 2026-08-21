@@ -6,6 +6,7 @@ import {
   type DismissReason,
   type HarnessId,
   type ItemKind,
+  type RecordedDecision,
   type Scope,
 } from "@/bindings";
 import { adoptedToastLabel } from "@/lib/copy";
@@ -56,6 +57,10 @@ interface AuditState {
     tokens: string[],
     reason: DismissReason,
   ) => Promise<void>;
+  /** Take back an acceptance or a dismissal. It rewrites the place's
+   *  kendex.toml like every other action here, so it belongs here: a write
+   *  held in a component keeps its busy flag out of the shared gate. */
+  revokeDecision: (row: RecordedDecision) => Promise<void>;
 }
 
 /** How long an audit answers for before a visit pays for a fresh one. */
@@ -148,6 +153,27 @@ export const useAuditStore = create<AuditState>((set, get) => {
     // is written into this place's kendex.toml like every other decision, so
     // busy stays up — the Save bar with it — until the editor has been told
     // the copy it holds is stale.
+    revokeDecision: async (row) =>
+      run(
+        row.scope,
+        () =>
+          row.record.kind === "accepted"
+            ? commands.revokeSafetyOverride(row.scope, row.key)
+            : commands.revokeDismissal(
+                row.scope,
+                row.key,
+                row.record.fingerprint,
+                row.record.dismissedAt,
+              ),
+        {
+          title: "Couldn't take this decision back",
+          successMessage:
+            row.record.kind === "accepted"
+              ? `${row.name} is held back again`
+              : TAKEN_BACK_TOAST,
+        },
+      ),
+
     dismiss: async (scope, tokens, reason) => {
       // Settling a finding writes this place's kendex.toml like every other
       // action here, and went round the funnel that asks for them.

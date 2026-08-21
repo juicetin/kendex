@@ -146,6 +146,16 @@ for f in $(printf '%s\n' $files | grep -E '^ui/src/.*\.tsx?$' | grep -v '\.test\
     say "$f rewrites a manifest without refusing an unsaved draft first — call refusesForUnsaved(scope) before the write"
 done
 
+# A write to a place's kendex.toml belongs in a store. A component that
+# writes one holds its busy flag in component state, and a flag that
+# unmounts with the page cannot be part of the gate that holds the
+# Customize Save bar down — so the bar goes live while the file is moving.
+for f in $(printf '%s\n' $files | grep -E '^ui/src/.*\.tsx$' | grep -v '\.test\.'); do
+  [ -f "$f" ] || continue
+  grep -q 'manifestRewritten(' "$f" &&
+    say "$f rewrites a manifest from a component — move the write to a store, whose busy flag the shared gate can see"
+done
+
 # Structural invariants.
 [ "$(readlink .claude/CLAUDE.md 2>/dev/null)" = "../AGENTS.md" ] ||
   say ".claude/CLAUDE.md must be a symlink to ../AGENTS.md"
