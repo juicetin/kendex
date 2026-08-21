@@ -134,9 +134,15 @@ pub fn execute(env: &Env, plan: &Plan, fail_after: Option<usize>) -> Result<Appl
     Ok(ApplyOutcome {
         applied,
         recovered_first,
-        // Still under `_guard`: the last moment the file is provably the
-        // one this apply left. Its own failure is not this apply's — the
-        // ops are committed either way.
+        // Still under `_guard`, which is the closest this can get: the lock
+        // serialises kendex's own writers, so no other apply is between
+        // the write and this read. It does not serialise anything else —
+        // an editor saving kendex.toml in that window would be read here
+        // as though this apply had left it, and the base handed back would
+        // describe bytes this apply never wrote. Deriving it from the
+        // bytes the manifest op actually wrote is the way to close that,
+        // and it needs the executor to report them: KEN-513. Its own
+        // failure is not this apply's — the ops are committed either way.
         manifest_base: manifest_base(env, &plan.scope),
     })
 }
@@ -146,6 +152,11 @@ pub fn execute(env: &Env, plan: &Plan, fail_after: Option<usize>) -> Result<Appl
 /// `None` where they could not be read — every caller of this is past the
 /// point of undoing anything, so a read that fails costs the answer and
 /// never the apply.
+///
+/// "As it stands" is the honest phrasing: this reads the file rather than
+/// being told what was written, so it describes whatever is there now.
+/// Under kendex's own lock that is what this apply left; against a writer
+/// that does not take the lock it is not (KEN-513).
 pub(super) fn manifest_base(env: &Env, scope: &Scope) -> Option<crate::manifest::Base> {
     let path = crate::manifest::manifest_path(env, scope);
     match crate::fs::read_if_exists(&path) {
