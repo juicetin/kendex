@@ -6,7 +6,7 @@ use crate::env::Env;
 use crate::error::Result;
 use crate::lock::{Lock, LockFile, lock_path};
 use crate::manifest::{self, Manifest, ManifestFile};
-use crate::model::Scope;
+use crate::model::{ItemKind, Scope};
 
 pub mod adopt;
 mod adopt_shared;
@@ -280,6 +280,21 @@ fn prepend_rename_generation(env: &Env, scope: &Scope, ops: &mut Vec<PlannedOp>)
 /// unmanaged items; nothing is planned that would touch a legacy file.
 pub fn audit(env: &Env, scope: &Scope) -> Result<EngineReport> {
     plan_apply(env, scope, &PlanOptions::default())
+}
+
+/// Whether this package's installed files are held here as edited by hand
+/// — the fact behind the edited notice, the drift report's line, and a
+/// row's `can_discard`. Discarding is planned as a scope plan carrying a
+/// permission for one package, so a caller that does not ask this first
+/// applies whatever else the scope had pending under a line about this
+/// package. Absent, undeclared, and clean all answer false.
+pub fn edited_here(env: &Env, scope: &Scope, kind: ItemKind, name: &str) -> Result<bool> {
+    Ok(audit(env, scope)?.drift.iter().any(|row| {
+        row.kind == kind
+            && row.name == name
+            && row.state == DriftState::Conflict
+            && matches!(row.cause, Some(DriftCause::LocalEdit | DriftCause::Both))
+    }))
 }
 
 /// What a refresh would do: regenerate everything declared, and re-derive

@@ -55,9 +55,9 @@ lives in one capability table read by core and UI.
    apply ever wrote are the user's: an edited installation becomes a
    conflict naming its exits (keep it as a fork, or discard the edits),
    and no write, sweep, refusal, or re-shape touches it. Discarding is
-   explicit, and per package (`kendex discard-edits`) — the scope-wide
-   `refresh --discard-edits` is never one line's fix. The anchor is the
-   lock's rendered hash — what apply last put on disk — and a
+   explicit, and per package (`kendex discard-edits`) wherever one line
+   names it. The anchor is the lock's rendered hash — what apply last put
+   on disk — and a
    record that cannot prove which bytes are whose holds too: one
    conflict, never one silent loss. A fork's bytes are held the same way;
    only its exits differ — keeping it as a fork is done, so the conflict
@@ -119,11 +119,15 @@ lives in one capability table read by core and UI.
     runs before its first durable write — not merely before the apply
     it guards — and a rejected operation leaves manifest, lock, and
     install tree byte-identical. No failure path leaves persistent
-    state changed. Output is checked on the same side of the write:
-    every rendering is read back through the target harness's own
-    format rules inside plan preview, and one the harness's loader
-    would reject is refused there, with the fix, for that harness
-    alone.
+    state changed. A plan is always a scope's and a per-package option is
+    a permission inside it (`overwrite_edited_names`, `allow_unsafe`), so
+    a per-package command measures that its package needs the work
+    (`engine::edited_here`, `refuse_unmatched_grants`) before planning any
+    — or it applies what the scope had pending under one name. Output is
+    checked on the same side of the write: every rendering is read back
+    through the target harness's own format rules inside plan preview,
+    and one the harness's loader would reject is refused there, with the
+    fix, for that harness alone.
 12. Verification compares content, not provenance. Installed artifacts
     are re-hashed against what they should be; a matching lock entry
     alone never reports OK, and an artifact kendex cannot compare is

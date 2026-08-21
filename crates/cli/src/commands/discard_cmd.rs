@@ -1,6 +1,6 @@
 use clap::Args;
 
-use kendex_core::engine::{PlanOptions, plan_scope};
+use kendex_core::engine::{PlanOptions, edited_here, plan_scope};
 use kendex_core::env::Env;
 use kendex_core::lock::{load as load_lock, lock_path};
 use kendex_core::manifest::{load_for_mutation, manifest_path};
@@ -33,6 +33,28 @@ pub fn run(env: &Env, args: DiscardArgs) -> CliResult {
     let filter = ScopeFilter::resolve(args.scope.as_deref(), args.global, ScopeFilter::Project)?;
     let scope = resolve_scopes(env, filter)?.remove(0);
     let manifest = load_for_mutation(&manifest_path(env, &scope))?.ok_or("no manifest")?;
+    // A name this scope never declared is a mistake worth saying out loud,
+    // not a quiet success that ran a scope's pending work under it.
+    if !manifest.declared(kind).contains_key(&args.name) {
+        return Err(format!(
+            "no {} named '{}' is declared in this scope",
+            kind.name(),
+            args.name
+        )
+        .into());
+    }
+    // The plan below is the scope's, and the permission it carries is this
+    // package's alone: with no edit to overwrite, the permission does
+    // nothing and executing would apply whatever else the scope had
+    // pending under a line saying this package was restored.
+    if !edited_here(env, &scope, kind, &args.name)? {
+        say(&format!(
+            "{} '{}' has no edits to discard — nothing was applied",
+            kind.name(),
+            args.name
+        ));
+        return Ok(());
+    }
     let lock = load_lock(&lock_path(env, &scope))?;
     let report = plan_scope(
         env,
@@ -44,14 +66,6 @@ pub fn run(env: &Env, args: DiscardArgs) -> CliResult {
             ..PlanOptions::default()
         },
     )?;
-    if report.plan.is_empty() {
-        say(&format!(
-            "{} '{}' has no edits to discard",
-            kind.name(),
-            args.name
-        ));
-        return Ok(());
-    }
     for op in &report.plan.ops {
         say(&format!("  - {}", op.description));
     }

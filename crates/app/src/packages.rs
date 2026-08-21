@@ -214,6 +214,12 @@ pub fn apply_discard_edits(
         apply::execute(&env, &report.plan, None).map_err(|e| e.to_string())?;
         return Ok(view(&env, &scope));
     }
+    // The plan below is the scope's, and the permission it carries is this
+    // package's alone: with no edit to overwrite, executing it would apply
+    // whatever else the scope had pending under an action about this one.
+    if !engine::edited_here(&env, &scope, kind, &name).map_err(|e| e.to_string())? {
+        return Ok(view(&env, &scope));
+    }
     let manifest = manifest::load_for_mutation(&manifest::manifest_path(&env, &scope))
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "no manifest".to_owned())?;

@@ -37,7 +37,8 @@ fn skill(catalog: &Path, name: &str, body: &str) {
 }
 
 /// A project holding two skills from a local catalog, installed as copies
-/// so an edit lives in the installation rather than in the catalog.
+/// so an edit lives in the installation rather than in the catalog. The
+/// catalog also offers `notes`, which nothing declares yet.
 #[allow(clippy::unwrap_used)]
 fn project_with_two_skills(home: &Path) -> PathBuf {
     let project = home.join("dev/app");
@@ -46,6 +47,7 @@ fn project_with_two_skills(home: &Path) -> PathBuf {
     write(&catalog, "kendex.toml", "[catalog]\n");
     skill(&catalog, "gh", "Upstream gh.");
     skill(&catalog, "lint", "Upstream lint.");
+    skill(&catalog, "notes", "Upstream notes.");
     write(
         &project,
         "kendex.toml",
@@ -55,6 +57,17 @@ fn project_with_two_skills(home: &Path) -> PathBuf {
         ),
     );
     project
+}
+
+/// Work the scope has waiting that this command was not asked about: a
+/// third skill declared after the install, so the scope's plan is not empty
+/// however clean the named package is.
+#[allow(clippy::unwrap_used)]
+fn declare_pending_work(project: &Path) {
+    let manifest = project.join("kendex.toml");
+    let mut text = fs::read_to_string(&manifest).unwrap();
+    text.push_str("\n[skills.notes]\nsource = \"cat\"\n");
+    fs::write(&manifest, text).unwrap();
 }
 
 #[test]
@@ -124,5 +137,87 @@ fn refresh_with_discard_edits_is_the_whole_scope() {
             .unwrap()
             .contains("Upstream lint."),
         "the scope-wide flag takes every edit — the reason it is not a fix line"
+    );
+}
+
+// The command names one package, so it acts on one package or on nothing.
+// A scope always has other work waiting sooner or later, and a plan built
+// to carry this package's permission carries that work too — executing it
+// under a line saying this package was restored spends the one on the
+// other.
+#[test]
+#[allow(clippy::unwrap_used)]
+fn a_clean_target_applies_nothing_even_with_work_waiting() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path();
+    let project = project_with_two_skills(home);
+    assert!(kendex(home, &project, &["apply", "-y"]).status.success());
+
+    let lint = project.join(".claude/skills/lint/SKILL.md");
+    fs::write(&lint, "my lint edit").unwrap();
+    declare_pending_work(&project);
+    let notes = project.join(".claude/skills/notes/SKILL.md");
+    assert!(!notes.exists(), "the waiting work has not run yet");
+
+    // gh is clean: there is nothing here to discard.
+    let output = kendex(home, &project, &["discard-edits", "skill", "gh"]);
+    let said = String::from_utf8_lossy(&output.stderr).into_owned()
+        + &String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{said}");
+    assert!(said.contains("no edits to discard"), "{said}");
+    assert!(
+        !notes.exists(),
+        "a clean target ran the scope's waiting work: {said}"
+    );
+    assert_eq!(
+        fs::read_to_string(&lint).unwrap(),
+        "my lint edit",
+        "and took another package's edits with it"
+    );
+}
+
+/// Declared but never installed reads the same way: there is no edit here,
+/// so there is nothing to put back.
+#[test]
+#[allow(clippy::unwrap_used)]
+fn a_target_with_no_installation_applies_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path();
+    let project = project_with_two_skills(home);
+    assert!(kendex(home, &project, &["apply", "-y"]).status.success());
+    fs::write(project.join(".claude/skills/lint/SKILL.md"), "my lint edit").unwrap();
+    declare_pending_work(&project);
+
+    let notes = project.join(".claude/skills/notes/SKILL.md");
+    let output = kendex(home, &project, &["discard-edits", "skill", "notes"]);
+    let said = String::from_utf8_lossy(&output.stderr).into_owned()
+        + &String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{said}");
+    assert!(said.contains("no edits to discard"), "{said}");
+    assert!(!notes.exists(), "nothing was installed under it: {said}");
+}
+
+/// A name this scope never declared is a mistake, and saying so is better
+/// than a success line over work the caller never asked for.
+#[test]
+#[allow(clippy::unwrap_used)]
+fn an_undeclared_target_refuses_and_applies_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path();
+    let project = project_with_two_skills(home);
+    assert!(kendex(home, &project, &["apply", "-y"]).status.success());
+    fs::write(project.join(".claude/skills/lint/SKILL.md"), "my lint edit").unwrap();
+    declare_pending_work(&project);
+
+    let notes = project.join(".claude/skills/notes/SKILL.md");
+    let output = kendex(home, &project, &["discard-edits", "skill", "nope"]);
+    let said = String::from_utf8_lossy(&output.stderr).into_owned()
+        + &String::from_utf8_lossy(&output.stdout);
+    assert!(!output.status.success(), "{said}");
+    assert!(said.contains("is declared"), "{said}");
+    assert!(!notes.exists(), "nothing ran under the wrong name: {said}");
+    assert_eq!(
+        fs::read_to_string(project.join(".claude/skills/lint/SKILL.md")).unwrap(),
+        "my lint edit"
     );
 }
