@@ -443,6 +443,27 @@ assert_eq "$rc" "2" "a git option before commit still reaches the lanes"
 aimed_at "git log --oneline"
 assert_eq "$rc" "0" "a command that is not a commit is left alone"
 
+# A path with a space has to be quoted, and JSON escapes those quotes. A
+# reader that stops at the first quote sees `git -C \` and finds no commit,
+# so every lane below passes a command it never read.
+aimed_at "git -C \\\"$REPO_G\\\" commit -m test"
+assert_eq "$rc" "2" "git -C with a quoted path still reaches the lanes"
+
+aimed_at "cd \\\"$REPO_G\\\" && git commit -m test"
+assert_eq "$rc" "2" "a quoted cd prefix still reaches the lanes"
+
+# A payload carrying no command is not a commit; one carrying a command the
+# decoder cannot recover would otherwise run every lane on an empty string.
+set +e
+out=$(printf '{"note":"about to commit"}' | bash "$HOOK" 2>/dev/null); rc=$?
+set -e
+assert_eq "$rc" "0" "a payload with no command at all is left alone"
+
+set +e
+out=$(printf '{"tool_input":{"command":' | bash "$HOOK" 2>/dev/null); rc=$?
+set -e
+assert_eq "$rc" "2" "a command the decoder cannot recover is refused"
+
 echo
 printf 'pass: %d   fail: %d\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]

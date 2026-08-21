@@ -10,7 +10,37 @@
 set -euo pipefail
 
 INPUT=$(cat)
-COMMAND=$(echo "$INPUT" | grep -o '"command"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed 's/.*"command"[[:space:]]*:[[:space:]]*"//;s/"$//' 2>/dev/null || true)
+# The payload is JSON, and a quoted path — `git -C "$repo" commit`, which is
+# what a path with a space requires — arrives with its quotes escaped. A
+# reader that stops at the first `"` sees `git -C \` and finds no commit,
+# so every check below passes a command it never looked at.
+# `block-repo-copy.sh` decodes the same field the same way.
+COMMAND=""
+decoded=0
+if command -v jq >/dev/null 2>&1; then
+  # jq's own exit status decides: 2 means it could not read the payload at
+  # all, and a swallowed 2 would leave COMMAND empty and every lane below
+  # skipped on a commit nobody inspected.
+  if COMMAND=$(printf '%s' "$INPUT" | jq -r '.tool_input.command // .command // ""' 2>/dev/null); then
+    decoded=1
+  fi
+fi
+if [ "$decoded" -eq 0 ]; then
+  COMMAND=$(printf '%s' "$INPUT" \
+    | grep -oE '"command"[[:space:]]*:[[:space:]]*"(\\.|[^"\\])*"' \
+    | head -1 \
+    | sed 's/.*"command"[[:space:]]*:[[:space:]]*"//; s/"$//' \
+    | sed 's/\\n/ /g; s/\\t/ /g; s/\\"/"/g; s/\\\\/\\/g') || COMMAND=""
+fi
+
+# A payload carrying no command is not a commit and passes; one that carries
+# a command the decoder could not recover is refused, because the checks
+# below would otherwise run on an empty string and report success for a
+# commit they never saw. `block-repo-copy.sh` draws the same line.
+if [ -z "$COMMAND" ] && printf '%s' "$INPUT" | grep -q '"command"[[:space:]]*:'; then
+  echo "pre-commit-check: could not read the command out of the hook payload" >&2
+  exit 2
+fi
 
 # Only relevant for git commit commands. `git` and `commit` are matched with
 # git's own options allowed between them: `git -C <path> commit` is how a
@@ -32,6 +62,12 @@ TARGET_DIR=$(echo "$COMMAND" | sed -n 's/.*git[[:space:]]\+-C[[:space:]]\+\([^[:
 if [ -z "$TARGET_DIR" ]; then
   TARGET_DIR=$(echo "$COMMAND" | sed -n 's/^[[:space:]]*cd[[:space:]]\+\([^[:space:]]\+\)[[:space:]]*&&.*/\1/p' | head -1)
 fi
+# A decoded path keeps the quotes it was written with, and no directory is
+# named `"/repo"`.
+TARGET_DIR=${TARGET_DIR%\"}
+TARGET_DIR=${TARGET_DIR#\"}
+TARGET_DIR=${TARGET_DIR%\'}
+TARGET_DIR=${TARGET_DIR#\'}
 if [ -n "$TARGET_DIR" ] && [ -d "$TARGET_DIR" ]; then
   cd "$TARGET_DIR" || exit 0
 fi

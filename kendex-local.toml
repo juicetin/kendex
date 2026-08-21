@@ -417,7 +417,7 @@ reviewer-safety = { color = "red", model = "inherit", deny-tools = ["subagent", 
 reviewer-security = { color = "red", model = "inherit", deny-tools = ["subagent", "get_subagent_result", "steer_subagent", "stop_subagent", "delegate_subagent", "question", "tasks_write"], allowed-subagents = [], pane = false }
 reviewer-test = { color = "blue", model = "inherit", deny-tools = ["subagent", "get_subagent_result", "steer_subagent", "stop_subagent", "delegate_subagent", "question", "tasks_write"], allowed-subagents = [], pane = false }
 rust = { color = "orange", model = "inherit", deny-tools = ["subagent", "get_subagent_result", "steer_subagent", "stop_subagent", "question"], allowed-subagents = ["scout"], pane = true }
-scout = { color = "cyan", model = "openai-codex/gpt-5.5:medium", deny-tools = ["subagent", "get_subagent_result", "steer_subagent", "stop_subagent", "delegate_subagent", "question"], allowed-subagents = [], pane = false }
+scout = { color = "cyan", model = "openai-codex/gpt-5.5", deny-tools = ["subagent", "get_subagent_result", "steer_subagent", "stop_subagent", "delegate_subagent", "question"], allowed-subagents = [], pane = false }
 tpm = { color = "blue", model = "inherit", deny-tools = ["subagent", "get_subagent_result", "steer_subagent", "stop_subagent", "delegate_subagent", "question"], allowed-subagents = [], pane = false }
 
 [skill-instructions]
