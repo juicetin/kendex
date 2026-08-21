@@ -181,3 +181,69 @@ fn a_plan_for_one_package_records_no_other_packages_additions() {
         "the manifest gained a skill nothing installed: {after:?}"
     );
 }
+
+/// "One package" is the package and what it needs. A discard whose source
+/// has since declared a required dependency restores the package; skipping
+/// the dependency would leave it unable to run, and the command would say
+/// it worked — worse than doing too much, because nobody is told.
+#[test]
+#[allow(clippy::unwrap_used)]
+fn a_plan_for_one_package_installs_what_that_package_requires() {
+    let w = world();
+    write_skill(&w.upstream, "gh", "Upstream gh.");
+    write_skill(&w.upstream, "lint", "Upstream lint.");
+    commit(&w.upstream, "one");
+    declare(
+        &w,
+        "[skills.gh]\nsource = \"cat\"\n\n[skills.lint]\nsource = \"cat\"\n",
+    );
+    sync_and_apply(&w);
+    fs::write(skill_file(&w), "my gh edit").unwrap();
+
+    // Upstream gives gh a dependency it did not have when it was installed.
+    let gh = w.upstream.join("skills/gh/SKILL.md");
+    fs::write(
+        &gh,
+        "---\nname: gh\ndescription: about gh\ndependencies:\n  required: [helper]\n---\nUpstream gh.\n",
+    )
+    .unwrap();
+    write_skill(&w.upstream, "helper", "Helper.");
+    commit(&w.upstream, "two");
+    let loaded = manifest::load_for_mutation(&manifest::manifest_path(&w.env, &w.scope))
+        .unwrap()
+        .unwrap();
+    kendex_core::remote::sync_sources(&w.env, &loaded).unwrap();
+
+    let one = (ItemKind::Skill, "gh".to_owned());
+    let lock = load_lock(&lock_path(&w.env, &w.scope)).unwrap();
+    let report = plan_scope(
+        &w.env,
+        &w.scope,
+        &loaded,
+        &lock,
+        &PlanOptions {
+            overwrite_edited_names: Some(vec![one.clone()]),
+            only_names: Some(vec![one]),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    apply::execute(&w.env, &report.plan, None).unwrap();
+
+    let helper = w.home.join("app/.agents/skills/helper/SKILL.md");
+    assert!(
+        helper.is_file(),
+        "the package was restored without what it requires"
+    );
+    assert!(
+        fs::read_to_string(skill_file(&w))
+            .unwrap()
+            .contains("Upstream gh."),
+        "and the package itself came back"
+    );
+    // Still one package's worth of work: the sibling is untouched.
+    assert_eq!(
+        fs::read_to_string(w.home.join("app/.agents/skills/lint/SKILL.md")).unwrap(),
+        fs::read_to_string(w.upstream.join("skills/lint/SKILL.md")).unwrap(),
+    );
+}

@@ -33,11 +33,21 @@ pub fn run(env: &Env, args: DiscardArgs) -> CliResult {
     let filter = ScopeFilter::resolve(args.scope.as_deref(), args.global, ScopeFilter::Project)?;
     let scope = resolve_scopes(env, filter)?.remove(0);
     let manifest = load_for_mutation(&manifest_path(env, &scope))?.ok_or("no manifest")?;
-    // A name this scope never declared is a mistake worth saying out loud,
-    // not a quiet success that ran a scope's pending work under it.
-    if !manifest.declared(kind).contains_key(&args.name) {
+    let lock = load_lock(&lock_path(env, &scope))?;
+    // A name this scope has nothing by is a mistake worth saying out loud,
+    // not a quiet success that ran a scope's pending work under it. What
+    // counts is what this place installs, not what it declares by name: a
+    // bundle member and a required dependency are installed here and can be
+    // discarded here, and the app has always offered exactly that. A guard
+    // reading declarations alone refuses the command for packages it should
+    // do its work on.
+    let installed_here = lock
+        .entries
+        .values()
+        .any(|entry| entry.kind == kind && entry.name == args.name);
+    if !manifest.declared(kind).contains_key(&args.name) && !installed_here {
         return Err(format!(
-            "no {} named '{}' is declared in this scope",
+            "no {} named '{}' is installed in this scope",
             kind.name(),
             args.name
         )
@@ -55,7 +65,6 @@ pub fn run(env: &Env, args: DiscardArgs) -> CliResult {
         ));
         return Ok(());
     }
-    let lock = load_lock(&lock_path(env, &scope))?;
     let report = plan_scope(
         env,
         &scope,

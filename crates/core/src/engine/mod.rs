@@ -123,8 +123,11 @@ pub fn plan_scope(
     let mut written = tree_plan::Written::default();
     let mut config_edits = config_edits::ConfigEditPlan::default();
 
-    // Every pass below that writes or removes, and what each does with
-    // `only_names` — a plan restricted to some packages. Asked, in order:
+    // Every pass below that writes or removes, and what each does with a
+    // restricted plan. They ask `DesiredState::acts_on`, never `only_names`
+    // directly: "one package" means that package and everything it needs,
+    // resolved once against the expansion, so no two passes can disagree
+    // about it. Asked, in order:
     // `plan_items` (writes for the named items, others carried forward),
     // `plan_settings_seed` (seeds only what the named packages ship),
     // `stale_emitted` (sweeps only their old paths), `plan_refusals` (takes
@@ -135,7 +138,10 @@ pub fn plan_scope(
     // always runs. What it writes *for* packages does not: an agent's
     // upstream skill additions are merged in `desired_state`, which leaves
     // out everything a restricted plan will not render, so the file never
-    // records an install that did not happen.
+    // records an install that did not happen. That and the closure above
+    // are the same rule from both ends — a restricted plan installs
+    // everything the named package needs, and records exactly what it
+    // installed.
     //
     // `orphans` is not asked, deliberately: it removes only under
     // `remove_orphans` or `sweep_unneeded` — a verb asking for exactly
@@ -166,20 +172,19 @@ pub fn plan_scope(
         &mut written,
     )?;
 
-    plan_settings_seed(scope, &state, options, &mut new_lock, &mut ops, &mut drift)?;
+    plan_settings_seed(scope, &state, &mut new_lock, &mut ops, &mut drift)?;
 
     // Trash ops all pass one guard: writes for this pass are already
     // planned, so anything still wanted is known, and no path goes to the
     // trash twice.
     let mut guard = removal::TrashGuard::new(&state.items);
-    removal::stale_emitted(&state, lock, options, &mut guard, &mut ops)?;
+    removal::stale_emitted(&state, lock, &mut guard, &mut ops)?;
 
     let refused_keys = plan_pass::plan_refusals(
         env,
         scope,
         lock,
         &state,
-        options,
         &mut guard,
         &mut drift,
         &mut ops,

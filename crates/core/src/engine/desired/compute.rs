@@ -63,6 +63,7 @@ fn compute(
     // its items pin different revisions.
     let mut reviews: BTreeMap<PathBuf, BTreeMap<String, crate::quality::reviews::SafetyReview>> =
         BTreeMap::new();
+    state.acting = acting(options, &expansion);
     let collisions = crate::engine::catalog::Collisions::find(&expansion, &mut state);
 
     for kind in crate::engine::expansion::PLANNED_KINDS {
@@ -120,7 +121,7 @@ fn compute(
                 harnesses,
                 reasons: &reasons,
                 author_review,
-                planned: options.acts_on(kind, name),
+                planned: state.acts_on(kind, name),
             };
             let outcome = match kind {
                 ItemKind::Skill => desired_skill(&ctx, &mut state),
@@ -165,6 +166,48 @@ fn compute(
         state.manifest_update = Some(updated_manifest);
     }
     Ok(state)
+}
+
+/// Which items a restricted plan acts on: the packages it names, and
+/// everything those packages require, however far down.
+///
+/// The literal pair is too tight the moment a package needs something. A
+/// discard whose refreshed source newly declares a dependency would restore
+/// the package, skip the dependency, and report success — leaving the
+/// package unable to run, which is worse than doing too much, because the
+/// person is told it worked.
+///
+/// A bundle member is not in it: a bundle carries its members, no package
+/// requires them, and a command about one package has no business
+/// installing what a bundle happens to bring.
+fn acting(
+    options: &PlanOptions,
+    expansion: &crate::engine::expansion::Expansion,
+) -> Option<BTreeSet<(ItemKind, String)>> {
+    let mut acting: BTreeSet<(ItemKind, String)> =
+        options.only_names.as_ref()?.iter().cloned().collect();
+    // The graph is small and shallow; walk it until nothing new is needed.
+    loop {
+        let mut grew = false;
+        for ((kind, name, _), reasons) in expansion.every_reason() {
+            if acting.contains(&(*kind, name.clone())) {
+                continue;
+            }
+            let needed = reasons.iter().any(|reason| match reason {
+                crate::lock::Reason::RequiredBy { by } => {
+                    acting.contains(&(by.kind, by.name.clone()))
+                }
+                _ => false,
+            });
+            if needed {
+                acting.insert((*kind, name.clone()));
+                grew = true;
+            }
+        }
+        if !grew {
+            return Some(acting);
+        }
+    }
 }
 
 /// Why each of an item's installations is wanted, as the closure derived it.

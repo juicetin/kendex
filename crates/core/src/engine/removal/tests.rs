@@ -74,11 +74,22 @@ fn moved(old: &std::path::Path, new: &std::path::Path) -> (desired::DesiredState
     )
 }
 
+/// The sweep, for a plan acting on exactly these items — `None` for a plan
+/// acting on everything, which is what an unrestricted one does.
 #[allow(clippy::unwrap_used)]
-fn swept(state: &desired::DesiredState, lock: &Lock, options: &PlanOptions) -> usize {
+fn swept(
+    state: &desired::DesiredState,
+    lock: &Lock,
+    acting: Option<Vec<(ItemKind, String)>>,
+) -> usize {
+    let state = desired::DesiredState {
+        items: state.items.clone(),
+        acting: acting.map(|names| names.into_iter().collect()),
+        ..Default::default()
+    };
     let mut guard = TrashGuard::new(&state.items);
     let mut ops = Vec::new();
-    stale_emitted(state, lock, options, &mut guard, &mut ops).unwrap();
+    stale_emitted(&state, lock, &mut guard, &mut ops).unwrap();
     ops.len()
 }
 
@@ -95,16 +106,13 @@ fn a_restricted_plan_sweeps_nothing_for_a_package_it_does_not_name() {
     let (state, lock) = moved(&old, &tmp.path().join("skills/ship__command"));
 
     // The control: unrestricted, the path it left is swept.
-    assert_eq!(swept(&state, &lock, &PlanOptions::default()), 1);
+    assert_eq!(swept(&state, &lock, None), 1);
 
     assert_eq!(
         swept(
             &state,
             &lock,
-            &PlanOptions {
-                only_names: Some(vec![(ItemKind::Skill, "notes".to_owned())]),
-                ..PlanOptions::default()
-            },
+            Some(vec![(ItemKind::Skill, "notes".to_owned())]),
         ),
         0,
         "a plan for another package swept this one's path"
@@ -114,10 +122,7 @@ fn a_restricted_plan_sweeps_nothing_for_a_package_it_does_not_name() {
         swept(
             &state,
             &lock,
-            &PlanOptions {
-                only_names: Some(vec![(ItemKind::Command, "ship".to_owned())]),
-                ..PlanOptions::default()
-            },
+            Some(vec![(ItemKind::Command, "ship".to_owned())])
         ),
         1
     );

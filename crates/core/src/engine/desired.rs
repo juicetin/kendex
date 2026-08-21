@@ -96,6 +96,13 @@ pub struct Refused {
 #[derive(Debug, Default)]
 pub struct DesiredState {
     pub items: Vec<Desired>,
+    /// Which items this plan acts on at all, where a caller restricted it
+    /// to some packages (`PlanOptions::only_names`) — `None` when it did
+    /// not. Resolved once against the expansion, so it is the named
+    /// packages *and everything they need*: a command that restores a
+    /// package and leaves the dependency that package requires uninstalled
+    /// has not done what it said, and says it worked.
+    pub(super) acting: Option<BTreeSet<(ItemKind, String)>>,
     /// Sources that could not be read (pending remotes, missing paths) and
     /// declared items the source no longer carries.
     pub notes: Vec<String>,
@@ -129,6 +136,17 @@ pub struct DesiredState {
 }
 
 impl DesiredState {
+    /// Whether this plan writes or removes for this item at all. Every pass
+    /// that touches disk asks here rather than reading `only_names`, so the
+    /// closure is resolved in one place and they cannot disagree about what
+    /// "one package" means.
+    pub(super) fn acts_on(&self, kind: ItemKind, name: &str) -> bool {
+        match &self.acting {
+            Some(acting) => acting.contains(&(kind, name.to_owned())),
+            None => true,
+        }
+    }
+
     /// A declaration whose source item cannot be parsed. Un-marking it keeps
     /// what it already installed out of the orphan sweep: a source file
     /// someone broke this morning must never uninstall a working artifact.

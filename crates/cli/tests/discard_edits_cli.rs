@@ -214,7 +214,7 @@ fn an_undeclared_target_refuses_and_applies_nothing() {
     let said = String::from_utf8_lossy(&output.stderr).into_owned()
         + &String::from_utf8_lossy(&output.stdout);
     assert!(!output.status.success(), "{said}");
-    assert!(said.contains("is declared"), "{said}");
+    assert!(said.contains("is installed"), "{said}");
     assert!(!notes.exists(), "nothing ran under the wrong name: {said}");
     assert_eq!(
         fs::read_to_string(project.join(".claude/skills/lint/SKILL.md")).unwrap(),
@@ -270,4 +270,40 @@ fn an_edited_target_leaves_the_scope_pending_work_alone() {
     let table = String::from_utf8_lossy(&listed.stderr).into_owned()
         + &String::from_utf8_lossy(&listed.stdout);
     assert!(table.contains("gh") && table.contains("lint"), "{table}");
+}
+
+/// A package installed here because something else needed it is a package
+/// installed here. The app has always offered its discard; a guard reading
+/// declarations alone refused the command for exactly the packages a person
+/// is most likely to have edited without declaring.
+#[test]
+#[allow(clippy::unwrap_used)]
+fn a_dependency_nobody_declared_can_still_be_discarded() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path();
+    let project = project_with_two_skills(home);
+    // gh requires helper, which nothing declares.
+    let catalog = home.join("catalog");
+    write(
+        &catalog,
+        "skills/gh/SKILL.md",
+        "---\nname: gh\ndescription: about gh\ndependencies:\n  required: [helper]\n---\nUpstream gh.\n",
+    );
+    skill(&catalog, "helper", "Upstream helper.");
+    assert!(kendex(home, &project, &["apply", "-y"]).status.success());
+
+    let helper = project.join(".claude/skills/helper/SKILL.md");
+    assert!(helper.is_file(), "the dependency is installed");
+    fs::write(&helper, "my helper edit").unwrap();
+
+    let output = kendex(home, &project, &["discard-edits", "skill", "helper"]);
+    let said = String::from_utf8_lossy(&output.stderr).into_owned()
+        + &String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{said}");
+    assert!(
+        fs::read_to_string(&helper)
+            .unwrap()
+            .contains("Upstream helper."),
+        "the discard the app offers is the one the CLI refused: {said}"
+    );
 }

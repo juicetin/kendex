@@ -127,11 +127,13 @@ pub struct PlanOptions {
     /// "discard" the app offers, which must never take a neighbour's
     /// edits with it, even one that shares a name across kinds.
     pub overwrite_edited_names: Option<Vec<(ItemKind, String)>>,
-    /// Plan for these items only. Every other declared item is carried
-    /// forward exactly as the lock records it — nothing written for it and
-    /// nothing of its taken away, by any pass: the item writes, the sweep
-    /// of a path an earlier install left, and the removal a safety refusal
-    /// would make. A plan is always the scope's, so a command naming one
+    /// Plan for these items only — them and everything they need, which
+    /// `DesiredState` resolves against the expansion and every pass then
+    /// asks through `DesiredState::acts_on`. Every other declared item is
+    /// carried forward exactly as the lock records it: nothing written for
+    /// it and nothing of its taken away, by any pass — the item writes, the
+    /// sweep of a path an earlier install left, and the removal a safety
+    /// refusal would make. A plan is always the scope's, so a command naming one
     /// package would otherwise install, update and re-render whatever else
     /// the scope had pending, and delete files belonging to packages it
     /// never mentioned. What runs regardless is what belongs to no item:
@@ -159,14 +161,5 @@ impl PlanOptions {
             Some(base) => Ok(crate::apply::Pre::from(base)),
             None => crate::apply::Pre::observed(path),
         }
-    }
-
-    /// Whether this plan acts on this item at all. Every pass that writes
-    /// for an item or takes something of its away asks this, or a plan
-    /// restricted to one package would still remove for another.
-    pub fn acts_on(&self, kind: ItemKind, name: &str) -> bool {
-        self.only_names
-            .as_ref()
-            .is_none_or(|only| only.iter().any(|(k, n)| *k == kind && n == name))
     }
 }

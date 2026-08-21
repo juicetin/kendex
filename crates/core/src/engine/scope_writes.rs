@@ -296,7 +296,6 @@ pub(super) fn plan_repo_move_write(
 pub(super) fn plan_settings_seed(
     scope: &Scope,
     state: &DesiredState,
-    options: &super::PlanOptions,
     new_lock: &mut crate::lock::Lock,
     ops: &mut Vec<PlannedOp>,
     drift: &mut Vec<DriftRow>,
@@ -311,7 +310,7 @@ pub(super) fn plan_settings_seed(
     let seeds: Vec<crate::settings_seed::SeededEnv> = state
         .settings_env
         .iter()
-        .filter(|seeded| options.acts_on(ItemKind::Skill, &seeded.owner))
+        .filter(|seeded| state.acts_on(ItemKind::Skill, &seeded.owner))
         .cloned()
         .collect();
     if seeds.is_empty() {

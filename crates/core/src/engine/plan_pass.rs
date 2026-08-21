@@ -44,7 +44,7 @@ pub(super) fn plan_items(
         // Not this plan's package: its record carries forward and nothing
         // is planned for it, the same way a held item's does. Dropping the
         // record instead would write a lock that forgets what is installed.
-        if !options.acts_on(item.kind, &item.name) {
+        if !state.acts_on(item.kind, &item.name) {
             if let Some(entry) = lock.entries.get(&item.key) {
                 sink.new_lock
                     .entries
@@ -83,7 +83,6 @@ pub(super) fn plan_refusals(
     scope: &Scope,
     lock: &Lock,
     state: &desired::DesiredState,
-    options: &PlanOptions,
     guard: &mut removal::TrashGuard,
     drift: &mut Vec<DriftRow>,
     ops: &mut Vec<PlannedOp>,
@@ -107,7 +106,7 @@ pub(super) fn plan_refusals(
             // are in it, and edited bytes are never an automatic casualty
             // (that is the exact promise of edit protection). Either way
             // the record stays with the files it describes.
-            if !options.acts_on(refusal.kind, &refusal.name) {
+            if !state.acts_on(refusal.kind, &refusal.name) {
                 new_lock.entries.insert(key.clone(), entry.clone());
             } else if removal::edit_holds(env, scope, entry) {
                 drift.push(DriftRow {

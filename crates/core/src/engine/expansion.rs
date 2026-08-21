@@ -69,6 +69,14 @@ impl Expansion {
             .unwrap_or_default()
     }
 
+    /// Every item this plan installs and why, for a caller that has to
+    /// follow the graph rather than look one item up.
+    pub(super) fn every_reason(
+        &self,
+    ) -> impl Iterator<Item = (&(ItemKind, String, HarnessId), &BTreeSet<Reason>)> {
+        self.reasons.iter()
+    }
+
     pub(super) fn contains(&self, kind: ItemKind, name: &str) -> bool {
         self.items.contains_key(&(kind, name.to_owned()))
     }
