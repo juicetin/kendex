@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
+import { updateRow } from "@/components/updates-test-rows";
 import { changed, plainManifests, source, VG } from "@/lib/places-test-source";
-import { placeStandings, uncheckedPlaces } from "./customized-places";
+import {
+  indexRows,
+  placeStandings,
+  uncheckedPlaces,
+} from "./customized-places";
 import { scopeKey } from "./scope";
 
 // A pass where one project's manifest would not load keeps the last one
@@ -29,5 +34,53 @@ describe("a place whose last manifest read failed", () => {
       [VG],
     );
     expect(fresh[0].state).toBe("customized");
+  });
+});
+
+// Both reads failing is the case where nothing can speak for the place:
+// the manifest is masked, and the row the check left behind answers for
+// whatever was true before it stopped finishing.
+describe("a place whose manifest and update read both failed", () => {
+  it("does not keep calling it forked from the row it kept", () => {
+    const standings = placeStandings(
+      source({
+        manifests: {},
+        unreadPlaces: new Set([scopeKey(VG)]),
+        manifestsRead: "failed",
+        updatesRead: "failed",
+        rows: indexRows([
+          updateRow("gh", scopeKey(VG), {
+            forked: true,
+            updateAvailable: false,
+          }),
+        ]),
+      }),
+      "skill",
+      "gh",
+      [VG],
+    );
+    expect(standings[0].forked).toBe(false);
+    expect(standings[0].state).toBe("unknown");
+  });
+
+  it("still trusts the row while the check itself succeeded", () => {
+    const standings = placeStandings(
+      source({
+        manifests: {},
+        unreadPlaces: new Set([scopeKey(VG)]),
+        manifestsRead: "failed",
+        updatesRead: "ready",
+        rows: indexRows([
+          updateRow("gh", scopeKey(VG), {
+            forked: true,
+            updateAvailable: false,
+          }),
+        ]),
+      }),
+      "skill",
+      "gh",
+      [VG],
+    );
+    expect(standings[0].forked).toBe(true);
   });
 });

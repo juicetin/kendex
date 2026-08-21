@@ -96,9 +96,13 @@ export function placeStandings(
     // by the side that also knows whether this place has a row at all: two
     // readers disagreeing is how a surface offers an action the engine has
     // already refused.
+    // The fallback is only as good as the read it comes from: a row kept
+    // from before a failed check answers for an earlier moment, and a fork
+    // can have been discarded since. With the manifest unread and the
+    // check unfinished, nobody can say — which is what `unknown` is for.
     const forked = manifest
       ? manifest.forks?.[kind]?.[name] != null
-      : row?.forked === true;
+      : source.updatesRead === "ready" && row?.forked === true;
     // Ranked by which fact has something to land on. A hand edit comes
     // first: it is the one still waiting on a decision, and the notice
     // offering it is on the overview. Then an overlay, on the Customize
