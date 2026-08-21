@@ -226,6 +226,9 @@ changes carry a **Breaking** call-out with their migration note inline.
 - A package is no longer shown as your own copy on the strength of a check
   that did not finish, when its project's settings could not be read either.
   With neither read able to speak, the place says it could not be checked.
+- A check that could not reach any project at all now says so for every
+  one of them. The marks it last drew stay on screen so nothing flickers
+  away, but none of them is presented as current.
 - A project whose settings could not be re-read is no longer marked from the
   copy kendex last had. Its mark says the place could not be checked, which
   is what the count of unchecked places has always meant.

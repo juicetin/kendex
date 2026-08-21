@@ -159,8 +159,17 @@ export const useEditorStore = create<EditorState>((set, get) => {
         // A rejected read is a read that failed, not one still running: a
         // pass that says nothing leaves every place reading as in-flight
         // forever, with no note and no retry.
+        //
+        // This pass got to no place at all — it could not even find out
+        // which places there are — so every manifest still in hand is one
+        // nothing re-checked. They stay, so a mark does not vanish, and
+        // every one of them is unread: none of them may answer as current.
         if (newest())
-          set({ manifestsLoaded: false, manifestError: String(thrown) });
+          set((state) => ({
+            manifestsLoaded: false,
+            manifestError: String(thrown),
+            unreadPlaces: Object.keys(state.saved),
+          }));
       } finally {
         done();
       }

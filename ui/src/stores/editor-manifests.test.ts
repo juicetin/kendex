@@ -4,7 +4,13 @@ import { useEditorStore } from "./editor";
 import { useSettingsStore } from "./settings";
 
 vi.mock("@/bindings", () => ({
-  commands: { getManifest: vi.fn(), editorInventory: vi.fn() },
+  commands: {
+    getManifest: vi.fn(),
+    editorInventory: vi.fn(),
+    getSettings: vi.fn(),
+    capabilityTable: vi.fn(),
+    windowZoomState: vi.fn(),
+  },
 }));
 
 function deferred<T>() {
