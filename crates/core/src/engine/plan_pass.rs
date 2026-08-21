@@ -94,6 +94,16 @@ pub(super) fn plan_items(
             rendered.insert(key);
         }
     }
+    // A tool the gate refused never reached the loop above: the refusal
+    // takes it out of `items` and records it in `refused`, so counting
+    // items alone cannot see it and the package's other tools would speak
+    // for it. `plan_refusals` keeps its edited files exactly where they
+    // are, which is the state a caller must not be told is restored.
+    for refusal in &state.refused {
+        if state.acts_on(refusal.kind, &refusal.name) {
+            rendered.remove(&(refusal.kind, refusal.name.clone()));
+        }
+    }
     Ok(())
 }
 
