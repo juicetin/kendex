@@ -45,6 +45,9 @@ fn moved(old: &std::path::Path, new: &std::path::Path) -> (desired::DesiredState
         provenance: String::new(),
         source_commit: None,
         recorded_fork: false,
+        // This fixture is about removal, which reads neither.
+        author_review: None,
+        authored: None,
         hash: "x".to_owned(),
         upstream_skills: None,
         emitted: Some(EmittedArtifact {

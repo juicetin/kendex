@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
-use crate::apply::{Op, Plan, PlannedOp};
+use crate::apply::{Plan, PlannedOp};
 use crate::env::Env;
 use crate::error::Result;
 use crate::lock::{Lock, LockFile, lock_path};
@@ -32,6 +32,8 @@ mod gate;
 mod gemini;
 mod holds;
 mod item_plan;
+mod manifest_write;
+pub use manifest_write::persists_manifest;
 mod item_source;
 mod observed;
 pub mod ops;
@@ -70,10 +72,7 @@ pub fn installed_paths(
 }
 
 use desired::desired_state;
-use scope_writes::{
-    plan_config_edits, plan_lock_write, plan_repo_move_write, plan_schema_upgrade,
-    plan_settings_seed, source_revisions,
-};
+use scope_writes::{plan_config_edits, plan_lock_write, plan_settings_seed, source_revisions};
 pub use set_change::{KeptInstall, SetChange, SetDirection};
 use set_change::{kept_members, set_changes};
 use unmanaged::unmanaged_rows;
@@ -147,7 +146,9 @@ pub fn plan_scope(
     // `remove_orphans` or `sweep_unneeded` — a verb asking for exactly
     // that, and never a restricted plan, which passes neither.
     // `plan_lock_write` records what the passes above decided.
-    plan_manifest_write(env, scope, repo_moved, manifest, &state, options, &mut ops)?;
+    manifest_write::plan_manifest_write(
+        env, scope, repo_moved, manifest, &state, options, &mut ops,
+    )?;
 
     // What earlier installs put on disk under another kind's name. A path
     // one of them wrote is ours to replace, whichever entry holds it now.
@@ -230,64 +231,6 @@ pub fn plan_scope(
     };
     unmanaged_rows(env, scope, manifest, lock, &state.items, &mut report.drift);
     Ok(report)
-}
-
-/// The plan's one manifest write, when anything needs it: skills an agent
-/// gained upstream or a review of findings this run was asked to record
-/// take the full serialized write — or, with neither, the repository move
-/// or the schema upgrade lands as a surgical text edit that keeps the
-/// user's comments and formatting. One write whatever put it there: a
-/// second manifest write could never run, its precondition binds to the
-/// bytes the first one replaces. The description names the biggest cause;
-/// the rest ride along in the same bytes.
-fn plan_manifest_write(
-    env: &Env,
-    scope: &Scope,
-    repo_moved: bool,
-    manifest: &Manifest,
-    state: &desired::DesiredState,
-    options: &PlanOptions,
-    ops: &mut Vec<PlannedOp>,
-) -> Result<()> {
-    let Some(update) = &state.manifest_update else {
-        if repo_moved {
-            return plan_repo_move_write(env, scope, manifest, options, ops);
-        }
-        if manifest.schema < manifest::MANIFEST_SCHEMA {
-            plan_schema_upgrade(env, scope, manifest, options, ops)?;
-        }
-        return Ok(());
-    };
-    let path = manifest::manifest_path(env, scope);
-    let pre = options.manifest_pre(&path)?;
-    let mut updated = update.clone();
-    updated.schema = manifest::MANIFEST_SCHEMA;
-    let granted = updated.safety_overrides != manifest.safety_overrides;
-    ops.push(PlannedOp {
-        description: match (repo_moved, granted) {
-            (true, _) => crate::repo_move::MOVE_DESCRIPTION.into(),
-            (false, true) => "Update kendex.toml with the safety findings you accepted".into(),
-            (false, false) => "Add new catalog skills to kendex.toml".into(),
-        },
-        op: Op::WriteManifest {
-            pre,
-            path,
-            manifest: Box::new(updated),
-        },
-    });
-    Ok(())
-}
-
-/// Whether a plan already persists the manifest — the full serialized
-/// write, or the repository move's surgical text edit. A caller about to
-/// insert its own save must count both: a second write to the same file
-/// binds to bytes the first one replaces and could never run.
-pub fn persists_manifest(ops: &[PlannedOp]) -> bool {
-    ops.iter().any(|op| {
-        matches!(op.op, Op::WriteManifest { .. })
-            || (op.description == crate::repo_move::MOVE_DESCRIPTION
-                && matches!(op.op, Op::WriteFile { .. }))
-    })
 }
 
 /// A scope still under the old product name renames first: everything

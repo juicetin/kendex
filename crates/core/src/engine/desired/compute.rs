@@ -18,9 +18,9 @@ use crate::model::{HarnessId, ItemKind, Scope};
 use crate::source::find_item;
 
 use crate::engine::desired::{DesiredState, ItemCtx};
-use crate::engine::desired_item::no_harness_note;
+use crate::engine::desired_item::{build, no_harness_note};
 use crate::engine::desired_source::{published_review, read_catalog, resolve_source};
-use crate::engine::{PlanOptions, desired_agent, desired_kinds, desired_skill::desired_skill};
+use crate::engine::{PlanOptions, desired_kinds};
 
 /// The desired world, computed against the manifest that will be on disk
 /// once this plan applies. An upstream skill merge rewrites the manifest,
@@ -129,40 +129,13 @@ fn compute(
                 author_review,
                 planned: state.acts_on(kind, name),
             };
-            let outcome = match kind {
-                ItemKind::Skill => desired_skill(&ctx, &mut state),
-                ItemKind::Agent => desired_agent::desired_agent(
-                    &ctx,
-                    &mut state,
-                    &mut updated_manifest,
-                    &mut manifest_changed,
-                ),
-                ItemKind::Hook => desired_kinds::desired_hook(&ctx, &mut state),
-                ItemKind::Command => {
-                    crate::engine::desired_command::desired_command(&ctx, &mut state)
-                }
-                ItemKind::McpServer => crate::engine::desired_mcp::desired_mcp(&ctx, &mut state),
-                _ => Ok(()),
-            };
-            match outcome {
-                Ok(()) => {}
-                // One hostile item must not take the whole scope down: the
-                // refused read becomes an unreadable note, and what it
-                // already installed stays out of the orphan sweep.
-                // "unreadable" is the phrase verify keys on: a refused item
-                // must fail verification, never print a green tick.
-                Err(crate::error::CoreError::SourceEscape { path, reason }) => {
-                    state.unreadable(
-                        kind,
-                        name,
-                        format!(
-                            "{name}: unreadable — refused catalog read: {reason} ({})",
-                            path.display()
-                        ),
-                    );
-                }
-                Err(other) => return Err(other),
-            }
+            build(
+                kind,
+                &ctx,
+                &mut state,
+                &mut updated_manifest,
+                &mut manifest_changed,
+            )?;
         }
     }
     desired_kinds::desired_plugins(env, scope, manifest, &mut state);

@@ -13,8 +13,8 @@ use crate::manifest::Manifest;
 use crate::model::{HarnessId, ItemKind, Scope};
 
 use super::super::expansion::PLANNED_KINDS;
-use crate::engine::PlanOptions;
 use super::{Desired, desired_state};
+use crate::engine::PlanOptions;
 
 /// The revision each installation is recorded at, keyed by the
 /// installation: one item, one tool.
