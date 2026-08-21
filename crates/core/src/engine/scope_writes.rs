@@ -136,9 +136,13 @@ pub(super) fn plan_schema_upgrade(
     env: &Env,
     scope: &Scope,
     manifest: &Manifest,
+    options: &super::PlanOptions,
     ops: &mut Vec<PlannedOp>,
 ) -> Result<()> {
     let path = manifest::manifest_path(env, scope);
+    // This writes the manifest, so it binds to the file a caller writing a
+    // whole copy of it came from, where there is one.
+    let pre = options.manifest_pre(&path)?;
     let description = format!(
         "Upgrade {} to the current format",
         crate::rename::MANIFEST_FILE
@@ -175,7 +179,7 @@ pub(super) fn plan_schema_upgrade(
     }
     let op = match rewritten {
         true => Op::WriteFile {
-            pre: crate::apply::Pre::observed(&path)?,
+            pre,
             path,
             bytes: upgraded_text.into_bytes(),
         },
@@ -183,7 +187,7 @@ pub(super) fn plan_schema_upgrade(
             let mut upgraded = manifest.clone();
             upgraded.schema = manifest::MANIFEST_SCHEMA;
             Op::WriteManifest {
-                pre: crate::apply::Pre::observed(&path)?,
+                pre,
                 path,
                 manifest: Box::new(upgraded),
             }
@@ -229,9 +233,11 @@ pub(super) fn plan_repo_move_write(
     env: &Env,
     scope: &Scope,
     migrated: &Manifest,
+    options: &super::PlanOptions,
     ops: &mut Vec<PlannedOp>,
 ) -> Result<()> {
     let path = manifest::manifest_path(env, scope);
+    let pre = options.manifest_pre(&path)?;
     let mut expected = migrated.clone();
     expected.schema = manifest::MANIFEST_SCHEMA;
     let current = crate::fs::read_if_exists(&path)?.unwrap_or_default();
@@ -265,12 +271,12 @@ pub(super) fn plan_repo_move_write(
     let reproduced = toml::from_str::<Manifest>(&edited).is_ok_and(|parsed| parsed == expected);
     let op = match reproduced {
         true => Op::WriteFile {
-            pre: crate::apply::Pre::observed(&path)?,
+            pre,
             path,
             bytes: edited.into_bytes(),
         },
         false => Op::WriteManifest {
-            pre: crate::apply::Pre::observed(&path)?,
+            pre,
             path,
             manifest: Box::new(expected),
         },

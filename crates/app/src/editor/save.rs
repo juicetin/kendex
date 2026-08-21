@@ -35,7 +35,7 @@ pub struct ManifestRead {
 /// Why a whole-manifest write did not happen. Refusing is a normal answer
 /// here, not a failure, so it is a shape the editor can act on rather than
 /// a message it would have to recognise by its words.
-#[derive(Serialize, Type)]
+#[derive(Debug, Serialize, Type)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum WriteRefused {
     /// The file is no longer the one this copy was read from. Something
@@ -81,6 +81,22 @@ pub fn get_manifest(scope: Scope) -> Result<ManifestRead, String> {
     // be accepted over the writer in between.
     let (manifest, base) = manifest::read_for_mutation(&path).map_err(|e| e.to_string())?;
     Ok(ManifestRead { manifest, base })
+}
+
+/// What a failed check of the base means to the person holding the copy.
+///
+/// A file that became something else is a stale copy, and the reload is the
+/// way out. A file that could not be read at all is neither: offering the
+/// reload for a permission or an encoding sends them to a remedy that
+/// cannot fix it, and hides the one thing that would have told them what
+/// went wrong.
+fn refusal(error: CoreError) -> WriteRefused {
+    match error {
+        CoreError::PlanStale { .. } => WriteRefused::Stale,
+        other => WriteRefused::Failed {
+            message: other.to_string(),
+        },
+    }
 }
 
 /// Whether an apply refused because this file moved under it. The write is
@@ -146,8 +162,12 @@ pub fn update_manifest(
     // a claim and is only ever compared, never believed.
     let claimed = manifest::Base::claimed(base);
     let held = Pre::from(&claimed);
-    if manifest::check_base(&path, &claimed).is_err() {
-        return Err(WriteRefused::Stale);
+    // Only a file that became something else is a stale copy. A file that
+    // could not be read at all is a failure to say out loud: offering the
+    // reload for it sends someone to a remedy that cannot fix a permission
+    // or an encoding, and hides what did.
+    if let Err(error) = manifest::check_base(&path, &claimed) {
+        return Err(refusal(error));
     }
     let mut manifest = match manifest::load_for_mutation(&path).map_err(|e| e.to_string())? {
         Some(_) => manifest,
@@ -161,8 +181,18 @@ pub fn update_manifest(
     kendex_core::hook::name_custom_hooks(&mut manifest);
     check(&manifest)?;
     let lock = load_lock(&lock_path(&env, &scope)).map_err(|e| e.to_string())?;
-    let mut report = engine::plan_scope(&env, &scope, &manifest, &lock, &PlanOptions::default())
-        .map_err(|e| e.to_string())?;
+    // Whoever plans a write of this file, it is the copy on screen being
+    // written, so the plan binds its own manifest write to the file that
+    // copy came from. Binding afterwards by path cannot: a scope still
+    // under the old product name has its writes retargeted to the new
+    // filename after planning, and a search for the path this command knew
+    // would find nothing and leave that write bound to what the plan saw.
+    let options = PlanOptions {
+        manifest_base: Some(claimed),
+        ..PlanOptions::default()
+    };
+    let mut report =
+        engine::plan_scope(&env, &scope, &manifest, &lock, &options).map_err(|e| e.to_string())?;
     let persisted = engine::persists_manifest(&report.plan.ops);
     if !persisted {
         report.plan.ops.insert(
@@ -177,13 +207,6 @@ pub fn update_manifest(
             },
         );
     }
-    // Whoever planned the write, it is the copy on screen that is being
-    // written, so every write of this file binds to the file that copy came
-    // from. A plan that carries its own manifest write — a schema upgrade,
-    // a repository move, skills an agent gained upstream — binds to what
-    // the file was when the plan ran, which would accept a writer that
-    // landed between the check above and here.
-    report.plan.bind_writes(&path, &held);
     // The bound precondition refuses a file that moved between the check
     // above and the write itself, and that refusal is the same answer the
     // check gives — so it reaches the editor as the same choice. Told as a
@@ -227,6 +250,37 @@ mod tests {
             },
             &path
         ));
+    }
+
+    /// A file that cannot be read is not a copy that went stale, and the
+    /// reload cannot fix it. Told as one, the person is sent to a remedy
+    /// that does nothing and never sees what actually stopped the write.
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn a_manifest_that_cannot_be_read_is_a_failure_and_says_what_it_was() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("kendex.toml");
+        // There, and not readable as text — what an editor replacing the
+        // file leaves for an instant, or a mode nobody can read.
+        std::fs::create_dir(&path).unwrap();
+
+        let error = manifest::check_base(&path, &manifest::Base::absent()).unwrap_err();
+        match refusal(error) {
+            WriteRefused::Failed { message } => assert!(message.contains("kendex.toml")),
+            other => panic!("a reload cannot fix this: {other:?}"),
+        }
+    }
+
+    /// The copy really did go stale: that is the reload's case.
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn a_file_that_became_something_else_is_the_reload() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("kendex.toml");
+        std::fs::write(&path, "schema = 5\n").unwrap();
+
+        let error = manifest::check_base(&path, &manifest::Base::absent()).unwrap_err();
+        assert!(matches!(refusal(error), WriteRefused::Stale));
     }
 
     /// Everything else is a failure, and says so. A precondition that

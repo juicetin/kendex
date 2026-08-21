@@ -134,7 +134,7 @@ pub fn plan_scope(
     // `remove_orphans` or `sweep_unneeded` — a verb asking for exactly that,
     // and never a restricted plan, which passes neither.
     // `plan_lock_write` records what the passes above decided.
-    plan_manifest_write(env, scope, repo_moved, manifest, &state, &mut ops)?;
+    plan_manifest_write(env, scope, repo_moved, manifest, &state, options, &mut ops)?;
 
     // What earlier installs put on disk under another kind's name. A path
     // one of them wrote is ours to replace, whichever entry holds it now.
@@ -233,18 +233,20 @@ fn plan_manifest_write(
     repo_moved: bool,
     manifest: &Manifest,
     state: &desired::DesiredState,
+    options: &PlanOptions,
     ops: &mut Vec<PlannedOp>,
 ) -> Result<()> {
     let Some(update) = &state.manifest_update else {
         if repo_moved {
-            return plan_repo_move_write(env, scope, manifest, ops);
+            return plan_repo_move_write(env, scope, manifest, options, ops);
         }
         if manifest.schema < manifest::MANIFEST_SCHEMA {
-            plan_schema_upgrade(env, scope, manifest, ops)?;
+            plan_schema_upgrade(env, scope, manifest, options, ops)?;
         }
         return Ok(());
     };
     let path = manifest::manifest_path(env, scope);
+    let pre = options.manifest_pre(&path)?;
     let mut updated = update.clone();
     updated.schema = manifest::MANIFEST_SCHEMA;
     let granted = updated.safety_overrides != manifest.safety_overrides;
@@ -255,7 +257,7 @@ fn plan_manifest_write(
             (false, false) => "Add new catalog skills to kendex.toml".into(),
         },
         op: Op::WriteManifest {
-            pre: crate::apply::Pre::observed(&path)?,
+            pre,
             path,
             manifest: Box::new(updated),
         },

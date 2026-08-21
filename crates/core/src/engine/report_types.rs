@@ -137,9 +137,30 @@ pub struct PlanOptions {
     /// never mentioned. What runs regardless is what belongs to no item:
     /// the manifest kendex maintains for the scope.
     pub only_names: Option<Vec<(ItemKind, String)>>,
+    /// The file a whole-manifest write is being made from — set by a caller
+    /// writing a copy someone has been holding, so every op in this plan
+    /// that writes this scope's manifest binds to it instead of to what the
+    /// file was when the plan ran.
+    ///
+    /// Bound here, where the ops are built, because a plan is not a list of
+    /// paths a caller can search afterwards: a scope still under the old
+    /// product name has its writes retargeted to the new filename after
+    /// planning, and a caller matching the path it knew would find nothing
+    /// and leave the write bound to whatever the plan observed.
+    pub manifest_base: Option<crate::manifest::Base>,
 }
 
 impl PlanOptions {
+    /// What a write of this scope's manifest binds to: the file the copy
+    /// being written came from, where the caller named one, and otherwise
+    /// what the file was when this plan was computed.
+    pub fn manifest_pre(&self, path: &std::path::Path) -> crate::error::Result<crate::apply::Pre> {
+        match &self.manifest_base {
+            Some(base) => Ok(crate::apply::Pre::from(base)),
+            None => crate::apply::Pre::observed(path),
+        }
+    }
+
     /// Whether this plan acts on this item at all. Every pass that writes
     /// for an item or takes something of its away asks this, or a plan
     /// restricted to one package would still remove for another.
