@@ -58,6 +58,12 @@ pub enum Remedy {
     Refresh {
         global: bool,
     },
+    /// Refresh, taking the edits with it. Named only where discarding is
+    /// the exit that resolves the line — a bare refresh holds an edited
+    /// installation and reports "up to date" over it.
+    DiscardEdits {
+        global: bool,
+    },
     Remove {
         name: String,
         global: bool,
@@ -102,6 +108,9 @@ impl Remedy {
         }
         Some(match self {
             Remedy::Refresh { global } => format!("kendex refresh{}", flag(global)),
+            Remedy::DiscardEdits { global } => {
+                format!("kendex refresh --discard-edits{}", flag(global))
+            }
             Remedy::Remove { name, global } => format!("kendex remove {name}{}", flag(global)),
             Remedy::Add { kind, name, global } => {
                 format!("kendex add --{} {name}{}", kind.name(), flag(global))

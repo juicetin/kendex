@@ -177,10 +177,16 @@ changes carry a **Breaking** call-out with their migration note inline.
   was held like any other edit, but the only exit named was to keep it as
   your own — which it already was — so `kendex check` and the app's change
   badge both reported a state nothing could clear. The package now says
-  "discard the edits and go back to the copy you kept", and `kendex refresh
-  --discard-edits` does exactly that. Keeping the same package as your own
-  twice is refused rather than quietly replacing the record of where it came
-  from, which is kept nowhere else.
+  "discard the edits and go back to the copy you kept", `kendex check`
+  prints `kendex refresh --discard-edits` as its fix, and that command does
+  exactly what the line says. The offer disappears if the copy you kept is
+  no longer there to restore. Keeping the same package as your own twice is
+  refused rather than quietly replacing the record of where it came from,
+  which is kept nowhere else.
+- Review no longer files a package it cannot act on under "Ready to apply".
+  Something waiting on you — an edit held on disk — is listed apart, with a
+  link to the package's own page where its exits are, rather than counted
+  as work the Apply button will do.
 - Keeping a fork or discarding edits is refused while you have unsaved
   changes on the Customize tab for that same project: saving them afterwards
   would have written the old settings back over the new fork, losing it

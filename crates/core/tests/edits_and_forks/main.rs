@@ -6,6 +6,7 @@
 mod disabled;
 mod edited_harness;
 
+mod edited_forks;
 mod forks;
 
 use std::fs;

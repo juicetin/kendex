@@ -9,7 +9,7 @@ import { SectionHeading } from "@/components/section";
 import { StatusLine } from "@/components/status-note";
 import { TagBadges } from "@/components/tag-badge";
 import { Badge } from "@/components/ui/badge";
-import { TAGS_ROW_LABEL } from "@/lib/copy";
+import { ORIGIN_UNREAD, TAGS_ROW_LABEL } from "@/lib/copy";
 import type { ItemGroup } from "@/lib/derive";
 import { kindLabel, scopeName } from "@/lib/labels";
 import { relativeTime } from "@/lib/relative-time";
@@ -47,6 +47,7 @@ export function PackageMetaBlock({
   const provenance = useProvenanceStore((s) => s.rows);
   const loadedProvenance = useProvenanceStore((s) => s.loaded);
   const loadProvenance = useProvenanceStore((s) => s.load);
+  const originError = useProvenanceStore((s) => s.error);
   const goToMarketplace = useNavStore((s) => s.goToMarketplace);
   // A package page can be the first thing opened after launch; the join
   // may not have been read yet, and this line is its only reader here.
@@ -96,6 +97,12 @@ export function PackageMetaBlock({
         ) : origin?.origin === "own" ? (
           <Row label="From">
             <span title={originTitle(origin)}>Your own</span>
+          </Row>
+        ) : originError ? (
+          <Row label="From">
+            <span className="text-muted-foreground" title={originError}>
+              {ORIGIN_UNREAD}
+            </span>
           </Row>
         ) : null}
         {meta?.current ? (

@@ -250,7 +250,19 @@ fn same_artifact(
 /// know it is a fork, and whether its files have been edited since. A fork
 /// is the one local source with a row, so a hardcoded "not edited" here
 /// would be the only place the measured edit is thrown away.
+/// Where a fork's own copy lives. Discarding an edit re-renders from it,
+/// so whether it is still there is the whole question of whether the exit
+/// exists — a local source someone cleared by hand has nothing to put back.
+fn local_copy(env: &Env, scope: &Scope, kind: ItemKind, name: &str) -> std::path::PathBuf {
+    let root = crate::source::local_source_root(env, scope);
+    match kind {
+        ItemKind::Skill => root.join("skills").join(name),
+        _ => root.join("agents").join(format!("{name}.md")),
+    }
+}
+
 fn fork_row(
+    env: &Env,
     scope: &Scope,
     kind: ItemKind,
     name: &str,
@@ -274,9 +286,10 @@ fn fork_row(
         edited_harnesses,
         // A fork is already the user's own copy, so there is nothing left to
         // keep as one — but the copy itself is in the local source, so an
-        // edit to it can be put back from there like any other.
+        // edit to it can be put back from there, as long as it is still
+        // there to put back. Measured like every other row's, never asserted.
         forkable_harness: None,
-        can_discard: true,
+        can_discard: local_copy(env, scope, kind, name).exists(),
         can_take_latest: false,
         derived: false,
         forked: true,

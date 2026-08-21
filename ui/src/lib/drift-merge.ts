@@ -63,3 +63,22 @@ export function summarizePaths(paths: (string | null)[]): PathSummary | null {
     title,
   };
 }
+
+/** Review's two lists. An apply runs a plan, and a conflict has no ops
+ *  behind it — filing one under "ready to apply" counts it as work a button
+ *  can do and then offers no button. Its exits live on the package's own
+ *  page, so it is listed apart, with the way there. Unmanaged items are
+ *  neither: they are a footnote pointing at the Library. */
+export function reviewLists(drift: DriftRow[]): {
+  changes: MergedDriftRow[];
+  conflicts: MergedDriftRow[];
+} {
+  return {
+    changes: mergeDriftRows(
+      drift.filter(
+        (row) => row.state !== "unmanaged" && row.state !== "conflict",
+      ),
+    ),
+    conflicts: mergeDriftRows(drift.filter((row) => row.state === "conflict")),
+  };
+}

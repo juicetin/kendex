@@ -12,10 +12,12 @@ import { FilePreview } from "@/components/package/file-preview";
 import { EditedNotice } from "@/components/package/fork-notice";
 import { PackageSidebar } from "@/components/package/package-sidebar";
 import type { PackageView } from "@/components/package/use-package-data";
+import { NO_COMPARISON_BODY, NO_COMPARISON_TITLE } from "@/lib/copy";
 import type { ItemGroup } from "@/lib/derive";
 import { harnessName } from "@/lib/labels";
 import { versionRowLabel } from "@/lib/versions";
 import type { PackageRef } from "@/stores/nav";
+import { useProblemsStore } from "@/stores/problems";
 
 /** What a package is, as installed: its provenance and switches on the
  *  left, the file it is made of — or a comparison — on the right. */
@@ -64,7 +66,16 @@ export function PackageBody({
       <EditedNotice
         row={editedRow}
         onViewChanges={(harness) => {
-          if (!installed) return;
+          // A click that does nothing and says nothing is the failure this
+          // notice exists to prevent, so the one case that cannot open a
+          // comparison explains itself instead.
+          if (!installed) {
+            useProblemsStore.getState().showError({
+              title: NO_COMPARISON_TITLE,
+              message: NO_COMPARISON_BODY,
+            });
+            return;
+          }
           setView({
             mode: "diff",
             from: installed.id,

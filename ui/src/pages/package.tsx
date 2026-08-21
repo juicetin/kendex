@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { toast } from "sonner";
 import type { HarnessId, Scope, VersionRow } from "@/bindings";
 import { ItemCustomize } from "@/components/customize/item-customize";
 import { SaveBar } from "@/components/customize/save-bar";
@@ -18,10 +19,11 @@ import {
   usePackageData,
   usePackageDiff,
 } from "@/components/package/use-package-data";
+import { packageGoneHere } from "@/lib/copy";
 import { canCustomize } from "@/lib/customization";
 import { useEditingPlacesSource } from "@/lib/customized-places";
 import { groupItems, groupScopes } from "@/lib/derive";
-import { packageDisplayName } from "@/lib/labels";
+import { packageDisplayName, scopeName, scopePath } from "@/lib/labels";
 import { PAGE_GUTTER, WIDE_CONTENT_WIDTH } from "@/lib/layout";
 import { packageMarks } from "@/lib/place-marks";
 import { cn } from "@/lib/utils";
@@ -97,10 +99,13 @@ export function PackagePage() {
   const updatesLoaded = useUpdatesStore((s) => s.loaded);
 
   // The scan no longer knows this package here — removed from this project,
-  // renamed, or nav state that outlived the scope. Either way this page has
-  // nothing to say about the place it was asked for.
+  // renamed, or nav state that outlived the scope. Going back can land on
+  // the very row that was clicked, so the way out says why rather than
+  // looking like a click that did nothing.
   useEffect(() => {
-    if (ref && result && !primary) back();
+    if (!ref || !result || primary) return;
+    toast.info(packageGoneHere(scopePath(ref.scope) ?? scopeName(ref.scope)));
+    back();
   }, [ref, result, primary, back]);
 
   if (!ref || !group || !primary) return null;

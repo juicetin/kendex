@@ -111,4 +111,28 @@ describe("package page edited notice", () => {
     expect(html).toContain("go back to the copy you kept");
     expect(html).not.toContain("can&#x27;t be kept as your own");
   });
+
+  // Every exit the notice advertises has to work. A fork's declaration
+  // resolves to its own local source, so there is no catalog version left
+  // to put beside the edit and the comparison would open nothing.
+  it("offers a fork no comparison, and does not promise one", () => {
+    const html = render(
+      edited({
+        forked: true,
+        editedHarnesses: ["claude"],
+        forkableHarness: null,
+        canDiscard: true,
+      }),
+    );
+    expect(html).not.toContain(">View changes<");
+    expect(html).not.toContain("See what changed");
+    expect(html).toContain(">Discard edits…<");
+  });
+
+  it("still offers the comparison where there is one to open", () => {
+    const html = render(
+      edited({ editedHarnesses: ["claude"], forkableHarness: "claude" }),
+    );
+    expect(html).toContain(">View changes<");
+  });
 });

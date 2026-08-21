@@ -23,7 +23,7 @@ export const DERIVED_FORK_NOTE =
 // A fork has already been kept as your own, so that half of the choice is
 // spent. What is left is the copy you kept: the app can put it back.
 export const FORKED_NOTICE_DETAIL =
-  "Updates are paused so your edits stay. See what changed, or discard the edits and go back to the copy you kept.";
+  "Updates are paused so your edits stay. Discard them to go back to the copy you kept.";
 export const FORKED_DISCARD_CONFIRM_BODY =
   "The copy you kept replaces your edits to this package, and your changes are gone.";
 export const DISCARD_EDITS_CONFIRM_TITLE = "Discard your edits?";

@@ -168,6 +168,23 @@ export const BACK_TO_FILES_LABEL = "Back to files";
 export const DIFF_TRUNCATED_NOTE =
   "This comparison is long; only the first part is shown.";
 export const VERSION_ERROR_TITLE = "Couldn't switch versions";
+// A comparison needs the version this place was installed from. Without it
+// there is nothing to put beside the edit, and a button that does nothing
+// and says nothing is worse than one that explains itself.
+// Where a package came from is derived from one read. A failure that says
+// nothing renders as a From row that is simply absent, which reads as "it
+// came from nowhere" rather than "kendex could not tell".
+export const ORIGIN_UNREAD = "Couldn't be read";
+
+// Nav state outlives a scan: a mark clicked before a package was removed
+// from that project opens a page with nothing to say. Going back can land
+// on the row that was clicked, so leaving says why.
+export const packageGoneHere = (place: string): string =>
+  `That package is no longer installed in ${place}.`;
+
+export const NO_COMPARISON_TITLE = "Nothing to compare against";
+export const NO_COMPARISON_BODY =
+  "kendex could not read the version this package was installed from, so there is no other side to show. Refreshing this place may bring it back.";
 
 // Updates page.
 export const UPDATES_EMPTY = "Everything is up to date";

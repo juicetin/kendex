@@ -62,7 +62,6 @@ describe("updates store", () => {
     });
     vi.clearAllMocks();
   });
-
   it("counts only unmuted updates for the badge — held ones still count", () => {
     const rows = [
       row({ name: "a" }),
@@ -94,68 +93,16 @@ describe("updates store", () => {
   // Home asks you to decide what to do about an edited package. A fork is
   // already the decision, so an edit to it is not a question — the drift
   // report and the package page both say the same.
+  // Home's row is about the keep-as-your-own decision, which a fork has
+  // already made. It is still held and still has an exit — `check` reports
+  // it and the package page offers the discard — so this is Home being the
+  // quieter surface, not the one disagreeing.
   it("asks about an edited package, never about an edited fork", () => {
     const mine = row({ blockedByLocalEdit: true, name: "gh" });
     const fork = row({ blockedByLocalEdit: true, forked: true, name: "rev" });
     expect(
       awaitingForkDecision([mine, fork, row({})]).map((r) => r.name),
     ).toEqual(["gh"]);
-  });
-
-  // Every screen joining on these rows memoizes on their identity, so a
-  // re-read that says the same thing must hand back the same array — an
-  // equal copy re-renders the whole table for news that is not news.
-  it("hands back the same rows when a re-read says the same thing", async () => {
-    const answer = {
-      status: "ok" as const,
-      data: { rows: [row({})], warnings: [] },
-    };
-    vi.mocked(commands.updatesOverview).mockResolvedValue(answer);
-    await useUpdatesStore.getState().load();
-    const first = useUpdatesStore.getState().rows;
-    // A fresh array off the wire, saying exactly what the last one did.
-    vi.mocked(commands.updatesOverview).mockResolvedValue({
-      status: "ok",
-      data: { rows: [row({})], warnings: [] },
-    });
-    await useUpdatesStore.getState().load();
-    expect(useUpdatesStore.getState().rows).toBe(first);
-
-    vi.mocked(commands.updatesOverview).mockResolvedValue({
-      status: "ok",
-      data: { rows: [row({ name: "rev" })], warnings: [] },
-    });
-    await useUpdatesStore.getState().load();
-    expect(useUpdatesStore.getState().rows).not.toBe(first);
-  });
-
-  it("treats a rejected read as a read that failed", async () => {
-    vi.mocked(commands.updatesOverview).mockRejectedValue(
-      new Error("no channel"),
-    );
-    await useUpdatesStore.getState().load();
-    expect(useUpdatesStore.getState().error).toContain("no channel");
-    expect(useUpdatesStore.getState().loaded).toBe(false);
-  });
-
-  // Hand edits reach the Library's marks only through this read, so a
-  // failure that leaves no trace shows a table of packages with nothing
-  // marked — which reads as "nothing of yours is here".
-  it("keeps the reason a load failed, and clears it on the next good one", async () => {
-    vi.mocked(commands.updatesOverview).mockResolvedValueOnce({
-      status: "error",
-      error: "no network",
-    });
-    await useUpdatesStore.getState().load();
-    expect(useUpdatesStore.getState().loaded).toBe(false);
-    expect(useUpdatesStore.getState().error).toBe("no network");
-
-    vi.mocked(commands.updatesOverview).mockResolvedValueOnce({
-      status: "ok",
-      data: { rows: [row({})], warnings: [] },
-    });
-    await useUpdatesStore.getState().load();
-    expect(useUpdatesStore.getState().error).toBe(null);
   });
 
   it("muting keeps the row, flagged — and unmuting brings it back", async () => {

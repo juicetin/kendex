@@ -49,10 +49,16 @@ const run = async (scope: Scope, work: () => Promise<string | null>) => {
     // The pass fills `saved`; the copy in hand for the place being edited
     // is a different read, and every editor surface joins through it. Left
     // stale it hides the new fork, and a later Save would write the
-    // pre-fork manifest back over it. Safe to re-read: an unsaved draft was
-    // refused above, so there is nothing here to lose.
-    if (sameScope(useEditorStore.getState().scope, scope))
-      await useEditorStore.getState().load(scope);
+    // pre-fork manifest back over it.
+    //
+    // The refusal above is a check at entry, and this runs seconds later
+    // with nothing stopping someone typing in between — so the dirty flag
+    // is read again here, not assumed. A draft that appeared since keeps
+    // the screen: the stale-manifest risk it leaves is the one the entry
+    // refusal already covers, and silently replacing typing is worse.
+    const editor = useEditorStore.getState();
+    if (sameScope(editor.scope, scope) && !editor.dirty)
+      await editor.load(scope);
     await useScanStore.getState().refresh();
     await useAuditStore.getState().refresh({ force: true });
   } finally {

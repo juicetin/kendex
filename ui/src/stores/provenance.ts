@@ -12,6 +12,10 @@ import { scopeKey } from "@/lib/scope";
 interface ProvenanceState {
   rows: ProvenanceRow[];
   loaded: boolean;
+  /** Why the join could not be read, or null. The From row is derived from
+   *  these rows, so a failure has to be sayable rather than rendering as a
+   *  row that is simply absent. */
+  error: string | null;
   load: () => Promise<void>;
 }
 
@@ -20,6 +24,7 @@ interface ProvenanceState {
 export const useProvenanceStore = create<ProvenanceState>((set) => ({
   rows: [],
   loaded: false,
+  error: null,
   load: async () => {
     const response = await commands.libraryProvenance();
     if (response.status === "ok") {
@@ -29,7 +34,12 @@ export const useProvenanceStore = create<ProvenanceState>((set) => ({
       set((state) => ({
         rows: keepIfSame(state.rows, response.data),
         loaded: true,
+        error: null,
       }));
+    } else {
+      // Left silent, a failure renders as a From row that simply never
+      // appears — the reader is told nothing and has nothing to retry.
+      set({ loaded: true, error: response.error });
     }
   },
 }));

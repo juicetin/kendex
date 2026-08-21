@@ -225,7 +225,7 @@ impl ScopeCheck<'_> {
                     format!(
                         "{prefix}{kind} '{name}' was edited on disk since your fork was rendered — refresh with edits discarded to re-render from your own copy"
                     ),
-                    Remedy::Refresh {
+                    Remedy::DiscardEdits {
                         global: self.global,
                     },
                 )

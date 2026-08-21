@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { UpdateRow } from "@/bindings";
 import { commands } from "@/bindings";
 import { useEditorStore } from "./editor";
+import { useProblemsStore } from "./problems";
 import { useSettingsStore } from "./settings";
 import { useUpdatesStore } from "./updates";
 import { keepAsOwn } from "./updates-edits";
@@ -55,7 +56,9 @@ function row(overrides: Partial<UpdateRow>): UpdateRow {
 
 // What a fork or a discard leaves behind: every reader of the file it
 // rewrote refreshed, and the one copy that could undo it refused.
-describe("after a fork or a discard", () => {
+// The Customize tab holds a whole manifest, and both of these rewrite the
+// file it came from. Neither may let that copy win.
+describe("a fork or discard beside an open Customize tab", () => {
   beforeEach(() => {
     useUpdatesStore.setState({ rows: [], busy: false, loaded: false });
     useSettingsStore.setState({ settings: { schema: 1, projects: [] } });
@@ -84,40 +87,14 @@ describe("after a fork or a discard", () => {
       },
     });
   });
-  // reads comes from that file. Nothing else re-reads it.
-  it("re-reads the manifests a fork rewrote, so the mark appears at once", async () => {
-    const view = {
-      scope: { scope: "global" } as const,
-      drift: [],
-      plan: [],
-      notes: [],
-      warnings: [],
-      safety: [],
-      heldBack: [],
-      queued: [],
-    };
-    vi.mocked(commands.packageFork).mockResolvedValue({
-      status: "ok",
-      data: view,
+  // The Customize tab holds a whole manifest. Saved after a fork, that copy
+  // puts the pre-fork file back and the fork record is gone for good.
+  it("refuses while an unsaved customization holds the same file", async () => {
+    useEditorStore.setState({
+      scope: { scope: "global" },
+      draft: { schema: 1, install: {} },
+      dirty: true,
     });
-    vi.mocked(commands.updatesOverview).mockResolvedValue({
-      status: "ok",
-      data: { rows: [], warnings: [] },
-    });
-    vi.mocked(commands.scanMachine).mockResolvedValue({
-      status: "ok",
-      data: { harnesses: [], items: [], missingProjects: [], warnings: [] },
-    });
-    vi.mocked(commands.auditAll).mockResolvedValue({ status: "ok", data: [] });
-    vi.mocked(commands.getManifest).mockResolvedValue({
-      status: "ok",
-      data: {
-        schema: 1,
-        install: {},
-        forks: { skill: { gh: { source: "cat", "forked-at": "2026-08-01" } } },
-      },
-    });
-
     await keepAsOwn(
       row({
         blockedByLocalEdit: true,
@@ -125,16 +102,29 @@ describe("after a fork or a discard", () => {
         forkableHarness: "claude",
       }),
     );
+    expect(commands.packageFork).not.toHaveBeenCalled();
+    expect(useProblemsStore.getState().dialog.title).toContain("Save your");
 
-    expect(useEditorStore.getState().saved.global?.forks).toEqual({
-      skill: { gh: { source: "cat", "forked-at": "2026-08-01" } },
+    // Another place's unsaved work is not this place's problem.
+    useEditorStore.setState({ scope: { scope: "project", root: "/work/vg" } });
+    vi.mocked(commands.packageFork).mockResolvedValue({
+      status: "error",
+      error: "nope",
     });
+    await keepAsOwn(
+      row({
+        blockedByLocalEdit: true,
+        editedHarnesses: ["claude"],
+        forkableHarness: "claude",
+      }),
+    );
+    expect(commands.packageFork).toHaveBeenCalled();
   });
 
-  // The editor surfaces join through the copy in hand, not the saved map,
-  // so a pass that fills only `saved` leaves the badge off on the very page
-  // the button lives on — and a later Save writes that copy back.
-  it("re-reads the copy in hand for the place a fork rewrote", async () => {
+  // The refusal at entry guards a window that stays open for the whole
+  // operation, and nothing stops typing during it. Replacing those
+  // keystrokes with a re-read, silently, is the worse of the two risks.
+  it("leaves typing that arrived mid-operation alone", async () => {
     const view = {
       scope: { scope: "global" } as const,
       drift: [],
@@ -145,9 +135,13 @@ describe("after a fork or a discard", () => {
       heldBack: [],
       queued: [],
     };
-    vi.mocked(commands.packageFork).mockResolvedValue({
-      status: "ok",
-      data: view,
+    vi.mocked(commands.packageFork).mockImplementation(async () => {
+      // Someone opens the Customize tab and types while the fork runs.
+      useEditorStore.setState({
+        draft: { schema: 1, install: {}, "skill-instructions": { gh: "mine" } },
+        dirty: true,
+      });
+      return { status: "ok", data: view };
     });
     vi.mocked(commands.updatesOverview).mockResolvedValue({
       status: "ok",
@@ -158,16 +152,6 @@ describe("after a fork or a discard", () => {
       data: { harnesses: [], items: [], missingProjects: [], warnings: [] },
     });
     vi.mocked(commands.auditAll).mockResolvedValue({ status: "ok", data: [] });
-    vi.mocked(commands.getManifest).mockResolvedValue({
-      status: "ok",
-      data: {
-        schema: 1,
-        install: {},
-        forks: { skill: { gh: { source: "cat", "forked-at": "2026-08-01" } } },
-      },
-    });
-    // The editor is pointed at the place the fork rewrote, holding the
-    // manifest as it was before it.
     useEditorStore.setState({
       scope: { scope: "global" },
       draft: { schema: 1, install: {} },
@@ -182,8 +166,9 @@ describe("after a fork or a discard", () => {
       }),
     );
 
-    expect(useEditorStore.getState().draft?.forks).toEqual({
-      skill: { gh: { source: "cat", "forked-at": "2026-08-01" } },
+    expect(useEditorStore.getState().draft?.["skill-instructions"]).toEqual({
+      gh: "mine",
     });
+    expect(useEditorStore.getState().dirty).toBe(true);
   });
 });

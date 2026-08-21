@@ -2,8 +2,8 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ObservedItem, Scope } from "@/bindings";
 import { updateRow } from "@/components/updates-test-rows";
-import { placeStandings } from "@/lib/customized-places";
-import { groupItems } from "@/lib/derive";
+import { type PlaceStanding, placeStandings } from "@/lib/customized-places";
+import { groupItems, type ItemGroup } from "@/lib/derive";
 import type { Draft } from "@/lib/editor-draft";
 import { markNav } from "@/lib/place-marks";
 import {
@@ -16,6 +16,32 @@ import {
   VG,
 } from "@/lib/places-test-source";
 import { InstalledTable } from "./installed-table";
+
+// The row is mocked to hand back the handlers it was given: a click cannot
+// be invoked through static markup, and what this pins is the argument the
+// table passes, not React's dispatch.
+const renderedRows: {
+  group: ItemGroup;
+  standings: PlaceStanding[];
+  onOpen: (group: ItemGroup) => void;
+  onOpenPlace: (group: ItemGroup, standings: PlaceStanding[]) => void;
+}[] = [];
+vi.mock("@/components/library/installed-row", () => ({
+  InstalledRow: (props: (typeof renderedRows)[number]) => {
+    renderedRows.push(props);
+    return null;
+  },
+}));
+
+const goToPackage = vi.hoisted(() => vi.fn());
+vi.mock("@/stores/nav", async (importOriginal) => {
+  const mod = await importOriginal<typeof import("@/stores/nav")>();
+  const hook = (selector?: (state: unknown) => unknown) => {
+    const state = { ...mod.useNavStore.getState(), goToPackage };
+    return selector ? selector(state) : state;
+  };
+  return { ...mod, useNavStore: Object.assign(hook, mod.useNavStore) };
+});
 
 // Static rendering reads a zustand store's initial snapshot, never one set
 // later, so both stores are wrapped to let a test stage what each place
@@ -91,6 +117,8 @@ beforeEach(() => {
   stub.saved = plainManifests();
   stub.scope = { scope: "global" };
   stub.draft = null;
+  renderedRows.length = 0;
+  goToPackage.mockClear();
   stub.rows = [null, ...ROOTS].map((root) =>
     updateRow("gh", root, { updateAvailable: false }),
   );
@@ -145,5 +173,32 @@ describe("where the customized mark leads", () => {
 
   it("leads nowhere when no place is changed", () => {
     expect(nav(plainManifests())).toBe(null);
+  });
+});
+
+// The mark names a place; the row it sits in opens the package's first
+// install. The table has to send the click to the place the mark named.
+describe("what the table does with the mark's click", () => {
+  it("opens the marked place, on the surface holding its change", () => {
+    stub.saved = { ...plainManifests(), "/work/hyprtrade": changed() };
+    render();
+    expect(renderedRows).toHaveLength(1);
+    const row = renderedRows[0];
+    row.onOpenPlace(row.group, row.standings);
+    expect(goToPackage).toHaveBeenCalledWith(
+      { kind: "skill", name: "gh", scope: HYPR },
+      { mode: "customize" },
+    );
+  });
+
+  it("leaves the row's own click on the package's first install", () => {
+    render();
+    const row = renderedRows[0];
+    row.onOpen(row.group);
+    expect(goToPackage).toHaveBeenCalledWith({
+      kind: "skill",
+      name: "gh",
+      scope: { scope: "global" },
+    });
   });
 });

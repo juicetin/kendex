@@ -77,7 +77,10 @@ export function ForkNotice({
             {KEEP_AS_FORK_LABEL}
           </Button>
         ) : null}
-        {several ? (
+        {/* A comparison needs two sides, and a fork's declaration resolves
+            to its own local source: there is no catalog version left to put
+            beside the edit, so the button would open nothing. */}
+        {row.forked ? null : several ? (
           row.editedHarnesses.map((harness) => (
             <Button
               key={harness}

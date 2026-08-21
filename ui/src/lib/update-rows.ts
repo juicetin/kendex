@@ -28,8 +28,10 @@ export const hiddenUpdates = (rows: UpdateRow[]): UpdateRow[] =>
   rows.filter((row) => noteworthy(row) && row.ignored);
 
 /** The packages Home asks you to decide about: files edited by hand, with
- *  the decision still open. A fork edited since is not one of them — it has
- *  no source to refresh from and nothing left to keep as your own — and the
- *  package page shows it no notice either. */
+ *  the keep-as-your-own decision still open. A fork is not one of them —
+ *  that decision is already made, and this row's words are about making it.
+ *  An edited fork is still held and still has an exit: `check` reports it
+ *  and the package page offers the discard. Home is deliberately the
+ *  quieter surface here, not a disagreeing one. */
 export const awaitingForkDecision = (rows: UpdateRow[]): UpdateRow[] =>
   rows.filter((row) => row.blockedByLocalEdit && !row.forked);

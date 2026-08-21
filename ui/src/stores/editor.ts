@@ -68,9 +68,12 @@ export const useEditorStore = create<EditorState>((set, get) => {
     // is pointed at; one for somewhere else — the re-read a save ends with —
     // feeds the marks and nothing more, and must not leave the surface
     // waiting on itself.
+    // -1 can never equal a claim, which counts up from 1: a read for
+    // somewhere else is self-evidently not the one the screen waits on,
+    // without resting on where its callers happen to be.
     const drawing = sameScope(get().scope, scope);
     if (drawing) screenReads += 1;
-    const claim = drawing ? screenReads : 0;
+    const claim = drawing ? screenReads : -1;
     // This read speaks for the editor on screen only while it is the newest
     // that could, and the editor still points at the place it read.
     const onScreen = () =>

@@ -42,6 +42,17 @@ export const useUpdatesStore = create<UpdatesState>((set, get) => {
   const showError = (title: string, message: string) =>
     useProblemsStore.getState().showError({ title, message });
 
+  // Every read of the standing takes a ticket. A read issued before a fork
+  // or a discard lands, resolving after it, would otherwise put its
+  // pre-resolution rows back — and the marks, the notice and the Review
+  // count all read those rows, so a state someone just resolved reappears.
+  let reads = 0;
+  const ticket = () => {
+    reads += 1;
+    const mine = reads;
+    return () => mine === reads;
+  };
+
   const apply = async (row: UpdateRow): Promise<boolean> => {
     // Held packages move by moving the hold; following ones come current
     // by applying the scope — which is what following means, and brings
@@ -63,6 +74,7 @@ export const useUpdatesStore = create<UpdatesState>((set, get) => {
   };
 
   const reload = async () => {
+    const newest = ticket();
     let response: Awaited<ReturnType<typeof commands.updatesOverview>>;
     try {
       response = await commands.updatesOverview();
@@ -70,9 +82,10 @@ export const useUpdatesStore = create<UpdatesState>((set, get) => {
       // A rejected read is a read that failed. Left to reject it would end
       // the pass with nothing said, and every place would read as still
       // being checked with nothing running and no note to say otherwise.
-      set({ loaded: false, error: String(thrown) });
+      if (newest()) set({ loaded: false, error: String(thrown) });
       return;
     }
+    if (!newest()) return;
     // A failed reload marks the data stale (loaded = false) rather than
     // leaving the last-good rows trusted — the package page gates the
     // Update button on `loaded`, and acting on rows we could not refresh
@@ -103,8 +116,10 @@ export const useUpdatesStore = create<UpdatesState>((set, get) => {
 
     check: async () => {
       set({ checking: true });
+      const newest = ticket();
       try {
         const response = await commands.updatesRefresh();
+        if (!newest()) return;
         if (response.status === "ok") {
           set({
             rows: response.data.rows,

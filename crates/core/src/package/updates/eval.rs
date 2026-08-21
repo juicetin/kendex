@@ -90,6 +90,7 @@ impl Eval<'_> {
             CoreError::ItemRevUnsupported { .. } => {
                 if forked {
                     report.rows.push(fork_row(
+                        self.env,
                         self.scope,
                         kind,
                         name,
