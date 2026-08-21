@@ -7,6 +7,7 @@ import {
   commands,
   ZOOM,
 } from "@/bindings";
+import { manifestRewritten } from "./manifest-sync";
 import { useProblemsStore } from "./problems";
 import { useScanStore } from "./scan";
 import { type ZoomSlice, zoomActions } from "./settings-zoom";
@@ -164,8 +165,11 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
           onClick: () => {
             void commands
               .installDriftHook({ scope: "project", root })
-              .then((result) => {
+              .then(async (result) => {
                 if (result.status === "ok") {
+                  // The declaration lands in that project's kendex.toml,
+                  // which the Customize tab may be holding a copy of.
+                  await manifestRewritten({ scope: "project", root });
                   // False: the scope had other pending changes, so only the
                   // declaration landed — nothing is applied unreviewed.
                   toast.success(
