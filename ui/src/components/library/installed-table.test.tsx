@@ -21,6 +21,8 @@ import { InstalledTable, markNav } from "./installed-table";
 // holds.
 const stub = vi.hoisted(() => ({
   saved: {} as Record<string, unknown>,
+  scope: { scope: "global" } as unknown,
+  draft: null as unknown,
   rows: [] as unknown[],
 }));
 
@@ -29,9 +31,10 @@ vi.mock("@/stores/editor", async (importOriginal) => {
   const hook = (selector?: (state: unknown) => unknown) => {
     const state = {
       ...mod.useEditorStore.getState(),
-      scope: { scope: "global" },
-      draft: null,
+      scope: stub.scope,
+      draft: stub.draft,
       saved: stub.saved,
+      manifestsLoaded: true,
     };
     return selector ? selector(state) : state;
   };
@@ -85,6 +88,8 @@ const render = () =>
 
 beforeEach(() => {
   stub.saved = plainManifests();
+  stub.scope = { scope: "global" };
+  stub.draft = null;
   stub.rows = [null, ...ROOTS].map((root) =>
     updateRow("gh", root, { updateAvailable: false }),
   );
@@ -100,6 +105,17 @@ describe("the Library table's colour key", () => {
 
   it("leaves the key off when nothing is marked", () => {
     expect(render()).not.toContain("No changes of yours found");
+  });
+
+  // The Library answers what is customized, not what someone is typing:
+  // an unsaved draft has changed nothing in kendex.toml or on disk, and
+  // leaving the page without saving throws it away.
+  it("ignores a draft that has not been saved", () => {
+    stub.scope = VG;
+    stub.draft = changed();
+    const html = render();
+    expect(html).not.toContain("No changes of yours found");
+    expect(html).not.toContain("Customized in");
   });
 });
 

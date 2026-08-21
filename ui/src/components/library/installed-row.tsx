@@ -1,3 +1,4 @@
+import { memo } from "react";
 import type { HarnessId, Origin } from "@/bindings";
 import { HarnessBadge } from "@/components/harness-badge";
 import { StatusDot } from "@/components/status-dot";
@@ -24,7 +25,6 @@ import {
 } from "@/lib/customized-places";
 import {
   type GroupStatus,
-  groupScopes,
   groupStatus,
   groupVendor,
   type ItemGroup,
@@ -57,7 +57,7 @@ const STATUS_TONES: Record<GroupStatus, "good" | "warning" | "critical"> = {
   broken: "critical",
 };
 
-export function InstalledRow({
+function Row({
   group,
   origin,
   standings,
@@ -68,22 +68,29 @@ export function InstalledRow({
   origin: Origin | null;
   /** What is known about each place this package is installed in. */
   standings: PlaceStanding[];
-  onOpen: () => void;
+  /** Opens the package where it was installed from. Handed the row's own
+   *  group rather than closing over it, so the table can keep one function
+   *  for every row and the row can stay memoized. */
+  onOpen: (group: ItemGroup) => void;
   /** Opens the place the mark names, on what was changed there. */
-  onOpenPlace: () => void;
+  onOpenPlace: (group: ItemGroup, standings: PlaceStanding[]) => void;
 }) {
   const Icon = kindIcon(group.kind);
   const displayName =
     group.kind === "hook" ? hookDisplayName(group.name) : group.name;
   const vendor = groupVendor(group);
-  const scopes = groupScopes(group);
+  // The standings were built from this group's places, in that order, so
+  // asking the group a second time would be asking the same question twice.
+  const scopes = standings.map((one) => one.scope);
   const status = groupStatus(group);
   const whereLabel =
     scopes.length === 1 ? scopeName(scopes[0]) : `${scopes.length} locations`;
   // The full path, so two projects sharing a folder name stay apart, and
   // what is known about each — including that nothing is.
   const whereTitle = standings
-    .map((one) => placeStateLine(scopePath(one.scope) ?? "Personal", one.state))
+    .map((one) =>
+      placeStateLine(scopePath(one.scope) ?? scopeName(one.scope), one.state),
+    )
     .join("\n");
   const changed = customizedPlaces(standings);
   const forks = forkedPlaces(standings);
@@ -99,7 +106,7 @@ export function InstalledRow({
       : null;
 
   return (
-    <TableRow onClick={onOpen} className="cursor-pointer">
+    <TableRow onClick={() => onOpen(group)} className="cursor-pointer">
       {/* Cells are nowrap by default; the description is the one column that
           wants to wrap rather than run out of the row and get cut mid-word. */}
       <TableCell className="max-w-[22rem] font-medium whitespace-normal">
@@ -171,7 +178,7 @@ export function InstalledRow({
           <button
             type="button"
             className="max-w-[13rem] text-left whitespace-normal text-customized hover:underline"
-            onClick={markClick(onOpenPlace)}
+            onClick={markClick(() => onOpenPlace(group, standings))}
           >
             {mark}
           </button>
@@ -206,3 +213,7 @@ export function InstalledRow({
     </TableRow>
   );
 }
+
+/** Rows are pure in their props, and the table re-joins its standings on
+ *  every updates reload — most of which move nothing. */
+export const InstalledRow = memo(Row);

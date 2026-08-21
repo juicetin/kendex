@@ -52,18 +52,19 @@ describe("per-place marks", () => {
     expect(customizedPlacesLabel(["vg"], 1, 0)).toBe("Customized in vg");
   });
 
-  it("counts the places when the package lives in several", () => {
+  it("names where the mark leads, and counts the places behind it", () => {
     expect(customizedPlacesLabel(["vg"], 3, 0)).toBe(
-      "Customized in 1 of 3 places",
+      "Customized in vg · 1 of 3 places",
     );
+    // The first named place is the one the click opens.
     expect(customizedPlacesLabel(["vg", "Personal"], 3, 0)).toBe(
-      "Customized in 2 of 3 places",
+      "Customized in vg · 2 of 3 places",
     );
   });
 
   it("never lets a count imply a place it could not read", () => {
     expect(customizedPlacesLabel(["vg"], 3, 1)).toBe(
-      "Customized in 1 of 3 places · 1 not checked",
+      "Customized in vg · 1 of 3 places · 1 not checked",
     );
   });
 

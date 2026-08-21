@@ -19,6 +19,9 @@ interface EditorState {
    *  missing from `saved` was never asked for; after it has, that scope's
    *  manifest could not be read. */
   manifestsLoaded: boolean;
+  /** Why a place's manifest could not be read on the last {@link loadAll},
+   *  naming the places. Null when every one of them was read. */
+  manifestError: string | null;
   dirty: boolean;
   loading: boolean;
   saving: boolean;
@@ -108,6 +111,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
     inventory: null,
     saved: {},
     manifestsLoaded: false,
+    manifestError: null,
     dirty: false,
     loading: false,
     saving: false,
@@ -140,13 +144,24 @@ export const useEditorStore = create<EditorState>((set, get) => {
         scopes.map((scope) => commands.getManifest(scope)),
       );
       const saved: Record<string, Draft> = {};
+      // A place whose manifest would not load stays out of `saved`, which
+      // the per-place marks read as "could not say". Keeping the reason
+      // means the Library can name it rather than only implying it.
+      const failed: string[] = [];
       for (const [index, response] of loaded.entries()) {
-        if (response.status !== "ok") continue;
+        if (response.status !== "ok") {
+          failed.push(`${scopeKey(scopes[index])}: ${response.error}`);
+          continue;
+        }
         saved[scopeKey(scopes[index])] = response.data
           ? toDraft(response.data)
           : emptyDraft();
       }
-      set({ saved, manifestsLoaded: true });
+      set({
+        saved,
+        manifestsLoaded: true,
+        manifestError: failed.length > 0 ? failed.join("\n") : null,
+      });
     },
 
     edit: (change) => {

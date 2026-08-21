@@ -1,5 +1,5 @@
 import { useState } from "react";
-import type { HarnessId, ItemKind, Scope, UpdateRow } from "@/bindings";
+import type { HarnessId, UpdateRow } from "@/bindings";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { StatusDot } from "@/components/status-dot";
 import { Button } from "@/components/ui/button";
@@ -20,7 +20,6 @@ import {
   viewChangesInLabel,
 } from "@/lib/copy";
 import { harnessName } from "@/lib/labels";
-import { sameScope } from "@/lib/scope";
 import { useUpdatesStore } from "@/stores/updates";
 import { keepAsOwn, takeNewVersion } from "@/stores/updates-edits";
 
@@ -123,31 +122,21 @@ export function ForkNotice({
 }
 
 /** The page-level wrapper: shows the notice exactly when this package has
- *  edits on disk and is not already a fork. */
+ *  edits on disk and is not already a fork. Both facts arrive from the
+ *  page's own per-place join, so the notice, the header badge and the
+ *  Update button can never disagree about one place. */
 export function EditedNotice({
-  scope,
-  kind,
-  name,
+  row,
   alreadyForked,
   onViewChanges,
   onResolved,
 }: {
-  scope: Scope;
-  kind: ItemKind;
-  name: string;
+  /** This place's update row when its files were edited by hand, else null. */
+  row: UpdateRow | null;
   alreadyForked: boolean;
   onViewChanges: (harness?: HarnessId) => void;
   onResolved: () => void;
 }) {
-  const row = useUpdatesStore((s) =>
-    s.rows.find(
-      (row) =>
-        row.kind === kind &&
-        row.name === name &&
-        sameScope(row.scope, scope) &&
-        row.blockedByLocalEdit,
-    ),
-  );
   if (!row || alreadyForked) return null;
   return (
     <div className="mb-6">

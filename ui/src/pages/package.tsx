@@ -22,12 +22,13 @@ import { canCustomize } from "@/lib/customization";
 import {
   headerStanding,
   placeStandings,
-  usePlacesSource,
+  rowIn,
+  standingIn,
+  useEditingPlacesSource,
 } from "@/lib/customized-places";
 import { groupItems, groupScopes } from "@/lib/derive";
-import { packageDisplayName, scopeName } from "@/lib/labels";
+import { packageDisplayName } from "@/lib/labels";
 import { PAGE_GUTTER, WIDE_CONTENT_WIDTH } from "@/lib/layout";
-import { sameScope } from "@/lib/scope";
 import { cn } from "@/lib/utils";
 import { installedRow, latestRow, versionRowLabel } from "@/lib/versions";
 import { useAuditStore } from "@/stores/audit";
@@ -47,7 +48,7 @@ export function PackagePage() {
   const toggle = useAuditStore((s) => s.toggle);
   const editorScope = useEditorStore((s) => s.scope);
   const { dirty, saving, openScope, load, save } = useEditorStore();
-  const places = usePlacesSource();
+  const places = useEditingPlacesSource();
 
   const [view, setView] = useState<PackageView>(() => openingView(initialView));
   const [tab, setTab] = useState(() => openingTab(initialView));
@@ -90,16 +91,6 @@ export function PackagePage() {
     diffHarness(view, group?.installations[0]?.harness ?? null),
   );
   const updatesLoaded = useUpdatesStore((s) => s.loaded);
-  const edited = useUpdatesStore((s) =>
-    s.rows.some(
-      (row) =>
-        ref != null &&
-        row.kind === ref.kind &&
-        row.name === ref.name &&
-        sameScope(row.scope, ref.scope) &&
-        row.blockedByLocalEdit,
-    ),
-  );
 
   // The scan no longer knows this package (removed, renamed): leave the
   // way the user came.
@@ -114,25 +105,30 @@ export function PackagePage() {
   const displayName = packageDisplayName(ref);
   const installed = installedRow(versions);
   const latest = latestRow(versions);
-  // Update waits for meta (held vs following) and the updates store
-  // (edited), and is off while edits are held.
-  const canUpdate =
-    latest != null &&
-    !latest.installed &&
-    installed != null &&
-    meta != null &&
-    updatesLoaded &&
-    !edited;
   const customizable = canCustomize(group.kind);
   const scopes = groupScopes(group);
   // Every mark in the header is about one place: the one the Customize tab
-  // has open, or the one this page was opened at while it loads.
+  // has open, or the one this page was opened at while it loads. The body
+  // is always about the place the page was opened at — its files, its
+  // versions and its edited-files notice all belong to that one.
   const standings = placeStandings(places, group.kind, group.name, scopes);
   const selected = headerStanding(
     standings,
     ref.scope,
     pointed ? editorScope : null,
   );
+  const here = standingIn(standings, ref.scope);
+  const row = rowIn(places, group.kind, group.name, ref.scope);
+  const editedRow = row?.blockedByLocalEdit ? row : null;
+  // Update waits for meta (held vs following) and the update standing, and
+  // is off while edits are held.
+  const canUpdate =
+    latest != null &&
+    !latest.installed &&
+    installed != null &&
+    meta != null &&
+    updatesLoaded &&
+    editedRow == null;
 
   const inEveryScope = async (act: (scope: Scope) => Promise<void>) => {
     for (const scope of scopes) await act(scope);
@@ -162,6 +158,8 @@ export function PackagePage() {
       group={group}
       primary={primary}
       meta={meta}
+      forked={here?.forked === true}
+      editedRow={editedRow}
       versions={versions}
       files={files}
       installed={installed}
@@ -187,9 +185,8 @@ export function PackagePage() {
         kind={group.kind}
         displayName={displayName}
         description={group.description}
-        forked={selected?.forked === true}
-        customized={selected?.state === "customized"}
-        place={selected ? scopeName(selected.scope, scopes) : null}
+        place={selected}
+        scopes={scopes}
         action={
           <PackageActions
             scope={primary.scope}

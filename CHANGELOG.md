@@ -91,22 +91,26 @@ changes carry a **Breaking** call-out with their migration note inline.
 
 - Everywhere the app says a package is customized, it now says **where**.
   A skill installed at your user level and in two projects, changed in one
-  of them, reads "Customized in 1 of 3 places" on its Library row and
-  "Customized in vg" in its own header — and clicking the mark opens that
-  project on the change itself: the Customize tab when you set it there,
-  the package overview beside its edited files when you edited them by
-  hand or forked it. The Customize tab's project chips carry a dot on the
-  places that hold changes and say in words what each place holds, and the
-  Forked mark now belongs to the place it was made in instead of showing
-  up on every copy. A place counts as customized whether you changed it on
-  the Customize tab, edited its installed files by hand, or forked it, so
-  a package you hand-edited is marked even when it is up to date, and a
-  fork you have since edited says so. Two projects with the same folder
-  name are told apart by their parent folder wherever they are named
-  together. Where a package comes from a local folder the app cannot check
-  its files, and such a place says "not checked" rather than passing as
-  untouched — while a place whose read is still on its way says it is
-  still being checked instead.
+  of them, reads "Customized in vg · 1 of 3 places" on its Library row and
+  "Customized in vg" in its own header — and clicking the mark opens the
+  place it names, on the change itself: the Customize tab when you set it
+  there, the package overview beside its edited files when you edited them
+  by hand or forked it. The Customize tab's project chips carry a dot on
+  the places that hold changes and say in words what each place holds, and
+  the Forked mark now belongs to the place it was made in instead of
+  showing up on every copy. A place counts as customized whether you
+  changed it on the Customize tab, edited its installed files by hand, or
+  forked it, so a package you hand-edited is marked even when it is up to
+  date, and a fork you have since edited says so. Text you are still
+  typing is not a customization yet: the Library marks what is saved. Two
+  projects with the same folder name are told apart by their parent folder
+  wherever they are named together. Where a package comes from a local
+  folder the app cannot check its files, and such a place says "not
+  checked" rather than passing as untouched — while a place whose read is
+  still on its way says it is still being checked instead. If the update
+  check or a project's settings will not read at all, the Library says so
+  above the table with a way to try again, rather than showing a page of
+  packages with nothing marked.
 - The Updates page is a table with one row per package. A package out of
   date in several projects shows how many places, expands into a row per
   place — User level and each project by name — and each place has its

@@ -53,7 +53,12 @@ function row(overrides: Partial<UpdateRow>): UpdateRow {
 
 describe("updates store", () => {
   beforeEach(() => {
-    useUpdatesStore.setState({ rows: [], busy: false, loaded: false });
+    useUpdatesStore.setState({
+      rows: [],
+      busy: false,
+      loaded: false,
+      error: null,
+    });
     vi.clearAllMocks();
   });
 
@@ -83,6 +88,26 @@ describe("updates store", () => {
     expect(visibleUpdates(rows).map((r) => r.name)).toEqual(["gone", "split"]);
     expect(hiddenUpdates(rows).map((r) => r.name)).toEqual(["muted-gone"]);
     expect(visibleUpdateCount(rows)).toBe(2);
+  });
+
+  // Hand edits reach the Library's marks only through this read, so a
+  // failure that leaves no trace shows a table of packages with nothing
+  // marked — which reads as "nothing of yours is here".
+  it("keeps the reason a load failed, and clears it on the next good one", async () => {
+    vi.mocked(commands.updatesOverview).mockResolvedValueOnce({
+      status: "error",
+      error: "no network",
+    });
+    await useUpdatesStore.getState().load();
+    expect(useUpdatesStore.getState().loaded).toBe(false);
+    expect(useUpdatesStore.getState().error).toBe("no network");
+
+    vi.mocked(commands.updatesOverview).mockResolvedValueOnce({
+      status: "ok",
+      data: { rows: [row({})], warnings: [] },
+    });
+    await useUpdatesStore.getState().load();
+    expect(useUpdatesStore.getState().error).toBe(null);
   });
 
   it("muting keeps the row, flagged — and unmuting brings it back", async () => {

@@ -3,6 +3,7 @@ import type {
   PackageDiff,
   PackageFile,
   PackageMeta_Serialize,
+  UpdateRow,
   VersionRow,
 } from "@/bindings";
 import { DiffView } from "@/components/diff/diff-view";
@@ -23,6 +24,8 @@ export function PackageBody({
   group,
   primary,
   meta,
+  forked,
+  editedRow,
   versions,
   files,
   installed,
@@ -40,6 +43,11 @@ export function PackageBody({
   group: ItemGroup;
   primary: ObservedItem;
   meta: PackageMeta_Serialize | null;
+  /** This page's own place, as the per-place join reports it: its fork,
+   *  and its update row when its files were edited by hand. One owner, so
+   *  the page cannot say two things about one place. */
+  forked: boolean;
+  editedRow: UpdateRow | null;
   versions: VersionRow[];
   files: PackageFile[];
   installed: VersionRow | undefined;
@@ -56,10 +64,8 @@ export function PackageBody({
   return (
     <>
       <EditedNotice
-        scope={reference.scope}
-        kind={reference.kind}
-        name={reference.name}
-        alreadyForked={meta?.fork != null}
+        row={editedRow}
+        alreadyForked={forked}
         onViewChanges={(harness) => {
           if (!installed) return;
           setView({

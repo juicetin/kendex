@@ -1,7 +1,9 @@
+import { useCallback, useMemo } from "react";
 import type { ItemKind, ProvenanceRow } from "@/bindings";
 import { InstalledRow } from "@/components/library/installed-row";
 import { InstalledSkeleton } from "@/components/library/installed-skeleton";
 import { LibraryLegend } from "@/components/library/library-legend";
+import { MarksNote } from "@/components/library/marks-note";
 import { TableEmptyRow } from "@/components/library/table-empty";
 import {
   Table,
@@ -12,7 +14,7 @@ import {
 } from "@/components/ui/table";
 import { TAGS_ROW_LABEL } from "@/lib/copy";
 import {
-  customizedPlaces,
+  anyCustomized,
   markTarget,
   type PlaceStanding,
   placeStandings,
@@ -57,19 +59,41 @@ export function InstalledTable({
 }) {
   const goToPackage = useNavStore((s) => s.goToPackage);
   const places = usePlacesSource();
-  const rows = groups.map((group) => ({
-    group,
-    standings: placeStandings(
-      places,
-      group.kind,
-      group.name,
-      groupScopes(group),
-    ),
-  }));
+  // Joined once per change of its inputs, and every handler kept stable, so
+  // an updates reload that moves no standing re-renders no row: the rows
+  // are memoized and their props are the same values as before.
+  const rows = useMemo(
+    () =>
+      groups.map((group) => {
+        const scopes = groupScopes(group);
+        return {
+          group,
+          standings: placeStandings(places, group.kind, group.name, scopes),
+          origin: originFor(provenance, group.kind, group.name, scopes),
+        };
+      }),
+    [groups, places, provenance],
+  );
+  const openRow = useCallback(
+    (group: ItemGroup) => {
+      const primary = group.installations[0];
+      if (!primary) return;
+      goToPackage({ kind: group.kind, name: group.name, scope: primary.scope });
+    },
+    [goToPackage],
+  );
+  const openMark = useCallback(
+    (group: ItemGroup, standings: PlaceStanding[]) => {
+      const nav = markNav(group, standings);
+      if (nav) goToPackage(...nav);
+    },
+    [goToPackage],
+  );
 
   return (
     <>
-      {rows.some((row) => customizedPlaces(row.standings).length > 0) ? (
+      <MarksNote />
+      {rows.some((row) => anyCustomized(row.standings)) ? (
         <LibraryLegend />
       ) : null}
       <Table>
@@ -86,34 +110,16 @@ export function InstalledTable({
           </TableRow>
         </TableHeader>
         <TableBody>
-          {rows.map(({ group, standings }) => {
-            const primary = group.installations[0];
-            return (
-              <InstalledRow
-                key={group.key}
-                group={group}
-                origin={originFor(
-                  provenance,
-                  group.kind,
-                  group.name,
-                  groupScopes(group),
-                )}
-                standings={standings}
-                onOpen={() => {
-                  if (!primary) return;
-                  goToPackage({
-                    kind: group.kind,
-                    name: group.name,
-                    scope: primary.scope,
-                  });
-                }}
-                onOpenPlace={() => {
-                  const nav = markNav(group, standings);
-                  if (nav) goToPackage(...nav);
-                }}
-              />
-            );
-          })}
+          {rows.map(({ group, standings, origin }) => (
+            <InstalledRow
+              key={group.key}
+              group={group}
+              origin={origin}
+              standings={standings}
+              onOpen={openRow}
+              onOpenPlace={openMark}
+            />
+          ))}
           {scanning ? <InstalledSkeleton /> : null}
           {!scanning && groups.length === 0 ? (
             <TableEmptyRow

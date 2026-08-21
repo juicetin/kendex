@@ -24,7 +24,7 @@ import {
   type PlaceStanding,
   placeStandings,
   standingIn,
-  usePlacesSource,
+  useEditingPlacesSource,
 } from "@/lib/customized-places";
 import { setInstruction } from "@/lib/editor-draft";
 import { scopeName } from "@/lib/labels";
@@ -48,7 +48,7 @@ export function ItemCustomize({
 }) {
   const { scope, draft, inventory, dirty, error, setScope, edit } =
     useEditorStore();
-  const places = usePlacesSource();
+  const places = useEditingPlacesSource();
   // Which places already carry changes, so switching to one is an informed
   // click rather than something you find out after arriving.
   const standings = placeStandings(places, kind, name, scopes);

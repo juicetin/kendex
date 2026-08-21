@@ -111,10 +111,13 @@ export const customizedPlacesLabel = (
   total: number,
   unchecked: number,
 ): string => {
+  // The first place named is the one clicking the mark opens, so where it
+  // leads is on the label rather than found out on arrival; the count is
+  // what the Where cell would otherwise have said.
   const said =
     total === 1 && places.length === 1
       ? customizedInLabel(places[0])
-      : `Customized in ${places.length} of ${total} places`;
+      : `${customizedInLabel(places[0])} · ${places.length} of ${total} places`;
   // A count of places implies the rest are untouched, so a place nothing
   // could be read for is said out loud rather than folded into the rest.
   return unchecked > 0 ? `${said} · ${unchecked} not checked` : said;
@@ -135,6 +138,16 @@ export const placeStateLine = (place: string, state: PlaceState): string => {
   };
   return `${place} — ${said[state]}`;
 };
+
+// The marks rest on two reads: every place's manifest, and the update
+// standing that carries hand edits. When one fails the table still lists
+// every package, so it says which answer is missing — "no changes found"
+// must never stand in for "we could not look".
+export const MARKS_UNREAD_TITLE = "Your changes could not all be checked";
+export const MARKS_UNREAD_UPDATES =
+  "The update check has not run, so files you edited by hand are not counted yet.";
+export const MARKS_UNREAD_MANIFESTS =
+  "Some projects' settings could not be read, so their changes are not counted.";
 
 // The key to the Library's icon colour. A muted icon means nothing of
 // yours was found, which is not the same as having looked everywhere: a

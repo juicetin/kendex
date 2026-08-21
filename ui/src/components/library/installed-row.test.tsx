@@ -73,7 +73,7 @@ const changedIn = (root: string) =>
 describe("the Library row's customized mark", () => {
   it("counts the places rather than claiming the package is changed", () => {
     const html = render(changedIn("/work/vg"));
-    expect(html).toContain("Customized in 1 of 3 places");
+    expect(html).toContain("Customized in vg · 1 of 3 places");
     // The full path, so two projects sharing a folder name stay apart.
     expect(html).toContain("/work/vg — customized by you");
     expect(html).toContain("/work/hyprtrade — as the author wrote it");
@@ -116,7 +116,7 @@ describe("the Library row's customized mark", () => {
         updateRow("gh", "/work/vg", { updateAvailable: false }),
       ]),
     });
-    expect(html).toContain("Customized in 1 of 3 places · 1 not checked");
+    expect(html).toContain("Customized in vg · 1 of 3 places · 1 not checked");
   });
 
   it("marks a place whose files were hand-edited while up to date", () => {
@@ -133,7 +133,7 @@ describe("the Library row's customized mark", () => {
         ]),
       }),
     );
-    expect(html).toContain("Customized in 1 of 3 places");
+    expect(html).toContain("Customized in vg · 1 of 3 places");
   });
 
   it("carries a fork mark only for the places that hold a fork", () => {
@@ -150,7 +150,7 @@ describe("the Library row's customized mark", () => {
       }),
     );
     expect(html).toContain("Forked in vg");
-    expect(html).toContain("Customized in 1 of 3 places");
+    expect(html).toContain("Customized in vg · 1 of 3 places");
   });
 
   it("leaves the fork mark off when no place here holds one", () => {

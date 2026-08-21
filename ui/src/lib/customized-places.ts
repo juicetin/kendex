@@ -105,12 +105,25 @@ export const customizedPlaces = (standings: PlaceStanding[]): Scope[] =>
 export const forkedPlaces = (standings: PlaceStanding[]): Scope[] =>
   standings.filter((one) => one.forked).map((one) => one.scope);
 
-/** How many places a count of customized ones must not speak for. A read
- *  still on its way is as unsettled as one that came back unable to say:
- *  the cause belongs on the per-place line, not in the tally. */
+/** How many places a mark cannot speak for: reads that came back unable to
+ *  say. A read still on its way is not one of them — every launch would
+ *  otherwise open by calling places unchecked and then take it back. */
 export const uncheckedPlaces = (standings: PlaceStanding[]): number =>
-  standings.filter((one) => one.state === "unknown" || one.state === "checking")
-    .length;
+  standings.filter((one) => one.state === "unknown").length;
+
+/** Whether anything on this screen is marked, without building the list to
+ *  find out — the Library asks once per group to decide on its colour key. */
+export const anyCustomized = (standings: PlaceStanding[]): boolean =>
+  standings.some((one) => one.state === "customized");
+
+/** This place's update row, from the index every screen already shares —
+ *  so a page reading one fact off a row never scans the whole list again. */
+export const rowIn = (
+  source: PlacesSource,
+  kind: ItemKind,
+  name: string,
+  scope: Scope,
+): UpdateRow | null => source.rows.get(placeKey(kind, name, scope)) ?? null;
 
 export const standingIn = (
   standings: PlaceStanding[],
@@ -158,18 +171,47 @@ export function manifestsOnScreen(
 export const indexRows = (rows: UpdateRow[]): Map<string, UpdateRow> =>
   new Map(rows.map((row) => [placeKey(row.kind, row.name, row.scope), row]));
 
-/** The two stores every per-place mark reads, joined once per screen. */
-export function usePlacesSource(): PlacesSource {
+// One index per rows array, shared by every screen that reads it: the
+// store replaces the array whenever the rows change, so identity is the
+// whole test — nothing here can go stale behind the store.
+let indexedRows: UpdateRow[] | null = null;
+let index: Map<string, UpdateRow> = new Map();
+const indexFor = (rows: UpdateRow[]): Map<string, UpdateRow> => {
+  if (rows !== indexedRows) {
+    indexedRows = rows;
+    index = indexRows(rows);
+  }
+  return index;
+};
+
+function usePlaces(withDraft: boolean): PlacesSource {
   const saved = useEditorStore((s) => s.saved);
   const scope = useEditorStore((s) => s.scope);
   const draft = useEditorStore((s) => s.draft);
+  const manifestsLoaded = useEditorStore((s) => s.manifestsLoaded);
   const rows = useUpdatesStore((s) => s.rows);
   const updatesLoaded = useUpdatesStore((s) => s.loaded);
-  const manifestsLoaded = useEditorStore((s) => s.manifestsLoaded);
   const manifests = useMemo(
-    () => manifestsOnScreen(saved, scope, draft),
-    [saved, scope, draft],
+    () => (withDraft ? manifestsOnScreen(saved, scope, draft) : saved),
+    [withDraft, saved, scope, draft],
   );
-  const indexed = useMemo(() => indexRows(rows), [rows]);
-  return { manifests, rows: indexed, updatesLoaded, manifestsLoaded };
+  return useMemo(
+    () => ({
+      manifests,
+      rows: indexFor(rows),
+      updatesLoaded,
+      manifestsLoaded,
+    }),
+    [manifests, rows, updatesLoaded, manifestsLoaded],
+  );
 }
+
+/** What is actually customized: saved manifests and the update standing.
+ *  The Library's question, and the one a mark on a row answers. */
+export const usePlacesSource = (): PlacesSource => usePlaces(false);
+
+/** The same, with the manifest being typed overlaid on the place it
+ *  belongs to — so the header, the chips and the box you are typing in
+ *  never disagree. Only the editor's own surfaces want this: text you have
+ *  not saved has changed nothing yet. */
+export const useEditingPlacesSource = (): PlacesSource => usePlaces(true);

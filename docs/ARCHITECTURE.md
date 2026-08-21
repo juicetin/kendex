@@ -181,12 +181,13 @@ lives in one capability table read by core and UI.
 - Hue carries exactly one meaning: **which harness** an item belongs to
   (`--tool-*`, one per harness). Status keeps the semantic tokens it
   always had, and item kinds are told apart by icon — so no surface ever
-  asks a reader to decode two colour languages at once. The Library's
-  table is the single exception: a row's kind icon takes `--customized`
-  when you have changed that package somewhere, and the table prints the
-  key above itself. A colour that means something has to say what, on the
-  same screen as the thing it marks — and since the colour cannot say
-  *where*, the row's Where cell spells that out in words.
+  asks a reader to decode two colour languages at once. `--customized` is
+  the one addition, saying exactly one thing wherever it appears — this is
+  yours — on a Library row's icon and Where cell, a Customize chip's dot,
+  the Customize index's icons, and a package header's badge. A colour has
+  to say what it means beside the thing it marks: the Library prints its
+  key above the table and the rest put the words next to the mark, since
+  no colour can say *which place*.
 - In a table, a harness is its mark, not its name. Every row carries the
   same five or six harnesses, so spelling them out is a column of repeated
   words crowding out the columns that differ; the logo and its hue tell
@@ -274,14 +275,13 @@ lives in one capability table read by core and UI.
   — that place's manifest overlay, its files edited by hand
   (`UpdateRow::blocked_by_local_edit`), and a fork, read from that place's
   own `forks` table so it never rests on an update check having succeeded
-  — into one `PlaceState` the Library row, package header, Customize
-  chips, and fork mark all read. Which fact it was decides where the mark
-  leads: an overlay to that place's Customize tab, a hand edit or fork to
-  the overview, beside the notice offering the decision. Neither unmarked
-  state is a default: `checking` while a read is on its way, `unknown`
-  once one came back unable to say — a path or local source gets no update
-  row, so nothing can say whether its files were edited, and that place
-  never counts as untouched.
+  — into one `PlaceStanding` every mark reads. Which fact it was decides
+  where the mark leads: an overlay to that place's Customize tab, a hand
+  edit or fork to the overview and its notice offering the decision.
+  Neither unmarked state is a default: `checking` while a read is on its
+  way, `unknown` once one came back and could not say — no update row for
+  a path or local source, a failed check, an unparseable manifest. Neither
+  counts as untouched, and the Library names the read it is missing.
 - Hook events have one vocabulary — Claude Code's names, in
   `core/hook.rs::EVENTS` — and every other harness's map is keyed by it.
   The picker offers that list, the validator rejects anything outside it,
