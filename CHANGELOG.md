@@ -205,6 +205,12 @@ changes carry a **Breaking** call-out with their migration note inline.
   which is what its buttons and badges have always meant.
 - Two projects whose folders share a name are told apart on Review, the way
   they already are in the Library and on a package's own page.
+- Turning a package on or off across every project it is in now waits for
+  all of them: if any one has unsaved customization, none is changed. It
+  used to change the others and quietly skip that one.
+- `kendex discard-edits` no longer offers Pi extensions. Pi installs them,
+  so kendex never rendered one and cannot put one back — the command said
+  "no edits to discard" and did nothing.
 - Taking back a dismissal or an acceptance now waits for unsaved
   customization in that project, and holds the Customize Save button while
   it runs, like every other change to a project's settings.

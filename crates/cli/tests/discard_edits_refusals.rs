@@ -196,16 +196,16 @@ fn the_help_names_every_kind_the_command_takes() {
     let output = kendex(home, &project, &["discard-edits", "--help"]);
     let said = String::from_utf8_lossy(&output.stdout).into_owned()
         + &String::from_utf8_lossy(&output.stderr);
-    for kind in [
-        "agent",
-        "skill",
-        "hook",
-        "command",
-        "mcp-server",
-        "pi-extension",
-    ] {
+    for kind in ["agent", "skill", "hook", "command", "mcp-server"] {
         assert!(said.contains(kind), "help does not name '{kind}': {said}");
     }
+    // Pi installs its own extensions, so nothing here renders one and
+    // nothing here can put one back. Naming it would advertise an exit
+    // that does not exist.
+    assert!(
+        !said.contains("pi-extension"),
+        "help names a kind the command cannot act on: {said}"
+    );
 }
 
 /// A target whose source cannot be read was never rendered, so nothing
@@ -243,4 +243,21 @@ fn an_unmeasured_target_is_refused_rather_than_called_clean() {
         "my gh edit",
         "and the edit is still there"
     );
+}
+
+/// A kind the planner never renders has no drift to read, so the clean
+/// line would report a discard that never happened.
+#[test]
+#[allow(clippy::unwrap_used)]
+fn a_kind_the_planner_does_not_render_is_refused() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path();
+    let project = project_with_two_skills(home);
+
+    let output = kendex(home, &project, &["discard-edits", "pi-extension", "x"]);
+    let said = String::from_utf8_lossy(&output.stderr).into_owned()
+        + &String::from_utf8_lossy(&output.stdout);
+    assert!(!output.status.success(), "{said}");
+    assert!(!said.contains("no edits to discard"), "{said}");
+    assert!(said.contains("cannot put one's files back"), "{said}");
 }

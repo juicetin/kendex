@@ -4,6 +4,7 @@ import { commands } from "@/bindings";
 import { useAuditStore } from "./audit";
 import { useEditorStore } from "./editor";
 import { useProblemsStore } from "./problems";
+import { refusesForUnsavedIn } from "./unsaved-first";
 
 vi.mock("@/bindings", () => ({
   commands: {
@@ -141,5 +142,36 @@ describe("taking a decision back", () => {
     } as never);
     expect(commands.revokeDismissal).not.toHaveBeenCalled();
     expect(useAuditStore.getState().busy).toBe(false);
+  });
+});
+
+// One click that means every place this package is installed in. Asked per
+// place inside the loop, the first refusal would stop that place and let
+// the rest be written — a package changed in two projects and not the
+// third, from a click that said nothing about doing part of it.
+describe("a package-wide action across several places", () => {
+  const VG = { scope: "project" as const, root: "/work/vg" };
+
+  it("refuses all of them when any one has unsaved typing", () => {
+    useEditorStore.setState({
+      scope: VG,
+      draft: null,
+      dirty: false,
+      held: {
+        global: {
+          scope: globalScope,
+          draft: { schema: 1, install: {} },
+          base: "read-earlier",
+        },
+      },
+    });
+    expect(refusesForUnsavedIn([VG, globalScope])).toBe(true);
+    // And names the place to go back to, which is not the one on screen.
+    expect(useProblemsStore.getState().dialog.steps?.[0]).toContain("Personal");
+  });
+
+  it("goes ahead when none of them does", () => {
+    useEditorStore.setState({ scope: VG, draft: null, dirty: false, held: {} });
+    expect(refusesForUnsavedIn([VG, globalScope])).toBe(false);
   });
 });

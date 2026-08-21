@@ -20,6 +20,14 @@ use crate::source_read::SealedSource;
 use super::desired::{DesiredState, target_harnesses};
 
 /// The kinds a plan installs, in the order it plans them.
+/// Whether a plan speaks for this kind at all. Pi extensions install
+/// through Pi rather than through the planner, so nothing here renders or
+/// compares them — a command that acts on plan drift cannot act on one,
+/// and asking is better than each caller keeping its own copy of the list.
+pub fn plans_kind(kind: ItemKind) -> bool {
+    PLANNED_KINDS.contains(&kind)
+}
+
 pub(super) const PLANNED_KINDS: [ItemKind; 5] = [
     ItemKind::Skill,
     ItemKind::Agent,

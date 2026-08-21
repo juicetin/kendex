@@ -27,6 +27,7 @@ mod desired_skill;
 mod desired_source;
 pub mod detach;
 mod expansion;
+pub use expansion::plans_kind;
 pub mod fork;
 mod gate;
 mod gemini;

@@ -1,6 +1,8 @@
 use clap::Args;
 
-use kendex_core::engine::{EditedHere, PlanOptions, edited_here, plan_scope, planned_declarations};
+use kendex_core::engine::{
+    EditedHere, PlanOptions, edited_here, plan_scope, planned_declarations, plans_kind,
+};
 use kendex_core::env::Env;
 use kendex_core::lock::{load as load_lock, lock_path};
 use kendex_core::manifest::{load_for_mutation, manifest_path};
@@ -18,7 +20,7 @@ use crate::scope::ScopeFilter;
 /// package, and why the app has only ever offered the targeted apply.
 #[derive(Args)]
 pub struct DiscardArgs {
-    /// agent | skill | hook | command | mcp-server | pi-extension
+    /// agent | skill | hook | command | mcp-server
     kind: String,
     name: String,
     #[arg(short = 'g', long)]
@@ -30,6 +32,18 @@ pub struct DiscardArgs {
 
 pub fn run(env: &Env, args: DiscardArgs) -> CliResult {
     let kind = parse_kind(&args.kind)?;
+    // Some kinds install through their own tool rather than through the
+    // planner, so nothing here rendered them and nothing can put them
+    // back. Saying so beats the clean line, which would report a discard
+    // that never happened.
+    if !plans_kind(kind) {
+        return Err(format!(
+            "kendex does not render {}s, so it cannot put one's files back — {} installs them",
+            kind.name(),
+            kind.name()
+        )
+        .into());
+    }
     let filter = ScopeFilter::resolve(args.scope.as_deref(), args.global, ScopeFilter::Project)?;
     let scope = resolve_scopes(env, filter)?.remove(0);
     let manifest = load_for_mutation(&manifest_path(env, &scope))?.ok_or("no manifest")?;

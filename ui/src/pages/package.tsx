@@ -33,6 +33,7 @@ import { useAuditStore } from "@/stores/audit";
 import { useEditorStore } from "@/stores/editor";
 import { useNavStore } from "@/stores/nav";
 import { useScanStore } from "@/stores/scan";
+import { refusesForUnsavedIn } from "@/stores/unsaved-first";
 import { useUpdatesStore } from "@/stores/updates";
 
 /** One package, full page: what it is as installed, and what you have
@@ -113,7 +114,11 @@ export function PackagePage() {
     updatesLoaded &&
     editedRow == null;
 
+  // Every place is asked before the first one is written: a refusal partway
+  // through leaves the package changed in some projects and not others,
+  // from one click that said nothing about doing part of it.
   const inEveryScope = async (act: (scope: Scope) => Promise<void>) => {
+    if (refusesForUnsavedIn(scopes)) return;
     for (const scope of scopes) await act(scope);
   };
 

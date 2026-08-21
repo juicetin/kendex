@@ -39,3 +39,28 @@ export function refusesForUnsaved(scope: Scope): boolean {
   });
   return true;
 }
+
+/** The same question about several places at once, for one click that
+ *  writes them all.
+ *
+ *  Asked per place inside the loop, the first refusal stops that place and
+ *  the loop carries on writing the others — one click leaving the package
+ *  changed in two projects and not the third, with nothing said about
+ *  which. A package-wide action either goes everywhere or nowhere. */
+export function refusesForUnsavedIn(scopes: Scope[]): boolean {
+  const editor = useEditorStore.getState();
+  const held = scopes.find(
+    (scope) => editor.held[scopeKey(scope)] !== undefined,
+  );
+  const onScreen = scopes.find(
+    (scope) => editor.dirty && sameScope(editor.scope, scope),
+  );
+  const blocking = held ?? onScreen;
+  if (!blocking) return false;
+  useProblemsStore.getState().showError({
+    title: UNSAVED_FIRST_TITLE,
+    message: UNSAVED_FIRST_BODY,
+    steps: unsavedFirstSteps(held ? scopeName(blocking) : null),
+  });
+  return true;
+}
