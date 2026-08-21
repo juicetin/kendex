@@ -192,3 +192,57 @@ REVIEW_GATE_CARRY_FORWARD_EXCLUDE = ""
 # accepts them; a declaration not in the exclude list is an orphan and
 # fails the selftest.
 REVIEW_GATE_CARRY_FORWARD_EXCLUDE_PROPHYLACTIC = ""
+
+# ── Migrated from vstack.settings.toml ───────────────────────────────────
+# Everything vstack sets that this repo did not. Values match vstack except
+# where this repo's names or layout make them wrong; those are called out.
+
+# Commit identity for agent-authored work. Empty uses the ambient git identity.
+BOT_EMAIL = ""
+BOT_NAME = ""
+BOT_REMOTE_NAME = ""
+
+# Where the decider skill keeps architecture decision records.
+DECISIONS_DIR = "docs/decisions"
+
+# DIFFERS FROM VSTACK: vstack points this at tools/validate-changed, which
+# does not exist here. tools/guard is this repo's validation command — the
+# same pre-commit checks agents already run before committing.
+DEV_VALIDATE_CMD = "tools/guard"
+
+GH_BOT_USERNAME = ""
+GH_VERIFY_CMD = ""
+
+# DIFFERS FROM VSTACK: the issue prefix is this repo's own. Matched
+# case-insensitively against the branch name, so ken-450 resolves to KEN-450.
+# GitHub issues are not listed: they reach their issue through the PR's
+# Closes line, not through the branch.
+GH_ISSUE_PATTERN = "ken-[0-9]+"
+
+LINEAR_FORMAT = "safe"
+ORCH_STATE_DIR = "tmp"
+
+# File-size ratchet classes: the ceiling a path gets when it is not the
+# default. Language-agnostic, so it carries over unchanged.
+SIZE_RATCHET_CLASSES = "*/README.md=120;*/tests/*=800;*/test/*=800;*/__tests__/*=800;*/tests.rs=800;*test_util.rs=800;*.test.*=800"
+
+# ── Worktrees ────────────────────────────────────────────────────────────
+# What a fresh issue worktree gets from this checkout. Symlink untracked
+# paths only: an entry over tracked files makes git refuse writes in that
+# worktree while `git status` still reports clean.
+#
+# DIFFERS FROM VSTACK: base dir and lock file carry this repo's name. The
+# harness directories are named whole here (.pi, .codex, .opencode) because
+# nothing under them is tracked, where vstack had to name children. The
+# .claude children are kendex-rendered and gitignored, so they link too.
+# opencode.json and .cursor are vstack-only and dropped.
+WORKTREE_BASE_DIR = "~/dev/.worktrees/kendex"
+WORKTREE_COPIES = ".kendex-lock.json"
+WORKTREE_DEFAULT_BRANCH = "main"
+WORKTREE_MKDIRS = "tmp"
+WORKTREE_SYMLINKS = ".env.local .agents .cache .codex .opencode .pi .claude/agents .claude/hooks .claude/skills .claude/settings.json"
+
+# DIFFERS FROM VSTACK: vstack links .claude/CLAUDE.md to AGENTS.md because
+# the file is untracked there. Here it is a tracked symlink, so it arrives
+# through git and naming it would shadow tracked content.
+WORKTREE_RELATIVE_SYMLINKS = ""
