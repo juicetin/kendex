@@ -70,6 +70,7 @@ export function SyncScopeCard({
   const canApply = view.plan.length > 0 || orphans.length > 0;
   const summary = scopeSummaryLabel({
     changes: changes.length,
+    conflicts: conflicts.length,
     blocked: blockedCount,
     open: openCount,
     unmanaged: unmanaged.length,

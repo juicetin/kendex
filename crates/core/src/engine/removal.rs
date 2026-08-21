@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use super::desired;
 use super::owned::{Owned, installed};
 use super::targets::disabled_name;
-use super::{DriftRow, DriftState, PlanOptions};
+use super::{DriftRow, DriftState, DriftSubject, PlanOptions};
 use crate::apply::{Op, PlannedOp, Pre};
 use crate::env::Env;
 use crate::error::Result;
@@ -264,6 +264,7 @@ pub(super) fn orphans(
             harness: entry.harness,
             scope: scope.clone(),
             state: DriftState::Orphaned,
+            subject: DriftSubject::Package,
             detail: if removable {
                 "no longer wanted — will be removed".into()
             } else {
@@ -288,6 +289,7 @@ pub(super) fn orphans(
                 harness: entry.harness,
                 scope: scope.clone(),
                 state: DriftState::Conflict,
+                subject: DriftSubject::Package,
                 detail: "no longer wanted, but its files were edited on disk — remove it by name to confirm".into(),
                 cause: Some(super::DriftCause::LocalEdit),
             });

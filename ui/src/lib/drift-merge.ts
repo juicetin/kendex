@@ -7,19 +7,23 @@ export interface MergedDriftRow {
   kind: DriftRow["kind"];
   name: string;
   state: DriftRow["state"];
+  /** What the row is about, which decides whether it has a page to open.
+   *  Merged rows share it: the key includes it, so a group is never a mix. */
+  subject: DriftRow["subject"];
   installations: DriftRow[];
 }
 
 export function mergeDriftRows(rows: DriftRow[]): MergedDriftRow[] {
   const groups = new Map<string, MergedDriftRow>();
   for (const row of rows) {
-    const key = `${row.kind}:${row.name}:${row.state}`;
+    const key = `${row.kind}:${row.name}:${row.state}:${row.subject}`;
     let group = groups.get(key);
     if (!group) {
       group = {
         kind: row.kind,
         name: row.name,
         state: row.state,
+        subject: row.subject,
         installations: [],
       };
       groups.set(key, group);

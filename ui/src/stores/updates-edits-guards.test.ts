@@ -18,6 +18,7 @@ vi.mock("@/bindings", () => ({
     packageFork: vi.fn(),
     getManifest: vi.fn(),
     editorInventory: vi.fn(),
+    updateManifest: vi.fn(),
     scanMachine: vi.fn(),
     auditAll: vi.fn(),
   },
@@ -170,5 +171,20 @@ describe("a fork or discard beside an open Customize tab", () => {
       gh: "mine",
     });
     expect(useEditorStore.getState().dirty).toBe(true);
+
+    // And the save that follows must not put the pre-fork file back over
+    // the record just made: keeping the typing is only half the answer.
+    vi.mocked(commands.updateManifest).mockResolvedValue({
+      status: "ok",
+      data: view,
+    });
+    await useEditorStore.getState().save();
+    expect(commands.updateManifest).not.toHaveBeenCalled();
+    expect(useProblemsStore.getState().dialog.title).toContain(
+      "changed while you typed",
+    );
+    expect(useEditorStore.getState().draft?.["skill-instructions"]).toEqual({
+      gh: "mine",
+    });
   });
 });

@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use super::desired::{Artifact, Desired};
 use super::item_plan::PlanSink;
-use super::{DriftCause, DriftRow, DriftState};
+use super::{DriftCause, DriftRow, DriftState, DriftSubject};
 use crate::env::Env;
 use crate::lock::Lock;
 use crate::model::Scope;
@@ -33,6 +33,7 @@ pub(super) fn hold_rev_conflict(
         harness: item.harness,
         scope: scope.clone(),
         state: DriftState::Conflict,
+        subject: DriftSubject::Package,
         detail: "wanted at two different revisions — nothing was changed".into(),
         cause: None,
     });
@@ -182,6 +183,7 @@ pub(super) fn hold_local_edit(
         harness: item.harness,
         scope: scope.clone(),
         state: DriftState::Conflict,
+        subject: DriftSubject::Package,
         detail: detail.into(),
         cause: Some(cause),
     });

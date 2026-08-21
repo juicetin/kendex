@@ -31,8 +31,16 @@ export async function readManifests(): Promise<{
   failed: string[];
 }> {
   const scopes = await everyScope();
+  // Each read answers for its own place. Left to reject, one bad manifest
+  // takes the whole batch down and every readable place with it — the
+  // opposite of the per-place result this returns.
   const loaded = await Promise.all(
-    scopes.map((scope) => commands.getManifest(scope)),
+    scopes.map((scope) =>
+      commands.getManifest(scope).catch((thrown: unknown) => ({
+        status: "error" as const,
+        error: String(thrown),
+      })),
+    ),
   );
   const read: [string, Draft][] = [];
   const failed: string[] = [];

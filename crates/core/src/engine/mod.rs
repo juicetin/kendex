@@ -79,7 +79,9 @@ use set_change::{kept_members, set_changes};
 use unmanaged::unmanaged_rows;
 
 mod report_types;
-pub use report_types::{DriftCause, DriftRow, DriftState, EngineReport, ItemWarning, PlanOptions};
+pub use report_types::{
+    DriftCause, DriftRow, DriftState, DriftSubject, EngineReport, ItemWarning, PlanOptions,
+};
 
 /// Compute drift and the plan that would fix it, in one pass — the Audit
 /// page and `apply` both consume this.

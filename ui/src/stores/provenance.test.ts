@@ -105,3 +105,16 @@ describe("re-reading the join", () => {
     expect(useProvenanceStore.getState().rows).toBe(first);
   });
 });
+
+// Both callers fire this without awaiting, so a rejection left to escape is
+// unhandled and the From row simply never appears.
+describe("a join read that rejects rather than answering", () => {
+  it("records the failure instead of escaping", async () => {
+    vi.mocked(commands.libraryProvenance).mockRejectedValue(
+      new Error("no channel"),
+    );
+    await expect(useProvenanceStore.getState().load()).resolves.toBeUndefined();
+    expect(useProvenanceStore.getState().error).toContain("no channel");
+    expect(useProvenanceStore.getState().loaded).toBe(true);
+  });
+});

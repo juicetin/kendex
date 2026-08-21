@@ -24,6 +24,7 @@ function drift(
     harness,
     scope: root ? { scope: "project", root } : { scope: "global" },
     state,
+    subject: "package",
     detail: "",
   };
 }

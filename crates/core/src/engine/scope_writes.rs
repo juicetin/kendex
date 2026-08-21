@@ -13,7 +13,7 @@ use crate::model::{HarnessId, ItemKind, Scope};
 use crate::source::SourceState;
 
 use super::desired::DesiredState;
-use super::{DriftRow, DriftState, config_edits};
+use super::{DriftRow, DriftState, DriftSubject, config_edits};
 
 /// One mutation per config file, whatever asked for it — a single
 /// precondition can hold; per-edit preconditions against the same original
@@ -312,6 +312,7 @@ pub(super) fn plan_settings_seed(
             harness: HarnessId::Claude,
             scope: scope.clone(),
             state: DriftState::Conflict,
+            subject: DriftSubject::Scope,
             detail: format!("{} is not a regular file", path.display()),
             cause: None,
         });

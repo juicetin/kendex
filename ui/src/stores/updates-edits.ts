@@ -53,12 +53,15 @@ const run = async (scope: Scope, work: () => Promise<string | null>) => {
     //
     // The refusal above is a check at entry, and this runs seconds later
     // with nothing stopping someone typing in between — so the dirty flag
-    // is read again here, not assumed. A draft that appeared since keeps
-    // the screen: the stale-manifest risk it leaves is the one the entry
-    // refusal already covers, and silently replacing typing is worse.
+    // is read again here, not assumed. Typing that arrived since is kept
+    // and the place is marked outdated instead: what is in hand was read
+    // before this rewrite, and saving it would put the old file back over
+    // the record just made. The save refuses and says so rather than this
+    // choosing silently between the two losses.
     const editor = useEditorStore.getState();
-    if (sameScope(editor.scope, scope) && !editor.dirty)
-      await editor.load(scope);
+    if (!sameScope(editor.scope, scope)) return;
+    if (editor.dirty) editor.outdate(scope);
+    else await editor.load(scope);
     await useScanStore.getState().refresh();
     await useAuditStore.getState().refresh({ force: true });
   } finally {

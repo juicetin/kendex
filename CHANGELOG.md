@@ -184,9 +184,16 @@ changes carry a **Breaking** call-out with their migration note inline.
   refused rather than quietly replacing the record of where it came from,
   which is kept nowhere else.
 - Review no longer files a package it cannot act on under "Ready to apply".
-  Something waiting on you — an edit held on disk — is listed apart, with a
-  link to the package's own page where its exits are, rather than counted
-  as work the Apply button will do.
+  Something waiting on you — an edit held on disk — is listed apart and
+  counted in the project's summary line, with a link to the package's own
+  page where its exits are, rather than counted as work the Apply button
+  will do. Rows that are not about a package, like a settings file kendex
+  could not write, are listed without a link, since there is no page to
+  open for them.
+- Saving the Customize tab is refused, with the reason and a way to reload,
+  when keeping a fork or discarding edits rewrote that project's settings
+  while you were typing. Before, the save put the older copy back and the
+  new fork record was lost silently.
 - Keeping a fork or discarding edits is refused while you have unsaved
   changes on the Customize tab for that same project: saving them afterwards
   would have written the old settings back over the new fork, losing it

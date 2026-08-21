@@ -36,6 +36,16 @@ pub enum DriftCause {
     Both,
 }
 
+/// What a drift row is about. A package's remedies live on its own page;
+/// a file kendex writes beside the packages has no page to open, so a
+/// surface that links every row would promise one that is not there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub enum DriftSubject {
+    Package,
+    Scope,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct DriftRow {
@@ -45,6 +55,7 @@ pub struct DriftRow {
     pub scope: Scope,
     pub state: DriftState,
     pub detail: String,
+    pub subject: DriftSubject,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cause: Option<DriftCause>,
 }

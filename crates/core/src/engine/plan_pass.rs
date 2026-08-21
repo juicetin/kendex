@@ -12,8 +12,8 @@ use crate::model::Scope;
 
 use super::item_plan::plan_item;
 use super::{
-    DriftCause, DriftRow, DriftState, PlanOptions, config_edits, desired, holds, item_plan,
-    removal, tree_plan,
+    DriftCause, DriftRow, DriftState, DriftSubject, PlanOptions, config_edits, desired, holds,
+    item_plan, removal, tree_plan,
 };
 
 /// One pass over the desired items, with the two holds that outrank
@@ -99,6 +99,7 @@ pub(super) fn plan_refusals(
                     harness: refusal.harness,
                     scope: scope.clone(),
                     state: DriftState::Conflict,
+                    subject: DriftSubject::Package,
                     detail: format!(
                         "{} — its files were edited on disk and were kept; keep them as a fork or remove the item by name",
                         refusal.reason
@@ -124,6 +125,7 @@ pub(super) fn plan_refusals(
             harness: refusal.harness,
             scope: scope.clone(),
             state: DriftState::Conflict,
+            subject: DriftSubject::Package,
             detail: match removals.is_empty() {
                 false => format!(
                     "{} — the previous installation will be moved to the trash",

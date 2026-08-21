@@ -30,13 +30,20 @@ export function ScopeConflicts({
             key={`${group.kind}:${group.name}`}
             className="flex flex-wrap items-center gap-2 py-2.5 first:pt-0 last:pb-0"
           >
-            <button
-              type="button"
-              className="text-sm font-medium underline underline-offset-2 hover:text-foreground"
-              onClick={() => onOpen(group)}
-            >
-              {group.name}
-            </button>
+            {/* Only a package has a page to open. A file kendex writes
+                beside them would navigate to something the scan cannot
+                contain, and the page would bounce straight back. */}
+            {group.subject === "package" ? (
+              <button
+                type="button"
+                className="text-sm font-medium underline underline-offset-2 hover:text-foreground"
+                onClick={() => onOpen(group)}
+              >
+                {group.name}
+              </button>
+            ) : (
+              <span className="text-sm font-medium">{group.name}</span>
+            )}
             <span className="text-xs text-muted-foreground">
               {kindLabel(group.kind)}
             </span>

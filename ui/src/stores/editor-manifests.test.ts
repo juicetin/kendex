@@ -128,11 +128,25 @@ describe("passes that overlap", () => {
   });
 
   it("treats a rejected read as a read that failed, not one still running", async () => {
+    // Every place refusing is still a pass that ran: each read answers for
+    // its own place, and the reason is named per place.
     vi.mocked(commands.getManifest).mockRejectedValue(new Error("no channel"));
     await useEditorStore.getState().loadAll();
     const state = useEditorStore.getState();
     expect(state.manifestsReading).toBe(false);
     expect(state.manifestError).toContain("no channel");
+    expect(state.manifestsLoaded).toBe(true);
+  });
+
+  it("says the pass itself failed when it could not even list the places", async () => {
+    useSettingsStore.setState({ settings: null });
+    vi.spyOn(useSettingsStore.getState(), "load").mockRejectedValue(
+      new Error("settings unreadable"),
+    );
+    await useEditorStore.getState().loadAll();
+    const state = useEditorStore.getState();
+    expect(state.manifestsReading).toBe(false);
+    expect(state.manifestError).toContain("settings unreadable");
     expect(state.manifestsLoaded).toBe(false);
   });
 
@@ -147,5 +161,36 @@ describe("passes that overlap", () => {
     // Identity is what the screens joining on this memoize against, so an
     // equal copy would re-render every row for news that is not news.
     expect(useEditorStore.getState().saved).toBe(first);
+  });
+
+  it("keeps the places that read when one of them rejects", async () => {
+    // Each read answers for its own place: one bad manifest taking the
+    // whole batch down would make every readable place unknown.
+    useSettingsStore.setState({
+      settings: { schema: 1, projects: ["/work/vg", "/work/hyprtrade"] },
+    });
+    vi.mocked(commands.getManifest).mockImplementation((scope) =>
+      scope.scope === "project" && scope.root === "/work/vg"
+        ? Promise.reject(new Error("no channel"))
+        : Promise.resolve({
+            status: "ok",
+            data: {
+              schema: 1,
+              install: {},
+              "skill-instructions": { gh: "read" },
+            },
+          }),
+    );
+
+    await useEditorStore.getState().loadAll();
+    const state = useEditorStore.getState();
+    expect(state.saved.global?.["skill-instructions"]).toEqual({ gh: "read" });
+    expect(state.saved["/work/hyprtrade"]?.["skill-instructions"]).toEqual({
+      gh: "read",
+    });
+    expect(state.saved["/work/vg"]).toBeUndefined();
+    expect(state.manifestError).toContain("/work/vg");
+    expect(state.manifestError).toContain("no channel");
+    expect(state.manifestsLoaded).toBe(true);
   });
 });

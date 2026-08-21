@@ -10,6 +10,7 @@ const conflict = (over: Partial<DriftRow> = {}): DriftRow => ({
   harness: "claude",
   scope: { scope: "project", root: "/work/vg" },
   state: "conflict",
+  subject: "package",
   detail: "edited on disk since your fork was rendered",
   cause: "local-edit",
   ...over,
@@ -45,5 +46,21 @@ describe("a conflict in the Review card", () => {
     expect(
       renderToStaticMarkup(<ScopeConflicts conflicts={[]} onOpen={() => {}} />),
     ).toBe("");
+  });
+
+  // Not every conflict is a package. The engine synthesises one for a
+  // settings file it writes beside them, and a link there would navigate
+  // to something the scan cannot contain.
+  it("is plain text where there is no package page to open", () => {
+    const html = renderToStaticMarkup(
+      <ScopeConflicts
+        conflicts={mergeDriftRows([
+          conflict({ name: ".kendex-settings.env", subject: "scope" }),
+        ])}
+        onOpen={() => {}}
+      />,
+    );
+    expect(html).not.toContain("<button");
+    expect(html).toContain(">.kendex-settings.env<");
   });
 });

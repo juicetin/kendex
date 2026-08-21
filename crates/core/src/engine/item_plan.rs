@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-use super::{DriftRow, DriftState};
+use super::{DriftRow, DriftState, DriftSubject};
 use crate::apply::{Op, PlannedOp, Pre};
 use crate::clock::timestamp;
 use crate::env::Env;
@@ -48,6 +48,7 @@ pub(super) fn plan_item(
         scope: scope.clone(),
         state,
         detail,
+        subject: DriftSubject::Package,
         cause: None,
     };
     let existing = lock.entries.get(&item.key);

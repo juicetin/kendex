@@ -94,6 +94,7 @@ describe("labels", () => {
       harness: "claude",
       scope: { scope: "global" },
       state: "stale",
+      subject: "package",
       detail: "",
       ...over,
     });

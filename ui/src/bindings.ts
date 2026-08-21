@@ -971,6 +971,7 @@ export type DriftRow_Deserialize = {
 	scope: Scope,
 	state: DriftState,
 	detail: string,
+	subject: DriftSubject,
 	cause?: DriftCause | null,
 };
 
@@ -981,6 +982,7 @@ export type DriftRow_Serialize = {
 	scope: Scope,
 	state: DriftState,
 	detail: string,
+	subject: DriftSubject,
 	cause?: DriftCause | null,
 };
 
@@ -995,6 +997,13 @@ export type DriftState =
 "unmanaged" | 
 /**  Needs a human: foreign symlink, occupied target, or provenance clash. */
 "conflict";
+
+/**
+ *  What a drift row is about. A package's remedies live on its own page;
+ *  a file kendex writes beside the packages has no page to open, so a
+ *  surface that links every row would promise one that is not there.
+ */
+export type DriftSubject = "package" | "scope";
 
 /**
  *  What the Customize page needs to offer real choices: the names already

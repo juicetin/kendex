@@ -1,19 +1,9 @@
-import { toast } from "sonner";
 import { create } from "zustand";
 import { commands, type ItemWarning, type UpdateRow } from "@/bindings";
-import { UPDATE_ERROR_TITLE, updatedToastLabel } from "@/lib/copy";
-import {
-  nothingToUpdateToastLabel,
-  updatedWithPlaceToastLabel,
-} from "@/lib/copy-updates";
+import { UPDATE_ERROR_TITLE } from "@/lib/copy";
 import { keepIfSame } from "@/lib/same-read";
-import { scopeKey } from "@/lib/scope";
-import { placeName, skippedPlaces, updatablePlaces } from "@/lib/update-groups";
-import { visibleUpdates } from "@/lib/update-rows";
-import { bulkUpdateToast } from "@/lib/update-toasts";
-import { useAuditStore } from "./audit";
 import { useProblemsStore } from "./problems";
-import { useScanStore } from "./scan";
+import { applyMany, applyOne } from "./updates-apply";
 
 interface UpdatesState {
   rows: UpdateRow[];
@@ -38,7 +28,7 @@ interface UpdatesState {
   setIgnored: (row: UpdateRow, ignored: boolean) => Promise<void>;
 }
 
-export const useUpdatesStore = create<UpdatesState>((set, get) => {
+export const useUpdatesStore = create<UpdatesState>((set) => {
   const showError = (title: string, message: string) =>
     useProblemsStore.getState().showError({ title, message });
 
@@ -51,26 +41,6 @@ export const useUpdatesStore = create<UpdatesState>((set, get) => {
     reads += 1;
     const mine = reads;
     return () => mine === reads;
-  };
-
-  const apply = async (row: UpdateRow): Promise<boolean> => {
-    // Held packages move by moving the hold; following ones come current
-    // by applying the scope — which is what following means, and brings
-    // any other pending changes in that scope along.
-    const response =
-      row.pinned && row.latest
-        ? await commands.packageSetRev(
-            row.scope,
-            row.kind,
-            row.name,
-            row.latest.commit,
-          )
-        : await commands.applyPlan(row.scope, false, []);
-    if (response.status === "error") {
-      showError(UPDATE_ERROR_TITLE, response.error);
-      return false;
-    }
-    return true;
   };
 
   const reload = async () => {
@@ -118,7 +88,19 @@ export const useUpdatesStore = create<UpdatesState>((set, get) => {
       set({ checking: true });
       const newest = ticket();
       try {
-        const response = await commands.updatesRefresh();
+        let response: Awaited<ReturnType<typeof commands.updatesRefresh>>;
+        try {
+          response = await commands.updatesRefresh();
+        } catch (thrown) {
+          // A rejected read is a read that failed. Left to reject, the
+          // standing keeps its last successful values and the marks go on
+          // presenting stale rows as a check that worked.
+          if (newest()) {
+            set({ loaded: false, error: String(thrown) });
+            showError(UPDATE_ERROR_TITLE, String(thrown));
+          }
+          return;
+        }
         if (!newest()) return;
         if (response.status === "ok") {
           set({
@@ -136,73 +118,9 @@ export const useUpdatesStore = create<UpdatesState>((set, get) => {
       }
     },
 
-    updateOne: async (row) => {
-      set({ busy: true });
-      try {
-        if (await apply(row)) {
-          // A follower comes current by applying its scope, which brings
-          // that scope's other followers along — the toast says so rather
-          // than letting the extra changes look like a surprise.
-          toast.success(
-            row.pinned
-              ? updatedToastLabel(row.name)
-              : updatedWithPlaceToastLabel(row.name, placeName(row.scope)),
-          );
-          await reload();
-          await useScanStore.getState().refresh();
-          await useAuditStore.getState().refresh({ force: true });
-        }
-      } finally {
-        set({ busy: false });
-      }
-    },
+    updateOne: applyOne,
 
-    updateRows: async (wanted) => {
-      set({ busy: true });
-      try {
-        // Edited packages are held by the engine and cannot be updated
-        // this way — they need the fork decision first, so they are left
-        // out rather than silently surviving the click. Rows that are news
-        // without an update (gone upstream, mixed installs) have nothing
-        // for this button to do.
-        const rows = updatablePlaces(wanted);
-        const skipped = skippedPlaces(wanted).length;
-        if (rows.length === 0) {
-          toast.info(nothingToUpdateToastLabel(skipped));
-          return;
-        }
-        // Move every hold first — each move applies its whole scope, so
-        // that scope's followers are already current — then one apply per
-        // scope no hold touched. Never two applies for one scope.
-        let ok = true;
-        const applied = new Set<string>();
-        for (const row of rows.filter((row) => row.pinned)) {
-          if (await apply(row)) applied.add(scopeKey(row.scope));
-          else ok = false;
-        }
-        const scopes = new Map(
-          rows
-            .filter((row) => !row.pinned && !applied.has(scopeKey(row.scope)))
-            .map((row) => [scopeKey(row.scope), row] as const),
-        );
-        for (const row of scopes.values()) {
-          const response = await commands.applyPlan(row.scope, false, []);
-          if (response.status === "error") {
-            showError(UPDATE_ERROR_TITLE, response.error);
-            ok = false;
-          }
-        }
-        await reload();
-        if (ok)
-          toast.success(
-            bulkUpdateToast(rows, skipped, visibleUpdates(get().rows)),
-          );
-        await useScanStore.getState().refresh();
-        await useAuditStore.getState().refresh({ force: true });
-      } finally {
-        set({ busy: false });
-      }
-    },
+    updateRows: applyMany,
 
     setAutoUpdate: async (row, auto) => {
       // Switching following OFF holds the package at what is installed now.

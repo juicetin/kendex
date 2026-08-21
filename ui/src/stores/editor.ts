@@ -2,10 +2,9 @@ import { create } from "zustand";
 import { commands, type EditorInventory, type Scope } from "@/bindings";
 import { type Draft, emptyDraft, toDraft } from "@/lib/editor-draft";
 import { sameScope, scopeKey } from "@/lib/scope";
-import { useAuditStore } from "./audit";
 import { manifestFold } from "./editor-order";
-import { named, readManifests } from "./editor-scopes";
-import { useScanStore } from "./scan";
+import { saveManifest } from "./editor-save";
+import { readManifests } from "./editor-scopes";
 
 interface EditorState {
   /** The single scope being edited — deliberately not the sidebar filter. */
@@ -26,6 +25,11 @@ interface EditorState {
   /** True while a {@link loadAll} pass is running, so a retry cannot be
    *  pressed on top of the read it is waiting for. */
   manifestsReading: boolean;
+  /** The place whose copy in hand was read before something else rewrote
+   *  that place's manifest — a fork, or a discard. Saving it would write
+   *  the older file back over what was recorded, so the save refuses while
+   *  this names the place being edited. Null once it has been re-read. */
+  outdated: string | null;
   dirty: boolean;
   loading: boolean;
   saving: boolean;
@@ -38,6 +42,8 @@ interface EditorState {
   /** Read every scope's manifest, for the marks drawn outside the editor. */
   loadAll: () => Promise<void>;
   edit: (change: (draft: Draft) => Draft) => void;
+  /** Say that this place's manifest was rewritten under the copy in hand. */
+  outdate: (scope: Scope) => void;
   save: () => Promise<void>;
 }
 
@@ -58,7 +64,6 @@ export const useEditorStore = create<EditorState>((set, get) => {
   // owns what the status says.
   let passes = 0;
   let latestPass = 0;
-  let writes = 0;
 
   const load = async (target?: Scope) => {
     const scope = target ?? get().scope;
@@ -120,47 +125,11 @@ export const useEditorStore = create<EditorState>((set, get) => {
       inventory: inventory.status === "ok" ? inventory.data : state.inventory,
       saved: fold(state.saved, read, token),
       dirty: false,
+      // What is in hand is this read's, so whatever rewrote the file before
+      // it is no longer under it.
+      outdated: state.outdated === scopeKey(scope) ? null : state.outdated,
       error: inventory.status === "ok" ? null : inventory.error,
     }));
-  };
-
-  const write = async () => {
-    // Scope and draft are one value: read apart, a place switch between the
-    // two reads sends one place's manifest to another place's file.
-    const { scope, draft } = get();
-    if (!draft) return;
-    writes += 1;
-    const token = writes;
-    const mine = () => token === writes;
-    const onScreen = () => mine() && sameScope(get().scope, scope);
-    set({ saving: true });
-    let response: Awaited<ReturnType<typeof commands.updateManifest>>;
-    try {
-      response = await commands.updateManifest(scope, draft);
-    } catch (thrown) {
-      if (mine()) set({ saving: false, error: `${named(scope)}: ${thrown}` });
-      return;
-    }
-    if (mine()) set({ saving: false });
-    // A newer save owns what the screen says about saving.
-    if (!mine()) return;
-    if (response.status === "error") {
-      // The note is about the place that was written, which may not be the
-      // one on screen any more — so it names that place rather than letting
-      // the reader assume the one in front of them.
-      set({
-        error: onScreen()
-          ? response.error
-          : `${named(scope)}: ${response.error}`,
-      });
-      return;
-    }
-    if (onScreen()) set({ error: null });
-    // Re-read the place that was written, never whichever is open now, or
-    // its saved manifest keeps the pre-save content and its mark with it.
-    await load(scope);
-    await useAuditStore.getState().refresh();
-    await useScanStore.getState().refresh();
   };
 
   return {
@@ -171,6 +140,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
     manifestsLoaded: false,
     manifestError: null,
     manifestsReading: false,
+    outdated: null,
     dirty: false,
     loading: false,
     saving: false,
@@ -180,6 +150,8 @@ export const useEditorStore = create<EditorState>((set, get) => {
       set({ scope, draft: null, dirty: false, error: null });
       await load();
     },
+
+    outdate: (scope) => set({ outdated: scopeKey(scope) }),
 
     openScope: async (scope) => {
       const state = get();
@@ -235,6 +207,6 @@ export const useEditorStore = create<EditorState>((set, get) => {
       set({ draft: change(draft), dirty: true });
     },
 
-    save: write,
+    save: saveManifest,
   };
 });

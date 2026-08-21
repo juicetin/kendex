@@ -26,7 +26,15 @@ export const useProvenanceStore = create<ProvenanceState>((set) => ({
   loaded: false,
   error: null,
   load: async () => {
-    const response = await commands.libraryProvenance();
+    let response: Awaited<ReturnType<typeof commands.libraryProvenance>>;
+    try {
+      response = await commands.libraryProvenance();
+    } catch (thrown) {
+      // Both callers fire this without awaiting, so a rejection left alone
+      // is unhandled and the From row simply never appears.
+      set({ loaded: true, error: String(thrown) });
+      return;
+    }
     if (response.status === "ok") {
       // A re-read that says the same thing hands back the array already on
       // screen: the Library keys these per place and memoizes on identity,

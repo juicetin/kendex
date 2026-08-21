@@ -42,3 +42,11 @@ export const UNSAVED_FIRST_STEPS = [
   "Open the Customize tab and save or discard your changes",
   "Then try this again",
 ];
+
+// Keeping a fork or discarding edits rewrites the same kendex.toml the
+// Customize tab is holding a copy of. Saving that copy afterwards would put
+// the older file back, and a fork's own entry lives nowhere else.
+export const OUTDATED_DRAFT_TITLE = "These settings changed while you typed";
+export const OUTDATED_DRAFT_BODY =
+  "Keeping a fork or discarding edits rewrote this project's settings, so what is on screen is older than the file. Saving it would undo that change.";
+export const RELOAD_SETTINGS_LABEL = "Reload settings";

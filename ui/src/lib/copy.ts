@@ -41,6 +41,7 @@ export const REVIEW_ACTION_LABEL = "Review & apply";
 // alone.
 export function scopeSummaryLabel(counts: {
   changes: number;
+  conflicts: number;
   blocked: number;
   open: number;
   unmanaged: number;
@@ -49,6 +50,10 @@ export function scopeSummaryLabel(counts: {
   if (counts.blocked > 0) {
     parts.push(`${counts.blocked} problem${counts.blocked === 1 ? "" : "s"}`);
   }
+  // A conflict is not "to apply" — no button clears one — but a card that
+  // leaves it out reads as nothing to do while opening onto a section that
+  // says otherwise.
+  if (counts.conflicts > 0) parts.push(`${counts.conflicts} waiting on you`);
   if (counts.changes > 0) parts.push(`${counts.changes} to apply`);
   if (counts.open > 0) {
     parts.push(`${counts.open} finding${counts.open === 1 ? "" : "s"}`);

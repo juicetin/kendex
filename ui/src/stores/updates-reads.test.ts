@@ -150,4 +150,19 @@ describe("reading the update standing", () => {
       "after",
     ]);
   });
+
+  // The explicit check has the same shape as the load: a rejection that
+  // skips both branches leaves the standing on its last successful values,
+  // and the marks go on presenting stale rows as a check that worked.
+  it("treats a rejected refresh as a read that failed", async () => {
+    useUpdatesStore.setState({ rows: [row({})], loaded: true, error: null });
+    vi.mocked(commands.updatesRefresh).mockRejectedValue(
+      new Error("no channel"),
+    );
+    await expect(useUpdatesStore.getState().check()).resolves.toBeUndefined();
+    const state = useUpdatesStore.getState();
+    expect(state.loaded).toBe(false);
+    expect(state.error).toContain("no channel");
+    expect(state.checking).toBe(false);
+  });
 });
