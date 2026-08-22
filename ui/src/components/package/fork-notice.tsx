@@ -23,7 +23,7 @@ import {
   viewChangesInLabel,
 } from "@/lib/copy-forks";
 import { harnessName } from "@/lib/labels";
-import { useUpdatesStore } from "@/stores/updates";
+import { canApplyUpdates, useUpdatesStore } from "@/stores/updates";
 import { keepAsOwn, takeNewVersion } from "@/stores/updates-edits";
 
 /** The package page's edited-files notice: the app found changes it did
@@ -42,6 +42,12 @@ export function ForkNotice({
   onResolved: () => void;
 }) {
   const busy = useUpdatesStore((s) => s.busy);
+  // The same button does two different things: a place that can move takes
+  // the revision this read reported, so a check still in flight would let
+  // it apply a version that is no longer the newest. A place that can only
+  // drop its edits applies none, and stays reachable — a check that failed
+  // must not strand an edited place. Same rule as the Updates page.
+  const canApply = useUpdatesStore(canApplyUpdates);
   const [confirmDiscard, setConfirmDiscard] = useState(false);
   const several = row.editedHarnesses.length > 1;
   const whyNoFork = row.derived
@@ -107,7 +113,7 @@ export function ForkNotice({
           <Button
             size="sm"
             variant="outline"
-            disabled={busy}
+            disabled={busy || (row.canTakeLatest && !canApply)}
             onClick={() => setConfirmDiscard(true)}
           >
             {several ? DISCARD_ALL_EDITS_LABEL : DISCARD_EDITS_LABEL}
@@ -123,7 +129,7 @@ export function ForkNotice({
         }
         confirmLabel={DISCARD_EDITS_CONFIRM_LABEL}
         destructive
-        busy={busy}
+        busy={busy || (row.canTakeLatest && !canApply)}
         onConfirm={() =>
           void takeNewVersion(row).then(() => {
             setConfirmDiscard(false);

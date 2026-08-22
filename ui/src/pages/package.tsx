@@ -34,7 +34,7 @@ import { useEditorStore } from "@/stores/editor";
 import { useNavStore } from "@/stores/nav";
 import { useScanStore } from "@/stores/scan";
 import { inEveryPlace } from "@/stores/unsaved-first";
-import { useUpdatesStore } from "@/stores/updates";
+import { canApplyUpdates, useUpdatesStore } from "@/stores/updates";
 
 /** One package, full page: what it is as installed, and what you have
  *  changed about it. */
@@ -85,7 +85,7 @@ export function PackagePage() {
     view,
     diffHarness(view, primary?.harness ?? null),
   );
-  const updatesLoaded = useUpdatesStore((s) => s.loaded);
+  const updatesCurrent = useUpdatesStore(canApplyUpdates);
 
   // The scan no longer knows this package here — removed from this project,
   // renamed, or nav state that outlived the scope. Going back can land on
@@ -105,13 +105,15 @@ export function PackagePage() {
   const customizable = canCustomize(group.kind);
   const scopes = groupScopes(group);
   // Update waits for meta (held vs following) and the update standing, and
-  // is off while edits are held.
+  // is off while edits are held. A check still on its way means the newest
+  // version on screen is the one before it: the button applies the revision
+  // this read named, so it waits for the read that names it.
   const canUpdate =
     latest != null &&
     !latest.installed &&
     installed != null &&
     meta != null &&
-    updatesLoaded &&
+    updatesCurrent &&
     editedRow == null;
 
   const inEveryScope = (act: (scope: Scope) => Promise<boolean>) =>

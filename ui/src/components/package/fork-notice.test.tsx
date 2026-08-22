@@ -1,18 +1,28 @@
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { UpdateRow } from "@/bindings";
 import { updateRow } from "@/components/updates-test-rows";
 import { EditedNotice } from "./fork-notice";
 
 // Static rendering reads a zustand store's initial snapshot, so the store
-// hook is wrapped for the busy flag the buttons read.
+// hook is wrapped for the flags the buttons read. The default is a check
+// that has landed, which is what every case below but the two about a
+// check in flight is about.
+const { standing } = vi.hoisted(() => ({
+  standing: { busy: false, loaded: true, checking: false },
+}));
+
 vi.mock("@/stores/updates", async (importOriginal) => {
   const mod = await importOriginal<typeof import("@/stores/updates")>();
   const hook = (selector?: (state: unknown) => unknown) => {
-    const state = { ...mod.useUpdatesStore.getState(), busy: false };
+    const state = { ...mod.useUpdatesStore.getState(), ...standing };
     return selector ? selector(state) : state;
   };
   return { ...mod, useUpdatesStore: Object.assign(hook, mod.useUpdatesStore) };
+});
+
+beforeEach(() => {
+  Object.assign(standing, { busy: false, loaded: true, checking: false });
 });
 
 // The page hands the notice the one row its own place's join found, so a
@@ -24,6 +34,15 @@ const render = (row: UpdateRow | null) =>
 
 const edited = (extra: Partial<UpdateRow>) =>
   updateRow("rev", null, { kind: "agent", blockedByLocalEdit: true, ...extra });
+
+/** Whether the button carrying this label is disabled. The class attribute
+ *  carries the literal `disabled:pointer-events-none`, so only the rendered
+ *  attribute answers this. */
+const offered = (html: string, label: string) => {
+  const tag = html.slice(0, html.indexOf(`>${label}<`)).lastIndexOf("<button");
+  if (tag < 0) throw new Error(`no button labelled ${label}`);
+  return !html.slice(tag, html.indexOf(`>${label}<`)).includes('disabled=""');
+};
 
 describe("package page edited notice", () => {
   it("shows nothing where this place holds no hand edit", () => {
@@ -135,6 +154,40 @@ describe("package page edited notice", () => {
     );
     expect(html).toContain(">View changes<");
   });
+
+  // The same button takes the newest version for a place that can move, and
+  // the newest version it would take is the one the check on its way is
+  // about to replace. Reported on #1569 by review.
+  it("waits for a check in flight before a place that can move may take it", () => {
+    standing.checking = true;
+    const html = render(
+      edited({
+        editedHarnesses: ["claude"],
+        forkableHarness: "claude",
+        canDiscard: true,
+        canTakeLatest: true,
+      }),
+    );
+    expect(html).toContain(">Discard edits…<");
+    expect(offered(html, "Discard edits…")).toBe(false);
+  });
+
+  // A place that cannot move applies no revision at all, so a check that is
+  // slow — or failed outright — must not strand it with its edits held.
+  it("leaves a place that can only drop its edits reachable mid-check", () => {
+    standing.checking = true;
+    const html = render(
+      edited({
+        forked: true,
+        editedHarnesses: ["claude"],
+        forkableHarness: null,
+        canDiscard: true,
+        canTakeLatest: false,
+      }),
+    );
+    expect(offered(html, "Discard edits…")).toBe(true);
+  });
+
   // The copy a discard would put back cannot be read, so no button is
   // offered. A line still promising that exit would name one that refuses,
   // which is what `kendex check` already declines to do for this row.

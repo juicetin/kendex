@@ -34,10 +34,22 @@ export async function manifestRewritten(scope: Scope): Promise<void> {
   // that is still the one the draft came from has nothing under it, and
   // refusing that save would teach people to reload away their own typing.
   if (after.dirty) {
-    const read = await commands.getManifest(scope);
-    const moved = read.status !== "ok" || read.data.base !== after.base;
+    // A read that never arrives cannot say the file is still the one the
+    // draft came from, so it does not get to take the mark off. The
+    // transport can drop this call the same as any other, and a caller
+    // that fired this and walked away would otherwise get an unhandled
+    // rejection and the reader nothing at all.
+    const read = await commands
+      .getManifest(scope)
+      .catch((thrown: unknown) => String(thrown));
+    const moved =
+      typeof read === "string" ||
+      read.status !== "ok" ||
+      read.data.base !== after.base;
     if (moved) after.outdate(scope);
     else after.current(scope);
+    if (typeof read === "string")
+      useEditorStore.setState({ manifestError: read });
     return;
   }
   // Marked again before the re-read, since the editor may have moved here

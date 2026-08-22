@@ -4,11 +4,8 @@ import { updateRow } from "@/components/updates-test-rows";
 import { UNSAVED_ELSEWHERE_TITLE } from "@/lib/copy-customize";
 import type { PlaceStanding } from "@/lib/customized-places";
 import { emptyDraft } from "@/lib/editor-draft";
-import { observedItem } from "@/lib/observed-test-item";
 import { PackagePage } from "./package";
-
-const VG = { scope: "project", root: "/work/vg" } as const;
-const HYPR = { scope: "project", root: "/work/hyprtrade" } as const;
+import { freshWorld, HYPR, type PageWorld, VG } from "./package-test-world";
 
 // The page's children are mocked to hand back the props they were given.
 // What is pinned here is the page's own destructure — every one of these
@@ -44,17 +41,7 @@ vi.mock("@/components/package/remove-dialog", () => ({
   RemoveDialog: () => null,
 }));
 
-const stub = vi.hoisted(() => ({
-  scope: { scope: "project", root: "/work/vg" } as unknown,
-  editorScope: { scope: "project", root: "/work/hyprtrade" } as unknown,
-  rows: [] as unknown[],
-  saved: {} as Record<string, unknown>,
-  held: {} as Record<string, unknown>,
-  // Enough for the Update button to be offered: a newer version exists and
-  // the package's own record was read.
-  meta: null as unknown,
-  versions: [] as unknown[],
-}));
+const world = vi.hoisted(() => ({ at: null as unknown as PageWorld }));
 
 vi.mock("@/components/package/use-package-data", async (importOriginal) => {
   const mod =
@@ -64,9 +51,9 @@ vi.mock("@/components/package/use-package-data", async (importOriginal) => {
   return {
     ...mod,
     usePackageData: () => ({
-      meta: stub.meta,
+      meta: world.at.meta,
       files: [],
-      versions: stub.versions,
+      versions: world.at.versions,
       load: () => {},
     }),
     usePackageDiff: () => null,
@@ -76,67 +63,58 @@ vi.mock("@/components/package/use-package-data", async (importOriginal) => {
 
 vi.mock("@/stores/nav", async (importOriginal) => {
   const mod = await importOriginal<typeof import("@/stores/nav")>();
-  const hook = (selector?: (state: unknown) => unknown) => {
-    const state = {
-      ...mod.useNavStore.getState(),
-      packageRef: { kind: "skill", name: "gh", scope: stub.scope },
+  const { stubbed } = await import("./package-test-world");
+  return {
+    ...mod,
+    useNavStore: stubbed(mod.useNavStore, () => ({
+      packageRef: { kind: "skill", name: "gh", scope: world.at.scope },
       packageView: null,
       clearPackageView: () => {},
       back: () => {},
-    };
-    return selector ? selector(state) : state;
+    })),
   };
-  return { ...mod, useNavStore: Object.assign(hook, mod.useNavStore) };
 });
 
 vi.mock("@/stores/scan", async (importOriginal) => {
   const mod = await importOriginal<typeof import("@/stores/scan")>();
-  const hook = (selector?: (state: unknown) => unknown) => {
-    const state = {
-      ...mod.useScanStore.getState(),
-      result: {
-        items: [
-          observedItem({ name: "gh", scope: VG, path: "/work/vg/gh" }),
-          observedItem({ name: "gh", scope: HYPR, path: "/work/hyprtrade/gh" }),
-        ],
-      },
-    };
-    return selector ? selector(state) : state;
+  const { scanned, stubbed } = await import("./package-test-world");
+  return {
+    ...mod,
+    useScanStore: stubbed(mod.useScanStore, () => ({ result: scanned() })),
   };
-  return { ...mod, useScanStore: Object.assign(hook, mod.useScanStore) };
 });
 
 vi.mock("@/stores/editor", async (importOriginal) => {
   const mod = await importOriginal<typeof import("@/stores/editor")>();
-  const hook = (selector?: (state: unknown) => unknown) => {
-    const state = {
-      ...mod.useEditorStore.getState(),
-      scope: stub.editorScope,
+  const { stubbed } = await import("./package-test-world");
+  return {
+    ...mod,
+    useEditorStore: stubbed(mod.useEditorStore, () => ({
+      scope: world.at.editorScope,
       draft: null,
-      saved: stub.saved,
-      held: stub.held,
+      saved: world.at.saved,
+      held: world.at.held,
       saving: false,
       manifestsLoaded: true,
       manifestError: null,
       openScope: async () => {},
-    };
-    return selector ? selector(state) : state;
+    })),
   };
-  return { ...mod, useEditorStore: Object.assign(hook, mod.useEditorStore) };
 });
 
 vi.mock("@/stores/updates", async (importOriginal) => {
   const mod = await importOriginal<typeof import("@/stores/updates")>();
-  const hook = (selector?: (state: unknown) => unknown) => {
-    const state = {
-      ...mod.useUpdatesStore.getState(),
-      rows: stub.rows,
+  const { stubbed } = await import("./package-test-world");
+  return {
+    ...mod,
+    useUpdatesStore: stubbed(mod.useUpdatesStore, () => ({
+      rows: world.at.rows,
       loaded: true,
+      checking: world.at.checking,
+      busy: false,
       error: null,
-    };
-    return selector ? selector(state) : state;
+    })),
   };
-  return { ...mod, useUpdatesStore: Object.assign(hook, mod.useUpdatesStore) };
 });
 
 const render = () => {
@@ -150,30 +128,7 @@ beforeEach(() => {
   seen.body = null;
   seen.header = null;
   seen.actions = null;
-  stub.scope = VG;
-  stub.editorScope = HYPR;
-  stub.rows = [];
-  stub.saved = { "/work/vg": {}, "/work/hyprtrade": {} };
-  stub.held = {};
-  stub.meta = { rev: null, fork: null };
-  stub.versions = [
-    {
-      id: "b".repeat(40),
-      label: "v2",
-      date: "2026-08-01",
-      summary: "newer",
-      installed: false,
-      newerThanInstalled: true,
-    },
-    {
-      id: "a".repeat(40),
-      label: "v1",
-      date: "2026-07-01",
-      summary: "installed",
-      installed: true,
-      newerThanInstalled: false,
-    },
-  ];
+  world.at = freshWorld();
 });
 
 describe("what the package page is about", () => {
@@ -181,7 +136,7 @@ describe("what the package page is about", () => {
     expect((render().body.primary as { path: string }).path).toBe(
       "/work/vg/gh",
     );
-    stub.scope = HYPR;
+    world.at.scope = HYPR;
     expect((render().body.primary as { path: string }).path).toBe(
       "/work/hyprtrade/gh",
     );
@@ -193,13 +148,13 @@ describe("what the package page is about", () => {
     // title names the place the installation, the actions and the notice
     // below it are about, or the page says one thing and does another.
     expect((render().header.place as PlaceStanding).scope).toEqual(VG);
-    stub.editorScope = VG;
-    stub.scope = HYPR;
+    world.at.editorScope = VG;
+    world.at.scope = HYPR;
     expect((render().header.place as PlaceStanding).scope).toEqual(HYPR);
   });
 
   it("reads its edited-files notice off the place it was opened at", () => {
-    stub.rows = [
+    world.at.rows = [
       updateRow("gh", "/work/vg", {
         updateAvailable: false,
         blockedByLocalEdit: true,
@@ -207,7 +162,7 @@ describe("what the package page is about", () => {
       updateRow("gh", "/work/hyprtrade", { updateAvailable: false }),
     ];
     expect((render().body.editedRow as { scope: unknown }).scope).toEqual(VG);
-    stub.scope = HYPR;
+    world.at.scope = HYPR;
     expect(render().body.editedRow).toBe(null);
   });
 
@@ -218,7 +173,7 @@ describe("what the package page is about", () => {
     expect(renderToStaticMarkup(<PackagePage />)).not.toContain(
       UNSAVED_ELSEWHERE_TITLE,
     );
-    stub.held = {
+    world.at.held = {
       "/work/hyprtrade": {
         scope: HYPR,
         draft: emptyDraft(),
@@ -230,14 +185,27 @@ describe("what the package page is about", () => {
     expect(html).toContain("/work/hyprtrade");
   });
 
+  // The button applies the revision the last read named, so a read still on
+  // its way means the version on screen is the one it is about to replace.
+  // Reported on #1569 by review.
+  it("does not offer an update while a check is still on its way", () => {
+    world.at.rows = [
+      updateRow("gh", "/work/vg", { updateAvailable: true, canDiscard: true }),
+    ];
+    expect(render().actions.updateAvailable).toBe(true);
+
+    world.at.checking = true;
+    expect(render().actions.updateAvailable).toBe(false);
+  });
+
   it("does not offer an update for a place its edits are holding", () => {
     // The control: everything the Update button needs is in place.
-    stub.rows = [
+    world.at.rows = [
       updateRow("gh", "/work/vg", { updateAvailable: true, canDiscard: true }),
     ];
     expect(render().actions.updateAvailable).toBe(true);
     // The edit is what holds it, and the engine would refuse the apply.
-    stub.rows = [
+    world.at.rows = [
       updateRow("gh", "/work/vg", {
         updateAvailable: true,
         blockedByLocalEdit: true,

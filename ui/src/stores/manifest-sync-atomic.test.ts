@@ -154,6 +154,28 @@ describe("the sync refuses before it reads", () => {
     expect(useEditorStore.getState().outdated).toBe("global");
   });
 
+  // A read that never arrives cannot report the file unmoved, and the caller
+  // that started this walked away — so a rejection here has to be turned
+  // into a refusal and a message rather than into a lost promise.
+  // Reported on #1569 by review.
+  it("keeps the place refused when the re-read never arrives", async () => {
+    useEditorStore.setState({ base: "before", manifestError: null });
+    type();
+    vi.mocked(commands.getManifest)
+      .mockResolvedValueOnce({
+        status: "ok",
+        data: { manifest: null, base: "before" },
+      })
+      .mockRejectedValueOnce(new Error("the channel closed"));
+
+    await expect(manifestRewritten(scope)).resolves.toBeUndefined();
+
+    const after = useEditorStore.getState();
+    expect(after.outdated).toBe("global");
+    expect(after.manifestError).toContain("the channel closed");
+    expect(after.draft).toEqual(typed);
+  });
+
   it("leaves a place it is not about alone", async () => {
     type();
     await manifestRewritten({ scope: "project", root: "/w/app" });
