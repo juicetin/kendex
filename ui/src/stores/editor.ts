@@ -6,7 +6,7 @@ import { type Held, pointAt } from "./editor-held";
 import { onlyThese, type Unread } from "./editor-order";
 import { fold, foldUnread, loadManifest, nextRead } from "./editor-read";
 import { saveManifest } from "./editor-save";
-import { named, readManifests } from "./editor-scopes";
+import { named, readManifests, scopesNow } from "./editor-scopes";
 
 interface EditorState {
   /** The single scope being edited — deliberately not the sidebar filter. */
@@ -77,13 +77,6 @@ interface EditorState {
   unread: (scope: Scope, why: string) => void;
   save: () => Promise<void>;
 }
-
-/** Prune when this pass is the newest, keep everything when it is not. */
-const keep = <T>(
-  kept: Record<string, T>,
-  places: ReadonlySet<string>,
-  newest: boolean,
-): Record<string, T> => (newest ? onlyThese(kept, places) : kept);
 
 export const useEditorStore = create<EditorState>((set, get) => {
   // How many manifest passes are still running, so the reading flag comes
@@ -161,26 +154,24 @@ export const useEditorStore = create<EditorState>((set, get) => {
       };
       try {
         const { read, unread } = await readManifests();
-        // Every place there is, since the pass asks each of them: what it
-        // read, plus what would not read.
-        const places = new Set([
-          ...read.map(([key]) => key),
-          ...unread.map(([key]) => key),
-        ]);
+        // Every place there is *now*, asked at the moment this pass writes
+        // rather than when it started. A pass carries the list it began
+        // with, so a project unregistered while it ran is still among its
+        // results — and folding those in puts back what the unregistering,
+        // or a later pass, already took away. Nothing would take it away
+        // again: no later pass reads a scope that is not there any more.
+        const places = new Set(scopesNow().map(scopeKey));
         set((state) => ({
           // A place whose manifest would not load keeps the last one that
           // did, rather than being dropped from `saved` and taking a mark
           // that was right with it.
-          // Pruned only by the newest pass: an older one carries an older
-          // list of projects, and would drop a place that has since been
-          // added back before its own read of it lands.
-          saved: keep(fold(state.saved, read, token), places, newest()),
+          saved: onlyThese(fold(state.saved, read, token), places),
           // And how each place's read went folds the same way, under the
           // same token: this pass answers for the places it reached, and
           // for none of the others. Replacing the whole list instead let a
           // pass that failed put back a mark a newer read of one place had
           // already cleared.
-          unreadPlaces: keep(
+          unreadPlaces: onlyThese(
             foldUnread(
               state.unreadPlaces,
               [
@@ -192,7 +183,6 @@ export const useEditorStore = create<EditorState>((set, get) => {
               token,
             ),
             places,
-            newest(),
           ),
           // The pass ran, so whatever stopped the last one from running is
           // over; what each place said travels with that place.

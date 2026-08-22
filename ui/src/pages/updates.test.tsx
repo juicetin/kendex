@@ -92,8 +92,9 @@ describe("the Updates page after a check that did not finish", () => {
     );
   });
 
-  // Nothing to show and a read that failed is not good news, and the page
-  // used to greet it with the same "you're up to date" as a clean check.
+  // Nothing to show and a read that failed are not the same news: an empty
+  // list means one thing after a clean check and another after a failed
+  // one, and "you're up to date" can only honestly follow the first.
   it("does not call a failed read up to date", () => {
     stub.rows = [];
     stub.loaded = false;

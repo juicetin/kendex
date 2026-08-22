@@ -75,8 +75,8 @@ describe("the sync refuses before it reads", () => {
 
   it("refuses a save pressed while the manifests are still being read", async () => {
     type();
-    // Not awaited: the call is the moment the window used to open, and the
-    // press lands inside it.
+    // Not awaited: the press has to land inside the call, which is the
+    // window this is about — awaiting it first would test nothing.
     const syncing = manifestRewritten(scope);
     press();
     await syncing;

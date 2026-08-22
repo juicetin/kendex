@@ -137,8 +137,10 @@ describe("customizeNav", () => {
   });
 });
 
-// Every fact a package page derives before it renders, from one call. Each
-// case is one of the reverts that used to pass green.
+// Every fact a package page derives before it renders, from one call.
+// Derived apart, they can disagree about which place the page is about —
+// the header naming one, the actions writing another — so each case pins a
+// different fact to the same opened place.
 describe("packageMarks", () => {
   const installs = [
     observedItem({ name: "gh", scope: { scope: "global" }, path: "/h/gh" }),

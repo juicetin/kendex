@@ -16,6 +16,16 @@ export const named = (scope: Scope): string =>
 async function everyScope(): Promise<Scope[]> {
   const settings = useSettingsStore.getState();
   if (!settings.settings) await settings.load();
+  return scopesNow();
+}
+
+/** Every place there is right now, read without awaiting anything.
+ *
+ *  A pass takes its list of places when it starts and answers with it much
+ *  later. Asked again at the moment its answer is written, this says which
+ *  of those places are still places — so a project unregistered in between
+ *  cannot be put back by a read that was already on its way. */
+export function scopesNow(): Scope[] {
   const projects = useSettingsStore.getState().settings?.projects ?? [];
   return [
     { scope: "global" },

@@ -50,8 +50,8 @@ describe("anyCustomized", () => {
 
 describe("the fork behind a standing", () => {
   it("falls back to the engine's row where the manifest could not be read", () => {
-    // The two used to disagree here, and the surfaces reading one of them
-    // offered actions the engine, reading the other, refuses.
+    // Two readers of the same fact, and a surface reading one of them
+    // while the engine reads the other offers actions the engine refuses.
     const standings = placeStandings(
       source({
         manifests: { global: emptyDraft(), "/work/hyprtrade": emptyDraft() },

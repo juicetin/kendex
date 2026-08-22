@@ -4,6 +4,14 @@ import { useEditorStore } from "./editor";
 import { whyUnread } from "./editor-order";
 import { useSettingsStore } from "./settings";
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((keep) => {
+    resolve = keep;
+  });
+  return { promise, resolve };
+}
+
 vi.mock("@/bindings", () => ({
   commands: {
     getManifest: vi.fn(),
@@ -86,6 +94,40 @@ describe("a project that is no longer there", () => {
   // back exactly what the prune took away, and no later pass asks for it
   // again — so the note would name it for good, and its retry would prune
   // and re-add it every press.
+  // A pass takes its list of places when it starts and answers with it
+  // much later. One that captured a project unregistered in between is
+  // still carrying it, and nothing reads that scope again — so folding its
+  // results in puts the project back for good.
+  it("cannot be put back by a pass that was already running", async () => {
+    const held = deferred<Awaited<ReturnType<typeof commands.getManifest>>>();
+    // The older pass reads global, then hangs on the project.
+    vi.mocked(commands.getManifest)
+      .mockResolvedValueOnce({
+        status: "ok",
+        data: { manifest: null, base: null },
+      })
+      .mockReturnValueOnce(held.promise);
+    const older = useEditorStore.getState().loadAll();
+
+    // The project is unregistered, and a newer pass runs to completion.
+    useSettingsStore.setState({ settings: { schema: 1, projects: [] } });
+    vi.mocked(commands.getManifest).mockResolvedValue({
+      status: "ok",
+      data: { manifest: null, base: null },
+    });
+    await useEditorStore.getState().loadAll();
+    expect(Object.keys(useEditorStore.getState().saved)).toEqual(["global"]);
+
+    // Only now does the older pass get its answer for the project.
+    held.resolve({ status: "error", error: "no such directory" });
+    await older;
+
+    const after = useEditorStore.getState();
+    expect(Object.keys(after.saved)).toEqual(["global"]);
+    expect(Object.keys(after.unreadPlaces)).toEqual([]);
+    expect(whyUnread(after)).toBeNull();
+  });
+
   it("does not read the place on screen back after removing it", async () => {
     useEditorStore.setState({ scope: { scope: "project", root: "/work/vg" } });
     vi.mocked(commands.getManifest).mockResolvedValue({
