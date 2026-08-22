@@ -108,8 +108,15 @@ export async function inEveryPlace(
     // said why; going on to the next place would leave the package changed
     // in some of them and not others, under one click that reported a
     // single failure and looked otherwise done.
-    const took = await act(scope);
-    rest = null;
+    let took: boolean;
+    try {
+      took = await act(scope);
+    } finally {
+      // However this leaves, including by throwing. Left set, the next
+      // failure anywhere in the app — a different package, a single place —
+      // would offer a retry that writes the rest of this one.
+      rest = null;
+    }
     if (!took) return;
   }
 }

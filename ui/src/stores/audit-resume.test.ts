@@ -76,4 +76,18 @@ describe("a package-wide action that stopped partway", () => {
     await inEveryPlace([A, B], funnel(new Set(), []));
     expect(retryTheRest()).toBeNull();
   });
+
+  // Including when the action does not return at all — a transport failure
+  // rejects rather than answering, and the way out of the loop it takes
+  // must still put this down. Reported on #1569 by review.
+  it("keeps nothing when a place throws instead of answering", async () => {
+    await expect(
+      inEveryPlace([A, B], async (scope) => {
+        if (scope === A) return true;
+        throw new Error("the channel closed");
+      }),
+    ).rejects.toThrow("the channel closed");
+
+    expect(retryTheRest()).toBeNull();
+  });
 });
