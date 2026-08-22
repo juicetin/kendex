@@ -98,7 +98,7 @@ beforeEach(() => {
   });
   vi.mocked(commands.updateManifest).mockResolvedValue({
     status: "ok",
-    data: { view: audited(), base: "written" },
+    data: { view: audited(), base: "written", seeded: false },
   });
 });
 
@@ -142,7 +142,10 @@ describe("saving a customization", () => {
       .edit((draft) =>
         setInstruction(draft, "skill-instructions", "gh", "second"),
       );
-    write.resolve({ status: "ok", data: { view: audited(), base: "written" } });
+    write.resolve({
+      status: "ok",
+      data: { view: audited(), base: "written", seeded: false },
+    });
     await saving;
 
     const after = useEditorStore.getState();

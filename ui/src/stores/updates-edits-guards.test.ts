@@ -208,7 +208,7 @@ describe("a fork or discard beside an open Customize tab", () => {
     // the record just made: keeping the typing is only half the answer.
     vi.mocked(commands.updateManifest).mockResolvedValue({
       status: "ok",
-      data: { view, base: "written" },
+      data: { view, base: "written", seeded: false },
     });
     await useEditorStore.getState().save();
     expect(commands.updateManifest).not.toHaveBeenCalled();

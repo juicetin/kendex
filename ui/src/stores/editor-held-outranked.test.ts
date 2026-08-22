@@ -146,7 +146,10 @@ describe("saving while the editor moves away", () => {
     const write = landing();
     const saving = useEditorStore.getState().save();
     await useEditorStore.getState().openScope(B);
-    write.resolve({ status: "ok", data: { view: audited(), base: "written" } });
+    write.resolve({
+      status: "ok",
+      data: { view: audited(), base: "written", seeded: false },
+    });
     await saving;
 
     expect(useEditorStore.getState().held).toEqual({});
@@ -164,7 +167,10 @@ describe("saving while the editor moves away", () => {
     const saving = useEditorStore.getState().save();
     type("and more, after the write left");
     await useEditorStore.getState().openScope(B);
-    write.resolve({ status: "ok", data: { view: audited(), base: "written" } });
+    write.resolve({
+      status: "ok",
+      data: { view: audited(), base: "written", seeded: false },
+    });
     await saving;
 
     await useEditorStore.getState().openScope(A);

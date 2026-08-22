@@ -105,7 +105,7 @@ describe("reads that draw no editor", () => {
     });
     vi.mocked(commands.updateManifest).mockResolvedValue({
       status: "ok",
-      data: { view: audited(), base: "written" },
+      data: { view: audited(), base: "written", seeded: false },
     });
     await useEditorStore.getState().setScope(A);
     const saving = useEditorStore.getState().save();

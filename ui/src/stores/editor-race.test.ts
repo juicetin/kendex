@@ -234,7 +234,10 @@ describe("switching place while a save is in flight", () => {
       status: "ok",
       data: read("after"),
     });
-    landing.resolve({ status: "ok", data: { view: audited(), base: "after" } });
+    landing.resolve({
+      status: "ok",
+      data: { view: audited(), base: "after", seeded: false },
+    });
     await saving;
 
     // A's mark reads its saved manifest, so a save that refreshed B instead

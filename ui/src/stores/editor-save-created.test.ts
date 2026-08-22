@@ -1,0 +1,177 @@
+// The first save at a place with no kendex.toml. Creating the file is the
+// one write that puts down more than it was handed — the default source, and
+// the harnesses this machine runs — so the file that lands is not the copy
+// that went. Typing that arrives while that write is away never held the
+// seed, and treating it as descended from the created file would let its
+// next save write the seed back out of existence with nothing refused and
+// nothing said.
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import type {
+  AuditView_Serialize,
+  Manifest_Serialize,
+  Scope,
+} from "@/bindings";
+import { commands } from "@/bindings";
+import { setInstruction } from "@/lib/editor-draft";
+import { useEditorStore } from "./editor";
+
+vi.mock("@/bindings", () => ({
+  commands: {
+    getManifest: vi.fn(),
+    editorInventory: vi.fn(),
+    updateManifest: vi.fn(),
+  },
+}));
+
+vi.mock("./audit", () => ({
+  useAuditStore: { getState: () => ({ refresh: async () => {} }) },
+}));
+vi.mock("./scan", () => ({
+  useScanStore: { getState: () => ({ refresh: async () => {} }) },
+}));
+
+const scope: Scope = { scope: "global" };
+const elsewhere: Scope = { scope: "project", root: "/work/vg" };
+
+const audited = (): AuditView_Serialize => ({
+  scope,
+  drift: [],
+  plan: [],
+  notes: [],
+  warnings: [],
+  safety: [],
+  heldBack: [],
+  queued: [],
+});
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((keep) => {
+    resolve = keep;
+  });
+  return { promise, resolve };
+}
+
+const type = (note: string) =>
+  useEditorStore
+    .getState()
+    .edit((draft) => setInstruction(draft, "skill-instructions", "gh", note));
+
+/** Open a place whose file does not exist yet and type in it. */
+const openEmptyAndType = async () => {
+  useEditorStore.setState({
+    outdated: null,
+    saved: {},
+    error: null,
+    held: {},
+    draft: null,
+    base: null,
+    dirty: false,
+  });
+  await useEditorStore.getState().setScope(scope);
+  expect(useEditorStore.getState().base).toBeNull();
+  type("first");
+};
+
+/** What the creation put on disk: the copy that was sent plus the seed the
+ *  caller never held. */
+const created: Manifest_Serialize = {
+  schema: 1,
+  install: { harnesses: ["claude"] },
+  sources: { kendex: { repo: "vanillagreencom/kendex", enabled: true } },
+  "skill-instructions": { gh: "first" },
+};
+
+/** The write that creates the file, held open so typing can land inside it.
+ *  Landing puts the file where the re-read afterwards will find it. */
+const creatingWrite = () => {
+  const write = deferred<Awaited<ReturnType<typeof commands.updateManifest>>>();
+  vi.mocked(commands.updateManifest).mockReturnValueOnce(write.promise);
+  return {
+    saving: useEditorStore.getState().save(),
+    land: () => {
+      vi.mocked(commands.getManifest).mockResolvedValue({
+        status: "ok",
+        data: { manifest: created, base: "created" },
+      });
+      write.resolve({
+        status: "ok",
+        data: { view: audited(), base: "created", seeded: true },
+      });
+    },
+  };
+};
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  vi.mocked(commands.editorInventory).mockResolvedValue({
+    status: "ok",
+    data: {
+      declaredAgents: [],
+      declaredSkills: [],
+      availableSkills: [],
+      harnesses: [],
+      hookEvents: [],
+    },
+  });
+  // No file here yet, which is what makes the write below a creation.
+  vi.mocked(commands.getManifest).mockResolvedValue({
+    status: "ok",
+    data: { manifest: null, base: null },
+  });
+});
+
+describe("the write that creates a place's file", () => {
+  it("refuses typing that arrived while it was away", async () => {
+    await openEmptyAndType();
+    const write = creatingWrite();
+    type("second");
+    write.land();
+    await write.saving;
+
+    const after = useEditorStore.getState();
+    // Still theirs to save, and still on screen — nothing was taken.
+    expect(after.draft?.["skill-instructions"]).toEqual({ gh: "second" });
+    expect(after.dirty).toBe(true);
+    // But it never held the seed, so it does not get to speak for the file
+    // the creation made.
+    expect(after.base).not.toBe("created");
+    expect(after.outdated).toBe("global");
+
+    // Which is the point: the next press is refused rather than writing the
+    // seed back out of existence.
+    vi.mocked(commands.updateManifest).mockClear();
+    await useEditorStore.getState().save();
+    expect(commands.updateManifest).not.toHaveBeenCalled();
+  });
+
+  it("settles the copy that went, seed and all", async () => {
+    await openEmptyAndType();
+    const write = creatingWrite();
+    write.land();
+    await write.saving;
+
+    const after = useEditorStore.getState();
+    // Nothing was typed over it, so the file is what is on screen.
+    expect(after.dirty).toBe(false);
+    expect(after.base).toBe("created");
+    expect(after.outdated).toBeNull();
+  });
+
+  it("refuses a copy parked elsewhere while it was away", async () => {
+    await openEmptyAndType();
+    const write = creatingWrite();
+    type("second");
+    // The reader clicks through to another place before the write answers,
+    // which parks the copy in hand at the place being written.
+    await useEditorStore.getState().setScope(elsewhere);
+    write.land();
+    await write.saving;
+
+    const parked = useEditorStore.getState().held.global;
+    expect(parked?.draft?.["skill-instructions"]).toEqual({ gh: "second" });
+    // It kept the base it was read against — absent — so the file it does
+    // not match refuses it on its own evidence when its place is opened.
+    expect(parked?.base).not.toBe("created");
+  });
+});

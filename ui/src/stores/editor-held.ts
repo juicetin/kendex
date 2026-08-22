@@ -47,12 +47,14 @@ export function dropHeld(held: Held, scope: Scope): Held {
 
 /** Settle the copy parked at a place against a write that just landed
  *  there. `saved` is the draft that went; `written` is what the file is
- *  now, or null when it could not be read back. */
+ *  now, or null when it could not be read back; `seeded` says the write
+ *  put down more than it was sent. */
 export function settleHeld(
   held: Held,
   scope: Scope,
   written: string | null,
   saved: Draft,
+  seeded: boolean,
 ): Held {
   const key = scopeKey(scope);
   const waiting = held[key];
@@ -64,7 +66,14 @@ export function settleHeld(
   // Typing that arrived after the write left descends from it, so it takes
   // that file's base or its own save is refused for a change it made
   // itself. With no base to take, the caller marks the place instead.
-  else if (written !== null) next[key] = { ...waiting, base: written };
+  //
+  // Unless the write filled in what it was not sent — the default source a
+  // first manifest gets. That copy never held it, so it does not descend
+  // from this file, and handing it this base would let its save put the
+  // seed back to nothing. It keeps the base it has, which the file it does
+  // not match refuses on its own evidence.
+  else if (written !== null && !seeded)
+    next[key] = { ...waiting, base: written };
   else return held;
   return next;
 }

@@ -70,6 +70,12 @@ pub struct ManifestWritten {
     /// what it must not do is read the file itself, which is the pairing
     /// this whole protection exists to prevent.
     pub base: Option<manifest::Base>,
+    /// Whether creating the file filled in what the caller did not send —
+    /// the default source, and the harnesses this machine runs. The copy
+    /// that was written holds it now; a copy typed while the write was
+    /// away never did, and saving that one against this file's base would
+    /// put the seed back to nothing without saying so.
+    pub seeded: bool,
 }
 
 #[tauri::command(async)]
@@ -103,14 +109,22 @@ fn check(manifest: &Manifest) -> Result<(), String> {
 /// The editor can create the first manifest for a scope, and first creation
 /// is where the default source is seeded — skipping it here would drop it
 /// for good, since later reconciliation never re-adds it.
-fn on_first_creation(mut manifest: Manifest, seed: Manifest) -> Manifest {
-    if manifest.sources.is_empty() {
-        manifest.sources = seed.sources;
-        if manifest.install.harnesses.is_empty() {
-            manifest.install.harnesses = seed.install.harnesses;
-        }
+///
+/// Reports whether anything was filled in. What goes on disk is then not
+/// what the caller sent, and a copy typed while this write was away never
+/// held it: the editor needs to be told so it does not treat that copy as
+/// descended from this file and let its next save drop the seed.
+fn on_first_creation(manifest: &mut Manifest, seed: Manifest) -> bool {
+    if !manifest.sources.is_empty() {
+        return false;
     }
-    manifest
+    let mut filled = !seed.sources.is_empty();
+    manifest.sources = seed.sources;
+    if manifest.install.harnesses.is_empty() && !seed.install.harnesses.is_empty() {
+        manifest.install.harnesses = seed.install.harnesses;
+        filled = true;
+    }
+    filled
 }
 
 /// Write an edited manifest and reconcile the scope to it.
@@ -141,10 +155,11 @@ pub fn update_manifest(
     if let Err(error) = manifest::check_base(&path, &claimed) {
         return Err(refusal(error));
     }
-    let mut manifest = match manifest::load_for_mutation(&path).map_err(|e| e.to_string())? {
-        Some(_) => manifest,
+    let mut manifest = manifest;
+    let seeded = match manifest::load_for_mutation(&path).map_err(|e| e.to_string())? {
+        Some(_) => false,
         None => on_first_creation(
-            manifest,
+            &mut manifest,
             ops::manifest_for_mutation(&env, &scope).map_err(|e| e.to_string())?,
         ),
     };
@@ -207,6 +222,7 @@ pub fn update_manifest(
         // here instead and the answer could already be somebody else's,
         // handed back paired with the copy this write came from.
         base: outcome.manifest_base,
+        seeded,
     })
 }
 
@@ -260,17 +276,24 @@ mod tests {
 
     #[test]
     fn creating_a_manifest_here_still_seeds_the_default_source() {
-        let seeded = on_first_creation(
-            Manifest {
-                schema: MANIFEST_SCHEMA,
-                ..Manifest::default()
-            },
-            manifest::seed(&[HarnessId::Claude]),
-        );
-        assert!(seeded.sources.contains_key("kendex"));
-        assert_eq!(seeded.install.harnesses, [HarnessId::Claude]);
+        let mut fresh = Manifest {
+            schema: MANIFEST_SCHEMA,
+            ..Manifest::default()
+        };
+        assert!(on_first_creation(
+            &mut fresh,
+            manifest::seed(&[HarnessId::Claude])
+        ));
+        assert!(fresh.sources.contains_key("kendex"));
+        assert_eq!(fresh.install.harnesses, [HarnessId::Claude]);
 
-        let declared = on_first_creation(manifest(), manifest::seed(&[HarnessId::Pi]));
+        let mut declared = manifest();
+        // Nothing was filled in, so the copy the caller sent is the file:
+        // the editor is told nothing was added and its base still stands.
+        assert!(!on_first_creation(
+            &mut declared,
+            manifest::seed(&[HarnessId::Pi])
+        ));
         assert_eq!(declared.sources.len(), 1);
         assert!(declared.install.harnesses.is_empty());
     }

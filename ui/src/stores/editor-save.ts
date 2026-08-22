@@ -107,13 +107,18 @@ export const saveManifest = async (): Promise<void> => {
   }
   if (onScreen()) useEditorStore.setState({ error: null });
   const written = response.data.base;
+  // Creating the file is where a scope's default source and this machine's
+  // harnesses are filled in, and the copy that went never held them. So the
+  // file that landed is not the copy that was sent, and only the copy that
+  // was sent may treat this write as its own.
+  const seeded = response.data.seeded;
   // The write landed on one place's file, so it settles that place's copy
   // wherever that copy is. A move made while the write was away parks it,
   // and a parked copy left carrying the base from before its own write has
   // its next save refused — the person told to reload over typing that is
   // already on disk.
   useEditorStore.setState((current) => ({
-    held: settleHeld(current.held, scope, written, draft),
+    held: settleHeld(current.held, scope, written, draft, seeded),
   }));
   // What is on screen is what the file now holds, so it is no longer
   // unsaved — the Save bar comes down and the place chips come live. Only
@@ -122,12 +127,21 @@ export const saveManifest = async (): Promise<void> => {
   // builds a new draft rather than mutating, so identity is that test, and
   // the re-read below leaves a newer draft alone for the same reason.
   if (onScreen()) {
+    // The copy that went is still the one in hand, so this write is its
+    // own — whatever the file was filled in with, it holds it too.
+    const wrote = useEditorStore.getState().draft === draft;
     if (written === null) {
       // The write landed and the file could not be read back to say what
       // it is now. Nothing to carry, so the place is marked and the next
       // save asks for a reload — what this must never do is read the file
       // here to find out, which pairs a base with content nobody read
       // with it.
+      useEditorStore.getState().outdate(scope);
+    } else if (seeded && !wrote) {
+      // Typing that arrived mid-write against a file being created never
+      // held the seed the creation put in it. Given this base its save
+      // would pass every check and write the seed back out of existence,
+      // so the place is marked instead and the choice is the reader's.
       useEditorStore.getState().outdate(scope);
     } else {
       // The base describes the file, and the file is what was just
@@ -139,8 +153,7 @@ export const saveManifest = async (): Promise<void> => {
     }
     // Either way the write landed, so what is on screen is saved — while
     // nothing was typed over it.
-    if (useEditorStore.getState().draft === draft)
-      useEditorStore.setState({ dirty: false });
+    if (wrote) useEditorStore.setState({ dirty: false });
   } else if (written === null) {
     // The same fact off screen: the file was written and could not be read
     // back, so the place is marked and whatever is parked there asks for a

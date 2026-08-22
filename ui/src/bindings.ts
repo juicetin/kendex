@@ -1630,6 +1630,14 @@ export type ManifestWritten_Deserialize = {
 	 *  this whole protection exists to prevent.
 	 */
 	base: Base | null,
+	/**
+	 *  Whether creating the file filled in what the caller did not send —
+	 *  the default source, and the harnesses this machine runs. The copy
+	 *  that was written holds it now; a copy typed while the write was
+	 *  away never did, and saving that one against this file's base would
+	 *  put the seed back to nothing without saying so.
+	 */
+	seeded: boolean,
 };
 
 /**
@@ -1650,6 +1658,14 @@ export type ManifestWritten_Serialize = {
 	 *  this whole protection exists to prevent.
 	 */
 	base: Base | null,
+	/**
+	 *  Whether creating the file filled in what the caller did not send —
+	 *  the default source, and the harnesses this machine runs. The copy
+	 *  that was written holds it now; a copy typed while the write was
+	 *  away never did, and saving that one against this file's base would
+	 *  put the seed back to nothing without saying so.
+	 */
+	seeded: boolean,
 };
 
 export type Manifest_Deserialize = {
