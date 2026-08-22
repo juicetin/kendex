@@ -128,16 +128,30 @@ pub fn run(env: &Env, args: DiscardArgs) -> CliResult {
             ..PlanOptions::default()
         },
     )?;
-    // Whether this package got a rendering, asked of the plan rather than
-    // read off its op list: a scope carries its own maintenance, so ops
-    // exist whether or not the package named got one, and every reason a
-    // package is skipped — refused, held, unmeasured — leaves the same
-    // silence there. Executing anyway would report a restore nobody did.
-    if !report.rendered.contains(&(kind, args.name.clone())) {
+    // Everything this plan is about, asked of the plan rather than read off
+    // its op list: a scope carries its own maintenance, so ops exist
+    // whether or not the package named got one, and every reason a package
+    // is skipped — refused, held, unmeasured — leaves the same silence
+    // there. Not only the package named, either: a dependency its
+    // declaration pulls in can be refused on its own account, and applying
+    // anyway leaves the package there with what it needs missing.
+    // Executing would report a restore nobody did.
+    let missing = report.unrendered();
+    if missing.iter().any(|(k, n)| *k == kind && n == &args.name) {
         return Err(format!(
             "{} '{}' was edited, and nothing here rendered its declared content to put back — 'kendex check' reports what is holding it",
             kind.name(),
             args.name
+        )
+        .into());
+    }
+    if let Some((needed, name)) = missing.first() {
+        return Err(format!(
+            "{} '{}' needs {} '{}', and nothing here rendered that to put back — 'kendex check' reports what is holding it",
+            kind.name(),
+            args.name,
+            needed.name(),
+            name
         )
         .into());
     }

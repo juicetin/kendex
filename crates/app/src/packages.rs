@@ -217,9 +217,18 @@ pub fn apply_discard_edits(
         // version can be held back by the safety gate — and applying that
         // would move the record while the edited files stayed, under a
         // line saying the content was replaced.
-        if !report.rendered.contains(&(kind, name.clone())) {
+        let missing = report.unrendered();
+        if missing.iter().any(|(k, n)| *k == kind && n == &name) {
             return Err(format!(
                 "{name} was edited, and nothing here rendered the version you chose to put in its place — Review reports what is holding it"
+            ));
+        }
+        // And what that version needs, which can be refused on its own
+        // account: applied anyway, the package comes back unable to run.
+        if let Some((needed, needs)) = missing.first() {
+            return Err(format!(
+                "{name} needs {} '{needs}', and nothing here rendered it — Review reports what is holding it",
+                needed.name()
             ));
         }
         apply::execute(&env, &report.plan, None).map_err(|e| e.to_string())?;
@@ -260,9 +269,16 @@ pub fn apply_discard_edits(
     // Whether this package got a rendering, asked of the plan rather than
     // read off its op list: a scope carries its own maintenance, so ops
     // exist whether or not the package named got one.
-    if !report.rendered.contains(&(kind, name.clone())) {
+    let missing = report.unrendered();
+    if missing.iter().any(|(k, n)| *k == kind && n == &name) {
         return Err(format!(
             "{name} was edited, and nothing here rendered its declared content to put back — Review reports what is holding it"
+        ));
+    }
+    if let Some((needed, needs)) = missing.first() {
+        return Err(format!(
+            "{name} needs {} '{needs}', and nothing here rendered it — Review reports what is holding it",
+            needed.name()
         ));
     }
     apply::execute(&env, &report.plan, None).map_err(|e| e.to_string())?;

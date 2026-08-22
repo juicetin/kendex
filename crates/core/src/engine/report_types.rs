@@ -100,6 +100,16 @@ pub struct EngineReport {
     /// named got one — and every reason a package is skipped, refused or
     /// held or unmeasured, leaves the same silence in that list.
     pub rendered: BTreeSet<(ItemKind, String)>,
+    /// Everything a restricted plan is about: the packages named, and what
+    /// those packages require. Empty where the plan is the whole scope's.
+    ///
+    /// A caller checking its own package rendered is asking half the
+    /// question. A dependency the refreshed declaration pulls in can be
+    /// refused on its own account — by the safety gate, or a revision it
+    /// cannot settle — and the plan still runs, leaving the package there
+    /// and the thing it needs absent. Reporting that as done tells someone
+    /// their package is back when it cannot run.
+    pub acting: BTreeSet<(ItemKind, String)>,
     /// Declarations this pass could not measure: their source did not
     /// resolve, could not be read, or no longer carries the item, so
     /// nothing was rendered to compare what is on disk against. They are
@@ -107,6 +117,21 @@ pub struct EngineReport {
     /// clean — a reader that treats the silence as cleanliness reports an
     /// edited place as untouched.
     pub unmeasured: BTreeSet<(ItemKind, String)>,
+}
+
+impl EngineReport {
+    /// What this plan is about that it did not render: the packages named,
+    /// or anything they require, that nothing here could put back.
+    ///
+    /// The question a caller must ask before it executes and reports the
+    /// package restored. Asking only whether the named package rendered
+    /// answers half of it — a dependency the declaration pulls in can be
+    /// refused on its own account, and the package comes back unable to
+    /// run under a line saying it is fine. Empty for a whole-scope plan,
+    /// which is about everything and promises nothing about one package.
+    pub fn unrendered(&self) -> Vec<(ItemKind, String)> {
+        self.acting.difference(&self.rendered).cloned().collect()
+    }
 }
 
 #[derive(Debug, Clone, Default)]

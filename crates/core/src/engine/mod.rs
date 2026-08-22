@@ -244,6 +244,7 @@ pub fn plan_scope(
         safety,
         unmeasured: state.unmeasured,
         rendered,
+        acting: state.acting.clone().unwrap_or_default(),
     };
     report.notes.extend(moved_notes);
     unmanaged_rows(env, scope, manifest, lock, &state.items, &mut report.drift);
@@ -346,8 +347,10 @@ pub fn plan_apply(env: &Env, scope: &Scope, options: &PlanOptions) -> Result<Eng
         sweepable: Vec::new(),
         kept: Vec::new(),
         safety: Vec::new(),
-        // Nothing is planned on this path, so nothing is rendered.
+        // Nothing is planned on this path, so nothing is rendered and the
+        // plan is about nothing.
         rendered: BTreeSet::new(),
+        acting: BTreeSet::new(),
         unmeasured: BTreeSet::new(),
     };
     // One fact, said once: files this build will read but not write. Which
