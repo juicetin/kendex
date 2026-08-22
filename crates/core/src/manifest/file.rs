@@ -107,12 +107,12 @@ pub fn load_for_mutation(path: &Path) -> Result<Option<Manifest>> {
 ///
 /// There is one way to derive one — [`Base::of`], over the bytes it
 /// describes — because the failure this exists to prevent is a base paired
-/// with content nobody read together. Three of those reached review, each
-/// a base taken by a read separate from the content it was meant to answer
-/// for: a writer landing between the two hands a caller old content under
-/// the new file's name, and the write that follows is accepted over that
-/// writer. Nothing here takes a path and hands back a base, deliberately —
-/// a path is not the bytes.
+/// with content nobody read together. A base taken by a read separate from
+/// the content it answers for describes a different moment: a writer
+/// landing between the two hands the caller old content under the new
+/// file's name, and the write that follows is accepted over that writer.
+/// Nothing here takes a path and hands back a base, deliberately — a path
+/// is not the bytes, and reading them apart is how the two come adrift.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(transparent)]
 pub struct Base(Option<String>);

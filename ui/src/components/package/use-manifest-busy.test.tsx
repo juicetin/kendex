@@ -67,8 +67,9 @@ function Probe() {
 const render = () => renderToStaticMarkup(<Probe />);
 
 // Every writer of a place's kendex.toml is one of these, and a version
-// switch is among them: it used to be passed in from the package page,
-// which meant it stopped counting the moment that page unmounted.
+// switch is among them. The flag has to live in the store rather than be
+// passed down from the page: read from a page, it stops counting the
+// moment that page unmounts, and the Save bar comes back up mid-write.
 describe("useManifestBusy", () => {
   it("is one gate over every store that rewrites the file", () => {
     expect(render()).toContain("idle");
