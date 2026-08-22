@@ -36,6 +36,11 @@ export function CustomizedActions({
   // same button dropping edits alone applies none, and stays available —
   // a failed check must not strand an edited place.
   const canApply = useUpdatesStore(canApplyUpdates);
+  // Taking the newest applies the revision the last read named, so a read
+  // still on its way holds it — at the button and at the confirmation
+  // alike, since a dialog already open when that read fails would otherwise
+  // still apply what it is about to replace.
+  const holdLatest = row.canTakeLatest && !canApply;
   const whyNoFork = row.derived
     ? DERIVED_EDIT_NOTE
     : row.editedHarnesses.length > 1
@@ -67,7 +72,7 @@ export function CustomizedActions({
         <Button
           size="sm"
           variant="outline"
-          disabled={busy || (row.canTakeLatest && !canApply)}
+          disabled={busy || holdLatest}
           onClick={() => setConfirmDiscard(true)}
         >
           {row.canTakeLatest ? USE_NEW_VERSION_LABEL : DISCARD_EDITS_LABEL}
@@ -82,6 +87,7 @@ export function CustomizedActions({
         confirmLabel={DISCARD_EDITS_CONFIRM_LABEL}
         destructive
         busy={busy}
+        holdConfirm={holdLatest}
         onConfirm={() =>
           void takeNewVersion(row).then(() => setConfirmDiscard(false))
         }

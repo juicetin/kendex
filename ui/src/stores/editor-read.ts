@@ -4,6 +4,7 @@ import { sameScope, scopeKey } from "@/lib/scope";
 import { useEditorStore } from "./editor";
 import { dropHeld } from "./editor-held";
 import { manifestFold, unreadFold } from "./editor-order";
+import { named } from "./editor-scopes";
 
 // Every manifest read takes a ticket. Three readers overlap — one place
 // at a time, every place at once, and the re-read a save ends with — and
@@ -105,7 +106,7 @@ export const loadManifest = async (
     useEditorStore.setState((current) => ({
       unreadPlaces: foldUnread(
         current.unreadPlaces,
-        [[scopeKey(scope), true]],
+        [[scopeKey(scope), `${named(scope)}: ${String(thrown)}`]],
         token,
       ),
     }));
@@ -121,7 +122,7 @@ export const loadManifest = async (
     useEditorStore.setState((current) => ({
       unreadPlaces: foldUnread(
         current.unreadPlaces,
-        [[scopeKey(scope), true]],
+        [[scopeKey(scope), `${named(scope)}: ${manifest.error}`]],
         token,
       ),
     }));
@@ -148,7 +149,7 @@ export const loadManifest = async (
       // refusing it.
       unreadPlaces: foldUnread(
         current.unreadPlaces,
-        [[scopeKey(scope), false]],
+        [[scopeKey(scope), null]],
         token,
       ),
       // A typed draft comes back to its own place; the choices beside it
@@ -180,7 +181,7 @@ export const loadManifest = async (
     saved: fold(current.saved, read, token),
     unreadPlaces: foldUnread(
       current.unreadPlaces,
-      [[scopeKey(scope), false]],
+      [[scopeKey(scope), null]],
       token,
     ),
     dirty: false,

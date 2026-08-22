@@ -48,6 +48,7 @@ export function ForkNotice({
   // drop its edits applies none, and stays reachable — a check that failed
   // must not strand an edited place. Same rule as the Updates page.
   const canApply = useUpdatesStore(canApplyUpdates);
+  const holdLatest = row.canTakeLatest && !canApply;
   const [confirmDiscard, setConfirmDiscard] = useState(false);
   const several = row.editedHarnesses.length > 1;
   const whyNoFork = row.derived
@@ -113,7 +114,7 @@ export function ForkNotice({
           <Button
             size="sm"
             variant="outline"
-            disabled={busy || (row.canTakeLatest && !canApply)}
+            disabled={busy || holdLatest}
             onClick={() => setConfirmDiscard(true)}
           >
             {several ? DISCARD_ALL_EDITS_LABEL : DISCARD_EDITS_LABEL}
@@ -129,7 +130,8 @@ export function ForkNotice({
         }
         confirmLabel={DISCARD_EDITS_CONFIRM_LABEL}
         destructive
-        busy={busy || (row.canTakeLatest && !canApply)}
+        busy={busy}
+        holdConfirm={holdLatest}
         onConfirm={() =>
           void takeNewVersion(row).then(() => {
             setConfirmDiscard(false);

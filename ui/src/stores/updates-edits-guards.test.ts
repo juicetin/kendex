@@ -70,7 +70,7 @@ describe("a fork or discard beside an open Customize tab", () => {
       held: {},
       saved: {},
       manifestsLoaded: false,
-      manifestError: null,
+      unreadPlaces: {},
     });
     vi.clearAllMocks();
     // Every path here ends by re-reading the place it rewrote.

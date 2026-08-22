@@ -21,8 +21,21 @@ vi.mock("@/stores/updates", async (importOriginal) => {
   return { ...mod, useUpdatesStore: Object.assign(hook, mod.useUpdatesStore) };
 });
 
+// The confirmation portals itself, so what it was handed is read here
+// rather than from the markup.
+const { asked } = vi.hoisted(() => ({
+  asked: { holdConfirm: undefined as boolean | undefined },
+}));
+vi.mock("@/components/confirm-dialog", () => ({
+  ConfirmDialog: (props: { holdConfirm?: boolean }) => {
+    asked.holdConfirm = props.holdConfirm;
+    return null;
+  },
+}));
+
 beforeEach(() => {
   Object.assign(standing, { busy: false, loaded: true, checking: false });
+  asked.holdConfirm = undefined;
 });
 
 // The page hands the notice the one row its own place's join found, so a
@@ -170,6 +183,9 @@ describe("package page edited notice", () => {
     );
     expect(html).toContain(">Discard edits…<");
     expect(offered(html, "Discard edits…")).toBe(false);
+    // And the confirmation behind it, which a reader may already have open
+    // when the check goes out.
+    expect(asked.holdConfirm).toBe(true);
   });
 
   // A place that cannot move applies no revision at all, so a check that is
@@ -186,6 +202,7 @@ describe("package page edited notice", () => {
       }),
     );
     expect(offered(html, "Discard edits…")).toBe(true);
+    expect(asked.holdConfirm).toBe(false);
   });
 
   // The copy a discard would put back cannot be read, so no button is

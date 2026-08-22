@@ -6,6 +6,7 @@ import type {
 } from "@/bindings";
 import { commands } from "@/bindings";
 import { useEditorStore } from "./editor";
+import { whyUnread } from "./editor-order";
 import { useSettingsStore } from "./settings";
 
 vi.mock("@/bindings", () => ({
@@ -141,13 +142,13 @@ describe("manifest passes that overlap", () => {
     });
     const older = useEditorStore.getState().loadAll();
     await useEditorStore.getState().loadAll();
-    expect(useEditorStore.getState().manifestError).toContain("gone");
+    expect(whyUnread(useEditorStore.getState())).toContain("gone");
 
     // The older pass succeeds, late. Clearing the newer failure here would
     // hand the marks a banner-free screen for a read that did fail.
     slow.resolve({ status: "ok", data: { manifest: null, base: null } });
     await older;
-    expect(useEditorStore.getState().manifestError).toContain("gone");
+    expect(whyUnread(useEditorStore.getState())).toContain("gone");
     expect(useEditorStore.getState().manifestsReading).toBe(false);
   });
 

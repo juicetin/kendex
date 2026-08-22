@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { commands } from "@/bindings";
 import { useEditorStore } from "./editor";
+import { whyUnread } from "./editor-order";
 import { useSettingsStore } from "./settings";
 
 vi.mock("@/bindings", () => ({
@@ -43,7 +44,7 @@ beforeEach(() => {
     draft: null,
     saved: {},
     manifestsLoaded: false,
-    manifestError: null,
+    unreadPlaces: {},
     manifestsReading: false,
   });
 });
@@ -68,8 +69,8 @@ describe("reading every place's manifest", () => {
     const state = useEditorStore.getState();
     expect(state.manifestsLoaded).toBe(true);
     expect(state.saved["/work/vg"]).toBeUndefined();
-    expect(state.manifestError).toContain("/work/vg");
-    expect(state.manifestError).toContain("expected a table");
+    expect(whyUnread(state)).toContain("/work/vg");
+    expect(whyUnread(state)).toContain("expected a table");
   });
 
   it("says nothing when every place read", async () => {
@@ -78,7 +79,7 @@ describe("reading every place's manifest", () => {
       data: { manifest: null, base: null },
     });
     await useEditorStore.getState().loadAll();
-    expect(useEditorStore.getState().manifestError).toBe(null);
+    expect(whyUnread(useEditorStore.getState())).toBe(null);
     expect(useEditorStore.getState().saved["/work/vg"]).toBeDefined();
   });
 });
@@ -149,7 +150,7 @@ describe("passes that overlap", () => {
     expect(state.saved["/work/vg"]?.["skill-instructions"]).toEqual({
       gh: "mine",
     });
-    expect(state.manifestError).toContain("/work/vg");
+    expect(whyUnread(state)).toContain("/work/vg");
   });
 
   it("treats a rejected read as a read that failed, not one still running", async () => {
@@ -159,7 +160,7 @@ describe("passes that overlap", () => {
     await useEditorStore.getState().loadAll();
     const state = useEditorStore.getState();
     expect(state.manifestsReading).toBe(false);
-    expect(state.manifestError).toContain("no channel");
+    expect(whyUnread(state)).toContain("no channel");
     expect(state.manifestsLoaded).toBe(true);
   });
 
@@ -171,7 +172,7 @@ describe("passes that overlap", () => {
     await useEditorStore.getState().loadAll();
     const state = useEditorStore.getState();
     expect(state.manifestsReading).toBe(false);
-    expect(state.manifestError).toContain("settings unreadable");
+    expect(whyUnread(state)).toContain("settings unreadable");
     expect(state.manifestsLoaded).toBe(false);
   });
 
@@ -224,8 +225,8 @@ describe("passes that overlap", () => {
       gh: "read",
     });
     expect(state.saved["/work/vg"]).toBeUndefined();
-    expect(state.manifestError).toContain("/work/vg");
-    expect(state.manifestError).toContain("no channel");
+    expect(whyUnread(state)).toContain("/work/vg");
+    expect(whyUnread(state)).toContain("no channel");
     expect(state.manifestsLoaded).toBe(true);
   });
 });

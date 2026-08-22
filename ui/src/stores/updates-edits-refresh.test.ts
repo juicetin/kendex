@@ -65,7 +65,7 @@ describe("after a fork or a discard", () => {
       dirty: false,
       saved: {},
       manifestsLoaded: false,
-      manifestError: null,
+      unreadPlaces: {},
     });
     vi.clearAllMocks();
     // Every path here ends by re-reading the place it rewrote.

@@ -48,8 +48,10 @@ export async function manifestRewritten(scope: Scope): Promise<void> {
       read.data.base !== after.base;
     if (moved) after.outdate(scope);
     else after.current(scope);
-    if (typeof read === "string")
-      useEditorStore.setState({ manifestError: read });
+    // A read that failed leaves this place unread like any other: what is
+    // still in hand for it answers for an earlier moment, and the note
+    // says so and offers the retry.
+    if (typeof read === "string") after.unread(scope, read);
     return;
   }
   // Marked again before the re-read, since the editor may have moved here

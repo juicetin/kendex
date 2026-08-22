@@ -1,6 +1,9 @@
 import type { Draft } from "@/lib/editor-draft";
 import { keepIfSame } from "@/lib/same-read";
 
+/** Every place whose manifest would not read, with what it said. */
+export type Unread = Readonly<Record<string, string>>;
+
 /** Which read each place's saved manifest came from, so an older one
  *  landing late is dropped for that place alone rather than for the whole
  *  pass. Three readers overlap — one place at a time, every place at once,
@@ -38,25 +41,42 @@ export function manifestFold() {
  *  exactly as `saved` does. */
 export function unreadFold() {
   const behind = new Map<string, number>();
+  /** `read` gives each place either why it would not read, or null for one
+   *  that did. The reason is folded with the mark rather than kept beside
+   *  it: two lists saying the same thing can disagree, and the one that
+   *  went stale was the note on screen — still naming a place that had
+   *  already read again, with a retry for a failure that was over. */
   return (
-    previous: string[],
-    read: [string, boolean][],
+    previous: Unread,
+    read: [string, string | null][],
     token: number,
-  ): string[] => {
-    const next = new Set(previous);
-    for (const [key, unread] of read) {
+  ): Unread => {
+    const next = { ...previous };
+    for (const [key, why] of read) {
       if ((behind.get(key) ?? 0) > token) continue;
       behind.set(key, token);
-      if (unread) next.add(key);
-      else next.delete(key);
+      if (why === null) delete next[key];
+      else next[key] = why;
     }
-    const grown = [...next].sort();
-    // The same identity the manifests keep: a list that says what it said
-    // before is the list already on screen, and the marks derived from it
-    // do not re-render.
-    return grown.length === previous.length &&
-      grown.every((key, at) => key === previous[at])
-      ? previous
-      : grown;
+    return keepIfSame(previous, next);
   };
+}
+
+/** What to say about the manifests behind the marks: why the last whole
+ *  pass could not run at all, and why each place still unread would not
+ *  read — each reason said once, since a pass that reached nowhere gives
+ *  every place the same one.
+ *
+ *  Derived rather than kept. Held as its own string it went stale the one
+ *  way that matters: a place recovering on a targeted read cleared its
+ *  mark and left the note still naming it, still offering a retry for a
+ *  failure that was over. */
+export function whyUnread(state: {
+  passError: string | null;
+  unreadPlaces: Unread;
+}): string | null {
+  const said = [
+    ...new Set([state.passError, ...Object.values(state.unreadPlaces)]),
+  ].filter((why): why is string => why !== null);
+  return said.length > 0 ? said.join("\n") : null;
 }

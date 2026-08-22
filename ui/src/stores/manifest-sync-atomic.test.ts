@@ -6,6 +6,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { commands } from "@/bindings";
 import { useEditorStore } from "./editor";
+import { whyUnread } from "./editor-order";
 import { manifestRewritten } from "./manifest-sync";
 import { useProblemsStore } from "./problems";
 import { useSettingsStore } from "./settings";
@@ -159,7 +160,7 @@ describe("the sync refuses before it reads", () => {
   // into a refusal and a message rather than into a lost promise.
   // Reported on #1569 by review.
   it("keeps the place refused when the re-read never arrives", async () => {
-    useEditorStore.setState({ base: "before", manifestError: null });
+    useEditorStore.setState({ base: "before", unreadPlaces: {} });
     type();
     vi.mocked(commands.getManifest)
       .mockResolvedValueOnce({
@@ -172,7 +173,7 @@ describe("the sync refuses before it reads", () => {
 
     const after = useEditorStore.getState();
     expect(after.outdated).toBe("global");
-    expect(after.manifestError).toContain("the channel closed");
+    expect(whyUnread(after)).toContain("the channel closed");
     expect(after.draft).toEqual(typed);
   });
 

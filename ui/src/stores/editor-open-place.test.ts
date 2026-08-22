@@ -27,7 +27,7 @@ beforeEach(() => {
     draft: null,
     saved: {},
     manifestsLoaded: false,
-    manifestError: null,
+    unreadPlaces: {},
     manifestsReading: false,
   });
 });

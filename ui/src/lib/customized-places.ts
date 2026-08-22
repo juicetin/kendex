@@ -12,6 +12,7 @@ import { isCustomized, itemCustomization } from "@/lib/customization";
 import type { Draft } from "@/lib/editor-draft";
 import { sameScope, scopeKey } from "@/lib/scope";
 import { useEditorStore } from "@/stores/editor";
+import { whyUnread } from "@/stores/editor-order";
 import { useUpdatesStore } from "@/stores/updates";
 
 /** What is known about one place's copy of a package. `unknown` is a real
@@ -204,15 +205,14 @@ export const readState = (loaded: boolean, error: string | null): ReadState =>
  *  thing, so this changes only when a fact does. */
 function useJoined(manifests: Record<string, Draft>): PlacesSource {
   const manifestsLoaded = useEditorStore((s) => s.manifestsLoaded);
-  const manifestError = useEditorStore((s) => s.manifestError);
   const rows = useUpdatesStore((s) => s.rows);
   const updatesLoaded = useUpdatesStore((s) => s.loaded);
   const updatesError = useUpdatesStore((s) => s.error);
   const indexed = useMemo(() => indexRows(rows), [rows]);
   const updatesRead = readState(updatesLoaded, updatesError);
-  const manifestsRead = readState(manifestsLoaded, manifestError);
   const unread = useEditorStore((s) => s.unreadPlaces);
-  const unreadPlaces = useMemo(() => new Set(unread), [unread]);
+  const manifestsRead = readState(manifestsLoaded, useEditorStore(whyUnread));
+  const unreadPlaces = useMemo(() => new Set(Object.keys(unread)), [unread]);
   return useMemo(
     () => ({
       manifests,

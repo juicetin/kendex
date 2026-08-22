@@ -3,9 +3,10 @@ import type { EditorInventory, Scope } from "@/bindings";
 import type { Draft } from "@/lib/editor-draft";
 import { sameScope, scopeKey } from "@/lib/scope";
 import { type Held, pointAt } from "./editor-held";
+import type { Unread } from "./editor-order";
 import { fold, foldUnread, loadManifest, nextRead } from "./editor-read";
 import { saveManifest } from "./editor-save";
-import { readManifests } from "./editor-scopes";
+import { named, readManifests } from "./editor-scopes";
 
 interface EditorState {
   /** The single scope being edited — deliberately not the sidebar filter. */
@@ -29,14 +30,16 @@ interface EditorState {
    *  missing from `saved` was never asked for; after it has, that scope's
    *  manifest could not be read. */
   manifestsLoaded: boolean;
-  /** Why a place's manifest could not be read on the last {@link loadAll},
-   *  naming the places. Null when every one of them was read. */
-  manifestError: string | null;
-  /** Places whose last manifest read failed. The manifest they had is kept
-   *  so a mark does not vanish, but it is last-known rather than current —
-   *  the join reads these places as unknown instead of taking the old
-   *  answer for a fresh one. */
-  unreadPlaces: string[];
+  /** Places whose last manifest read failed, each with what it said. The
+   *  manifest they had is kept so a mark does not vanish, but it is
+   *  last-known rather than current — the join reads these places as
+   *  unknown instead of taking the old answer for a fresh one, and the
+   *  note on screen says which places and why. */
+  unreadPlaces: Unread;
+  /** Why the last whole-manifest pass could not run at all — it never found
+   *  out which places there are, so this belongs to no place and no
+   *  per-place read can clear it. The next pass that runs does. */
+  passError: string | null;
   /** True while a {@link loadAll} pass is running, so a retry cannot be
    *  pressed on top of the read it is waiting for. */
   manifestsReading: boolean;
@@ -69,6 +72,9 @@ interface EditorState {
   /** Take that back: the file turned out to be the one the copy came from
    *  after all. Only for the place it was said about. */
   current: (scope: Scope) => void;
+  /** Say that this place's manifest would not read, and why. What is still
+   *  in hand for it answers for an earlier moment until one does. */
+  unread: (scope: Scope, why: string) => void;
   save: () => Promise<void>;
 }
 
@@ -87,8 +93,8 @@ export const useEditorStore = create<EditorState>((set, get) => {
     inventory: null,
     saved: {},
     manifestsLoaded: false,
-    manifestError: null,
-    unreadPlaces: [],
+    unreadPlaces: {},
+    passError: null,
     manifestsReading: false,
     outdated: null,
     dirty: false,
@@ -111,6 +117,15 @@ export const useEditorStore = create<EditorState>((set, get) => {
     current: (scope) =>
       set((state) => ({
         outdated: state.outdated === scopeKey(scope) ? null : state.outdated,
+      })),
+
+    unread: (scope, why) =>
+      set((state) => ({
+        unreadPlaces: foldUnread(
+          state.unreadPlaces,
+          [[scopeKey(scope), `${named(scope)}: ${why}`]],
+          nextRead(),
+        ),
       })),
 
     openScope: async (scope) => {
@@ -138,7 +153,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
         if (passes === 0) set({ manifestsReading: false });
       };
       try {
-        const { read, failed, unread } = await readManifests();
+        const { read, unread } = await readManifests();
         set((state) => ({
           // A place whose manifest would not load keeps the last one that
           // did, rather than being dropped from `saved` and taking a mark
@@ -152,17 +167,16 @@ export const useEditorStore = create<EditorState>((set, get) => {
           unreadPlaces: foldUnread(
             state.unreadPlaces,
             [
-              ...read.map(([key]) => [key, false] as [string, boolean]),
-              ...unread.map((key) => [key, true] as [string, boolean]),
+              ...read.map(([key]) => [key, null] as [string, string | null]),
+              ...unread.map(
+                ([key, why]) => [key, why] as [string, string | null],
+              ),
             ],
             token,
           ),
-          ...(newest()
-            ? {
-                manifestsLoaded: true,
-                manifestError: failed.length > 0 ? failed.join("\n") : null,
-              }
-            : {}),
+          // The pass ran, so whatever stopped the last one from running is
+          // over; what each place said travels with that place.
+          ...(newest() ? { manifestsLoaded: true, passError: null } : {}),
         }));
         // The pass answers for every place, the open one included. A draft
         // with nothing typed in it is the file's, not the person's: another
@@ -184,10 +198,10 @@ export const useEditorStore = create<EditorState>((set, get) => {
         if (newest())
           set((state) => ({
             manifestsLoaded: false,
-            manifestError: String(thrown),
+            passError: String(thrown),
             unreadPlaces: foldUnread(
               state.unreadPlaces,
-              Object.keys(state.saved).map((key) => [key, true]),
+              Object.keys(state.saved).map((key) => [key, String(thrown)]),
               token,
             ),
           }));

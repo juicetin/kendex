@@ -63,7 +63,7 @@ describe("updates store: edited places", () => {
       dirty: false,
       saved: {},
       manifestsLoaded: false,
-      manifestError: null,
+      unreadPlaces: {},
     });
     vi.clearAllMocks();
     // Every path here ends by re-reading the place it rewrote.

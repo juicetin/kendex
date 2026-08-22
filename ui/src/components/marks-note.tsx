@@ -10,6 +10,7 @@ import {
 } from "@/lib/copy-customize";
 import { cn } from "@/lib/utils";
 import { useEditorStore } from "@/stores/editor";
+import { whyUnread } from "@/stores/editor-order";
 import { useUpdatesStore } from "@/stores/updates";
 
 /** Said out loud when a read behind the per-place marks failed. Without it
@@ -21,7 +22,9 @@ export function MarksNote({ className }: { className?: string }) {
   const updatesError = useUpdatesStore((s) => s.error);
   const checking = useUpdatesStore((s) => s.checking);
   const check = useUpdatesStore((s) => s.check);
-  const manifestError = useEditorStore((s) => s.manifestError);
+  // Derived from the reads themselves, so the note cannot outlive the
+  // failure: the last place to read again takes this away with it.
+  const manifestError = useEditorStore(whyUnread);
   const reading = useEditorStore((s) => s.manifestsReading);
   const loadAll = useEditorStore((s) => s.loadAll);
   if (!updatesError && !manifestError) return null;

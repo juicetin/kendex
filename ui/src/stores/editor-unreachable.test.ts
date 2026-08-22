@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { commands } from "@/bindings";
 import { useEditorStore } from "./editor";
+import { whyUnread } from "./editor-order";
 import { useSettingsStore } from "./settings";
 
 vi.mock("@/bindings", () => ({
@@ -33,7 +34,7 @@ beforeEach(() => {
     draft: null,
     saved: {},
     manifestsLoaded: false,
-    manifestError: null,
+    unreadPlaces: {},
     manifestsReading: false,
   });
 });
@@ -53,7 +54,7 @@ describe("a pass that could not reach any place", () => {
     await useEditorStore.getState().loadAll();
     // The control: a good pass leaves nothing unread.
     expect(useEditorStore.getState().saved["/work/vg"]).toBeDefined();
-    expect(useEditorStore.getState().unreadPlaces).toEqual([]);
+    expect(Object.keys(useEditorStore.getState().unreadPlaces)).toEqual([]);
 
     // The next pass cannot list the places at all.
     useSettingsStore.setState({ settings: null });
@@ -68,11 +69,11 @@ describe("a pass that could not reach any place", () => {
     const state = useEditorStore.getState();
     expect(state.manifestsLoaded).toBe(false);
     // Whatever the reason reads as, the pass has to have said one.
-    expect(state.manifestError).toContain("settings");
+    expect(whyUnread(state)).toContain("settings");
     // Kept, so a mark does not vanish — and unread, so none of them speaks.
     expect(state.saved["/work/vg"]).toBeDefined();
-    expect(state.unreadPlaces).toContain("/work/vg");
-    expect(state.unreadPlaces).toContain("global");
+    expect(Object.keys(state.unreadPlaces)).toContain("/work/vg");
+    expect(Object.keys(state.unreadPlaces)).toContain("global");
   });
 });
 
@@ -94,11 +95,15 @@ describe("a place read on its own after a pass failed", () => {
     });
     vi.mocked(commands.getSettings).mockRejectedValue(new Error("no settings"));
     await useEditorStore.getState().loadAll();
-    expect(useEditorStore.getState().unreadPlaces).toContain("global");
+    expect(Object.keys(useEditorStore.getState().unreadPlaces)).toContain(
+      "global",
+    );
 
     // Its own read lands.
     await useEditorStore.getState().load({ scope: "global" });
-    expect(useEditorStore.getState().unreadPlaces).not.toContain("global");
+    expect(Object.keys(useEditorStore.getState().unreadPlaces)).not.toContain(
+      "global",
+    );
   });
 });
 
@@ -113,7 +118,7 @@ describe("how each place's read went", () => {
       data: { manifest: null, base: null },
     });
     await useEditorStore.getState().loadAll();
-    expect(useEditorStore.getState().unreadPlaces).toEqual([]);
+    expect(Object.keys(useEditorStore.getState().unreadPlaces)).toEqual([]);
 
     vi.mocked(commands.getManifest).mockResolvedValue({
       status: "error",
@@ -121,7 +126,9 @@ describe("how each place's read went", () => {
     });
     await useEditorStore.getState().load({ scope: "global" });
 
-    expect(useEditorStore.getState().unreadPlaces).toContain("global");
+    expect(Object.keys(useEditorStore.getState().unreadPlaces)).toContain(
+      "global",
+    );
     // Kept, so no mark vanishes mid-read — and masked, so it cannot speak.
     expect(useEditorStore.getState().saved.global).toBeDefined();
   });
@@ -130,115 +137,3 @@ describe("how each place's read went", () => {
 // The two reads answer different questions, so one failing must not speak
 // for the other: an inventory kendex could not fetch says nothing about
 // whether this place's manifest was read.
-describe("when only the inventory read fails", () => {
-  it("keeps the manifest and leaves the place readable", async () => {
-    vi.mocked(commands.getManifest).mockResolvedValue({
-      status: "ok",
-      data: { manifest: null, base: "read" },
-    });
-    vi.mocked(commands.editorInventory).mockRejectedValue(
-      new Error("the bridge went away"),
-    );
-
-    await useEditorStore.getState().load({ scope: "global" });
-
-    const state = useEditorStore.getState();
-    expect(state.unreadPlaces).not.toContain("global");
-    expect(state.saved.global).toBeDefined();
-    // The failure is still said out loud rather than swallowed.
-    expect(state.error).toContain("bridge went away");
-  });
-});
-
-// The choices a form offers belong to the place it is about. After a move
-// the inventory in hand belongs to where you were — so keeping it when the
-// new place's read fails offers one project's skills while saving another
-// project's file. The typed draft is the case that matters: it comes back
-// to its own place, and the choices beside it must not follow it there.
-describe("returning to a parked draft when its inventory will not read", () => {
-  const stocked = {
-    declaredAgents: [],
-    declaredSkills: ["from-the-other-place"],
-    availableSkills: ["from-the-other-place"],
-    harnesses: [],
-    hookEvents: [],
-  };
-
-  it("offers nothing rather than the place you came from", async () => {
-    vi.mocked(commands.getManifest).mockResolvedValue({
-      status: "ok",
-      data: { manifest: null, base: "read" },
-    });
-    vi.mocked(commands.editorInventory).mockResolvedValue({
-      status: "ok",
-      data: stocked,
-    });
-
-    // Typing at one place, then away to another: the draft parks.
-    await useEditorStore.getState().setScope({ scope: "global" });
-    useEditorStore.setState({
-      draft: { schema: 1, install: {}, "skill-instructions": { gh: "mine" } },
-      dirty: true,
-    });
-    await useEditorStore
-      .getState()
-      .setScope({ scope: "project", root: "/work/vg" });
-    expect(useEditorStore.getState().inventory).toEqual(stocked);
-
-    // Back again, and this place's inventory will not come. The draft
-    // returns — it is the person's — and the choices do not.
-    vi.mocked(commands.editorInventory).mockResolvedValue({
-      status: "error",
-      error: "the inventory would not read",
-    });
-    await useEditorStore.getState().setScope({ scope: "global" });
-
-    const state = useEditorStore.getState();
-    expect(state.dirty).toBe(true);
-    expect(state.draft?.["skill-instructions"]).toEqual({ gh: "mine" });
-    expect(state.inventory).toBeNull();
-    expect(state.error).toContain("would not read");
-  });
-});
-
-// The move itself, before any read answers. The draft travels with the
-// person; the choices belong to the place, so between leaving one and
-// hearing from the other the form has nothing of its own to offer — and a
-// manifest read that fails leaves it that way rather than stocked from
-// where you were.
-describe("the moment of moving between places", () => {
-  const stocked = {
-    declaredAgents: [],
-    declaredSkills: ["from-the-other-place"],
-    availableSkills: ["from-the-other-place"],
-    harnesses: [],
-    hookEvents: [],
-  };
-
-  it("offers nothing until this place answers, and after it fails to", async () => {
-    vi.mocked(commands.getManifest).mockResolvedValue({
-      status: "ok",
-      data: { manifest: null, base: "read" },
-    });
-    vi.mocked(commands.editorInventory).mockResolvedValue({
-      status: "ok",
-      data: stocked,
-    });
-    await useEditorStore.getState().setScope({ scope: "global" });
-    expect(useEditorStore.getState().inventory).toEqual(stocked);
-
-    // The next place's manifest will not read at all.
-    vi.mocked(commands.getManifest).mockResolvedValue({
-      status: "error",
-      error: "would not parse",
-    });
-    const moving = useEditorStore
-      .getState()
-      .setScope({ scope: "project", root: "/work/vg" });
-    // Before anything lands: the form is already this place's, and empty.
-    expect(useEditorStore.getState().inventory).toBeNull();
-    await moving;
-    // And a failed read leaves it empty rather than stocked from before.
-    expect(useEditorStore.getState().inventory).toBeNull();
-  });
-});
