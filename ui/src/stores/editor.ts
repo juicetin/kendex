@@ -205,7 +205,14 @@ export const useEditorStore = create<EditorState>((set, get) => {
         // already gone. One with typing in it stays, and its save is still
         // refused on its base. This read rather than the fold above,
         // because only a read pairs a draft with the base it came from.
-        if (!get().dirty) await get().load();
+        //
+        // Unless the place the editor is pointed at is not one of them any
+        // more. Reading a project that has just been unregistered puts back
+        // the very state the prune above took away, and no later pass asks
+        // for it again — so the note would name an untracked project for
+        // good, and its retry would prune and re-add it every press.
+        if (!get().dirty && places.has(scopeKey(get().scope)))
+          await get().load();
       } catch (thrown) {
         // A rejected read is a read that failed, not one still running: a
         // pass that says nothing leaves every place reading as in-flight

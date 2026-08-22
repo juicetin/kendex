@@ -4,7 +4,7 @@ import { replaceView } from "./audit";
 import { manifestRewritten } from "./manifest-sync";
 import { type ErrorAction, useProblemsStore } from "./problems";
 import { useScanStore } from "./scan";
-import { refusesForUnsaved } from "./unsaved-first";
+import { refusesForUnsaved, retryTheRest } from "./unsaved-first";
 
 /** Everything the funnel writes back into the store it belongs to. */
 interface MutationHost {
@@ -70,7 +70,10 @@ export function auditMutation(
       if (response.wrote === true) await manifestRewritten(scope);
       const retry: ErrorAction = {
         label: "Retry",
-        onClick: () => void run(scope, action, opts),
+        // Inside a package-wide action this place is not the whole job:
+        // retrying it alone would report success with the places after it
+        // never attempted. The one that knows what is left says so.
+        onClick: retryTheRest() ?? (() => void run(scope, action, opts)),
       };
       useProblemsStore.getState().showError({
         title: opts.title,

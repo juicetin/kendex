@@ -65,6 +65,20 @@ export function refusesForUnsavedIn(scopes: Scope[]): boolean {
   return true;
 }
 
+// Set only while a package-wide action is writing one of its places, and
+// read by the funnel that raises the failure — which is called from inside
+// the action and so cannot be handed this any other way. One slot rather
+// than a stack: these all run under a busy flag that keeps a second
+// package-wide action from starting while one is in flight.
+let rest: (() => void) | null = null;
+
+/** What a retry raised during a package-wide action should do: the places
+ *  that are left, not the one place the message came from. Null when the
+ *  failure is a single place's own. */
+export function retryTheRest(): (() => void) | null {
+  return rest;
+}
+
 /** Run one package-wide action over every place it is about, or over none.
  *
  *  Two questions, because they are different questions. The first is asked
@@ -83,12 +97,19 @@ export async function inEveryPlace(
   act: (scope: Scope) => Promise<boolean>,
 ): Promise<void> {
   if (refusesForUnsavedIn(scopes)) return;
-  for (const scope of scopes) {
+  for (const [at, scope] of scopes.entries()) {
     if (refusesForUnsaved(scope)) return;
+    // What Retry should mean while this place is being written: the rest of
+    // the package-wide action, starting here. The place that failed is
+    // where the message comes from, but finishing only that place leaves
+    // the ones after it undone with nothing left to say so.
+    rest = () => void inEveryPlace(scopes.slice(at), act);
     // And stop when the machine would not take it. The action has already
     // said why; going on to the next place would leave the package changed
     // in some of them and not others, under one click that reported a
     // single failure and looked otherwise done.
-    if (!(await act(scope))) return;
+    const took = await act(scope);
+    rest = null;
+    if (!took) return;
   }
 }

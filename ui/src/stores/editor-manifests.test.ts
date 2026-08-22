@@ -82,6 +82,38 @@ describe("reading every place's manifest", () => {
 // app no longer has, with a retry that cannot reach it.
 // Reported on #1569 by review.
 describe("a project that is no longer there", () => {
+  // The pass ends by re-reading the place the editor is pointed at, and a
+  // project just unregistered is still the one on screen. Reading it puts
+  // back exactly what the prune took away, and no later pass asks for it
+  // again — so the note would name it for good, and its retry would prune
+  // and re-add it every press. Reported on #1569 by review.
+  it("does not read the place on screen back after removing it", async () => {
+    useEditorStore.setState({ scope: { scope: "project", root: "/work/vg" } });
+    vi.mocked(commands.getManifest).mockResolvedValue({
+      status: "error",
+      error: "expected a table",
+    });
+    await useEditorStore.getState().loadAll();
+    expect(Object.keys(useEditorStore.getState().unreadPlaces)).toContain(
+      "/work/vg",
+    );
+
+    // Unregistered, so the next pass asks only for the rest — and the
+    // directory it used to be is gone, so reading it on its own fails.
+    useSettingsStore.setState({ settings: { schema: 1, projects: [] } });
+    vi.mocked(commands.getManifest)
+      .mockResolvedValueOnce({
+        status: "ok",
+        data: { manifest: null, base: null },
+      })
+      .mockResolvedValue({ status: "error", error: "no such directory" });
+    await useEditorStore.getState().loadAll();
+
+    const after = useEditorStore.getState();
+    expect(Object.keys(after.unreadPlaces)).toEqual([]);
+    expect(whyUnread(after)).toBeNull();
+  });
+
   it("takes its manifest and its reason with it", async () => {
     vi.mocked(commands.getManifest)
       .mockResolvedValueOnce({
