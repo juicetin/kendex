@@ -133,12 +133,21 @@ export const forkedInLabel = (places: string[]): string =>
 /** The fork mark where several places are listed at once, in the shape the
  *  customized mark beside it uses — the first place named because that is
  *  the one the mark opens, and a count for the rest so a row does not grow
- *  a list. No unchecked count: a fork is read from the place's own
- *  manifest, so a place that would not read has no mark to qualify. */
-export const forkedPlacesLabel = (places: string[], total: number): string =>
-  total === 1 && places.length === 1
-    ? forkedInLabel(places)
-    : `${forkedInLabel([places[0]])} · ${places.length} of ${total} places`;
+ *  a list. */
+export const forkedPlacesLabel = (
+  places: string[],
+  total: number,
+  unchecked: number,
+): string => {
+  const said =
+    total === 1 && places.length === 1
+      ? forkedInLabel(places)
+      : `${forkedInLabel([places[0]])} · ${places.length} of ${total} places`;
+  // "1 of 3" says the other two are not forks, which is a claim about
+  // places nobody could read. A place whose manifest would not load has no
+  // answer either way, and folding it into the count invents one.
+  return unchecked > 0 ? `${said} · ${unchecked} not checked` : said;
+};
 export const NOT_CHECKED_STATE = "not checked for your changes";
 export const CHECKING_STATE = "still being checked";
 

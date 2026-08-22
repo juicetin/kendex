@@ -154,6 +154,32 @@ describe("the Library row's customized mark", () => {
     expect(html).toContain("Customized in vg · 1 of 3 places");
   });
 
+  // "1 of 3" says the other two are not forks. Where a place could not be
+  // read there is no answer either way, and the mark says so rather than
+  // counting it among the settled.
+  it("says how many places it could not speak for beside the fork count", () => {
+    const html = render(
+      source({
+        manifests: {
+          global: emptyDraft(),
+          "/work/vg": {
+            ...emptyDraft(),
+            forks: { skill: { gh: { source: "cat", "forked-at": "2026" } } },
+          },
+          "/work/hyprtrade": emptyDraft(),
+        },
+        // This place's manifest is last-known rather than read, and its
+        // update row cannot stand in for it.
+        unreadPlaces: new Set(["/work/hyprtrade"]),
+        rows: indexRows([
+          updateRow("gh", null, { updateAvailable: false }),
+          updateRow("gh", "/work/vg", { updateAvailable: false }),
+        ]),
+      }),
+    );
+    expect(html).toContain("Forked in vg · 1 of 3 places · 1 not checked");
+  });
+
   it("leaves the fork mark off when no place here holds one", () => {
     expect(render(source())).not.toContain("Forked");
   });

@@ -34,11 +34,12 @@ export function manifestFold() {
  *
  *  The mark says a manifest in hand answers for a moment nobody re-checked,
  *  so it travels with the reads themselves: set when a place's read fails,
- *  cleared when one lands. Kept as a whole-list replacement it went wrong
- *  twice over — a pass that failed put back marks a newer targeted read had
- *  already cleared, and a single place's failure never set one at all,
- *  leaving its stale manifest reading as current. Per place, newest wins,
- *  exactly as `saved` does. */
+ *  cleared when one lands. It has to be per place and newest-wins for the
+ *  same reason `saved` does — three readers overlap here, and a whole-list
+ *  answer speaks for places the reader never reached. Replacing the list
+ *  would let a pass that failed put back marks a newer targeted read had
+ *  cleared, and leave a single place's failure unmarked, its stale manifest
+ *  reading as current. */
 export function unreadFold() {
   const behind = new Map<string, number>();
   /** `read` gives each place either why it would not read, or null for one

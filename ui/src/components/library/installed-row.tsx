@@ -150,6 +150,7 @@ function Row({
                   {forkedPlacesLabel(
                     forks.map((where) => scopeName(where, scopes)),
                     scopes.length,
+                    uncheckedPlaces(standings),
                   )}
                 </Badge>
               ) : null}
