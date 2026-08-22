@@ -107,18 +107,18 @@ export const saveManifest = async (): Promise<void> => {
   }
   if (onScreen()) useEditorStore.setState({ error: null });
   const written = response.data.base;
-  // Creating the file is where a scope's default source and this machine's
-  // harnesses are filled in, and the copy that went never held them. So the
-  // file that landed is not the copy that was sent, and only the copy that
-  // was sent may treat this write as its own.
-  const seeded = response.data.seeded;
+  // The write puts down things nobody typed: the default source and
+  // harnesses a first manifest is seeded with, and a name derived for a
+  // custom hook that arrived without one. So the file that landed is not
+  // the copy that was sent, and no copy in hand may claim it.
+  const wroteMore = response.data.wroteMore;
   // The write landed on one place's file, so it settles that place's copy
   // wherever that copy is. A move made while the write was away parks it,
   // and a parked copy left carrying the base from before its own write has
   // its next save refused — the person told to reload over typing that is
   // already on disk.
   useEditorStore.setState((current) => ({
-    held: settleHeld(current.held, scope, written, draft, seeded),
+    held: settleHeld(current.held, scope, written, draft, wroteMore),
   }));
   // What is on screen is what the file now holds, so it is no longer
   // unsaved — the Save bar comes down and the place chips come live. Only
@@ -130,18 +130,19 @@ export const saveManifest = async (): Promise<void> => {
     // Whether the copy that went is still the one in hand: only then is
     // there nothing unsaved left here.
     const wrote = useEditorStore.getState().draft === draft;
-    if (written === null || seeded) {
+    if (written === null || wroteMore) {
       // Nothing in hand is this file. Either it could not be read back to
       // say what it is — and reading it here to find out is the one thing
       // this must never do, since that pairs a base with content nobody
-      // read with it — or it holds the seed the creation put in it, which
-      // no copy that went carries and no edit made from one does either.
+      // read with it — or it holds something the write put there, which no
+      // copy that went carries and no edit made from one does either.
       //
       // So the place is refused, and the re-read below is what takes the
       // refusal off: it lands on the file and settles a copy nobody has
       // typed over. Typing that arrives before it does keeps the refusal,
-      // which is the answer — that copy would write the seed back out of
-      // existence, and every check it passes would say it was fine.
+      // which is the answer — that copy would write what the file gained
+      // back out of existence, and every check it passes would say it was
+      // fine.
       useEditorStore.getState().outdate(scope);
     } else {
       // The base describes the file, and the file is what was just

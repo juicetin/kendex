@@ -70,12 +70,16 @@ pub struct ManifestWritten {
     /// what it must not do is read the file itself, which is the pairing
     /// this whole protection exists to prevent.
     pub base: Option<manifest::Base>,
-    /// Whether creating the file filled in what the caller did not send —
-    /// the default source, and the harnesses this machine runs. The copy
-    /// that was written holds it now; a copy typed while the write was
-    /// away never did, and saving that one against this file's base would
-    /// put the seed back to nothing without saying so.
-    pub seeded: bool,
+    /// Whether the write put down something the caller did not send: the
+    /// default source and harnesses a first manifest is seeded with, or a
+    /// name derived for a custom hook that arrived without one.
+    ///
+    /// No copy in hand holds it, so none of them is this file — not even
+    /// the one that went. Told otherwise, the editor hands the file's base
+    /// to a copy that never had it, and the next save passes every check
+    /// and writes it away: the seed back to nothing, or a second hook
+    /// under a second derived name with the first left running.
+    pub wrote_more: bool,
 }
 
 #[tauri::command(async)]
@@ -127,6 +131,21 @@ fn on_first_creation(manifest: &mut Manifest, seed: Manifest) -> bool {
     filled
 }
 
+/// Bring what the caller sent to what actually goes on disk, and say
+/// whether the two differ. `seed` is present only where there is no file
+/// yet, which is the one moment seeding happens.
+///
+/// Both normalizations answer here so neither can be added without the
+/// caller being told: a write that quietly holds more than it was sent is
+/// a write the editor will mistake for its own copy.
+fn as_written(manifest: &mut Manifest, seed: Option<Manifest>) -> bool {
+    let seeded = seed.is_some_and(|seed| on_first_creation(manifest, seed));
+    // A custom hook's name is its identity everywhere downstream; saving is
+    // when a derived one stops being derived.
+    let named = kendex_core::hook::name_custom_hooks(manifest);
+    seeded || named
+}
+
 /// Write an edited manifest and reconcile the scope to it.
 ///
 /// `base` is what the file was when this copy was read. A whole manifest
@@ -156,16 +175,11 @@ pub fn update_manifest(
         return Err(refusal(error));
     }
     let mut manifest = manifest;
-    let seeded = match manifest::load_for_mutation(&path).map_err(|e| e.to_string())? {
-        Some(_) => false,
-        None => on_first_creation(
-            &mut manifest,
-            ops::manifest_for_mutation(&env, &scope).map_err(|e| e.to_string())?,
-        ),
+    let seed = match manifest::load_for_mutation(&path).map_err(|e| e.to_string())? {
+        Some(_) => None,
+        None => Some(ops::manifest_for_mutation(&env, &scope).map_err(|e| e.to_string())?),
     };
-    // A custom hook's name is its identity everywhere downstream; saving is
-    // when a derived one stops being derived.
-    kendex_core::hook::name_custom_hooks(&mut manifest);
+    let wrote_more = as_written(&mut manifest, seed);
     check(&manifest)?;
     let lock = load_lock(&lock_path(&env, &scope)).map_err(|e| e.to_string())?;
     // Whoever plans a write of this file, it is the copy on screen being
@@ -222,7 +236,7 @@ pub fn update_manifest(
         // here instead and the answer could already be somebody else's,
         // handed back paired with the copy this write came from.
         base: outcome.manifest_base,
-        seeded,
+        wrote_more,
     })
 }
 
@@ -296,6 +310,37 @@ mod tests {
         ));
         assert_eq!(declared.sources.len(), 1);
         assert!(declared.install.harnesses.is_empty());
+    }
+
+    // Both normalizations are the same fact to the caller: the file holds
+    // something no copy in hand does. Naming a hook is the one that reaches
+    // a manifest that already exists. Reported on #1569 by review.
+    #[test]
+    fn naming_a_hook_is_the_write_holding_more_than_it_was_sent() {
+        let unnamed = || kendex_core::manifest::CustomHook {
+            name: None,
+            event: "PreToolUse".to_owned(),
+            matcher: None,
+            command: "./guard.sh".to_owned(),
+            description: None,
+            timeout: None,
+            harnesses: None,
+            enabled: true,
+            agents: kendex_core::manifest::HookAgents::One("all".to_owned()),
+        };
+
+        // An existing file, so nothing is seeded: the naming alone answers.
+        let mut arriving = manifest();
+        arriving.custom_hooks.push(unnamed());
+        assert!(as_written(&mut arriving, None));
+        assert!(arriving.custom_hooks[0].name.is_some());
+
+        // And a manifest the write leaves exactly as it came says so, or
+        // every ordinary save would refuse the copy that made it.
+        let mut settled = manifest();
+        settled.custom_hooks.push(unnamed());
+        settled.custom_hooks[0].name = Some("guard".to_owned());
+        assert!(!as_written(&mut settled, None));
     }
 
     #[test]

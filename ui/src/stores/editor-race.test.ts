@@ -236,7 +236,7 @@ describe("switching place while a save is in flight", () => {
     });
     landing.resolve({
       status: "ok",
-      data: { view: audited(), base: "after", seeded: false },
+      data: { view: audited(), base: "after", wroteMore: false },
     });
     await saving;
 

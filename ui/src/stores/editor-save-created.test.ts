@@ -1,10 +1,9 @@
-// The first save at a place with no kendex.toml. Creating the file is the
-// one write that puts down more than it was handed — the default source, and
-// the harnesses this machine runs — so the file that lands is not the copy
-// that went. Typing that arrives while that write is away never held the
-// seed, and treating it as descended from the created file would let its
-// next save write the seed back out of existence with nothing refused and
-// nothing said.
+// A write that puts down more than it was handed. Creating the file seeds
+// the default source and this machine's harnesses; any save can derive a
+// name for a custom hook that arrived without one. Either way the file that
+// lands is not the copy that went, and typing made from that copy never
+// held the difference — so treating it as descended from the file would let
+// its next save write that away, with nothing refused and nothing said.
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   AuditView_Serialize,
@@ -96,7 +95,7 @@ const creatingWrite = () => {
       });
       write.resolve({
         status: "ok",
-        data: { view: audited(), base: "created", seeded: true },
+        data: { view: audited(), base: "created", wroteMore: true },
       });
     },
   };

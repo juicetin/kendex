@@ -98,7 +98,7 @@ beforeEach(() => {
   });
   vi.mocked(commands.updateManifest).mockResolvedValue({
     status: "ok",
-    data: { view: audited(), base: "written", seeded: false },
+    data: { view: audited(), base: "written", wroteMore: false },
   });
 });
 
@@ -144,7 +144,7 @@ describe("saving a customization", () => {
       );
     write.resolve({
       status: "ok",
-      data: { view: audited(), base: "written", seeded: false },
+      data: { view: audited(), base: "written", wroteMore: false },
     });
     await saving;
 

@@ -1649,13 +1649,17 @@ export type ManifestWritten_Deserialize = {
 	 */
 	base: Base | null,
 	/**
-	 *  Whether creating the file filled in what the caller did not send —
-	 *  the default source, and the harnesses this machine runs. The copy
-	 *  that was written holds it now; a copy typed while the write was
-	 *  away never did, and saving that one against this file's base would
-	 *  put the seed back to nothing without saying so.
+	 *  Whether the write put down something the caller did not send: the
+	 *  default source and harnesses a first manifest is seeded with, or a
+	 *  name derived for a custom hook that arrived without one.
+	 * 
+	 *  No copy in hand holds it, so none of them is this file — not even
+	 *  the one that went. Told otherwise, the editor hands the file's base
+	 *  to a copy that never had it, and the next save passes every check
+	 *  and writes it away: the seed back to nothing, or a second hook
+	 *  under a second derived name with the first left running.
 	 */
-	seeded: boolean,
+	wroteMore: boolean,
 };
 
 /**
@@ -1677,13 +1681,17 @@ export type ManifestWritten_Serialize = {
 	 */
 	base: Base | null,
 	/**
-	 *  Whether creating the file filled in what the caller did not send —
-	 *  the default source, and the harnesses this machine runs. The copy
-	 *  that was written holds it now; a copy typed while the write was
-	 *  away never did, and saving that one against this file's base would
-	 *  put the seed back to nothing without saying so.
+	 *  Whether the write put down something the caller did not send: the
+	 *  default source and harnesses a first manifest is seeded with, or a
+	 *  name derived for a custom hook that arrived without one.
+	 * 
+	 *  No copy in hand holds it, so none of them is this file — not even
+	 *  the one that went. Told otherwise, the editor hands the file's base
+	 *  to a copy that never had it, and the next save passes every check
+	 *  and writes it away: the seed back to nothing, or a second hook
+	 *  under a second derived name with the first left running.
 	 */
-	seeded: boolean,
+	wroteMore: boolean,
 };
 
 export type Manifest_Deserialize = {

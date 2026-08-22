@@ -148,7 +148,7 @@ describe("saving while the editor moves away", () => {
     await useEditorStore.getState().openScope(B);
     write.resolve({
       status: "ok",
-      data: { view: audited(), base: "written", seeded: false },
+      data: { view: audited(), base: "written", wroteMore: false },
     });
     await saving;
 
@@ -169,7 +169,7 @@ describe("saving while the editor moves away", () => {
     await useEditorStore.getState().openScope(B);
     write.resolve({
       status: "ok",
-      data: { view: audited(), base: "written", seeded: false },
+      data: { view: audited(), base: "written", wroteMore: false },
     });
     await saving;
 
