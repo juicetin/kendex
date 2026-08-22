@@ -121,8 +121,9 @@ changes carry a **Breaking** call-out with their migration note inline.
   set something there, and the overview again for a place whose copy is
   your own fork. The Customize tab's project chips carry a dot on the
   places that hold changes and say in words what each place holds, and the
-  Forked mark now belongs to the place it was made in instead of showing
-  up on every copy. The page you land on is about that place too — its
+  Forked mark names its place and belongs to the place it was made in,
+  instead of reading "Forked" everywhere and saying which one only on
+  hover. The page you land on is about that place too — its
   path, its open actions and its file list, not the first project the
   package happens to be installed in, and it stays that place while you look
   at another one's settings on the Customize tab — the chips move the tab,

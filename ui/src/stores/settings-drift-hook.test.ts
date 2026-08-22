@@ -82,6 +82,17 @@ describe("adding the drift report to a project", () => {
     });
   });
 
+  /** Every queued microtask and one macrotask, so "still busy" means it. */
+  const settle = () => new Promise((done) => setTimeout(done, 0));
+
+  function deferred<T>() {
+    let resolve!: (value: T) => void;
+    const promise = new Promise<T>((keep) => {
+      resolve = keep;
+    });
+    return { promise, resolve };
+  }
+
   /** The offer is a toast action, and taking it is what writes. */
   const takeTheOffer = async () => {
     await useSettingsStore.getState().registerProject(root);
@@ -109,6 +120,32 @@ describe("adding the drift report to a project", () => {
     // refused rather than writing the hook declaration back out.
     expect(useEditorStore.getState().outdated).toBe(root);
     expect(useEditorStore.getState().dirty).toBe(true);
+  });
+
+  // A toast is offered per project, so two can be open at once. The flag
+  // they share is what holds the Customize Save bar down, and it belongs to
+  // every write in flight rather than to whichever lands first.
+  it("holds the gate down until the last write lands", async () => {
+    const first = deferred<{ status: "ok"; data: boolean }>();
+    const second = deferred<{ status: "ok"; data: boolean }>();
+    vi.mocked(commands.installDriftHook)
+      .mockReturnValueOnce(first.promise as never)
+      .mockReturnValueOnce(second.promise as never);
+
+    await takeTheOffer();
+    await takeTheOffer();
+    expect(useSettingsStore.getState().busy).toBe(true);
+
+    first.resolve({ status: "ok", data: true });
+    // Every turn the first write's chain needs, its own `finally` included
+    // — the moment a flag belonging to one operation would come down.
+    await settle();
+    await settle();
+    // The second project's file is still being written.
+    expect(useSettingsStore.getState().busy).toBe(true);
+
+    second.resolve({ status: "ok", data: true });
+    await vi.waitUntil(() => !useSettingsStore.getState().busy);
   });
 
   // The declaration lands in the same file the Customize tab edits, so it

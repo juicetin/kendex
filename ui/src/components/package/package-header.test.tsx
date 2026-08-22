@@ -15,6 +15,11 @@ const standing = (over: Partial<PlaceStanding> = {}): PlaceStanding => ({
   ...over,
 });
 
+/** What the header actually shows: every tag and attribute dropped, so a
+ *  place named only in a `title` does not count. A tooltip is not there at
+ *  all for anyone reading by touch or by keyboard. */
+const shown = (html: string) => html.replace(/<[^>]*>/g, " ");
+
 const header = (place: PlaceStanding | null = standing()) =>
   renderToStaticMarkup(
     <PackageHeader
@@ -29,7 +34,7 @@ const header = (place: PlaceStanding | null = standing()) =>
 
 describe("the package header's marks", () => {
   it("names the place the mark is about", () => {
-    expect(header()).toContain("Customized in vg");
+    expect(shown(header())).toContain("Customized in vg");
   });
 
   it("says nothing while the place is still being worked out", () => {
@@ -44,22 +49,21 @@ describe("the package header's marks", () => {
   });
 
   it("names the place a fork belongs to", () => {
-    expect(header(standing({ forked: true }))).toContain("Forked in vg");
+    expect(shown(header(standing({ forked: true })))).toContain("Forked in vg");
   });
 
   it("tells two projects sharing a folder name apart", () => {
     const twin = { scope: "project" as const, root: "/clients/vg" };
-    expect(
-      renderToStaticMarkup(
-        <PackageHeader
-          kind="skill"
-          displayName="gh"
-          description={null}
-          place={standing()}
-          scopes={[VG, twin]}
-          action={null}
-        />,
-      ),
-    ).toContain("Customized in work/vg");
+    const twinned = renderToStaticMarkup(
+      <PackageHeader
+        kind="skill"
+        displayName="gh"
+        description={null}
+        place={standing()}
+        scopes={[VG, twin]}
+        action={null}
+      />,
+    );
+    expect(shown(twinned)).toContain("Customized in work/vg");
   });
 });

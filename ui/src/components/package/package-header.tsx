@@ -4,7 +4,6 @@ import { InlineMarkdown } from "@/components/inline-markdown";
 import { PageHeader } from "@/components/page-header";
 import { Badge } from "@/components/ui/badge";
 import { customizedInLabel, forkedInLabel } from "@/lib/copy-customize";
-import { FORKED_BADGE_LABEL } from "@/lib/copy-forks";
 import type { PlaceStanding } from "@/lib/customized-places";
 import { kindIcon } from "@/lib/kind-icon";
 import { scopeName } from "@/lib/labels";
@@ -44,9 +43,10 @@ export function PackageHeader({
           <Icon className="size-5 shrink-0 translate-y-[0.1875rem] text-muted-foreground" />
           <span className="min-w-0 truncate">{displayName}</span>
           {place?.forked && named ? (
-            <Badge variant="outline" title={forkedInLabel([named])}>
-              {FORKED_BADGE_LABEL}
-            </Badge>
+            // Named in the badge itself, not only in a tooltip: a mark that
+            // says which place it is about says nothing to anyone reading
+            // by touch or by keyboard if the place is only on hover.
+            <Badge variant="outline">{forkedInLabel([named])}</Badge>
           ) : null}
           {place?.state === "customized" && named ? (
             <Badge variant="customized">{customizedInLabel(named)}</Badge>

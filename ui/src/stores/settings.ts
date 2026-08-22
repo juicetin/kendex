@@ -1,4 +1,3 @@
-import { toast } from "sonner";
 import { create } from "zustand";
 import {
   type Appearance,
@@ -7,11 +6,10 @@ import {
   commands,
   ZOOM,
 } from "@/bindings";
-import { manifestRewritten } from "./manifest-sync";
+import { offerDriftHook } from "./drift-hook-offer";
 import { useProblemsStore } from "./problems";
 import { useScanStore } from "./scan";
 import { type ZoomSlice, zoomActions } from "./settings-zoom";
-import { refusesForUnsaved } from "./unsaved-first";
 
 interface SettingsState extends ZoomSlice {
   settings: AppSettings | null;
@@ -165,44 +163,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       // offer, never an auto-install — it injects into agent context.
       const root =
         (response.data.projects ?? []).find((p) => !before.includes(p)) ?? path;
-      toast.success(`Added ${path.split("/").pop()}`, {
-        action: {
-          label: "Add session drift report",
-          onClick: () => {
-            // The declaration lands in that project's kendex.toml, so
-            // unsaved customization for it refuses this the way every
-            // other writer of that file is refused.
-            if (refusesForUnsaved({ scope: "project", root })) return;
-            // Down only once the editor has been told, below: clearing it
-            // any earlier leaves a window where a save passes the outdated
-            // check and writes the pre-hook file back over the declaration.
-            set({ busy: true });
-            void commands
-              .installDriftHook({ scope: "project", root })
-              .then(async (result) => {
-                if (result.status === "ok") {
-                  // The declaration lands in that project's kendex.toml,
-                  // which the Customize tab may be holding a copy of.
-                  await manifestRewritten({ scope: "project", root });
-                  // False: the scope had other pending changes, so only the
-                  // declaration landed — nothing is applied unreviewed.
-                  toast.success(
-                    result.data
-                      ? "Drift report installed"
-                      : "Drift report added — finish by applying changes in Review",
-                  );
-                  void rescan();
-                } else {
-                  useProblemsStore.getState().showError({
-                    title: "Couldn't install the drift report",
-                    message: result.error,
-                  });
-                }
-              })
-              .finally(() => set({ busy: false }));
-          },
-        },
-      });
+      offerDriftHook(root, path.split("/").pop() ?? path, set);
       await rescan();
       return true;
     }

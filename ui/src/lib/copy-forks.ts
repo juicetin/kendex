@@ -2,7 +2,6 @@
 // exits, and the two refusals that protect the record of what you kept.
 
 // Fork: what happens when the app finds files you edited by hand.
-export const FORKED_BADGE_LABEL = "Forked";
 export const FORK_NOTICE_TITLE = "You've changed this package's files";
 export const FORK_NOTICE_DETAIL =
   "Updates are paused so your edits stay. Keep it as your own copy, see what changed, or discard the edits and go back to the catalog's version.";

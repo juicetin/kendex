@@ -19,10 +19,10 @@ import {
 import {
   customizedPlacesLabel,
   forkedInLabel,
+  forkedPlacesLabel,
   placeStateLine,
   STATUS_LABELS,
 } from "@/lib/copy-customize";
-import { FORKED_BADGE_LABEL } from "@/lib/copy-forks";
 import {
   customizedPlaces,
   forkedPlaces,
@@ -137,13 +137,20 @@ function Row({
             <span className="flex items-center gap-1.5">
               <span className="block truncate">{displayName}</span>
               {forks.length > 0 ? (
+                // The place is in the badge, not only in its tooltip: a
+                // mark that says which place it is about says nothing to
+                // anyone reading by touch or by keyboard otherwise. The
+                // tooltip still carries the full list.
                 <Badge
                   variant="outline"
                   title={forkedInLabel(
                     forks.map((where) => scopeName(where, scopes)),
                   )}
                 >
-                  {FORKED_BADGE_LABEL}
+                  {forkedPlacesLabel(
+                    forks.map((where) => scopeName(where, scopes)),
+                    scopes.length,
+                  )}
                 </Badge>
               ) : null}
               {vendor ? (
