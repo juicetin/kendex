@@ -142,6 +142,22 @@ describe("a dismissal that landed and then could not be described", () => {
   });
 });
 
+/** The Undo the dismissal's toast offered. */
+const undoOffered = async () => {
+  const { toast } = await import("sonner");
+  const offered = vi.mocked(toast.success).mock.calls.at(-1);
+  if (!offered) throw new Error("the dismissal offered no undo");
+  return (offered[1] as unknown as { action: { onClick: () => void } }).action;
+};
+
+/** Press it and wait for the funnel to finish everything the outcome owes;
+ *  the flag comes down in its `finally`. */
+const press = async (undo: { onClick: () => void }) => {
+  undo.onClick();
+  expect(useAuditStore.getState().busy).toBe(true);
+  await vi.waitUntil(() => !useAuditStore.getState().busy);
+};
+
 describe("an undo that took some of its records back", () => {
   it("tells the editor about the ones that landed", async () => {
     vi.mocked(commands.dismissFindings).mockResolvedValue({
@@ -160,20 +176,7 @@ describe("an undo that took some of its records back", () => {
       .mockResolvedValueOnce({ status: "ok", data: view })
       .mockResolvedValueOnce({ status: "error", error: "a newer decision" });
 
-    const { toast } = await import("sonner");
-    const offered = vi.mocked(toast.success).mock.calls.at(-1);
-    if (!offered) throw new Error("the dismissal offered no undo");
-    const undo = (
-      offered[1] as unknown as {
-        action: { onClick: () => void };
-      }
-    ).action;
-    undo.onClick();
-    // The flag comes down in the funnel's `finally`, after everything the
-    // outcome owes — which is the point being pinned.
-    expect(useAuditStore.getState().busy).toBe(true);
-    await vi.waitUntil(() => !useAuditStore.getState().busy);
-
+    await press(await undoOffered());
     expect(commands.revokeDismissal).toHaveBeenCalledTimes(2);
 
     expect(useEditorStore.getState().saved.global).toEqual({
@@ -181,5 +184,49 @@ describe("an undo that took some of its records back", () => {
       install: {},
       "skill-instructions": { gh: "after the dismissal" },
     });
+  });
+
+  // Each revoke is pinned to the exact dismissal it takes back, so one
+  // already taken back refuses. A retry that starts over therefore stops on
+  // the record that already succeeded and never reaches the one that
+  // failed — offering a way out that can never finish.
+  // Reported on #1569 by review.
+  it("picks up where it stopped rather than starting over", async () => {
+    const three = [
+      record,
+      { ...record, key: "rev" },
+      { ...record, key: "orch" },
+    ];
+    vi.mocked(commands.dismissFindings).mockResolvedValue({
+      status: "ok",
+      data: { view, records: three },
+    });
+    await useAuditStore
+      .getState()
+      .dismiss(scope, ["gh:f1", "rev:f1", "orch:f1"], "intended");
+
+    // The first comes back; the second refuses, whatever the reason was.
+    vi.mocked(commands.revokeDismissal)
+      .mockResolvedValueOnce({ status: "ok", data: view })
+      .mockResolvedValueOnce({ status: "error", error: "a newer decision" });
+    const undo = await undoOffered();
+    await press(undo);
+    expect(
+      vi.mocked(commands.revokeDismissal).mock.calls.map((c) => c[1]),
+    ).toEqual(["gh", "rev"]);
+
+    // Pressed again with whatever blocked the second now cleared. Starting
+    // over would ask for `gh` again — already taken back, so pinned-refused
+    // — and stop there with `rev` and `orch` still dismissed.
+    vi.mocked(commands.revokeDismissal).mockClear();
+    vi.mocked(commands.revokeDismissal).mockResolvedValue({
+      status: "ok",
+      data: view,
+    });
+    await press(undo);
+
+    expect(
+      vi.mocked(commands.revokeDismissal).mock.calls.map((c) => c[1]),
+    ).toEqual(["rev", "orch"]);
   });
 });

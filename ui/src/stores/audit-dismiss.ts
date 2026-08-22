@@ -75,6 +75,12 @@ export function dismissFinding(
       const { view, records } = response.data;
       set({ views: replaceView(get().views, view), error: null });
       await manifestRewritten(scope);
+      // How much of the undo is already done. It lives out here because a
+      // retry runs the same closure again: each record's revoke is pinned
+      // to the exact dismissal it takes back, so one already taken back
+      // refuses and stops the loop before it reaches the record that
+      // actually failed — a retry that can never finish what it offers.
+      let taken = 0;
       toast.success(ignoredToast(records.length), {
         action: {
           label: UNDO_LABEL,
@@ -91,8 +97,8 @@ export function dismissFinding(
                 // One undo per record, so a failure partway through
                 // leaves the ones before it taken back on disk. The
                 // editor is told about those whichever way this ends.
-                let took = 0;
-                for (const record of records) {
+                const before = taken;
+                for (const record of records.slice(taken)) {
                   latest = await commands.revokeDismissal(
                     scope,
                     record.key,
@@ -100,11 +106,11 @@ export function dismissFinding(
                     record.dismissedAt,
                   );
                   if (latest.status !== "ok") break;
-                  took += 1;
+                  taken += 1;
                 }
                 return latest.status === "ok"
                   ? latest
-                  : { ...latest, wrote: took > 0 };
+                  : { ...latest, wrote: taken > before };
               },
               {
                 title: "Couldn't take the dismissal back",
