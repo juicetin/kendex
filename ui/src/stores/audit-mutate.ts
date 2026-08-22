@@ -35,7 +35,11 @@ export function auditMutation(
     // editor holds a whole copy of it that a save would write back.
     scope: Scope,
     action: () => Promise<
-      { status: "ok"; data: AuditView } | { status: "error"; error: string }
+      // `wrote` is for an action made of several writes: one that failed
+      // partway through still changed the file, and the editor is owed
+      // that by the write rather than by the outcome.
+      | { status: "ok"; data: AuditView }
+      | { status: "error"; error: string; wrote?: boolean }
     >,
     opts: { title: string; successMessage?: string; steps?: string[] },
     // Whether the machine took it. A caller running one action over
@@ -63,6 +67,7 @@ export function auditMutation(
         return true;
       }
       set({ error: response.error });
+      if (response.wrote === true) await manifestRewritten(scope);
       const retry: ErrorAction = {
         label: "Retry",
         onClick: () => void run(scope, action, opts),

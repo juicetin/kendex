@@ -54,7 +54,7 @@ export const commands = {
 	 *  The tokens are re-read against a fresh audit before anything is written;
 	 *  one that no longer names what is installed stops the whole call.
 	 */
-	dismissFindings: (scope: Scope, tokens: string[], reason: DismissReason) => typedError<Dismissed_Serialize, string>(__TAURI_INVOKE("dismiss_findings", { scope, tokens, reason })),
+	dismissFindings: (scope: Scope, tokens: string[], reason: DismissReason) => typedError<Dismissed_Serialize, DismissFailed>(__TAURI_INVOKE("dismiss_findings", { scope, tokens, reason })),
 	/**
 	 *  Take a dismissal back. `dismissed_at` pins the exact record: a stale undo
 	 *  finding a newer dismissal at the same key refuses rather than deleting
@@ -828,6 +828,24 @@ export type DirectoryView = {
 	fetchedAt: string,
 	stale: boolean,
 };
+
+/**
+ *  Why a dismissal did not come back with its records — and, since the
+ *  write happens before they are read, whether the file changed anyway.
+ * 
+ *  A string cannot carry that, and the caller cannot infer it: told only
+ *  that this failed, it says nothing was changed and leaves the editor
+ *  holding a copy of a file that moved under it. Both of those are wrong
+ *  in exactly the case the write landed.
+ */
+export type DismissFailed = 
+/**  Nothing was written. The decision is still there to make. */
+{ kind: "untouched"; message: string } | 
+/**
+ *  The decisions were written, and then the file could not be read
+ *  back to say what an undo would need. What is on disk changed.
+ */
+{ kind: "written"; message: string };
 
 /**
  *  Why a finding was dismissed. Every reason is a claim about the content
