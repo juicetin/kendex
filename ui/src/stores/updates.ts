@@ -180,16 +180,17 @@ export const useUpdatesStore = create<UpdatesState>((set) => {
           row.name,
           auto ? null : hold,
         );
-        if (response.status === "error") {
-          showError(UPDATE_ERROR_TITLE, response.error);
-        } else {
+        const wrote = response.status !== "error";
+        if (wrote) {
           // Holding a package at a version, or letting it follow again,
           // writes that place's kendex.toml — before the tables re-read,
           // or a save of the copy the Customize tab holds puts the old
           // file back over what this just recorded.
           await manifestRewritten(row.scope);
-        }
-        await reload(true);
+        } else showError(UPDATE_ERROR_TITLE, response.error);
+        // Only a write earns the rank that retires a check already in
+        // flight; a refusal moved nothing, so this is an ordinary poll.
+        await reload(wrote);
       } finally {
         set({ busy: false });
       }

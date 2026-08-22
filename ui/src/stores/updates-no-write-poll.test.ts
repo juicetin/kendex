@@ -96,6 +96,38 @@ beforeEach(() => {
   });
 });
 
+describe("a hold toggle the machine refused", () => {
+  it("leaves the check it overlapped with standing", async () => {
+    const fetched =
+      deferred<Awaited<ReturnType<typeof commands.updatesRefresh>>>();
+    vi.mocked(commands.updatesRefresh).mockReturnValue(fetched.promise);
+    vi.mocked(commands.updatesOverview).mockResolvedValue({
+      status: "ok",
+      data: { rows: [held("before")], warnings: [] },
+    });
+    void useUpdatesStore.getState().check();
+    await settle();
+    expect(useUpdatesStore.getState().checking).toBe(true);
+
+    // Letting a held package follow again is refused: nothing on disk moved.
+    vi.mocked(commands.packageSetRev).mockResolvedValue({
+      status: "error",
+      error: "the hold belongs to a bundle",
+    });
+    await useUpdatesStore.getState().setAutoUpdate(held("before"), true);
+
+    fetched.resolve({
+      status: "ok",
+      data: { rows: [held("after the check")], warnings: [] },
+    });
+    await settle();
+
+    expect(useUpdatesStore.getState().rows.map((r) => r.name)).toEqual([
+      "after the check",
+    ]);
+  });
+});
+
 describe("an update run that stopped before writing anything", () => {
   it("leaves the check it overlapped with standing", async () => {
     // The check the person started is still fetching.

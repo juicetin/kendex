@@ -88,6 +88,36 @@ describe("reading every place's manifest", () => {
 // A project someone unregisters is read by no later pass, so anything kept
 // for it can never be answered — the note would go on naming a place the
 // app no longer has, with a retry that cannot reach it.
+// The settings read is what says which projects there are. One that could
+// not open the file resolves like any other, leaving nothing to list — and
+// a pass that answered for the user's own place alone would report success
+// while every project's packages read as untouched.
+describe("a pass that could not find out which projects there are", () => {
+  it("fails rather than answering for the global scope alone", async () => {
+    useSettingsStore.setState({ settings: null });
+    vi.mocked(commands.getSettings).mockResolvedValue({
+      status: "error",
+      error: "the settings file would not parse",
+    });
+    vi.mocked(commands.capabilityTable).mockResolvedValue([]);
+    vi.mocked(commands.windowZoomState).mockResolvedValue({
+      percent: 100,
+      launchRefused: false,
+    });
+
+    // Counted from here: earlier cases in this file share the mock.
+    vi.mocked(commands.getManifest).mockClear();
+
+    await useEditorStore.getState().loadAll();
+
+    const after = useEditorStore.getState();
+    expect(after.manifestsLoaded).toBe(false);
+    expect(whyUnread(after)).toContain("projects could not be read");
+    // And nothing was read, so no place may answer as current.
+    expect(commands.getManifest).not.toHaveBeenCalled();
+  });
+});
+
 describe("a project that is no longer there", () => {
   // The pass ends by re-reading the place the editor is pointed at, and a
   // project just unregistered is still the one on screen. Reading it puts

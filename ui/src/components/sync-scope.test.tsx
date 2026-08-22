@@ -49,9 +49,11 @@ const card = (scope: Scope) =>
   );
 
 // Two projects whose folders share a name are told apart by their parent
-// wherever several places are shown. Review is one of those places now that
-// its rows link per scope, and the full path beside the heading is hidden
-// below the wide breakpoint — so the heading has to carry it.
+// wherever several places are shown. Review is one of those places: its
+// rows link per scope, so a heading naming both equally leaves the reader
+// unable to tell which card they are acting on — and the full path beside
+// the heading is hidden below the wide breakpoint, so the heading itself
+// has to carry it.
 describe("two projects with the same folder name on Review", () => {
   it("heads each card with a name that is only one of them", () => {
     expect(card(ONE)).toContain(">work/api<");

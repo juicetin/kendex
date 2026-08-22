@@ -16,6 +16,13 @@ export const named = (scope: Scope): string =>
 async function everyScope(): Promise<Scope[]> {
   const settings = useSettingsStore.getState();
   if (!settings.settings) await settings.load();
+  // A read that could not open the file resolves like any other — it says
+  // so its own way — and leaves nothing here to list. Carrying on would
+  // answer for the user's own place and call that every place: the pass
+  // would report success, and every project's packages would read as
+  // untouched with nobody having looked at them.
+  if (!useSettingsStore.getState().settings)
+    throw new Error("your projects could not be read");
   return scopesNow();
 }
 
