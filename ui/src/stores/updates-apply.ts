@@ -23,9 +23,12 @@ const showError = (title: string, message: string) =>
   useProblemsStore.getState().showError({ title, message });
 
 const set = (partial: { busy: boolean }) => useUpdatesStore.setState(partial);
-// Every use of this follows a write, so it reads a file that moved rather
-// than guessing whether it did.
-const reload = () => useUpdatesStore.getState().load({ afterWrite: true });
+// A read that follows a write outranks one that was only polling, so it is
+// never put back by a check that was already on its way. That ranking is
+// earned by the write: claimed where nothing moved, it would throw away a
+// check the person started and leave the pre-check tables on screen.
+const reload = (wrote: boolean) =>
+  useUpdatesStore.getState().load(wrote ? { afterWrite: true } : undefined);
 
 const apply = async (row: UpdateRow): Promise<boolean> => {
   // Both branches below rewrite this place's kendex.toml, so unsaved
@@ -67,7 +70,7 @@ export const applyOne = async (row: UpdateRow): Promise<void> => {
           ? updatedToastLabel(row.name)
           : updatedWithPlaceToastLabel(row.name, placeName(row.scope)),
       );
-      await reload();
+      await reload(true);
       await useScanStore.getState().refresh();
       await useAuditStore.getState().refresh({ force: true });
     }
@@ -95,8 +98,8 @@ export const applyMany = async (wanted: UpdateRow[]): Promise<void> => {
     // named only if nothing stopped, and the rest of the app told. An exit
     // that skipped it would leave the page showing the world as it was
     // before the button was pressed.
-    const finish = async (succeeded: boolean) => {
-      await reload();
+    const finish = async (succeeded: boolean, wrote: boolean) => {
+      await reload(wrote);
       if (succeeded)
         toast.success(
           bulkUpdateToast(
@@ -133,13 +136,20 @@ export const applyMany = async (wanted: UpdateRow[]): Promise<void> => {
     // Whatever stopped the loop above stops this one too: a failure or a
     // refusal there is a reason not to write anywhere else either.
     if (!ok) {
-      // Awaited, not returned: `return finish(false)` hands back the
-      // promise and lets the `finally` below clear busy while the re-reads
-      // are still running, so the controls come back before the tables do
-      // and the next thing pressed races this one's scan.
-      await finish(false);
+      // Awaited, not returned: `return finish(...)` hands back the promise
+      // and lets the `finally` below clear busy while the re-reads are
+      // still running, so the controls come back before the tables do and
+      // the next thing pressed races this one's scan.
+      //
+      // The first place refusing is the ordinary way this stops, and then
+      // nothing moved: the re-read is a poll like any other, and a check
+      // the person started meanwhile outranks it.
+      await finish(false, applied.size > 0);
       return;
     }
+    // How many scopes this loop actually wrote, so a run that refused at its
+    // first place claims nothing over a check already in flight.
+    let wrote = 0;
     const scopes = new Map(
       rows
         .filter((row) => !row.pinned && !applied.has(scopeKey(row.scope)))
@@ -162,8 +172,9 @@ export const applyMany = async (wanted: UpdateRow[]): Promise<void> => {
         break;
       }
       await manifestRewritten(row.scope);
+      wrote += 1;
     }
-    await finish(ok);
+    await finish(ok, applied.size + wrote > 0);
   } finally {
     set({ busy: false });
   }
