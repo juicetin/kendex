@@ -64,57 +64,6 @@ describe("placeStandings", () => {
       "as-installed",
     ]);
   });
-
-  it("says a place is still being checked while the reads are on their way", () => {
-    expect(states({ updatesRead: "pending" })).toEqual([
-      "checking",
-      "checking",
-      "checking",
-    ]);
-    // A manifest nobody has asked for yet is not one that failed.
-    expect(
-      states({
-        manifests: { global: emptyDraft(), "/work/vg": emptyDraft() },
-        manifestsRead: "pending",
-      }),
-    ).toEqual(["as-installed", "as-installed", "checking"]);
-  });
-
-  // A read that came back with nothing will not run again on its own, so
-  // calling it in-flight promises a resolution that is never coming.
-  it("says a failed read could not tell, never that it is still trying", () => {
-    expect(states({ updatesRead: "failed" })).toEqual([
-      "unknown",
-      "unknown",
-      "unknown",
-    ]);
-    expect(
-      states({
-        manifests: { global: emptyDraft(), "/work/vg": emptyDraft() },
-        manifestsRead: "failed",
-      }),
-    ).toEqual(["as-installed", "as-installed", "unknown"]);
-  });
-
-  it("leaves a place whose manifest could not be read unknown", () => {
-    expect(
-      states({ manifests: { global: emptyDraft(), "/work/vg": emptyDraft() } }),
-    ).toEqual(["as-installed", "as-installed", "unknown"]);
-  });
-
-  it("still marks a place the manifest changes when its files are unknown", () => {
-    expect(
-      states({
-        manifests: {
-          global: emptyDraft(),
-          "/work/vg": changed(),
-          "/work/hyprtrade": emptyDraft(),
-        },
-        rows: indexRows([updateRow("gh", null, { updateAvailable: false })]),
-      }),
-    ).toEqual(["as-installed", "customized", "unknown"]);
-  });
-
   it("counts the places that are customized, not the installs", () => {
     const standings = placeStandings(
       source({

@@ -22,11 +22,11 @@ import {
 } from "@/components/package/use-package-data";
 import { packageGoneHere } from "@/lib/copy";
 import { canCustomize } from "@/lib/customization";
-import { useEditingPlacesSource } from "@/lib/customized-places";
 import { groupItems, groupScopes } from "@/lib/derive";
 import { packageDisplayName, scopeName, scopePath } from "@/lib/labels";
 import { PAGE_GUTTER, WIDE_CONTENT_WIDTH } from "@/lib/layout";
 import { packageMarks } from "@/lib/place-marks";
+import { useEditingPlacesSource } from "@/lib/places-source";
 import { cn } from "@/lib/utils";
 import { installedRow, latestRow, versionRowLabel } from "@/lib/versions";
 import { useAuditStore } from "@/stores/audit";

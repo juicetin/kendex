@@ -143,8 +143,8 @@ export function groupScopes(group: ItemGroup): Scope[] {
  *  With one named and nothing installed there, null: substituting another
  *  place's installation would let the page describe a location the reader
  *  never asked about, which is reachable whenever nav state outlives a
- *  scope. Every route used to arrive at the first install; a mark that
- *  names a project can open any of them. */
+ *  scope. A mark names the project it was made in and opens that one, so
+ *  any installation can be the one asked for — not only the first. */
 export function installationIn(
   group: ItemGroup,
   scope: Scope | null,

@@ -23,10 +23,10 @@ import {
   type PlaceStanding,
   placeStandings,
   standingIn,
-  useEditingPlacesSource,
 } from "@/lib/customized-places";
 import { setInstruction } from "@/lib/editor-draft";
 import { scopeName } from "@/lib/labels";
+import { useEditingPlacesSource } from "@/lib/places-source";
 import { scopeKey } from "@/lib/scope";
 import { useEditorStore } from "@/stores/editor";
 

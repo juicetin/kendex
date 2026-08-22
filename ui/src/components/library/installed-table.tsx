@@ -17,10 +17,10 @@ import {
   anyCustomized,
   type PlaceStanding,
   placeStandings,
-  usePlacesSource,
 } from "@/lib/customized-places";
 import { groupScopes, type ItemGroup } from "@/lib/derive";
 import { markNav } from "@/lib/place-marks";
+import { usePlacesSource } from "@/lib/places-source";
 import { useNavStore } from "@/stores/nav";
 import { originFor, useProvenanceStore } from "@/stores/provenance";
 

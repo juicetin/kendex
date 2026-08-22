@@ -6,14 +6,10 @@
 // which is that place's own copy of the package. This joins them, and says
 // how far a read got rather than guessing when a fact is not in hand.
 
-import { useMemo } from "react";
 import type { ItemKind, Scope, UpdateRow } from "@/bindings";
 import { isCustomized, itemCustomization } from "@/lib/customization";
 import type { Draft } from "@/lib/editor-draft";
 import { sameScope, scopeKey } from "@/lib/scope";
-import { useEditorStore } from "@/stores/editor";
-import { whyUnread } from "@/stores/editor-order";
-import { useUpdatesStore } from "@/stores/updates";
 
 /** What is known about one place's copy of a package. `unknown` is a real
  *  answer, not a default: a path or local source gets no update row, so
@@ -63,6 +59,13 @@ export interface PlacesSource {
    *  {@link manifests} so a mark does not disappear, but it answers for an
    *  earlier moment — this join must not read it as current. */
   unreadPlaces: ReadonlySet<string>;
+  /** A pass over every place's manifest is running. Distinct from
+   *  {@link manifestsRead}, which stays `ready` once one has succeeded: a
+   *  project registered afterwards has no manifest yet and its read is on
+   *  its way, and calling that "not checked" names the wrong cause. */
+  manifestsReading: boolean;
+  /** A fetch of newer versions is running, for the same reason. */
+  updatesChecking: boolean;
 }
 
 const placeKey = (kind: ItemKind, name: string, scope: Scope): string =>
@@ -121,9 +124,20 @@ export function placeStandings(
     // A read still on its way is not a read that came back empty: saying
     // "not checked" of a place nobody has asked about yet names the wrong
     // cause, and a read that failed is not still running.
+    //
+    // `pending` is the state before any read has come back, so it speaks
+    // for every place at once and nothing here narrows it. A pass running
+    // after one has succeeded is different: the facts it will bring are
+    // already in hand for most places, and calling those "checking" every
+    // time the window regains focus would blink the marks through a state
+    // on their way back to themselves. So the in-flight signals count only
+    // where this place has nothing yet — a project registered after the
+    // first pass has neither manifest nor row, and its reads are running.
     const stillReading =
-      (overlay === null && source.manifestsRead === "pending") ||
-      source.updatesRead === "pending";
+      (overlay === null &&
+        (source.manifestsRead === "pending" || source.manifestsReading)) ||
+      source.updatesRead === "pending" ||
+      (row === undefined && source.updatesChecking);
     const state: PlaceState =
       change != null
         ? "customized"
@@ -199,51 +213,3 @@ export const indexRows = (rows: UpdateRow[]): Map<string, UpdateRow> =>
 /** A store's loaded/error pair as the one answer the join asks for. */
 export const readState = (loaded: boolean, error: string | null): ReadState =>
   loaded ? "ready" : error ? "failed" : "pending";
-
-/** Everything both variants read, and the identity of what it builds. The
- *  stores hand back their previous value when a re-read says the same
- *  thing, so this changes only when a fact does. */
-function useJoined(manifests: Record<string, Draft>): PlacesSource {
-  const manifestsLoaded = useEditorStore((s) => s.manifestsLoaded);
-  const rows = useUpdatesStore((s) => s.rows);
-  const updatesLoaded = useUpdatesStore((s) => s.loaded);
-  const updatesError = useUpdatesStore((s) => s.error);
-  const indexed = useMemo(() => indexRows(rows), [rows]);
-  const updatesRead = readState(updatesLoaded, updatesError);
-  const unread = useEditorStore((s) => s.unreadPlaces);
-  const manifestsRead = readState(manifestsLoaded, useEditorStore(whyUnread));
-  const unreadPlaces = useMemo(() => new Set(Object.keys(unread)), [unread]);
-  return useMemo(
-    () => ({
-      manifests,
-      rows: indexed,
-      updatesRead,
-      manifestsRead,
-      unreadPlaces,
-    }),
-    [manifests, indexed, updatesRead, manifestsRead, unreadPlaces],
-  );
-}
-
-/** What is actually customized: saved manifests and the update standing.
- *  The Library's question, and the one a mark on a row answers. Deliberately
- *  no subscription to the draft — a keystroke in the editor is not news
- *  here, and this is what the whole Library table joins on. */
-export function usePlacesSource(): PlacesSource {
-  return useJoined(useEditorStore((s) => s.saved));
-}
-
-/** The same, with the manifest being typed overlaid on the place it
- *  belongs to — so the header, the chips and the box you are typing in
- *  never disagree. Only the editor's own surfaces want this: text you have
- *  not saved has changed nothing yet. */
-export function useEditingPlacesSource(): PlacesSource {
-  const saved = useEditorStore((s) => s.saved);
-  const scope = useEditorStore((s) => s.scope);
-  const draft = useEditorStore((s) => s.draft);
-  const manifests = useMemo(
-    () => manifestsOnScreen(saved, scope, draft),
-    [saved, scope, draft],
-  );
-  return useJoined(manifests);
-}
