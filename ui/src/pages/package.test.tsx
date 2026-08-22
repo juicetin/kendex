@@ -8,8 +8,10 @@ import { PackagePage } from "./package";
 import { freshWorld, HYPR, type PageWorld, VG } from "./package-test-world";
 
 // The page's children are mocked to hand back the props they were given.
-// What is pinned here is the page's own destructure — every one of these
-// facts reverted green while only the helper behind them was covered.
+// What is pinned here is the page's own destructure, not the helper behind
+// it: a test of the helper alone passes whether or not the page still asks
+// it the right question, and asking the wrong one is how the page comes to
+// describe a place the reader never opened.
 const seen = vi.hoisted(() => ({
   body: null as Record<string, unknown> | null,
   header: null as Record<string, unknown> | null,
