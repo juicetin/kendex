@@ -42,7 +42,7 @@ describe("a mark while its reads are in flight", () => {
       "as-installed",
       "checking",
     ]);
-    expect(states({ ...newcomer, updatesChecking: true })).toEqual([
+    expect(states({ ...newcomer, updatesReading: true })).toEqual([
       "as-installed",
       "as-installed",
       "checking",
@@ -52,7 +52,7 @@ describe("a mark while its reads are in flight", () => {
   // A pass runs for every place at once. Places whose facts are already in
   // hand must sit still through it rather than blinking through "checking".
   it("leaves the places it already knows alone while a pass runs", () => {
-    expect(states({ manifestsReading: true, updatesChecking: true })).toEqual([
+    expect(states({ manifestsReading: true, updatesReading: true })).toEqual([
       "as-installed",
       "as-installed",
       "as-installed",

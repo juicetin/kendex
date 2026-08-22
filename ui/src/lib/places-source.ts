@@ -2,7 +2,7 @@ import { useMemo } from "react";
 import type { Draft } from "@/lib/editor-draft";
 import { useEditorStore } from "@/stores/editor";
 import { whyUnread } from "@/stores/editor-order";
-import { useUpdatesStore } from "@/stores/updates";
+import { updatesReading, useUpdatesStore } from "@/stores/updates";
 import {
   indexRows,
   manifestsOnScreen,
@@ -23,7 +23,7 @@ function useJoined(manifests: Record<string, Draft>): PlacesSource {
   const unread = useEditorStore((s) => s.unreadPlaces);
   const manifestsRead = readState(manifestsLoaded, useEditorStore(whyUnread));
   const manifestsReading = useEditorStore((s) => s.manifestsReading);
-  const updatesChecking = useUpdatesStore((s) => s.checking);
+  const reading = useUpdatesStore(updatesReading);
   const unreadPlaces = useMemo(() => new Set(Object.keys(unread)), [unread]);
   return useMemo(
     () => ({
@@ -33,7 +33,7 @@ function useJoined(manifests: Record<string, Draft>): PlacesSource {
       manifestsRead,
       unreadPlaces,
       manifestsReading,
-      updatesChecking,
+      updatesReading: reading,
     }),
     [
       manifests,
@@ -42,7 +42,7 @@ function useJoined(manifests: Record<string, Draft>): PlacesSource {
       manifestsRead,
       unreadPlaces,
       manifestsReading,
-      updatesChecking,
+      reading,
     ],
   );
 }

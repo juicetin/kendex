@@ -64,8 +64,9 @@ export interface PlacesSource {
    *  project registered afterwards has no manifest yet and its read is on
    *  its way, and calling that "not checked" names the wrong cause. */
   manifestsReading: boolean;
-  /** A fetch of newer versions is running, for the same reason. */
-  updatesChecking: boolean;
+  /** A read of the update standing is running, of either kind, for the
+   *  same reason. */
+  updatesReading: boolean;
 }
 
 const placeKey = (kind: ItemKind, name: string, scope: Scope): string =>
@@ -137,7 +138,7 @@ export function placeStandings(
       (overlay === null &&
         (source.manifestsRead === "pending" || source.manifestsReading)) ||
       source.updatesRead === "pending" ||
-      (row === undefined && source.updatesChecking);
+      (row === undefined && source.updatesReading);
     const state: PlaceState =
       change != null
         ? "customized"

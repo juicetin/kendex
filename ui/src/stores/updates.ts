@@ -6,6 +6,7 @@ import { manifestRewritten } from "./manifest-sync";
 import { useProblemsStore } from "./problems";
 import { refusesForUnsaved } from "./unsaved-first";
 import { applyMany, applyOne } from "./updates-apply";
+import { updateTickets } from "./updates-order";
 
 interface UpdatesState {
   rows: UpdateRow[];
@@ -15,6 +16,11 @@ interface UpdatesState {
   busy: boolean;
   /** True while a mirror fetch is running — the explicit "check". */
   checking: boolean;
+  /** True while an ordinary read of the standing is running — the one the
+   *  project list starts, and the one every write ends with. Kept apart
+   *  from {@link checking}, which gates the buttons that apply a revision:
+   *  a background read is no reason to take those away. */
+  reading: boolean;
   loaded: boolean;
   /** Why the last read of the standing failed, or null. A load runs on its
    *  own at startup, so it cannot open the error modal a click may — the
@@ -33,6 +39,14 @@ interface UpdatesState {
   setAutoUpdate: (row: UpdateRow, auto: boolean) => Promise<void>;
   setIgnored: (row: UpdateRow, ignored: boolean) => Promise<void>;
 }
+
+/** Whether a read of the standing is running at all, of either kind. What
+ *  the per-place marks ask, so a place with no row yet reads as being
+ *  looked at rather than as one nobody asked about. */
+export const updatesReading = (state: {
+  checking: boolean;
+  reading: boolean;
+}): boolean => state.checking || state.reading;
 
 /** Whether the rows on screen may be acted on. A read that failed keeps the
  *  last good rows rather than blanking the page, which is right for reading
@@ -53,53 +67,9 @@ export const useUpdatesStore = create<UpdatesState>((set) => {
   const showError = (title: string, message: string) =>
     useProblemsStore.getState().showError({ title, message });
 
-  // Every read of the standing takes a ticket. A read issued before a fork
-  // or a discard lands, resolving after it, would otherwise put its
-  // pre-resolution rows back — and the marks, the notice and the Review
-  // count all read those rows, so a state someone just resolved reappears.
-  //
-  // Two kinds of read, and one counter cannot rank them. A poll reads what
-  // the mirrors already say; Check for updates fetches first, so its answer
-  // is the newer one however the two land. Sharing a ticket, a poll issued
-  // during a check takes the newer number and commits the pre-fetch rows,
-  // and the check the person asked for is thrown away with the screen still
-  // showing what it was asked to replace.
-  let reads = 0;
-  let checks = 0;
-  let checking = 0;
-  // A read that follows a write this app just made. It is not a poll —
-  // nobody is guessing, the file moved and this is the reading of it — so
-  // it must land, and a check that was already in flight must not put the
-  // pre-write rows back over it afterwards. Counting it as a check does
-  // both: it lands on the fetched predicate, and every older check finds
-  // its own count superseded and declines.
-  const ticket = (fetched = false, afterWrite = false) => {
-    reads += 1;
-    const mine = reads;
-    if (fetched) {
-      checks += 1;
-      checking += 1;
-    } else if (afterWrite) {
-      checks += 1;
-    }
-    const mineCheck = checks;
-    // Whether a fetch was already running when this read began. A poll that
-    // started mid-fetch is reading the pre-fetch mirrors however long it
-    // takes to return, so asking what is in flight when it *lands* accepts
-    // exactly that poll once the fetch has finished — and puts the rows the
-    // person asked to replace back over the fetched ones.
-    const during = checking > 0;
-    return fetched || afterWrite
-      ? // Only a later fetch answers for one: a poll that started after it
-        // is reading the older truth, whenever it happens to land.
-        () => mineCheck === checks
-      : // And a poll lands only while it is the newest read, with no fetch
-        // running when it started and none started since.
-        () => mine === reads && !during && mineCheck === checks;
-  };
+  const { ticket, fetchEnded } = updateTickets();
 
-  const reload = async (afterWrite = false) => {
-    const newest = ticket(false, afterWrite);
+  const read = async (newest: () => boolean) => {
     let response: Awaited<ReturnType<typeof commands.updatesOverview>>;
     try {
       response = await commands.updatesOverview();
@@ -127,11 +97,27 @@ export const useUpdatesStore = create<UpdatesState>((set) => {
     else set({ loaded: false, error: response.error });
   };
 
+  // How many ordinary reads are running, so the flag comes down when the
+  // last one lands rather than the first.
+  let running = 0;
+  const reload = async (afterWrite = false) => {
+    const newest = ticket(false, afterWrite);
+    running += 1;
+    set({ reading: true });
+    try {
+      await read(newest);
+    } finally {
+      running -= 1;
+      if (running === 0) set({ reading: false });
+    }
+  };
+
   return {
     rows: [],
     warnings: [],
     busy: false,
     checking: false,
+    reading: false,
     loaded: false,
     error: null,
 
@@ -169,11 +155,7 @@ export const useUpdatesStore = create<UpdatesState>((set) => {
           showError(UPDATE_ERROR_TITLE, response.error);
         }
       } finally {
-        checking -= 1;
-        // The spinner belongs to every fetch, not to whichever finishes
-        // first: two overlapping checks and the first to land would take it
-        // down with the other still running.
-        set({ checking: checking > 0 });
+        set({ checking: fetchEnded() });
       }
     },
 
