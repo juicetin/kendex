@@ -169,8 +169,10 @@ describe("a project that is no longer there", () => {
       "/work/vg",
     );
 
-    // Unregistered, so the next pass asks only for the rest — and the
-    // directory it used to be is gone, so reading it on its own fails.
+    // Unregistered, so the next pass asks only for the rest. A targeted
+    // read of the departed scope is staged to fail, because a read that
+    // succeeded would put the place back quietly — the failure is what
+    // makes the re-adding visible if it happens at all.
     useSettingsStore.setState({ settings: { schema: 1, projects: [] } });
     vi.mocked(commands.getManifest)
       .mockResolvedValueOnce({
