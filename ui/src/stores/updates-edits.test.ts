@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { UpdateRow } from "@/bindings";
 import { commands } from "@/bindings";
 import { useEditorStore } from "./editor";
+import { useProblemsStore } from "./problems";
 import { useSettingsStore } from "./settings";
 import { useUpdatesStore } from "./updates";
 import { keepAsOwn, takeNewVersion } from "./updates-edits";
@@ -166,5 +167,58 @@ describe("updates store: edited places", () => {
     );
     expect(busyDuring).toBe(true);
     expect(useUpdatesStore.getState().busy).toBe(false);
+  });
+});
+
+// A fork captures the copy it keeps and records it in kendex.toml before it
+// renders. A failure in the render answers with an error and leaves the
+// record on disk, and nothing in the answer says so — so the editor is told
+// either way, or the copy the Customize tab holds writes the fork away.
+describe("a fork that recorded itself and then failed", () => {
+  beforeEach(() => {
+    useEditorStore.setState({
+      scope: { scope: "global" },
+      draft: null,
+      dirty: false,
+      saved: { global: { schema: 1, install: {} } },
+      manifestsLoaded: true,
+      unreadPlaces: {},
+    });
+    // What the file holds once the fork has been recorded.
+    vi.mocked(commands.getManifest).mockResolvedValue({
+      status: "ok",
+      data: {
+        manifest: {
+          schema: 1,
+          install: {},
+          forks: { skill: { gh: { source: "cat", "forked-at": "2026" } } },
+        },
+        base: "after the fork",
+      },
+    });
+  });
+
+  it("tells the editor when the render half failed", async () => {
+    vi.mocked(commands.packageFork).mockResolvedValue({
+      status: "error",
+      error: "the rendering would not settle",
+    });
+
+    await keepAsOwn(row({ forkableHarness: "claude" }));
+
+    expect(useEditorStore.getState().saved.global).toHaveProperty("forks");
+  });
+
+  it("tells the editor when the command never answered", async () => {
+    vi.mocked(commands.packageFork).mockRejectedValue(
+      new Error("the channel closed"),
+    );
+
+    await keepAsOwn(row({ forkableHarness: "claude" }));
+
+    expect(useEditorStore.getState().saved.global).toHaveProperty("forks");
+    expect(useProblemsStore.getState().dialog.message).toContain(
+      "the channel closed",
+    );
   });
 });

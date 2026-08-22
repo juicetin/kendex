@@ -21,17 +21,23 @@ const run = async (scope: Scope, work: () => Promise<string | null>) => {
   if (refusesForUnsaved(scope)) return;
   useUpdatesStore.setState({ busy: true });
   try {
-    const error = await work();
+    // A rejection is an answer too. Left to throw it would leave here by a
+    // path that owes nothing — no message, and no telling the editor about
+    // a file that may already have moved.
+    const error = await work().catch((thrown: unknown) => String(thrown));
+    // Before the tables re-read, and whatever the outcome. A fork captures
+    // its copy and records it before it renders, so an error can arrive
+    // with kendex.toml already carrying the fork — and nothing in the
+    // answer says which. The sync re-reads and compares, so where nothing
+    // moved it takes its own mark back off; guessing the other way loses
+    // the record, which lives nowhere else.
+    await manifestRewritten(scope);
     if (error !== null) {
       useProblemsStore
         .getState()
         .showError({ title: FORK_ERROR_TITLE, message: error });
       return;
     }
-    // First, before the tables re-read: the manifest is already rewritten,
-    // and every await between the write and this is a window where saving
-    // the copy in hand puts the pre-fork file back.
-    await manifestRewritten(scope);
     // This read follows the write above, so it is not a poll: a check that
     // was already running must not put the pre-fork rows back over it.
     await useUpdatesStore.getState().load({ afterWrite: true });

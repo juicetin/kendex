@@ -64,9 +64,11 @@ export function dismissFinding(
               : "Nothing was changed — read the finding again and decide again",
           ],
         });
-        // The editor is owed this by the write, not by the outcome: a
-        // file that changed is one its copy predates either way.
-        if (landed) await manifestRewritten(scope);
+        // Told either way. `landed` decides what the reader is told, not
+        // whether the editor is: the sync re-reads and compares, so where
+        // nothing moved it takes its own mark back off, and guessing wrong
+        // the other way costs the decision.
+        await manifestRewritten(scope);
         // The refusal usually means the page was showing findings a minute
         // old; the fresh audit is what the person should decide on.
         await get().refresh({ force: true });
@@ -95,9 +97,8 @@ export function dismissFinding(
                   error: "nothing to take back",
                 };
                 // One undo per record, so a failure partway through
-                // leaves the ones before it taken back on disk. The
-                // editor is told about those whichever way this ends.
-                const before = taken;
+                // leaves the ones before it taken back on disk — which is
+                // why the funnel tells the editor either way.
                 for (const record of records.slice(taken)) {
                   latest = await commands.revokeDismissal(
                     scope,
@@ -108,9 +109,7 @@ export function dismissFinding(
                   if (latest.status !== "ok") break;
                   taken += 1;
                 }
-                return latest.status === "ok"
-                  ? latest
-                  : { ...latest, wrote: taken > before };
+                return latest;
               },
               {
                 title: "Couldn't take the dismissal back",

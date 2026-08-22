@@ -17,6 +17,24 @@ interface MutationHost {
  *  remove and dismiss all go through here, so what each of them owes —
  *  refusing while a draft is unsaved, holding the Save bar down until the
  *  editor knows, saying what happened either way — is owed once. */
+/** Run the command and turn a transport failure into an answer. Left to
+ *  reject it would leave the funnel by a path that owes nothing — no
+ *  message, no sync, and the busy flag coming down on a file that may have
+ *  moved. */
+const attempt = async (
+  action: () => Promise<
+    { status: "ok"; data: AuditView } | { status: "error"; error: string }
+  >,
+): Promise<
+  { status: "ok"; data: AuditView } | { status: "error"; error: string }
+> => {
+  try {
+    return await action();
+  } catch (thrown) {
+    return { status: "error", error: String(thrown) };
+  }
+};
+
 export function auditMutation(
   set: (
     update:
@@ -35,11 +53,7 @@ export function auditMutation(
     // editor holds a whole copy of it that a save would write back.
     scope: Scope,
     action: () => Promise<
-      // `wrote` is for an action made of several writes: one that failed
-      // partway through still changed the file, and the editor is owed
-      // that by the write rather than by the outcome.
-      | { status: "ok"; data: AuditView }
-      | { status: "error"; error: string; wrote?: boolean }
+      { status: "ok"; data: AuditView } | { status: "error"; error: string }
     >,
     opts: { title: string; successMessage?: string; steps?: string[] },
     // Whether the machine took it. A caller running one action over
@@ -58,16 +72,23 @@ export function auditMutation(
     // it any earlier leaves a window where a save passes the outdated check
     // and writes the pre-action manifest back.
     try {
-      const response = await action();
+      // Whatever the outcome. Several of these commands write in stages —
+      // a fork captures and records before it renders, an adoption moves
+      // files before it plans — so an error can arrive with the file
+      // already changed, and nothing in the answer says which. Asking is
+      // the only way to know, and asking costs a read: the sync re-reads
+      // and compares, so where nothing moved it takes its own mark back
+      // off. Guessing costs the record, since the copy the Customize tab
+      // holds would write over it.
+      const response = await attempt(action);
+      await manifestRewritten(scope);
       if (response.status === "ok") {
         set({ views: replaceView(get().views, response.data), error: null });
         if (opts.successMessage) toast.success(opts.successMessage);
-        await manifestRewritten(scope);
         await useScanStore.getState().refresh();
         return true;
       }
       set({ error: response.error });
-      if (response.wrote === true) await manifestRewritten(scope);
       const retry: ErrorAction = {
         label: "Retry",
         // Inside a package-wide action this place is not the whole job:
