@@ -80,3 +80,20 @@ export function whyUnread(state: {
   ].filter((why): why is string => why !== null);
   return said.length > 0 ? said.join("\n") : null;
 }
+
+/** Drop what belongs to places that are not there any more.
+ *
+ *  A project someone unregistered is read by no later pass, so anything
+ *  kept for it can never be answered: its manifest would go on feeding
+ *  marks, and its reason would go on naming it in a note whose retry
+ *  cannot reach it. Only a pass that reached every place may do this —
+ *  it is the one that knows what the whole set is. */
+export function onlyThese<T>(
+  kept: Record<string, T>,
+  places: ReadonlySet<string>,
+): Record<string, T> {
+  const next: Record<string, T> = {};
+  for (const [key, value] of Object.entries(kept))
+    if (places.has(key)) next[key] = value;
+  return keepIfSame(kept, next);
+}

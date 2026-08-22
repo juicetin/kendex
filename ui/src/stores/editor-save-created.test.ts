@@ -145,6 +145,36 @@ describe("the write that creates a place's file", () => {
     expect(commands.updateManifest).not.toHaveBeenCalled();
   });
 
+  // The write answering is not the file arriving: the seed is only in hand
+  // once the re-read lands, and the Save bar comes down before it does.
+  // Reported on #1569 by review.
+  it("refuses typing that arrived before the file came back", async () => {
+    await openEmptyAndType();
+    const write = creatingWrite();
+    // The re-read the save ends with is held open, which is the window.
+    const reread = deferred<Awaited<ReturnType<typeof commands.getManifest>>>();
+    vi.mocked(commands.getManifest).mockReturnValueOnce(reread.promise);
+    write.land();
+    // Nothing typed while the write was away, so this is the copy that went.
+    await Promise.resolve();
+    type("second");
+    reread.resolve({
+      status: "ok",
+      data: { manifest: created, base: "created" },
+    });
+    await write.saving;
+
+    const after = useEditorStore.getState();
+    expect(after.draft?.["skill-instructions"]).toEqual({ gh: "second" });
+    expect(after.dirty).toBe(true);
+    // The re-read found typing it must not take, so the refusal stands and
+    // the seed cannot be written away by the next press.
+    expect(after.outdated).toBe("global");
+    vi.mocked(commands.updateManifest).mockClear();
+    await useEditorStore.getState().save();
+    expect(commands.updateManifest).not.toHaveBeenCalled();
+  });
+
   it("settles the copy that went, seed and all", async () => {
     await openEmptyAndType();
     const write = creatingWrite();

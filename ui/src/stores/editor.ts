@@ -3,7 +3,7 @@ import type { EditorInventory, Scope } from "@/bindings";
 import type { Draft } from "@/lib/editor-draft";
 import { sameScope, scopeKey } from "@/lib/scope";
 import { type Held, pointAt } from "./editor-held";
-import type { Unread } from "./editor-order";
+import { onlyThese, type Unread } from "./editor-order";
 import { fold, foldUnread, loadManifest, nextRead } from "./editor-read";
 import { saveManifest } from "./editor-save";
 import { named, readManifests } from "./editor-scopes";
@@ -77,6 +77,13 @@ interface EditorState {
   unread: (scope: Scope, why: string) => void;
   save: () => Promise<void>;
 }
+
+/** Prune when this pass is the newest, keep everything when it is not. */
+const keep = <T>(
+  kept: Record<string, T>,
+  places: ReadonlySet<string>,
+  newest: boolean,
+): Record<string, T> => (newest ? onlyThese(kept, places) : kept);
 
 export const useEditorStore = create<EditorState>((set, get) => {
   // How many manifest passes are still running, so the reading flag comes
@@ -154,25 +161,38 @@ export const useEditorStore = create<EditorState>((set, get) => {
       };
       try {
         const { read, unread } = await readManifests();
+        // Every place there is, since the pass asks each of them: what it
+        // read, plus what would not read.
+        const places = new Set([
+          ...read.map(([key]) => key),
+          ...unread.map(([key]) => key),
+        ]);
         set((state) => ({
           // A place whose manifest would not load keeps the last one that
           // did, rather than being dropped from `saved` and taking a mark
           // that was right with it.
-          saved: fold(state.saved, read, token),
+          // Pruned only by the newest pass: an older one carries an older
+          // list of projects, and would drop a place that has since been
+          // added back before its own read of it lands.
+          saved: keep(fold(state.saved, read, token), places, newest()),
           // And how each place's read went folds the same way, under the
           // same token: this pass answers for the places it reached, and
           // for none of the others. Replacing the whole list instead let a
           // pass that failed put back a mark a newer read of one place had
           // already cleared.
-          unreadPlaces: foldUnread(
-            state.unreadPlaces,
-            [
-              ...read.map(([key]) => [key, null] as [string, string | null]),
-              ...unread.map(
-                ([key, why]) => [key, why] as [string, string | null],
-              ),
-            ],
-            token,
+          unreadPlaces: keep(
+            foldUnread(
+              state.unreadPlaces,
+              [
+                ...read.map(([key]) => [key, null] as [string, string | null]),
+                ...unread.map(
+                  ([key, why]) => [key, why] as [string, string | null],
+                ),
+              ],
+              token,
+            ),
+            places,
+            newest(),
           ),
           // The pass ran, so whatever stopped the last one from running is
           // over; what each place said travels with that place.

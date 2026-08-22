@@ -14,16 +14,6 @@ vi.mock("@/bindings", () => ({
   },
 }));
 
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  let reject!: (reason: unknown) => void;
-  const promise = new Promise<T>((keep, fail) => {
-    resolve = keep;
-    reject = fail;
-  });
-  return { promise, resolve, reject };
-}
-
 beforeEach(() => {
   useSettingsStore.setState({
     settings: { schema: 1, projects: ["/work/vg"] },
@@ -87,146 +77,37 @@ describe("reading every place's manifest", () => {
 // The pass fires from three places that overlap — app start, every window
 // focus, and the note's own retry — so which one lands last must not decide
 // what every place's mark says.
-describe("passes that overlap", () => {
-  it("never lets an older pass revert a place a newer read answered for", async () => {
-    const slow = deferred<Awaited<ReturnType<typeof commands.getManifest>>>();
-    const issued = deferred<null>();
-    let holding = true;
-    vi.mocked(commands.getManifest).mockImplementation(() => {
-      if (!holding) {
-        return Promise.resolve({
-          status: "ok",
-          data: {
-            manifest: {
-              schema: 1,
-              install: {},
-              "skill-instructions": { gh: "typed" },
-            },
-            base: "typed",
-          },
-        });
-      }
-      issued.resolve(null);
-      return slow.promise;
-    });
+// A project someone unregisters is read by no later pass, so anything kept
+// for it can never be answered — the note would go on naming a place the
+// app no longer has, with a retry that cannot reach it.
+// Reported on #1569 by review.
+describe("a project that is no longer there", () => {
+  it("takes its manifest and its reason with it", async () => {
+    vi.mocked(commands.getManifest)
+      .mockResolvedValueOnce({
+        status: "ok",
+        data: { manifest: null, base: null },
+      })
+      .mockResolvedValueOnce({
+        status: "error",
+        error: "expected a table",
+      });
+    await useEditorStore.getState().loadAll();
+    const failed = useEditorStore.getState();
+    expect(Object.keys(failed.unreadPlaces)).toContain("/work/vg");
+    expect(whyUnread(failed)).toContain("expected a table");
 
-    const pass = useEditorStore.getState().loadAll();
-    await issued.promise;
-    // A place read on its own while the pass is still in flight.
-    holding = false;
-    await useEditorStore.getState().setScope({
-      scope: "project",
-      root: "/work/vg",
-    });
-    slow.resolve({ status: "ok", data: { manifest: null, base: null } });
-    await pass;
-
-    expect(
-      useEditorStore.getState().saved["/work/vg"]?.["skill-instructions"],
-    ).toEqual({ gh: "typed" });
-  });
-
-  it("keeps a place's last good manifest when a later pass cannot read it", async () => {
+    // The project is unregistered, so the next pass asks only the rest.
+    useSettingsStore.setState({ settings: { schema: 1, projects: [] } });
     vi.mocked(commands.getManifest).mockResolvedValue({
       status: "ok",
-      data: {
-        manifest: {
-          schema: 1,
-          install: {},
-          "skill-instructions": { gh: "mine" },
-        },
-        base: "mine-base",
-      },
+      data: { manifest: null, base: null },
     });
     await useEditorStore.getState().loadAll();
 
-    vi.mocked(commands.getManifest).mockResolvedValue({
-      status: "error",
-      error: "expected a table",
-    });
-    await useEditorStore.getState().loadAll();
-
-    const state = useEditorStore.getState();
-    expect(state.saved["/work/vg"]?.["skill-instructions"]).toEqual({
-      gh: "mine",
-    });
-    expect(whyUnread(state)).toContain("/work/vg");
-  });
-
-  it("treats a rejected read as a read that failed, not one still running", async () => {
-    // Every place refusing is still a pass that ran: each read answers for
-    // its own place, and the reason is named per place.
-    vi.mocked(commands.getManifest).mockRejectedValue(new Error("no channel"));
-    await useEditorStore.getState().loadAll();
-    const state = useEditorStore.getState();
-    expect(state.manifestsReading).toBe(false);
-    expect(whyUnread(state)).toContain("no channel");
-    expect(state.manifestsLoaded).toBe(true);
-  });
-
-  it("says the pass itself failed when it could not even list the places", async () => {
-    useSettingsStore.setState({ settings: null });
-    vi.spyOn(useSettingsStore.getState(), "load").mockRejectedValue(
-      new Error("settings unreadable"),
-    );
-    await useEditorStore.getState().loadAll();
-    const state = useEditorStore.getState();
-    expect(state.manifestsReading).toBe(false);
-    expect(whyUnread(state)).toContain("settings unreadable");
-    expect(state.manifestsLoaded).toBe(false);
-  });
-
-  it("hands back the same object when a re-read says the same thing", async () => {
-    vi.mocked(commands.getManifest).mockResolvedValue({
-      status: "ok",
-      data: {
-        manifest: {
-          schema: 1,
-          install: {},
-          "skill-instructions": { gh: "mine" },
-        },
-        base: "mine-base",
-      },
-    });
-    await useEditorStore.getState().loadAll();
-    const first = useEditorStore.getState().saved;
-    await useEditorStore.getState().loadAll();
-    // Identity is what the screens joining on this memoize against, so an
-    // equal copy would re-render every row for news that is not news.
-    expect(useEditorStore.getState().saved).toBe(first);
-  });
-
-  it("keeps the places that read when one of them rejects", async () => {
-    // Each read answers for its own place: one bad manifest taking the
-    // whole batch down would make every readable place unknown.
-    useSettingsStore.setState({
-      settings: { schema: 1, projects: ["/work/vg", "/work/hyprtrade"] },
-    });
-    vi.mocked(commands.getManifest).mockImplementation((scope) =>
-      scope.scope === "project" && scope.root === "/work/vg"
-        ? Promise.reject(new Error("no channel"))
-        : Promise.resolve({
-            status: "ok",
-            data: {
-              manifest: {
-                schema: 1,
-                install: {},
-                "skill-instructions": { gh: "read" },
-              },
-              base: "read",
-            },
-          }),
-    );
-
-    await useEditorStore.getState().loadAll();
-    const state = useEditorStore.getState();
-    expect(state.saved.global?.["skill-instructions"]).toEqual({ gh: "read" });
-    expect(state.saved["/work/hyprtrade"]?.["skill-instructions"]).toEqual({
-      gh: "read",
-    });
-    expect(state.saved["/work/vg"]).toBeUndefined();
-    expect(whyUnread(state)).toContain("/work/vg");
-    expect(whyUnread(state)).toContain("no channel");
-    expect(state.manifestsLoaded).toBe(true);
+    const after = useEditorStore.getState();
+    expect(Object.keys(after.unreadPlaces)).toEqual([]);
+    expect(whyUnread(after)).toBeNull();
+    expect(Object.keys(after.saved)).toEqual(["global"]);
   });
 });

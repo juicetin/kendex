@@ -127,21 +127,21 @@ export const saveManifest = async (): Promise<void> => {
   // builds a new draft rather than mutating, so identity is that test, and
   // the re-read below leaves a newer draft alone for the same reason.
   if (onScreen()) {
-    // The copy that went is still the one in hand, so this write is its
-    // own — whatever the file was filled in with, it holds it too.
+    // Whether the copy that went is still the one in hand: only then is
+    // there nothing unsaved left here.
     const wrote = useEditorStore.getState().draft === draft;
-    if (written === null) {
-      // The write landed and the file could not be read back to say what
-      // it is now. Nothing to carry, so the place is marked and the next
-      // save asks for a reload — what this must never do is read the file
-      // here to find out, which pairs a base with content nobody read
-      // with it.
-      useEditorStore.getState().outdate(scope);
-    } else if (seeded && !wrote) {
-      // Typing that arrived mid-write against a file being created never
-      // held the seed the creation put in it. Given this base its save
-      // would pass every check and write the seed back out of existence,
-      // so the place is marked instead and the choice is the reader's.
+    if (written === null || seeded) {
+      // Nothing in hand is this file. Either it could not be read back to
+      // say what it is — and reading it here to find out is the one thing
+      // this must never do, since that pairs a base with content nobody
+      // read with it — or it holds the seed the creation put in it, which
+      // no copy that went carries and no edit made from one does either.
+      //
+      // So the place is refused, and the re-read below is what takes the
+      // refusal off: it lands on the file and settles a copy nobody has
+      // typed over. Typing that arrives before it does keeps the refusal,
+      // which is the answer — that copy would write the seed back out of
+      // existence, and every check it passes would say it was fine.
       useEditorStore.getState().outdate(scope);
     } else {
       // The base describes the file, and the file is what was just
