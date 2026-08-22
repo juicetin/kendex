@@ -80,13 +80,12 @@ describe("reading every place's manifest", () => {
 // A project someone unregisters is read by no later pass, so anything kept
 // for it can never be answered — the note would go on naming a place the
 // app no longer has, with a retry that cannot reach it.
-// Reported on #1569 by review.
 describe("a project that is no longer there", () => {
   // The pass ends by re-reading the place the editor is pointed at, and a
   // project just unregistered is still the one on screen. Reading it puts
   // back exactly what the prune took away, and no later pass asks for it
   // again — so the note would name it for good, and its retry would prune
-  // and re-add it every press. Reported on #1569 by review.
+  // and re-add it every press.
   it("does not read the place on screen back after removing it", async () => {
     useEditorStore.setState({ scope: { scope: "project", root: "/work/vg" } });
     vi.mocked(commands.getManifest).mockResolvedValue({

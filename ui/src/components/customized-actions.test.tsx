@@ -156,9 +156,9 @@ describe("customized places", () => {
   });
 });
 
-// Reported on #1569 by review: the gate reached the button that opens the
-// confirmation but not the confirmation itself, so a check that failed while
-// it stood open still applied the version it was about to replace.
+// The gate reached the button that opens the confirmation but not the
+// confirmation itself, so a check that failed while it stood open still
+// applied the version it was about to replace.
 describe("a confirmation left open across a check", () => {
   it("holds the answer for a place that would take the newest", () => {
     render([

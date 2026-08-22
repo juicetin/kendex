@@ -1,12 +1,13 @@
 //! Why a whole-manifest write did not happen, and which file it was about.
 //!
-//! Two questions, and rounds of review found this code answering each with
-//! the other's answer. A file that became something else is a stale copy
-//! and the editor has a reload for it; a file that could not be read is a
-//! failure, and the reload cannot fix it. And the file a refusal names is
-//! not always the one the caller asked about: a scope still under the old
-//! product name renames its manifest first, and every write planned
-//! against the old name is retargeted with it.
+//! Two questions, and each must not be answered with the other's answer. A
+//! file that became something else is a stale copy and the editor has a
+//! reload for it; a file that could not be read is a failure, and the
+//! reload cannot fix it — offering it sends someone to a remedy for a
+//! permission or an encoding. And the file a refusal names is not always
+//! the one the caller asked about: a scope still under the old product
+//! name renames its manifest first, and every write planned against the
+//! old name is retargeted with it.
 
 use std::path::{Path, PathBuf};
 

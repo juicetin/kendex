@@ -146,7 +146,6 @@ describe("the write that creates a place's file", () => {
 
   // The write answering is not the file arriving: the seed is only in hand
   // once the re-read lands, and the Save bar comes down before it does.
-  // Reported on #1569 by review.
   it("refuses typing that arrived before the file came back", async () => {
     await openEmptyAndType();
     const write = creatingWrite();

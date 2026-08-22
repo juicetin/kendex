@@ -65,7 +65,7 @@ describe("what the Library says when a read behind the marks fails", () => {
 
   // The note is about the places that are unread now, not about a read that
   // failed once: a place that reads again takes its line away, and the last
-  // one to recover takes the note. Reported on #1569 by review.
+  // one to recover takes the note.
   it("stops speaking once the last place has read again", () => {
     stub.unreadPlaces = {
       "/work/vg": "/work/vg: expected a table",

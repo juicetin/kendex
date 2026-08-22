@@ -187,7 +187,6 @@ describe("what the package page is about", () => {
 
   // The button applies the revision the last read named, so a read still on
   // its way means the version on screen is the one it is about to replace.
-  // Reported on #1569 by review.
   it("does not offer an update while a check is still on its way", () => {
     world.at.rows = [
       updateRow("gh", "/work/vg", { updateAvailable: true, canDiscard: true }),

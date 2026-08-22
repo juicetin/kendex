@@ -190,7 +190,6 @@ describe("an undo that took some of its records back", () => {
   // already taken back refuses. A retry that starts over therefore stops on
   // the record that already succeeded and never reaches the one that
   // failed — offering a way out that can never finish.
-  // Reported on #1569 by review.
   it("picks up where it stopped rather than starting over", async () => {
     const three = [
       record,

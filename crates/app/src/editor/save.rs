@@ -314,7 +314,7 @@ mod tests {
 
     // Both normalizations are the same fact to the caller: the file holds
     // something no copy in hand does. Naming a hook is the one that reaches
-    // a manifest that already exists. Reported on #1569 by review.
+    // a manifest that already exists.
     #[test]
     fn naming_a_hook_is_the_write_holding_more_than_it_was_sent() {
         let unnamed = || kendex_core::manifest::CustomHook {

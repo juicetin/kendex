@@ -64,9 +64,9 @@ describe("a confirmation that cannot be given yet", () => {
     expect(offered(html, "Cancel")).toBe(false);
   });
 
-  // Reported on #1569 by review: the gate reached the button that opens the
-  // dialog but not the dialog, so a read that failed while it stood open
-  // still applied what it was about to replace.
+  // The gate reached the button that opens the dialog but not the dialog
+  // itself, so a read that failed while it stood open still applied what it
+  // was about to replace.
   it("holds only the answer while what it rests on is being read", () => {
     const html = render({ holdConfirm: true });
     expect(offered(html, "Use new version")).toBe(false);

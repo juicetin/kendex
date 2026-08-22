@@ -1,8 +1,8 @@
-// The four windows the sync used to leave open. Three rounds of review
-// closed one caller's ordering at a time; these hold the helper itself to
-// the rule, so a caller cannot open them again: the place is refused before
-// anything is awaited, and no read replaces typing that arrives while it is
-// on its way.
+// The four windows a caller can leave open between a write landing and the
+// editor being told. These hold the helper itself to the rule rather than
+// each caller in turn, since the list of callers is not fixed: the place is
+// refused before anything is awaited, and no read replaces typing that
+// arrives while it is on its way.
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { commands } from "@/bindings";
 import { useEditorStore } from "./editor";
@@ -158,7 +158,6 @@ describe("the sync refuses before it reads", () => {
   // A read that never arrives cannot report the file unmoved, and the caller
   // that started this walked away — so a rejection here has to be turned
   // into a refusal and a message rather than into a lost promise.
-  // Reported on #1569 by review.
   it("keeps the place refused when the re-read never arrives", async () => {
     useEditorStore.setState({ base: "before", unreadPlaces: {} });
     type();

@@ -79,7 +79,7 @@ describe("a package-wide action that stopped partway", () => {
 
   // Including when the action does not return at all — a transport failure
   // rejects rather than answering, and the way out of the loop it takes
-  // must still put this down. Reported on #1569 by review.
+  // must still put this down.
   it("keeps nothing when a place throws instead of answering", async () => {
     await expect(
       inEveryPlace([A, B], async (scope) => {

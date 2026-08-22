@@ -170,7 +170,7 @@ describe("package page edited notice", () => {
 
   // The same button takes the newest version for a place that can move, and
   // the newest version it would take is the one the check on its way is
-  // about to replace. Reported on #1569 by review.
+  // about to replace.
   it("waits for a check in flight before a place that can move may take it", () => {
     standing.checking = true;
     const html = render(
