@@ -160,6 +160,13 @@ done
 # from `writing(` or from a funnel's `run(`, which both end in it — a call
 # still inside those brackets is wrapped however many lines down it sits,
 # and one outside them is not, whatever the file does elsewhere.
+#
+# The list below is every command that reaches a manifest write, and only
+# those. A command that writes somewhere else — muting an update records a
+# preference in kendex's own settings — belongs to none of this, and
+# listing one costs a person the wait for a file it never touches. The
+# editor's own save writes a manifest and is absent on purpose: it is the
+# write the helper tells the editor about.
 WRITERS='adoptItem|applyPlan|applyDiscardEdits|bundleInstall|dismissFindings|forkRename|installDriftHook|marketplaceInstall|marketplaceSubscribe|marketplaceUnsubscribe|packageFork|packageSetRev|removeItem|revokeDismissal|revokeSafetyOverride|sourceToggle|toggleItem'
 for f in $(printf '%s\n' $files | grep -E '^ui/src/.*\.tsx?$' | grep -v '\.test\.'); do
   [ -f "$f" ] || continue
