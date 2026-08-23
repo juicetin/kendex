@@ -189,6 +189,26 @@ describe("what the package page is about", () => {
 
   // The button applies the revision the last read named, so a read still on
   // its way means the version on screen is the one it is about to replace.
+  // The same package can be installed differently from place to place. A
+  // group's harnesses and tags are unions across its installations, so the
+  // one this page hands to the details has to hold this place's alone —
+  // otherwise the header names one project while everything under it
+  // describes both.
+  it("describes the place it is about, not every place at once", () => {
+    const body = render().body;
+    const shown = body.group as { harnesses: string[]; tags: string[] };
+    expect(shown.harnesses).toEqual(["claude"]);
+    expect(shown.tags).toEqual(["review"]);
+
+    world.at.scope = HYPR;
+    const other = render().body.group as {
+      harnesses: string[];
+      tags: string[];
+    };
+    expect(other.harnesses).toEqual(["opencode"]);
+    expect(other.tags).toEqual(["testing"]);
+  });
+
   it("does not offer an update while a check is still on its way", () => {
     world.at.rows = [
       updateRow("gh", "/work/vg", { updateAvailable: true, canDiscard: true }),

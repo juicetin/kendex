@@ -128,7 +128,9 @@ changes carry a **Breaking** call-out with their migration note inline.
   path, its open actions and its file list, not the first project the
   package happens to be installed in, and it stays that place while you look
   at another one's settings on the Customize tab — the chips move the tab,
-  not the page. A place counts as customized whether
+  not the page. What it says about the package is that place's too: a
+  package installed for one tool here and another there no longer reads as
+  though every place had both. A place counts as customized whether
   you changed it on the Customize tab, edited its installed files by hand,
   or forked it, so a package you hand-edited is marked even when it is up
   to date, and a fork you have since edited says so. Text you are still

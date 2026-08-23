@@ -53,11 +53,24 @@ export const freshWorld = (): PageWorld => ({
 });
 
 /** The same package installed at both places, which is what makes the
- *  question "which place is this page about" answerable at all. */
+ *  question "which place is this page about" answerable at all — and
+ *  installed differently in each, which is what makes the answer show. */
 export const scanned = () => ({
   items: [
-    observedItem({ name: "gh", scope: VG, path: "/work/vg/gh" }),
-    observedItem({ name: "gh", scope: HYPR, path: "/work/hyprtrade/gh" }),
+    observedItem({
+      name: "gh",
+      scope: VG,
+      path: "/work/vg/gh",
+      harness: "claude",
+      tags: ["review"],
+    }),
+    observedItem({
+      name: "gh",
+      scope: HYPR,
+      path: "/work/hyprtrade/gh",
+      harness: "opencode",
+      tags: ["testing"],
+    }),
   ],
 });
 

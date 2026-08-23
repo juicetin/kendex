@@ -27,6 +27,7 @@ import { packageDisplayName, scopeName, scopePath } from "@/lib/labels";
 import { PAGE_GUTTER, WIDE_CONTENT_WIDTH } from "@/lib/layout";
 import { packageMarks } from "@/lib/place-marks";
 import { useEditingPlacesSource } from "@/lib/places-source";
+import { sameScope } from "@/lib/scope";
 import { cn } from "@/lib/utils";
 import { installedRow, latestRow, versionRowLabel } from "@/lib/versions";
 import { useAuditStore } from "@/stores/audit";
@@ -70,6 +71,21 @@ export function PackagePage() {
     return groupItems(matching)[0] ?? null;
   }, [ref, result]);
 
+  // The same package can be installed differently from place to place —
+  // one tool here, another there, different tags, its own copy shared or
+  // not. A group's `harnesses`, `tags`, `shared` and modification time are
+  // unions across its installations, so a group spanning places describes
+  // a union of places while the header names one. Everything about this
+  // place reads a group of this place's installations alone; the full one
+  // stays for the question it answers, which is where else this lives.
+  const here = useMemo(() => {
+    if (!group || !ref) return null;
+    const mine = group.installations.filter((one) =>
+      sameScope(one.scope, ref.scope),
+    );
+    return groupItems(mine)[0] ?? null;
+  }, [group, ref]);
+
   const { meta, files, versions, load: reload } = usePackageData(ref);
   // Everything this page says is about one place: the one it was opened at,
   // which a customized mark can name any of. Its installation carries the
@@ -97,7 +113,7 @@ export function PackagePage() {
     back();
   }, [ref, result, primary, back]);
 
-  if (!ref || !group || !primary) return null;
+  if (!ref || !group || !here || !primary) return null;
 
   const displayName = packageDisplayName(ref);
   const installed = installedRow(versions);
@@ -139,7 +155,7 @@ export function PackagePage() {
   const body = (
     <PackageBody
       reference={ref}
-      group={group}
+      group={here}
       primary={primary}
       meta={meta}
       editedRow={editedRow}
