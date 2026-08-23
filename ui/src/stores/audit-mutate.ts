@@ -51,7 +51,10 @@ export function auditMutation(
       | Partial<MutationHost>
       | ((state: { views: AuditView[] }) => Partial<MutationHost>),
   ) => void,
-  get: () => { views: AuditView[] },
+  get: () => {
+    views: AuditView[];
+    refresh: (opts?: { force?: boolean }) => Promise<void>;
+  },
 ) {
   // A row that vanishes with no word said is indistinguishable from a
   // button that did nothing — every outcome here speaks up, success or
@@ -96,6 +99,14 @@ export function auditMutation(
         await useScanStore.getState().refresh();
         return true;
       }
+      // A failure says nothing about what the file holds: the write may
+      // have been refused before it started, or landed and failed after.
+      // And an older write of this place that did succeed stood down for
+      // this one on its way past, so what is on the books can be older
+      // than the disk either way. Reading it back is the only answer.
+      await get().refresh({ force: true });
+      // After the re-read, not before it: a read that lands clears the
+      // last error, and this one is about the write rather than the read.
       set({ error: response.error });
       const retry: ErrorAction = {
         label: "Retry",

@@ -20,6 +20,9 @@ vi.mock("@/bindings", () => ({
 }));
 
 vi.mock("sonner", () => ({ toast: { error: vi.fn(), success: vi.fn() } }));
+vi.mock("./problems", () => ({
+  useProblemsStore: { getState: () => ({ showError: vi.fn() }) },
+}));
 vi.mock("./scan", () => ({
   useScanStore: { getState: () => ({ refresh: vi.fn() }) },
 }));
@@ -109,5 +112,39 @@ describe("two writes of one place", () => {
     await older;
     await settle();
     expect(notes()).toEqual(["newer"]);
+  });
+});
+
+// The rank decides which successful answer stands. It must not let a
+// failure silence one: a write that lost the race can still have landed on
+// disk, and the newer attempt that superseded it may bring nothing back at
+// all. Left there, Review goes on showing findings the file no longer has.
+describe("a newer write that fails after an older one succeeded", () => {
+  it("does not leave the older success suppressed", async () => {
+    const winner = held<{ status: "ok"; data: AuditView }>();
+    const loser = held<{ status: "error"; error: string }>();
+    vi.mocked(commands.toggleItem)
+      .mockReturnValueOnce(winner.promise)
+      .mockReturnValueOnce(loser.promise);
+    // What the disk actually holds once the first write has landed.
+    vi.mocked(commands.auditAll).mockResolvedValue({
+      status: "ok",
+      data: [viewWith(["settled on disk"])],
+    });
+
+    const older = useAuditStore.getState().toggle(scope, "skill", "gh", false);
+    const newer = useAuditStore.getState().toggle(scope, "skill", "gh", true);
+    await settle();
+
+    // The older write won the lock and wrote; its answer stands down for
+    // the newer one, which then brings nothing back.
+    winner.release({ status: "ok", data: viewWith(["settled"]) });
+    await older;
+    await settle();
+    loser.release({ status: "error", error: "the place was busy" });
+    await newer;
+    await settle();
+
+    expect(notes()).toEqual(["settled on disk"]);
   });
 });
