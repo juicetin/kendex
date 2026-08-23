@@ -307,8 +307,11 @@ changes carry a **Breaking** call-out with their migration note inline.
   longer re-enables the Customize Save button before the change has landed.
 - The Updates page says it is checking instead of "Everything is up to
   date" before the first check has answered.
-- A package whose own copy can no longer be read says so, instead of
-  offering to put back a copy that is not there.
+- A package whose own copy can no longer be read, or can no longer be made
+  sense of, says so instead of offering to put back a copy that would not
+  come back. An agent whose kept copy has lost its heading is the second
+  kind: the file is still there and still readable, and nothing can render
+  it.
 - A package is no longer shown as your own copy on the strength of a check
   that did not finish, when its project's settings could not be read either.
   With neither read able to speak, the place says it could not be checked.

@@ -288,9 +288,13 @@ fn local_copy_resolves(env: &Env, scope: &Scope, kind: ItemKind, name: &str) -> 
             let dir = root.join("skills").join(name);
             sealed.is_file(&dir.join("SKILL.md")) && sealed.collect_skill_tree(&dir).is_ok()
         }
+        // Read is not enough for an agent: the planner parses the file it
+        // reads, and a copy that is readable but has no usable frontmatter
+        // is refused there as unmeasured. Offering a discard on the
+        // strength of the read alone names a way out that cannot run.
         _ => sealed
-            .read(&root.join("agents").join(format!("{name}.md")))
-            .is_ok(),
+            .read_to_string(&root.join("agents").join(format!("{name}.md")))
+            .is_ok_and(|text| crate::render::agent::parse_source_agent(&text).is_ok()),
     }
 }
 

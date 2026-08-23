@@ -4,6 +4,7 @@
 #![cfg(unix)]
 
 mod disabled;
+mod discard_offered;
 mod edited_harness;
 
 mod edited_forks;
