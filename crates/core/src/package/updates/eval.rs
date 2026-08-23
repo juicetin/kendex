@@ -95,6 +95,7 @@ impl Eval<'_> {
                         kind,
                         name,
                         decl,
+                        self.manifest,
                         self.edited_harnesses(kind, name),
                     ));
                 }

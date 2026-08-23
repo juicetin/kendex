@@ -5,7 +5,7 @@
 //! that fails when pressed.
 
 use crate::env::Env;
-use crate::model::{HarnessId, ItemKind, Scope};
+use crate::model::{ItemKind, Scope};
 
 /// A fork's row: no versions, no update — the Library still needs to
 /// know it is a fork, and whether its files have been edited since. A fork
@@ -25,8 +25,15 @@ pub(super) fn local_copy_resolves(
     scope: &Scope,
     kind: ItemKind,
     name: &str,
-    harnesses: &[HarnessId],
+    decl: &crate::manifest::ItemDecl,
+    manifest: &crate::manifest::Manifest,
 ) -> bool {
+    // Every tool the declaration targets, not only the ones whose files
+    // happen to be edited now: the discard renders for all of them, and one
+    // it cannot render for refuses the whole apply. And with this scope's
+    // own manifest, since what it says — a skill's instructions, and the
+    // protected block they occupy — is part of what the render has to fit.
+    let harnesses = crate::engine::harnesses_for(decl.harnesses.as_deref(), manifest, kind, scope);
     let root = crate::source::local_source_root(env, scope);
     let Ok(sealed) = crate::source_read::SealedSource::open(&root) else {
         return false;
@@ -42,12 +49,8 @@ pub(super) fn local_copy_resolves(
             if !sealed.is_file(&dir.join("SKILL.md")) {
                 return false;
             }
-            let Ok(rendered) = crate::render::skill::render_skill(
-                &sealed,
-                &dir,
-                &crate::manifest::Manifest::default(),
-                name,
-            ) else {
+            let Ok(rendered) = crate::render::skill::render_skill(&sealed, &dir, manifest, name)
+            else {
                 return false;
             };
             harnesses.iter().all(|harness| {

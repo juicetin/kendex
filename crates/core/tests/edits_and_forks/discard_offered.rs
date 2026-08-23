@@ -246,3 +246,79 @@ fn a_forked_skill_whose_copy_will_not_render_offers_no_discard() {
     );
     assert!(held.forked, "still this place's own copy: {held:?}");
 }
+
+/// The check answers for every tool the declaration targets, not only the
+/// ones whose files are edited right now. A discard renders for all of
+/// them, and one it cannot render for refuses the whole apply — so a row
+/// asking only about the edited ones advertises a button that fails.
+///
+/// Staged the way it happens: the fork is made while one tool carries the
+/// package, and another is added to the declaration afterwards. Nothing
+/// about the edited files changes; what the discard has to satisfy does.
+#[test]
+#[allow(clippy::unwrap_used)]
+fn a_target_added_after_the_fork_still_decides_the_discard() {
+    let w = world();
+    write_skill(&w.upstream, "gh_tool", "Upstream.");
+    commit(&w.upstream, "one");
+    declare(&w, "[skills.gh_tool]\nsource = \"cat\"\n");
+    sync_and_apply(&w);
+
+    let installed = w.home.join("app/.agents/skills/gh_tool/SKILL.md");
+    fs::write(
+        &installed,
+        "---\nname: gh_tool\ndescription: mine\n---\nMy fork.\n",
+    )
+    .unwrap();
+    let plan = fork::fork(
+        &w.env,
+        &w.scope,
+        ItemKind::Skill,
+        "gh_tool",
+        HarnessId::Claude,
+    )
+    .unwrap();
+    apply::execute(&w.env, &plan, None).unwrap();
+    let report = audit(&w.env, &w.scope).unwrap();
+    apply::execute(&w.env, &report.plan, None).unwrap();
+    fs::write(&installed, "edited after forking").unwrap();
+
+    let row = |w: &World| {
+        updates::updates(&w.env, &w.scope)
+            .unwrap()
+            .rows
+            .into_iter()
+            .find(|row| row.name == "gh_tool")
+            .unwrap()
+    };
+    let offered = row(&w);
+    assert!(
+        offered.can_discard,
+        "the copy is there to put back: {offered:?}"
+    );
+
+    // A second tool is added to the declaration. Its loader will not hold a
+    // name with an underscore, so the discard cannot render for it — while
+    // the edited files, and the tool that edited them, are unchanged.
+    // Edited in place: rewriting the whole file would take the fork record
+    // with it, and the fork is what this row is about.
+    let path = manifest::manifest_path(&w.env, &w.scope);
+    let text = fs::read_to_string(&path).unwrap();
+    let widened = text.replace(
+        "[skills.gh_tool]",
+        "[skills.gh_tool]\nharnesses = [\"claude\", \"opencode\"]",
+    );
+    assert_ne!(widened, text, "the declaration is in the file: {text}");
+    fs::write(&path, widened).unwrap();
+
+    let held = row(&w);
+    assert_eq!(
+        held.edited_harnesses,
+        vec![HarnessId::Claude],
+        "the edited tool is the same one: {held:?}"
+    );
+    assert!(
+        !held.can_discard,
+        "the tool that cannot take it decides too: {held:?}"
+    );
+}

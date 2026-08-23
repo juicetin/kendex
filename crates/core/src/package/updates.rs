@@ -265,12 +265,14 @@ fn same_artifact(
     matches!((resolved(a), resolved(b)), (Some(x), Some(y)) if x == y)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn fork_row(
     env: &Env,
     scope: &Scope,
     kind: ItemKind,
     name: &str,
     decl: &crate::manifest::ItemDecl,
+    manifest: &crate::manifest::Manifest,
     edited_harnesses: Vec<HarnessId>,
 ) -> UpdateRow {
     UpdateRow {
@@ -288,13 +290,7 @@ fn fork_row(
         ignored: false,
         blocked_by_local_edit: !edited_harnesses.is_empty(),
         // Measured before the field takes the vector.
-        can_discard: super::fork_copy::local_copy_resolves(
-            env,
-            scope,
-            kind,
-            name,
-            &edited_harnesses,
-        ),
+        can_discard: super::fork_copy::local_copy_resolves(env, scope, kind, name, decl, manifest),
         edited_harnesses,
         // A fork is already the user's own copy, so there is nothing left to
         // keep as one — but the copy itself is in the local source, so an

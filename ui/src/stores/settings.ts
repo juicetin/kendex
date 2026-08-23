@@ -40,6 +40,20 @@ const nextRead = (): number => {
 };
 const newest = (mine: number): boolean => mine === reads;
 
+/** Record settings this process just wrote.
+ *
+ *  It takes a ticket of its own, which supersedes every read still in
+ *  flight: those describe the file as it was before this write, and one
+ *  landing afterwards would put that back — a project registered a moment
+ *  ago then reads as never added. */
+const wrote = (
+  set: (partial: { settings: AppSettings }) => void,
+  settings: AppSettings,
+): void => {
+  reads += 1;
+  set({ settings });
+};
+
 export const useSettingsStore = create<SettingsState>((set, get) => ({
   busy: false,
   settings: null,
@@ -102,7 +116,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     const current = get().settings;
     if (!current) return;
     const response = await commands.updateSettings({ ...current, appearance });
-    if (response.status === "ok") set({ settings: response.data });
+    if (response.status === "ok") wrote(set, response.data);
     else
       useProblemsStore.getState().showError({
         title: "Couldn't change the appearance",
@@ -124,7 +138,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       ...current,
       safety: { "warn-below": warnBelow, "block-below": blockBelow },
     });
-    if (response.status === "ok") set({ settings: response.data });
+    if (response.status === "ok") wrote(set, response.data);
     else
       useProblemsStore.getState().showError({
         title: "Couldn't update safety settings",
@@ -150,7 +164,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       "harness-roots": roots,
     });
     if (response.status === "ok") {
-      set({ settings: response.data });
+      wrote(set, response.data);
       await rescan();
     } else {
       useProblemsStore.getState().showError({
@@ -174,7 +188,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     const before = get().settings?.projects ?? [];
     const response = await commands.registerProject(path);
     if (response.status === "ok") {
-      set({ settings: response.data });
+      wrote(set, response.data);
       // Registration is where the drift report is offered: agents in this
       // project start blind until the session-start hook is installed. An
       // offer, never an auto-install — it injects into agent context.
@@ -198,7 +212,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   unregisterProject: async (path) => {
     const response = await commands.unregisterProject(path);
     if (response.status === "ok") {
-      set({ settings: response.data });
+      wrote(set, response.data);
       await rescan();
     } else {
       useProblemsStore.getState().showError({

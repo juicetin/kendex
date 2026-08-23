@@ -12,12 +12,20 @@ vi.mock("@/bindings", () => ({
     getSettings: vi.fn(),
     capabilityTable: vi.fn(),
     windowZoomState: vi.fn(),
+    registerProject: vi.fn(),
+    installDriftHook: vi.fn(),
+    scanMachine: vi.fn(),
   },
   ZOOM: { default: 100, min: 50, max: 200, step: 10 },
 }));
 
 vi.mock("sonner", () => ({
   toast: { error: vi.fn(), success: vi.fn(), info: vi.fn() },
+}));
+
+// Registering rescans; what the scan finds is not this test's subject.
+vi.mock("./scan", () => ({
+  useScanStore: { getState: () => ({ refresh: async () => {} }) },
 }));
 
 function deferred<T>() {
@@ -42,6 +50,37 @@ beforeEach(() => {
   vi.mocked(commands.windowZoomState).mockResolvedValue({
     percent: 100,
     launchRefused: false,
+  });
+});
+
+describe("a read still in flight when something is written", () => {
+  // The read has its answer from the file and is still waiting on the
+  // capability and zoom calls it commits with. A project registered in
+  // that gap is written straight to the store — and the read landing
+  // afterwards carries the list from before it.
+  it("does not put the older list back over a project just registered", async () => {
+    const zoom = deferred<{ percent: number; launchRefused: boolean }>();
+    vi.mocked(commands.getSettings).mockResolvedValue(projects([]) as never);
+    vi.mocked(commands.windowZoomState).mockReturnValue(zoom.promise as never);
+
+    const reading = useSettingsStore.getState().load();
+    await settle();
+    // Registering commits its own answer while the read is still waiting.
+    useSettingsStore.setState({ settings: { schema: 1, projects: [] } });
+    vi.mocked(commands.registerProject).mockResolvedValue(
+      projects(["/work/vg"]) as never,
+    );
+    await useSettingsStore.getState().registerProject("/work/vg");
+    expect(useSettingsStore.getState().settings?.projects).toEqual([
+      "/work/vg",
+    ]);
+
+    zoom.resolve({ percent: 100, launchRefused: false });
+    await reading;
+
+    expect(useSettingsStore.getState().settings?.projects).toEqual([
+      "/work/vg",
+    ]);
   });
 });
 
