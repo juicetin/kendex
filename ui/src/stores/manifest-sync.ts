@@ -42,16 +42,26 @@ export async function manifestRewritten(scope: Scope): Promise<void> {
     const read = await commands
       .getManifest(scope)
       .catch((thrown: unknown) => String(thrown));
+    // Why it could not be read, either way it failed. A rejection and a
+    // refusal are the same fact to this place: nobody looked, so what is
+    // still in hand for it answers for an earlier moment. Counting only
+    // the rejection left an ordinary error looking like a read that came
+    // back — and the pass that just succeeded had already cleared the
+    // mark, so the marks read as confirmed with no retry offered.
+    const why =
+      typeof read === "string"
+        ? read
+        : read.status !== "ok"
+          ? read.error
+          : null;
     const moved =
+      why !== null ||
       typeof read === "string" ||
       read.status !== "ok" ||
       read.data.base !== after.base;
     if (moved) after.outdate(scope);
     else after.current(scope);
-    // A read that failed leaves this place unread like any other: what is
-    // still in hand for it answers for an earlier moment, and the note
-    // says so and offers the retry.
-    if (typeof read === "string") after.unread(scope, read);
+    if (why !== null) after.unread(scope, why);
     return;
   }
   // Marked again before the re-read, since the editor may have moved here

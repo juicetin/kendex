@@ -158,3 +158,40 @@ fn a_change_the_planner_records_says_the_file_holds_more() {
         "the mapping the pass recorded is not in what was sent"
     );
 }
+
+/// A save over an older-schema file the person formatted themselves. The
+/// upgrade rewrites the schema line in place, keeping their formatting, and
+/// that is a manifest write like any other — missed as one, the save adds a
+/// whole-file write bound to the same bytes, and whichever runs second is
+/// refused after the first has already moved them.
+#[test]
+#[allow(clippy::unwrap_used)]
+fn a_schema_upgrade_is_the_manifest_write_rather_than_a_second_one() {
+    let f = fixture();
+    let source = f.env.home.join("catalog");
+    // Written by hand, at an older schema, with formatting worth keeping.
+    fs::write(
+        f.project.join("kendex.toml"),
+        format!(
+            "schema = 4\n\n[sources.cat]\npath   = \"{}\"\n\n[install]\nharnesses = [\"claude\"]\nmethod = \"copy\"\n",
+            source.display()
+        ),
+    )
+    .unwrap();
+
+    let held = match kendex_core::manifest::load(&f.project.join("kendex.toml")).unwrap() {
+        kendex_core::manifest::ManifestFile::Current(m) => *m,
+        _ => panic!("an older schema still reads as current"),
+    };
+    // The save goes through rather than being refused by its own second
+    // write, and the file is left at the current schema.
+    write_manifest(&f.env, f.scope.clone(), held, base_now(&f)).unwrap();
+    let after = fs::read_to_string(f.project.join("kendex.toml")).unwrap();
+    assert!(
+        after.contains(&format!(
+            "schema = {}",
+            kendex_core::manifest::MANIFEST_SCHEMA
+        )),
+        "{after}"
+    );
+}

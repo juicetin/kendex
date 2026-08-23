@@ -78,10 +78,21 @@ pub fn written_manifest(ops: &[PlannedOp]) -> Option<&Manifest> {
     })
 }
 
+/// Whether this plan already writes the manifest, in any of the shapes
+/// that counts as writing it.
+///
+/// Two of them are surgical file writes rather than a whole-manifest op —
+/// the rename generation's, and the schema upgrade's — and both bind their
+/// precondition to the bytes on disk. Missed here, the caller adds a whole
+/// write of its own bound to those same bytes, the first moves them, and
+/// the second is refused as stale after the file has already changed.
 pub fn persists_manifest(ops: &[PlannedOp]) -> bool {
+    let surgical = [
+        crate::repo_move::MOVE_DESCRIPTION.to_owned(),
+        super::scope_writes::schema_upgrade_description(),
+    ];
     ops.iter().any(|op| {
         matches!(op.op, Op::WriteManifest { .. })
-            || (op.description == crate::repo_move::MOVE_DESCRIPTION
-                && matches!(op.op, Op::WriteFile { .. }))
+            || (surgical.contains(&op.description) && matches!(op.op, Op::WriteFile { .. }))
     })
 }

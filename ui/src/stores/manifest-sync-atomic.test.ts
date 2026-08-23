@@ -158,6 +158,28 @@ describe("the sync refuses before it reads", () => {
   // A read that never arrives cannot report the file unmoved, and the caller
   // that started this walked away — so a rejection here has to be turned
   // into a refusal and a message rather than into a lost promise.
+  // A refusal and a rejection are the same fact to this place: nobody
+  // looked. The pass that just succeeded cleared the mark, so an error
+  // counted as a read leaves the marks reading as confirmed with nothing
+  // offering to try again.
+  it("keeps the place unread when the re-read is refused", async () => {
+    useEditorStore.setState({ base: "before", unreadPlaces: {} });
+    type();
+    vi.mocked(commands.getManifest)
+      .mockResolvedValueOnce({
+        status: "ok",
+        data: { manifest: null, base: "before" },
+      })
+      .mockResolvedValueOnce({ status: "error", error: "expected a table" });
+
+    await manifestRewritten(scope);
+
+    const after = useEditorStore.getState();
+    expect(after.outdated).toBe("global");
+    expect(whyUnread(after)).toContain("expected a table");
+    expect(after.draft).toEqual(typed);
+  });
+
   it("keeps the place refused when the re-read never arrives", async () => {
     useEditorStore.setState({ base: "before", unreadPlaces: {} });
     type();

@@ -140,6 +140,17 @@ fn rewrite_schema_line(line: &str, from: u32, to: u32) -> Option<String> {
 /// The bump is a surgical text edit — the schema line changes and nothing
 /// else does (invariant 10); only if no schema assignment can be found
 /// does the plan fall back to a full rewrite.
+/// What the schema upgrade's op is called. Named once because two places
+/// read it: the planner writes it, and `persists_manifest` recognises the
+/// surgical form by it — a manifest write that goes unrecognised earns the
+/// caller a second one bound to the same bytes.
+pub(super) fn schema_upgrade_description() -> String {
+    format!(
+        "Upgrade {} to the current format",
+        crate::rename::MANIFEST_FILE
+    )
+}
+
 pub(super) fn plan_schema_upgrade(
     env: &Env,
     scope: &Scope,
@@ -151,10 +162,7 @@ pub(super) fn plan_schema_upgrade(
     // This writes the manifest, so it binds to the file a caller writing a
     // whole copy of it came from, where there is one.
     let pre = options.manifest_pre(&path)?;
-    let description = format!(
-        "Upgrade {} to the current format",
-        crate::rename::MANIFEST_FILE
-    );
+    let description = schema_upgrade_description();
     let current = crate::fs::read_if_exists(&path)?.unwrap_or_default();
     let mut rewritten = false;
     let upgraded_text: String = current

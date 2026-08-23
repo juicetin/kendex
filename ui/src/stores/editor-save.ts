@@ -80,22 +80,28 @@ export const saveManifest = async (): Promise<void> => {
       });
     return;
   }
+  // A newer save owns what the screen says about saving — but only that.
+  // What this write did to the file is this write's to settle: a second
+  // press before the button disables starts a second save, and if the
+  // first wins the lock and lands while the second is refused, dropping
+  // the first's outcome leaves the place unsaved on screen and the tables
+  // reading the file as it was before it.
   if (mine()) useEditorStore.setState({ saving: false });
-  // A newer save owns what the screen says about saving.
-  if (!mine()) return;
   if (response.status === "error") {
     // The write refused because the file is not the one this copy came
     // from. Nothing marked the place — that is the point of asking the
     // file — so the same refusal the mark would have raised is raised
     // here, with the same way out.
     if (response.error.kind === "stale") {
-      if (onScreen()) refuseOnScreen(scope, load);
-      else useEditorStore.setState({ error: outdatedElsewhere(scope) });
-      // The place is marked too, so the Save bar's next press is refused
-      // without another round trip.
+      // Marked whichever save is newest: the file moved under this copy,
+      // which is a fact about the place rather than about the screen.
       useEditorStore.getState().outdate(scope);
+      if (onScreen()) refuseOnScreen(scope, load);
+      else if (mine())
+        useEditorStore.setState({ error: outdatedElsewhere(scope) });
       return;
     }
+    if (!mine()) return;
     // The note is about the place that was written, which may not be the
     // one on screen any more — so it names that place rather than letting
     // the reader assume the one in front of them.
