@@ -10,16 +10,9 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import {
-  bundledWithLabel,
-  ORIGIN_UNCONFIRMED,
-  originUnconfirmedTitle,
-  vendorHelp,
-} from "@/lib/copy";
+import { ORIGIN_UNCONFIRMED, originUnconfirmedTitle } from "@/lib/copy";
 import {
   customizedPlacesLabel,
-  forkedInLabel,
-  forkedPlacesLabel,
   placeStateLine,
   STATUS_LABELS,
 } from "@/lib/copy-customize";
@@ -35,27 +28,19 @@ import {
   groupVendor,
   type ItemGroup,
 } from "@/lib/derive";
-import { kindIcon } from "@/lib/kind-icon";
-import {
-  describesItself,
-  hookDisplayName,
-  kindLabel,
-  scopeName,
-  scopePath,
-} from "@/lib/labels";
+import { hookDisplayName, kindLabel, scopeName, scopePath } from "@/lib/labels";
 import { relativeTime } from "@/lib/relative-time";
-import { cn } from "@/lib/utils";
+import { NameCell } from "./installed-row-name";
+
+import { markClick } from "./row-click";
+
+export { markClick } from "./row-click";
+
 import { originLabel, originTitle } from "@/stores/provenance";
 
 /** The mark sits inside a row that opens the package where it was
  *  installed from; its own click means the place it names instead, so it
  *  must never also fire the row's. */
-export const markClick =
-  (open: () => void) =>
-  (event: { stopPropagation: () => void }): void => {
-    event.stopPropagation();
-    open();
-  };
 
 const STATUS_TONES: Record<GroupStatus, "good" | "warning" | "critical"> = {
   active: "good",
@@ -70,6 +55,7 @@ function Row({
   standings,
   onOpen,
   onOpenPlace,
+  onOpenFork,
 }: {
   group: ItemGroup;
   origin: Origin | null;
@@ -85,8 +71,10 @@ function Row({
   onOpen: (group: ItemGroup) => void;
   /** Opens the place the mark names, on what was changed there. */
   onOpenPlace: (group: ItemGroup, standings: PlaceStanding[]) => void;
+  /** Opens the place whose copy is its own — which is not always the place
+   *  the customized mark names, since a row can carry both. */
+  onOpenFork: (group: ItemGroup, standings: PlaceStanding[]) => void;
 }) {
-  const Icon = kindIcon(group.kind);
   const displayName =
     group.kind === "hook" ? hookDisplayName(group.name) : group.name;
   const vendor = groupVendor(group);
@@ -120,59 +108,16 @@ function Row({
     <TableRow onClick={() => onOpen(group)} className="cursor-pointer">
       {/* Cells are nowrap by default; the description is the one column that
           wants to wrap rather than run out of the row and get cut mid-word. */}
-      <TableCell className="max-w-[22rem] font-medium whitespace-normal">
-        <span className="flex items-start gap-2">
-          {/* The kind icon carries the customization colour, the legend
-              above the table names what it means, and the Where cell in
-              this same row repeats it in words. */}
-          <span title={mark ?? undefined} className="mt-0.5 shrink-0">
-            <Icon
-              className={cn(
-                "size-4",
-                mark ? "text-customized" : "text-muted-foreground",
-              )}
-            />
-          </span>
-          <span className="min-w-0">
-            <span className="flex items-center gap-1.5">
-              <span className="block truncate">{displayName}</span>
-              {forks.length > 0 ? (
-                // The place is in the badge, not only in its tooltip: a
-                // mark that says which place it is about says nothing to
-                // anyone reading by touch or by keyboard otherwise. The
-                // tooltip still carries the full list.
-                <Badge
-                  variant="outline"
-                  title={forkedInLabel(
-                    forks.map((where) => scopeName(where, scopes)),
-                  )}
-                >
-                  {forkedPlacesLabel(
-                    forks.map((where) => scopeName(where, scopes)),
-                    scopes.length,
-                    uncheckedPlaces(standings),
-                  )}
-                </Badge>
-              ) : null}
-              {vendor ? (
-                <Badge variant="outline" title={vendorHelp(vendor)}>
-                  {bundledWithLabel(group.installations[0].harness)}
-                </Badge>
-              ) : null}
-            </span>
-            {group.description ? (
-              <span
-                className={cn(
-                  "line-clamp-2 text-xs font-normal text-muted-foreground",
-                  !describesItself(group.kind) && "font-mono text-[11px]",
-                )}
-              >
-                {group.description}
-              </span>
-            ) : null}
-          </span>
-        </span>
-      </TableCell>
+      <NameCell
+        group={group}
+        displayName={displayName}
+        mark={mark}
+        vendor={vendor}
+        forks={forks}
+        scopes={scopes}
+        standings={standings}
+        onOpenFork={() => onOpenFork(group, standings)}
+      />
       <TableCell className="align-top text-muted-foreground">
         {kindLabel(group.kind)}
       </TableCell>

@@ -4,7 +4,7 @@ import { forkedToastLabel } from "@/lib/copy";
 import { FORK_ERROR_TITLE } from "@/lib/copy-forks";
 import { packageDisplayName } from "@/lib/labels";
 import { useAuditStore } from "./audit";
-import { manifestRewritten } from "./manifest-sync";
+import { writing } from "./manifest-sync";
 import { useProblemsStore } from "./problems";
 import { useScanStore } from "./scan";
 import { refusesForUnsaved } from "./unsaved-first";
@@ -21,17 +21,8 @@ const run = async (scope: Scope, work: () => Promise<string | null>) => {
   if (refusesForUnsaved(scope)) return;
   useUpdatesStore.setState({ busy: true });
   try {
-    // A rejection is an answer too. Left to throw it would leave here by a
-    // path that owes nothing — no message, and no telling the editor about
-    // a file that may already have moved.
-    const error = await work().catch((thrown: unknown) => String(thrown));
-    // Before the tables re-read, and whatever the outcome. A fork captures
-    // its copy and records it before it renders, so an error can arrive
-    // with kendex.toml already carrying the fork — and nothing in the
-    // answer says which. The sync re-reads and compares, so where nothing
-    // moved it takes its own mark back off; guessing the other way loses
-    // the record, which lives nowhere else.
-    await manifestRewritten(scope);
+    const attempt = await writing(scope, work);
+    const error = attempt.ok ? attempt.value : attempt.why;
     if (error !== null) {
       useProblemsStore
         .getState()

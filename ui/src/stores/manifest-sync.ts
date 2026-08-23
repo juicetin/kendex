@@ -60,3 +60,29 @@ export async function manifestRewritten(scope: Scope): Promise<void> {
   after.outdate(scope);
   await after.load(scope);
 }
+
+/** Run a command that rewrites a place's kendex.toml, and tell the editor
+ *  afterwards — whatever the outcome, a rejection included.
+ *
+ *  Every writer of that file owes this, and none of them can decide it for
+ *  itself: several write in stages, so an error can arrive with the file
+ *  already changed and nothing in the answer saying which, and a rejection
+ *  says less than that. The cost is not symmetric. Telling the editor when
+ *  nothing moved costs a read that compares and takes its own mark back
+ *  off; not telling it when something did costs whatever was recorded,
+ *  which for a fork lives nowhere else.
+ *
+ *  Callers get the answer or the reason, so a rejection reaches the reader
+ *  as a message rather than ending the action with nothing said. */
+export async function writing<T>(
+  scope: Scope,
+  call: () => Promise<T>,
+): Promise<{ ok: true; value: T } | { ok: false; why: string }> {
+  try {
+    return { ok: true, value: await call() };
+  } catch (thrown) {
+    return { ok: false, why: String(thrown) };
+  } finally {
+    await manifestRewritten(scope);
+  }
+}

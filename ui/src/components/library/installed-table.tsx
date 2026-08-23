@@ -19,7 +19,7 @@ import {
   placeStandings,
 } from "@/lib/customized-places";
 import { groupScopes, type ItemGroup } from "@/lib/derive";
-import { markNav } from "@/lib/place-marks";
+import { forkNav, markNav } from "@/lib/place-marks";
 import { usePlacesSource } from "@/lib/places-source";
 import { useNavStore } from "@/stores/nav";
 import { originFor, useProvenanceStore } from "@/stores/provenance";
@@ -81,6 +81,13 @@ export function InstalledTable({
     },
     [goToPackage],
   );
+  const openFork = useCallback(
+    (group: ItemGroup, standings: PlaceStanding[]) => {
+      const nav = forkNav(group, standings);
+      if (nav) goToPackage(...nav);
+    },
+    [goToPackage],
+  );
 
   return (
     <>
@@ -111,6 +118,7 @@ export function InstalledTable({
               standings={standings}
               onOpen={openRow}
               onOpenPlace={openMark}
+              onOpenFork={openFork}
             />
           ))}
           {scanning ? <InstalledSkeleton /> : null}

@@ -42,6 +42,26 @@ export function markNav(
   ];
 }
 
+/** Where the fork mark leads: the place whose copy is its own, and the
+ *  overview that holds it.
+ *
+ *  Its own question because the answer differs. A row can carry both marks
+ *  — settings changed in one place, a fork kept in another — and the
+ *  customized mark names the first place carrying any change, which is not
+ *  the forked one. A badge that names a place and opens a different one is
+ *  worse than a badge that does not open at all. */
+export function forkNav(
+  group: { kind: ItemKind; name: string },
+  standings: PlaceStanding[],
+): [PackageRef, PackageView | undefined] | null {
+  const found = standings.find((one) => one.forked);
+  if (!found) return null;
+  return [
+    { kind: group.kind, name: group.name, scope: found.scope },
+    undefined,
+  ];
+}
+
 /** The Customize index's Open. Every row it lists is an overlay written on
  *  the Customize tab, so it opens that tab rather than the overview the
  *  page would otherwise default to. */

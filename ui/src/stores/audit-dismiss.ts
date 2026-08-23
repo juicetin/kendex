@@ -12,7 +12,7 @@ import {
 } from "@/lib/copy-decisions";
 import { replaceView } from "./audit";
 import type { auditMutation } from "./audit-mutate";
-import { manifestRewritten } from "./manifest-sync";
+import { writing } from "./manifest-sync";
 import { useProblemsStore } from "./problems";
 import { refusesForUnsaved } from "./unsaved-first";
 
@@ -45,7 +45,19 @@ export function dismissFinding(
     if (refusesForUnsaved(scope)) return;
     set({ busy: true });
     try {
-      const response = await commands.dismissFindings(scope, tokens, reason);
+      const attempt = await writing(scope, () =>
+        commands.dismissFindings(scope, tokens, reason),
+      );
+      // A rejection says less than an error does: it cannot even say
+      // whether the write ran. It reaches the reader as the untouched
+      // message, which is the honest half of what is known — the editor
+      // has already been told, whichever it was.
+      const response = attempt.ok
+        ? attempt.value
+        : {
+            status: "error" as const,
+            error: { kind: "untouched" as const, message: attempt.why },
+          };
       if (response.status !== "ok") {
         // The write comes before the read that describes it, so a failure
         // here does not mean the file stood still. Told wrong, this says
@@ -64,11 +76,6 @@ export function dismissFinding(
               : "Nothing was changed — read the finding again and decide again",
           ],
         });
-        // Told either way. `landed` decides what the reader is told, not
-        // whether the editor is: the sync re-reads and compares, so where
-        // nothing moved it takes its own mark back off, and guessing wrong
-        // the other way costs the decision.
-        await manifestRewritten(scope);
         // The refusal usually means the page was showing findings a minute
         // old; the fresh audit is what the person should decide on.
         await get().refresh({ force: true });
@@ -76,7 +83,6 @@ export function dismissFinding(
       }
       const { view, records } = response.data;
       set({ views: replaceView(get().views, view), error: null });
-      await manifestRewritten(scope);
       // How much of the undo is already done. It lives out here because a
       // retry runs the same closure again: each record's revoke is pinned
       // to the exact dismissal it takes back, so one already taken back

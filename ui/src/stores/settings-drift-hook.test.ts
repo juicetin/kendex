@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppSettings } from "@/bindings";
 import { commands } from "@/bindings";
 import { useEditorStore } from "./editor";
+import { useProblemsStore } from "./problems";
 import { useSettingsStore } from "./settings";
 
 vi.mock("@/bindings", () => ({
@@ -120,6 +121,36 @@ describe("adding the drift report to a project", () => {
     // refused rather than writing the hook declaration back out.
     expect(useEditorStore.getState().outdated).toBe(root);
     expect(useEditorStore.getState().dirty).toBe(true);
+  });
+
+  // The command can commit the declaration and then answer with an error,
+  // and a rejection says less still. Either way the file may have moved,
+  // so the editor is told — or the copy the Customize tab holds writes the
+  // declaration away.
+  it("tells the editor when the command answered with an error", async () => {
+    vi.mocked(commands.installDriftHook).mockResolvedValue({
+      status: "error",
+      error: "the plan would not settle",
+    });
+
+    await takeTheOffer();
+    await vi.waitUntil(() => !useSettingsStore.getState().busy);
+
+    expect(commands.getManifest).toHaveBeenCalled();
+  });
+
+  it("tells the editor when the command never answered", async () => {
+    vi.mocked(commands.installDriftHook).mockRejectedValue(
+      new Error("the channel closed"),
+    );
+
+    await takeTheOffer();
+    await vi.waitUntil(() => !useSettingsStore.getState().busy);
+
+    expect(commands.getManifest).toHaveBeenCalled();
+    expect(useProblemsStore.getState().dialog.message).toContain(
+      "the channel closed",
+    );
   });
 
   // A toast is offered per project, so two can be open at once. The flag

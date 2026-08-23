@@ -19,7 +19,7 @@ import {
   standingIn,
 } from "./customized-places";
 import { type Draft, emptyDraft } from "./editor-draft";
-import { customizeNav, markTarget, packageMarks } from "./place-marks";
+import { customizeNav, forkNav, markTarget, packageMarks } from "./place-marks";
 
 // Where a mark leads once it is drawn, and which place each of a package
 // page's own marks speaks for.
@@ -123,6 +123,38 @@ describe("markTarget", () => {
       customizedPlaces(standings)[0],
     );
     expect(customizedPlaces(standings)).toEqual([VG, HYPR]);
+  });
+});
+
+// A row can carry both marks, and they need not name the same place. The
+// fork badge says where the copy is kept, so that is where it goes — the
+// customized mark's first-changed place is a different answer.
+describe("forkNav", () => {
+  it("opens the place the fork is in, not the place a change is in", () => {
+    const standings = placeStandings(
+      source({
+        manifests: {
+          ...plainManifests(),
+          "/work/vg": changed(),
+          "/work/hyprtrade": forkedHere(),
+        },
+      }),
+      "skill",
+      "gh",
+      EVERYWHERE,
+    );
+    // The customized mark leads to the overlay it names.
+    expect(markTarget(standings)?.scope).toEqual(VG);
+    // And the fork badge to the place whose copy is its own.
+    const nav = forkNav({ kind: "skill", name: "gh" }, standings);
+    expect(nav?.[0].scope).toEqual(HYPR);
+    // The overview, where the copy it kept is offered back.
+    expect(nav?.[1]).toBeUndefined();
+  });
+
+  it("leads nowhere where no place here keeps its own copy", () => {
+    const standings = placeStandings(source(), "skill", "gh", EVERYWHERE);
+    expect(forkNav({ kind: "skill", name: "gh" }, standings)).toBeNull();
   });
 });
 

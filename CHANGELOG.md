@@ -123,7 +123,8 @@ changes carry a **Breaking** call-out with their migration note inline.
   places that hold changes and say in words what each place holds, and the
   Forked mark names its place and belongs to the place it was made in,
   instead of reading "Forked" everywhere and saying which one only on
-  hover. The page you land on is about that place too — its
+  hover — and clicking it opens the place it names, which is not always
+  the one the customized mark beside it names. The page you land on is about that place too — its
   path, its open actions and its file list, not the first project the
   package happens to be installed in, and it stays that place while you look
   at another one's settings on the Customize tab — the chips move the tab,
