@@ -4,6 +4,7 @@ import {
   abbreviateHome,
   mergeDriftRows,
   mergedDetail,
+  packageConflicts,
   summarizePaths,
 } from "./drift-merge";
 
@@ -116,5 +117,36 @@ describe("summarizePaths", () => {
 
   it("returns null with no paths", () => {
     expect(summarizePaths([null])).toBeNull();
+  });
+});
+
+describe("packageConflicts", () => {
+  // What the safety gate holds back is always a package. The rows a place
+  // raises about itself are synthesized, and one of them carries a skill's
+  // kind with the settings file's name — so a package held back under that
+  // same name would take the scope's own conflict off Review with it, and
+  // the scope conflict has no exit on any package page to be found on.
+  it("keeps a conflict about the place itself", () => {
+    const heldBack = [
+      { kind: "skill", name: ".kendex-settings.env", harness: "claude" },
+    ] as Parameters<typeof packageConflicts>[1];
+    const aboutThePlace = row({
+      kind: "skill",
+      name: ".kendex-settings.env",
+      harness: "claude",
+      state: "conflict",
+      subject: "scope",
+      detail: "/work/vg/.kendex-settings.env is not a regular file",
+    });
+    const aboutThePackage = row({
+      kind: "skill",
+      name: ".kendex-settings.env",
+      harness: "claude",
+      state: "conflict",
+      subject: "package",
+    });
+
+    const kept = packageConflicts([aboutThePlace, aboutThePackage], heldBack);
+    expect(kept).toEqual([aboutThePlace]);
   });
 });

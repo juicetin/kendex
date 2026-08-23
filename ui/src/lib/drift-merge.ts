@@ -75,7 +75,14 @@ export function summarizePaths(paths: (string | null)[]): PathSummary | null {
  *  dismiss decision already on offer above, and no package page can settle
  *  a safety decision — so listing it here shows one thing twice and points
  *  the second copy at a page that cannot help. The refusals are exactly the
- *  items the same view reports as held back, harness by harness. */
+ *  items the same view reports as held back, harness by harness.
+ *
+ *  Packages only. What is held back is always a package, so a conflict
+ *  about the place itself answers to nothing in that list — and the rows
+ *  the place raises are synthesized ones that can carry a package's kind,
+ *  name and harness by coincidence. Matched on those alone, a real
+ *  conflict about the scope would vanish from Review with no exit
+ *  anywhere. */
 export function packageConflicts(
   drift: DriftRow[],
   heldBack: ItemSafety[],
@@ -84,7 +91,9 @@ export function packageConflicts(
     `${row.kind}:${row.name}:${row.harness}`;
   const refused = new Set(heldBack.map(key));
   return drift.filter(
-    (row) => row.state === "conflict" && !refused.has(key(row)),
+    (row) =>
+      row.state === "conflict" &&
+      !(row.subject === "package" && refused.has(key(row))),
   );
 }
 
