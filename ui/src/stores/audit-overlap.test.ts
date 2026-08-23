@@ -14,6 +14,8 @@ vi.mock("@/bindings", () => ({
   commands: {
     auditAll: vi.fn(),
     toggleItem: vi.fn(),
+    dismissFindings: vi.fn(),
+    revokeDismissal: vi.fn(),
     getManifest: vi.fn(),
     editorInventory: vi.fn(),
     updateManifest: vi.fn(),
@@ -79,6 +81,36 @@ describe("two writes in flight at once", () => {
     expect(useAuditStore.getState().busy).toBe(true);
 
     first.release({ status: "ok", data: emptyView });
+    await slow;
+    await settle();
+    expect(useAuditStore.getState().busy).toBe(false);
+  });
+
+  // Settling a finding raises the same flag by its own hand rather than
+  // through the funnel, so counting only the funnel's writers left this pair
+  // lowering it over each other exactly as before.
+  it("counts a dismissal beside a package-wide action", async () => {
+    const toggling = held<{ status: "ok"; data: AuditView }>();
+    const settling = held<{
+      status: "ok";
+      data: { view: AuditView; records: [] };
+    }>();
+    vi.mocked(commands.toggleItem).mockReturnValueOnce(toggling.promise);
+    vi.mocked(commands.dismissFindings).mockReturnValueOnce(settling.promise);
+
+    const slow = useAuditStore.getState().toggle(scope, "skill", "gh", false);
+    const quick = useAuditStore
+      .getState()
+      .dismiss(scope, ["token"], "intended");
+    await settle();
+    expect(useAuditStore.getState().busy).toBe(true);
+
+    settling.release({ status: "ok", data: { view: emptyView, records: [] } });
+    await quick;
+    await settle();
+    expect(useAuditStore.getState().busy).toBe(true);
+
+    toggling.release({ status: "ok", data: emptyView });
     await slow;
     await settle();
     expect(useAuditStore.getState().busy).toBe(false);

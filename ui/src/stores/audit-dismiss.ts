@@ -12,6 +12,7 @@ import {
 } from "@/lib/copy-decisions";
 import { replaceView } from "./audit";
 import type { auditMutation } from "./audit-mutate";
+import { heldDown } from "./audit-mutate";
 import { writing } from "./manifest-sync";
 import { useProblemsStore } from "./problems";
 import { refusesForUnsaved } from "./unsaved-first";
@@ -43,8 +44,7 @@ export function dismissFinding(
     // Settling a finding writes this place's kendex.toml like every other
     // action here, and went round the funnel that asks for them.
     if (refusesForUnsaved(scope)) return;
-    set({ busy: true });
-    try {
+    await heldDown(set, async () => {
       const attempt = await writing(scope, () =>
         commands.dismissFindings(scope, tokens, reason),
       );
@@ -129,8 +129,6 @@ export function dismissFinding(
             ),
         },
       });
-    } finally {
-      set({ busy: false });
-    }
+    });
   };
 }

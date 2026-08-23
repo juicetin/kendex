@@ -167,6 +167,22 @@ done
 # listing one costs a person the wait for a file it never touches. The
 # editor's own save writes a manifest and is absent on purpose: it is the
 # write the helper tells the editor about.
+# The same shape one level up, for the one flag two files raise. The audit
+# store's busy flag holds the Customize Save bar down, and a dismissal and
+# the funnel both write it — the first to finish put it up while the other
+# was still writing, releasing the bar over a live write. Counting the
+# writers fixes it only while every writer counts, and a hand-written
+# `set({ busy: true })` reads fine on its own: it is wrong only beside
+# another write, the case nobody has in mind while writing the line.
+for f in $(printf '%s\n' $files | grep -E '^ui/src/stores/audit.*\.tsx?$' | grep -v '\.test\.'); do
+  [ -f "$f" ] || continue
+  # The holder owns the flag; it is the one place that sets it.
+  [ "$f" = "ui/src/stores/audit-mutate.ts" ] && continue
+  grep -n 'set({ busy: true })' "$f" | while IFS=: read -r hitline _; do
+    say "$f raises the audit busy flag directly at line $hitline — hold it with heldDown(set, () => …) so an overlapping write cannot release it early"
+  done
+done
+
 WRITERS='adoptItem|applyPlan|applyDiscardEdits|bundleInstall|dismissFindings|forkRename|installDriftHook|marketplaceInstall|marketplaceSubscribe|marketplaceUnsubscribe|packageFork|packageSetRev|removeItem|revokeDismissal|revokeSafetyOverride|sourceToggle|toggleItem'
 for f in $(printf '%s\n' $files | grep -E '^ui/src/.*\.tsx?$' | grep -v '\.test\.'); do
   [ -f "$f" ] || continue

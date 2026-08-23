@@ -6,6 +6,33 @@ import { type ErrorAction, useProblemsStore } from "./problems";
 import { useScanStore } from "./scan";
 import { refusesForUnsaved, takeTheRest } from "./unsaved-first";
 
+/** How many writes are in flight. Two of them can be: a toast's Undo is
+ *  pressed whenever the reader presses it, which can be while a package-wide
+ *  action is still writing. */
+let writers = 0;
+
+/** Hold the store's busy flag down for the length of one write.
+ *
+ *  The flag is what keeps the Customize tab's Save bar down, so it has to
+ *  stay down until the editor has been told its copy is stale. A plain
+ *  boolean went up at whichever write finished first, releasing the bar over
+ *  another still in progress, where a save passes the outdated check and
+ *  writes the pre-action manifest back. Every writer of this flag holds it
+ *  through here — one left out is the same bug again. */
+export async function heldDown<T>(
+  set: (update: { busy: boolean }) => void,
+  call: () => Promise<T>,
+): Promise<T> {
+  writers += 1;
+  set({ busy: true });
+  try {
+    return await call();
+  } finally {
+    writers -= 1;
+    if (writers === 0) set({ busy: false });
+  }
+}
+
 /** Everything the funnel writes back into the store it belongs to. */
 interface MutationHost {
   views: AuditView[];
@@ -25,12 +52,6 @@ export function auditMutation(
   ) => void,
   get: () => { views: AuditView[] },
 ) {
-  // Two of these can be in flight at once: a toast's Undo runs whenever it is
-  // pressed, which can be while a package-wide action is still writing. A
-  // plain boolean would go down at whichever finished first and release the
-  // Save bar over a write still in progress, so the flag counts its writers
-  // and stays down until the last one leaves.
-  let writers = 0;
   // A row that vanishes with no word said is indistinguishable from a
   // button that did nothing — every outcome here speaks up, success or
   // failure, on top of the state update the page renders from. Failure is a
@@ -58,13 +79,7 @@ export function auditMutation(
     // after it — an Undo from a toast, another action entirely — finds
     // nothing left and retries itself.
     const theRest = takeTheRest();
-    writers += 1;
-    set({ busy: true });
-    // Busy is one of the flags holding the Customize tab's Save bar down, so
-    // it stays up until the editor has been told its copy is stale — clearing
-    // it any earlier leaves a window where a save passes the outdated check
-    // and writes the pre-action manifest back.
-    try {
+    return await heldDown(set, async () => {
       const attempt = await writing(scope, action);
       const response = attempt.ok
         ? attempt.value
@@ -90,10 +105,7 @@ export function auditMutation(
         actions: [retry],
       });
       return false;
-    } finally {
-      writers -= 1;
-      if (writers === 0) set({ busy: false });
-    }
+    });
   };
   return run;
 }
