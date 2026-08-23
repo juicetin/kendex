@@ -4,7 +4,7 @@ import { replaceView } from "./audit";
 import { writing } from "./manifest-sync";
 import { type ErrorAction, useProblemsStore } from "./problems";
 import { useScanStore } from "./scan";
-import { refusesForUnsaved, retryTheRest } from "./unsaved-first";
+import { refusesForUnsaved, takeTheRest } from "./unsaved-first";
 
 /** Everything the funnel writes back into the store it belongs to. */
 interface MutationHost {
@@ -48,6 +48,10 @@ export function auditMutation(
     // discard is refused — before anything is written, and wherever the
     // typing is waiting.
     if (refusesForUnsaved(scope)) return false;
+    // Taken at entry, so it belongs to this write alone: anything started
+    // after it — an Undo from a toast, another action entirely — finds
+    // nothing left and retries itself.
+    const theRest = takeTheRest();
     set({ busy: true });
     // Busy is one of the flags holding the Customize tab's Save bar down, so
     // it stays up until the editor has been told its copy is stale — clearing
@@ -70,7 +74,7 @@ export function auditMutation(
         // Inside a package-wide action this place is not the whole job:
         // retrying it alone would report success with the places after it
         // never attempted. The one that knows what is left says so.
-        onClick: retryTheRest() ?? (() => void run(scope, action, opts)),
+        onClick: theRest ?? (() => void run(scope, action, opts)),
       };
       useProblemsStore.getState().showError({
         title: opts.title,

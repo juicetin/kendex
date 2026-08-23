@@ -172,7 +172,10 @@ export function PackagePage() {
       <PackageHeader
         kind={group.kind}
         displayName={displayName}
-        description={group.description}
+        // This place's, like everything else the header says: a group keeps
+        // the first installation's description, and two places can be on
+        // versions or sources that describe the package differently.
+        description={here.description}
         place={selected}
         scopes={scopes}
         action={

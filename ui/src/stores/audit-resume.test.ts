@@ -7,7 +7,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Scope } from "@/bindings";
 import { useEditorStore } from "./editor";
 import { useProblemsStore } from "./problems";
-import { inEveryPlace, retryTheRest } from "./unsaved-first";
+import { inEveryPlace, takeTheRest } from "./unsaved-first";
 
 vi.mock("@/bindings", () => ({ commands: {} }));
 
@@ -22,7 +22,7 @@ const funnel =
   (fails: Set<string>, wrote: string[]) => async (scope: Scope) => {
     const root = "root" in scope ? scope.root : "global";
     if (fails.has(root)) {
-      const again = retryTheRest();
+      const again = takeTheRest();
       useProblemsStore.getState().showError({
         title: "Couldn't do it here",
         message: root,
@@ -74,7 +74,7 @@ describe("a package-wide action that stopped partway", () => {
   // nothing to do with it.
   it("keeps nothing once the action is over", async () => {
     await inEveryPlace([A, B], funnel(new Set(), []));
-    expect(retryTheRest()).toBeNull();
+    expect(takeTheRest()).toBeNull();
   });
 
   // Including when the action does not return at all — a transport failure
@@ -88,6 +88,31 @@ describe("a package-wide action that stopped partway", () => {
       }),
     ).rejects.toThrow("the channel closed");
 
-    expect(retryTheRest()).toBeNull();
+    expect(takeTheRest()).toBeNull();
+  });
+
+  // An Undo offered by a toast runs on its own, at any moment — including
+  // while a package-wide action is between places. Finding that action's
+  // continuation would give its Retry the job of writing a package nobody
+  // named, so the write it was left for takes it and nothing else can.
+  it("leaves nothing for an action that started on its own", async () => {
+    const wrote: string[] = [];
+    let sawWhileRunning: (() => void) | null | undefined;
+
+    await inEveryPlace([A, B], async (scope) => {
+      const root = "root" in scope ? scope.root : "global";
+      // The funnel takes it at entry, which is what this stands in for.
+      const mine = takeTheRest();
+      if (root === "/work/a") {
+        // Something else starts while this place is being written.
+        sawWhileRunning = takeTheRest();
+      }
+      expect(mine).not.toBeNull();
+      wrote.push(root);
+      return true;
+    });
+
+    expect(wrote).toEqual(["/work/a", "/work/b"]);
+    expect(sawWhileRunning).toBeNull();
   });
 });

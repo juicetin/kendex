@@ -66,6 +66,7 @@ export const scanned = () => ({
       path: "/work/vg/gh",
       harness: "claude",
       tags: ["review"],
+      description: "what gh does here",
     }),
     observedItem({
       name: "gh",
@@ -73,6 +74,7 @@ export const scanned = () => ({
       path: "/work/hyprtrade/gh",
       harness: "opencode",
       tags: ["testing"],
+      description: "what gh does over there",
     }),
   ],
 });

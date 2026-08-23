@@ -205,6 +205,10 @@ describe("what the package page is about", () => {
     expect(shown.harnesses).toEqual(["claude"]);
     expect(shown.tags).toEqual(["review"]);
 
+    // The header speaks for the same place, description included: two
+    // places can be on versions that describe the package differently.
+    expect(render().header.description).toBe("what gh does here");
+
     world.at.scope = HYPR;
     const other = render().body.group as {
       harnesses: string[];
@@ -212,6 +216,7 @@ describe("what the package page is about", () => {
     };
     expect(other.harnesses).toEqual(["opencode"]);
     expect(other.tags).toEqual(["testing"]);
+    expect(render().header.description).toBe("what gh does over there");
   });
 
   // The Customize tab's chips move between places, so what it is told

@@ -65,18 +65,23 @@ export function refusesForUnsavedIn(scopes: Scope[]): boolean {
   return true;
 }
 
-// Set only while a package-wide action is writing one of its places, and
-// read by the funnel that raises the failure — which is called from inside
-// the action and so cannot be handed this any other way. One slot rather
-// than a stack: these all run under a busy flag that keeps a second
-// package-wide action from starting while one is in flight.
+// Left here for the funnel that raises the failure, which is called from
+// inside the action and so cannot be handed this any other way.
 let rest: (() => void) | null = null;
 
 /** What a retry raised during a package-wide action should do: the places
  *  that are left, not the one place the message came from. Null when the
- *  failure is a single place's own. */
-export function retryTheRest(): (() => void) | null {
-  return rest;
+ *  failure is a single place's own.
+ *
+ *  Taken rather than read. The write this was left for is the next one to
+ *  ask, so handing it over and clearing the slot in one step is what keeps
+ *  it from reaching anything else: an Undo offered by a toast runs on its
+ *  own, at any moment, and finding a package-wide action's continuation
+ *  would give its Retry the job of writing a package nobody named. */
+export function takeTheRest(): (() => void) | null {
+  const mine = rest;
+  rest = null;
+  return mine;
 }
 
 /** Run one package-wide action over every place it is about, or over none.
