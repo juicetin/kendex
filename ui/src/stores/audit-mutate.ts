@@ -1,6 +1,7 @@
 import { toast } from "sonner";
 import type { AuditView, Scope } from "@/bindings";
 import { replaceView } from "./audit";
+import { writeTicket } from "./audit-order";
 import { writing } from "./manifest-sync";
 import { type ErrorAction, useProblemsStore } from "./problems";
 import { useScanStore } from "./scan";
@@ -79,13 +80,18 @@ export function auditMutation(
     // after it — an Undo from a toast, another action entirely — finds
     // nothing left and retries itself.
     const theRest = takeTheRest();
+    // What comes back is this place's file as this write left it. Landing
+    // after a newer write of the same place, it would put that place's
+    // pre-write account back over the newer one.
+    const mayLand = writeTicket(scope);
     return await heldDown(set, async () => {
       const attempt = await writing(scope, action);
       const response = attempt.ok
         ? attempt.value
         : { status: "error" as const, error: attempt.why };
       if (response.status === "ok") {
-        set({ views: replaceView(get().views, response.data), error: null });
+        if (mayLand())
+          set({ views: replaceView(get().views, response.data), error: null });
         if (opts.successMessage) toast.success(opts.successMessage);
         await useScanStore.getState().refresh();
         return true;

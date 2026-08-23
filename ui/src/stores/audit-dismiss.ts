@@ -13,6 +13,7 @@ import {
 import { replaceView } from "./audit";
 import type { auditMutation } from "./audit-mutate";
 import { heldDown } from "./audit-mutate";
+import { writeTicket } from "./audit-order";
 import { writing } from "./manifest-sync";
 import { useProblemsStore } from "./problems";
 import { refusesForUnsaved } from "./unsaved-first";
@@ -44,6 +45,9 @@ export function dismissFinding(
     // Settling a finding writes this place's kendex.toml like every other
     // action here, and went round the funnel that asks for them.
     if (refusesForUnsaved(scope)) return;
+    // Settling writes this place's file like the rest, so its answer ranks
+    // the same way: a newer write of the same place outranks it.
+    const mayLand = writeTicket(scope);
     await heldDown(set, async () => {
       const attempt = await writing(scope, () =>
         commands.dismissFindings(scope, tokens, reason),
@@ -87,7 +91,8 @@ export function dismissFinding(
       }
       if (!attempt.ok || attempt.value.status !== "ok") return;
       const { view, records } = attempt.value.data;
-      set({ views: replaceView(get().views, view), error: null });
+      if (mayLand())
+        set({ views: replaceView(get().views, view), error: null });
       // How much of the undo is already done. It lives out here because a
       // retry runs the same closure again: each record's revoke is pinned
       // to the exact dismissal it takes back, so one already taken back

@@ -13,6 +13,7 @@ import { adoptedToastLabel } from "@/lib/copy";
 import { TAKEN_BACK_TOAST } from "@/lib/copy-decisions";
 import { dismissFinding } from "./audit-dismiss";
 import { auditMutation } from "./audit-mutate";
+import { readTicket } from "./audit-order";
 
 interface AuditState {
   views: AuditView[];
@@ -96,9 +97,14 @@ export const useAuditStore = create<AuditState>((set, get) => {
         auditedAt != null && Date.now() - auditedAt < AUDIT_FRESH_FOR_MS;
       if (fresh && !opts?.force) return;
       set({ auditing: true });
+      // Every place at once, so it speaks for places this app may write
+      // while it is away: landing afterwards, it would put the pre-write
+      // account of them back.
+      const mayLand = readTicket();
       try {
         const response = await commands.auditAll();
         if (response.status === "ok") {
+          if (!mayLand()) return;
           set({
             views: response.data,
             auditedAt: Date.now(),
