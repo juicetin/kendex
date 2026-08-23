@@ -43,7 +43,10 @@ export function ItemCustomize({
   name: string;
   /** Where this package is installed; the first is the one opened. */
   scopes: Scope[];
-  harnesses: HarnessId[];
+  /** Which tools carry this package, per place — the chips move between
+   *  places, and a package installed for one tool here and another there
+   *  must not offer either place the other's. */
+  harnesses: Record<string, HarnessId[]>;
 }) {
   const { scope, draft, inventory, saving, error, setScope, edit } =
     useEditorStore();
@@ -57,8 +60,13 @@ export function ItemCustomize({
 
   const mine = itemCustomization(draft, kind, name);
   const shared = sharedCustomization(draft);
+  // What this place's machine has, narrowed to what this place installs
+  // the package for: a tool the machine offers is not a tool this package
+  // is here under, and settings for one it is not would be written to a
+  // rendering nobody has.
+  const installedHere = harnesses[scopeKey(scope)] ?? [];
   const tools = (inventory?.harnesses ?? []).filter((id) =>
-    harnesses.includes(id),
+    installedHere.includes(id),
   );
 
   return (

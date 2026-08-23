@@ -20,6 +20,8 @@ export type PageWorld = {
   versions: unknown[];
   /** A newer check on its way, which the Update button waits for. */
   checking: boolean;
+  /** What the page was opened showing, which decides its first tab. */
+  opened: { mode: string } | null;
 };
 
 /** Enough for the Update button to be offered: a newer version exists and
@@ -32,6 +34,7 @@ export const freshWorld = (): PageWorld => ({
   held: {},
   meta: { rev: null, fork: null },
   checking: false,
+  opened: null,
   versions: [
     {
       id: "b".repeat(40),

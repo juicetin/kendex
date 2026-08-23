@@ -1,4 +1,10 @@
-import type { ItemKind, ObservedItem, Scope, UpdateRow } from "@/bindings";
+import type {
+  HarnessId,
+  ItemKind,
+  ObservedItem,
+  Scope,
+  UpdateRow,
+} from "@/bindings";
 import {
   editedRowIn,
   type PlaceStanding,
@@ -6,7 +12,13 @@ import {
   placeStandings,
   standingIn,
 } from "@/lib/customized-places";
-import { groupScopes, type ItemGroup, installationIn } from "@/lib/derive";
+import {
+  groupItems,
+  groupScopes,
+  type ItemGroup,
+  installationIn,
+} from "@/lib/derive";
+import { sameScope, scopeKey } from "@/lib/scope";
 import type { PackageRef, PackageView } from "@/stores/nav";
 
 // Where a mark leads. A mark that says a place is yours is only worth
@@ -96,4 +108,31 @@ export function packageMarks(
     selected: standingIn(standings, opened),
     editedRow: editedRowIn(source, kind, name, opened),
   };
+}
+
+/** The group a page about one place may describe itself from.
+ *
+ *  A group folds `harnesses`, `tags`, `shared` and the modification time
+ *  across its installations, and those span places — so a group built from
+ *  all of them describes a union of places while the header names one. The
+ *  full group still answers the question it is for: where else this lives.
+ */
+export function groupHere(group: ItemGroup, scope: Scope): ItemGroup | null {
+  const mine = group.installations.filter((one) => sameScope(one.scope, scope));
+  return groupItems(mine)[0] ?? null;
+}
+
+/** Which tools carry this package in each place, keyed by place.
+ *
+ *  The Customize tab's chips move between places, so one list for all of
+ *  them would offer a place settings for a tool it does not install the
+ *  package under — written to a rendering nobody has. */
+export function carriedBy(group: ItemGroup): Record<string, HarnessId[]> {
+  const byPlace: Record<string, HarnessId[]> = {};
+  for (const one of group.installations) {
+    const key = scopeKey(one.scope);
+    const seen = byPlace[key] ?? [];
+    if (!seen.includes(one.harness)) byPlace[key] = [...seen, one.harness];
+  }
+  return byPlace;
 }

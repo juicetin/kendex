@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { Scope, UpdateRow } from "@/bindings";
+import type { HarnessId, Scope, UpdateRow } from "@/bindings";
 import { updateRow } from "@/components/updates-test-rows";
 import { type Draft, emptyDraft } from "@/lib/editor-draft";
 import { ItemCustomize } from "./item-customize";
@@ -19,6 +19,8 @@ const stub = vi.hoisted(() => ({
   rows: [] as unknown[],
   updatesLoaded: true,
   updatesError: null as string | null,
+  inventory: null as unknown,
+  scope: { scope: "project", root: "/work/vg" } as unknown,
 }));
 
 vi.mock("@/stores/editor", async (importOriginal) => {
@@ -26,12 +28,13 @@ vi.mock("@/stores/editor", async (importOriginal) => {
   const hook = (selector?: (state: unknown) => unknown) => {
     const state = {
       ...mod.useEditorStore.getState(),
-      scope: { scope: "project", root: "/work/vg" },
+      scope: stub.scope,
       draft: stub.saved["/work/vg"] ?? null,
       saved: stub.saved,
       manifestsLoaded: stub.manifestsLoaded,
       manifestError: stub.manifestError,
       saving: stub.saving,
+      inventory: stub.inventory,
     };
     return selector ? selector(state) : state;
   };
@@ -64,7 +67,7 @@ const current = (scope: Scope): UpdateRow =>
 
 const render = () =>
   renderToStaticMarkup(
-    <ItemCustomize kind="skill" name="gh" scopes={[VG, HYPR]} harnesses={[]} />,
+    <ItemCustomize kind="skill" name="gh" scopes={[VG, HYPR]} harnesses={{}} />,
   );
 
 beforeEach(() => {
@@ -75,6 +78,7 @@ beforeEach(() => {
   stub.updatesLoaded = true;
   stub.updatesError = null;
   stub.rows = [current(VG), current(HYPR)];
+  stub.scope = VG;
 });
 
 // Switching places is how you reach a customization, so the chips carry the
@@ -143,7 +147,7 @@ describe("the Customize tab's place chips", () => {
           { scope: "project", root: "/work/one/api" },
           { scope: "project", root: "/work/two/api" },
         ]}
-        harnesses={[]}
+        harnesses={{}}
       />,
     );
     expect(html).toContain(">one/api<");
@@ -167,5 +171,58 @@ describe("the Customize tab's place chips", () => {
     // The open place stays clickable — going there changes nothing.
     expect(chips[0]).not.toContain(' disabled=""');
     expect(chips[1]).toContain(' disabled=""');
+  });
+});
+
+// The chips move between places, and a package can be installed for one
+// tool in one place and another elsewhere. The settings offered are for
+// the tools that carry it *here* — settings for a tool this place does not
+// install it under would be written to a rendering nobody has.
+describe("the tools the Customize tab offers", () => {
+  const offered = (harnesses: Record<string, HarnessId[]>) => {
+    stub.inventory = {
+      declaredAgents: [],
+      declaredSkills: [],
+      availableSkills: [],
+      harnesses: ["claude", "opencode"],
+      hookEvents: [],
+    };
+    return renderToStaticMarkup(
+      <ItemCustomize
+        kind="agent"
+        name="rev"
+        scopes={[VG, HYPR]}
+        harnesses={harnesses}
+      />,
+    );
+  };
+
+  it("offers only the tools this place carries it under", () => {
+    // The editor is pointed at /work/vg, which carries it under Claude
+    // alone; the other place's OpenCode is not this place's business.
+    const html = offered({
+      "/work/vg": ["claude"],
+      "/work/hyprtrade": ["opencode"],
+    });
+    expect(html).toContain("Claude Code");
+    expect(html).not.toContain("OpenCode");
+  });
+
+  it("offers none where this place carries it under nothing", () => {
+    const html = offered({ "/work/hyprtrade": ["opencode"] });
+    expect(html).not.toContain("OpenCode");
+    expect(html).not.toContain("Claude Code");
+  });
+
+  // The chips move the tab between places, so the answer has to be there
+  // for every place they reach — not only the one the page was opened at.
+  it("answers for the place a chip moved to", () => {
+    stub.scope = HYPR;
+    const html = offered({
+      "/work/vg": ["claude"],
+      "/work/hyprtrade": ["opencode"],
+    });
+    expect(html).toContain("OpenCode");
+    expect(html).not.toContain("Claude Code");
   });
 });

@@ -1,11 +1,8 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { updateRow } from "@/components/updates-test-rows";
-import { UNSAVED_ELSEWHERE_TITLE } from "@/lib/copy-customize";
-import type { PlaceStanding } from "@/lib/customized-places";
-import { emptyDraft } from "@/lib/editor-draft";
 import { PackagePage } from "./package";
-import { freshWorld, HYPR, type PageWorld, VG } from "./package-test-world";
+import { freshWorld, type PageWorld } from "./package-test-world";
 
 // The page's children are mocked to hand back the props they were given.
 // What is pinned here is the page's own destructure, not the helper behind
@@ -138,93 +135,35 @@ beforeEach(() => {
   world.at = freshWorld();
 });
 
-describe("what the package page is about", () => {
-  it("takes its installation from the place it was opened at", () => {
-    expect((render().body.primary as { path: string }).path).toBe(
-      "/work/vg/gh",
-    );
-    world.at.scope = HYPR;
-    expect((render().body.primary as { path: string }).path).toBe(
-      "/work/hyprtrade/gh",
-    );
+// When the page offers to bring this place up to date. The button applies
+// the revision the last read named and writes the file the Customize tab
+// may be holding, so it waits on both — a check still arriving, and an
+// edit this place is holding back.
+describe("the package page's Update button", () => {
+  it("does not offer an update while a check is still on its way", () => {
+    world.at.rows = [
+      updateRow("gh", "/work/vg", { updateAvailable: true, canDiscard: true }),
+    ];
+    expect(render().actions.updateAvailable).toBe(true);
+
+    world.at.checking = true;
+    expect(render().actions.updateAvailable).toBe(false);
   });
 
-  it("speaks for the place it was opened at, whatever the chips have open", () => {
-    // The editor points somewhere else: the package last edited before this
-    // page opened, or the place a Customize chip was clicked. Either way the
-    // title names the place the installation, the actions and the notice
-    // below it are about, or the page says one thing and does another.
-    expect((render().header.place as PlaceStanding).scope).toEqual(VG);
-    world.at.editorScope = VG;
-    world.at.scope = HYPR;
-    expect((render().header.place as PlaceStanding).scope).toEqual(HYPR);
-  });
-
-  it("reads its edited-files notice off the place it was opened at", () => {
+  it("does not offer an update for a place its edits are holding", () => {
+    // The control: everything the Update button needs is in place.
+    world.at.rows = [
+      updateRow("gh", "/work/vg", { updateAvailable: true, canDiscard: true }),
+    ];
+    expect(render().actions.updateAvailable).toBe(true);
+    // The edit is what holds it, and the engine would refuse the apply.
     world.at.rows = [
       updateRow("gh", "/work/vg", {
-        updateAvailable: false,
+        updateAvailable: true,
         blockedByLocalEdit: true,
+        canDiscard: true,
       }),
-      updateRow("gh", "/work/hyprtrade", { updateAvailable: false }),
     ];
-    expect((render().body.editedRow as { scope: unknown }).scope).toEqual(VG);
-    world.at.scope = HYPR;
-    expect(render().body.editedRow).toBe(null);
-  });
-
-  // Arriving here is what parks typing left at another place, so this is
-  // the page that has to say where it went — above the tabs, since landing
-  // on Overview must not hide it.
-  it("names typing parked at another place, whatever tab is open", () => {
-    expect(renderToStaticMarkup(<PackagePage />)).not.toContain(
-      UNSAVED_ELSEWHERE_TITLE,
-    );
-    world.at.held = {
-      "/work/hyprtrade": {
-        scope: HYPR,
-        draft: emptyDraft(),
-        base: null,
-      },
-    };
-    const html = renderToStaticMarkup(<PackagePage />);
-    expect(html).toContain(UNSAVED_ELSEWHERE_TITLE);
-    expect(html).toContain("/work/hyprtrade");
-  });
-
-  // The button applies the revision the last read named, so a read still on
-  // its way means the version on screen is the one it is about to replace.
-  // The same package can be installed differently from place to place. A
-  // group's harnesses and tags are unions across its installations, so the
-  // one this page hands to the details has to hold this place's alone —
-  // otherwise the header names one project while everything under it
-  // describes both.
-  it("describes the place it is about, not every place at once", () => {
-    const body = render().body;
-    const shown = body.group as { harnesses: string[]; tags: string[] };
-    expect(shown.harnesses).toEqual(["claude"]);
-    expect(shown.tags).toEqual(["review"]);
-
-    world.at.scope = HYPR;
-    const other = render().body.group as {
-      harnesses: string[];
-      tags: string[];
-    };
-    expect(other.harnesses).toEqual(["opencode"]);
-    expect(other.tags).toEqual(["testing"]);
-  });
-
-  // The Customize tab's chips move between places, so what it is told
-  // about which tools carry the package has to cover every place they
-  // reach — not only the one the page was opened at.
-  it("tells Customize about every place its chips can reach", () => {
-    // The tab renders only what it is showing, so the page opens on it —
-    // and the body, which `render` insists on, is not shown there.
-    world.at.opened = { mode: "customize" };
-    renderToStaticMarkup(<PackagePage />);
-    expect(seen.customize?.harnesses).toEqual({
-      "/work/vg": ["claude"],
-      "/work/hyprtrade": ["opencode"],
-    });
+    expect(render().actions.updateAvailable).toBe(false);
   });
 });

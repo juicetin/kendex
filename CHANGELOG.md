@@ -344,9 +344,9 @@ changes carry a **Breaking** call-out with their migration note inline.
   package's own page already did. Saving into that window wrote a copy of
   the settings file the action had already changed.
 - `kendex discard-edits --help` lists every kind the command takes — hooks,
-  commands, MCP servers and Pi extensions as well as agents and skills. It
-  named only two, so a fix `kendex check` printed for one of the others read
-  as unsupported.
+  commands and MCP servers as well as agents and skills. It named only two,
+  so a fix `kendex check` printed for one of the others read as
+  unsupported.
 - Discarding your unsaved customization no longer takes typing you did
   after pressing it. The reload that follows leaves anything newer than the
   instruction alone, instead of replacing it without a word.
