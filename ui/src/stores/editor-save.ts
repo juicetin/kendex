@@ -49,6 +49,18 @@ const refuseOnScreen = (scope: Scope, load: Load) =>
     ],
   });
 
+/** The base the editor holds for a place, wherever that copy is sitting.
+ *
+ *  A save that lands after the reader has moved on is still about the place
+ *  it wrote, and the store's own base by then belongs to the place now in
+ *  front of them — reading it there compares two different files and calls
+ *  every late refusal settled. The parked copy keeps its own. */
+const heldBase = (scope: Scope, onThisPlace: boolean): string | null => {
+  const state = useEditorStore.getState();
+  if (onThisPlace) return state.base;
+  return state.held[scopeKey(scope)]?.base ?? null;
+};
+
 export const saveManifest = async (): Promise<void> => {
   // Scope, draft and base are one value: read apart, a place switch between
   // the reads sends one place's manifest to another place's file, or writes
@@ -107,7 +119,7 @@ export const saveManifest = async (): Promise<void> => {
       // the lock has already settled the place and moved the base on. Its
       // twin refusing afterwards would refuse a save the file would take,
       // and offer to reload away whatever has been typed since.
-      const settledSince = useEditorStore.getState().base !== base;
+      const settledSince = heldBase(scope, here()) !== base;
       if (!settledSince) useEditorStore.getState().outdate(scope);
       if (settledSince) return;
       if (onScreen()) refuseOnScreen(scope, load);

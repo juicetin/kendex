@@ -179,3 +179,39 @@ describe("a second save pressed before the first answered", () => {
     expect(after.base).toBe("written");
   });
 });
+
+// A save's answer can arrive after the reader has moved to another place.
+// The write is still about the place it wrote, and the copy it came from is
+// parked, not gone — the store's own base by then describes the place now
+// on screen. Compared against that, a refusal reads as a place someone else
+// already settled, and the parked copy keeps no mark: reopened, it offers a
+// draft the file will refuse all over again.
+describe("a refusal that lands after the reader has moved on", () => {
+  it("marks the place that was written, not the one now on screen", async () => {
+    const elsewhere: Scope = { scope: "project", root: "/work/vg" };
+    const late =
+      deferred<Awaited<ReturnType<typeof commands.updateManifest>>>();
+    vi.mocked(commands.updateManifest).mockReturnValueOnce(late.promise);
+
+    const saving = useEditorStore.getState().save();
+    await settle();
+
+    // Moving parks the copy this save came from and reads the new place,
+    // which brings its own base with it.
+    vi.mocked(commands.getManifest).mockResolvedValue({
+      status: "ok",
+      data: { manifest: null, base: "another-place" },
+    });
+    await useEditorStore.getState().setScope(elsewhere);
+    expect(useEditorStore.getState().base).toBe("another-place");
+
+    late.resolve({
+      status: "error",
+      error: { kind: "stale" },
+    });
+    await saving;
+    await settle();
+
+    expect(useEditorStore.getState().outdated).toBe("global");
+  });
+});
