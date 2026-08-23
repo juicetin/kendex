@@ -25,6 +25,12 @@ export function auditMutation(
   ) => void,
   get: () => { views: AuditView[] },
 ) {
+  // Two of these can be in flight at once: a toast's Undo runs whenever it is
+  // pressed, which can be while a package-wide action is still writing. A
+  // plain boolean would go down at whichever finished first and release the
+  // Save bar over a write still in progress, so the flag counts its writers
+  // and stays down until the last one leaves.
+  let writers = 0;
   // A row that vanishes with no word said is indistinguishable from a
   // button that did nothing — every outcome here speaks up, success or
   // failure, on top of the state update the page renders from. Failure is a
@@ -52,6 +58,7 @@ export function auditMutation(
     // after it — an Undo from a toast, another action entirely — finds
     // nothing left and retries itself.
     const theRest = takeTheRest();
+    writers += 1;
     set({ busy: true });
     // Busy is one of the flags holding the Customize tab's Save bar down, so
     // it stays up until the editor has been told its copy is stale — clearing
@@ -84,7 +91,8 @@ export function auditMutation(
       });
       return false;
     } finally {
-      set({ busy: false });
+      writers -= 1;
+      if (writers === 0) set({ busy: false });
     }
   };
   return run;
