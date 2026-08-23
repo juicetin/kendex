@@ -84,6 +84,50 @@ beforeEach(async () => {
 });
 
 describe("a second save pressed before the first answered", () => {
+  // Both presses send the same draft. One wins the lock and settles the
+  // place; the other is refused as stale and answers afterwards. Marking
+  // the place then would refuse a save the file would take, and the way
+  // out it offers is a reload over whatever has been typed since.
+  it("does not mark a place its twin has already settled", async () => {
+    const winner =
+      deferred<Awaited<ReturnType<typeof commands.updateManifest>>>();
+    const loser =
+      deferred<Awaited<ReturnType<typeof commands.updateManifest>>>();
+    vi.mocked(commands.updateManifest)
+      .mockReturnValueOnce(winner.promise)
+      .mockReturnValueOnce(loser.promise);
+
+    const one = useEditorStore.getState().save();
+    const two = useEditorStore.getState().save();
+    await settle();
+
+    vi.mocked(commands.getManifest).mockResolvedValue({
+      status: "ok",
+      data: {
+        manifest: {
+          schema: 1,
+          install: {},
+          "skill-instructions": { gh: "mine" },
+        },
+        base: "written",
+      },
+    });
+    winner.resolve({
+      status: "ok",
+      data: { view: audited(), base: "written", wroteMore: false },
+    });
+    await one;
+    expect(useEditorStore.getState().outdated).toBeNull();
+
+    // And now the twin's refusal arrives, about a file that has moved on.
+    loser.resolve({ status: "error", error: { kind: "stale" } });
+    await two;
+
+    const after = useEditorStore.getState();
+    expect(after.outdated).toBeNull();
+    expect(after.base).toBe("written");
+  });
+
   it("settles the write that landed, even though it is not the newest", async () => {
     const first =
       deferred<Awaited<ReturnType<typeof commands.updateManifest>>>();

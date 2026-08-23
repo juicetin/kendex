@@ -128,8 +128,10 @@ describe("a save pressed the moment the busy flag comes down", () => {
       return { status: "ok", data: emptyView };
     });
     const save = saveOnce();
-    // The flag lives in the updates store now rather than in the page, so
-    // the window is watched the same way the audit one is.
+    // The flag the Save bar reads is the updates store's, so the window
+    // this watches for is that flag coming down: it has to stay up until
+    // the editor has been told, or a save pressed the instant it drops
+    // writes the pre-action manifest back.
     const stop = useUpdatesStore.subscribe((state, previous) => {
       if (previous.busy && !state.busy) save.press();
     });

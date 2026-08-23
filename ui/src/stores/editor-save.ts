@@ -100,9 +100,16 @@ export const saveManifest = async (): Promise<void> => {
     // file — so the same refusal the mark would have raised is raised
     // here, with the same way out.
     if (response.error.kind === "stale") {
-      // Marked whichever save is newest: the file moved under this copy,
-      // which is a fact about the place rather than about the screen.
-      useEditorStore.getState().outdate(scope);
+      // The file moved under this copy, which is a fact about the place
+      // rather than about the screen — so it is recorded whichever save is
+      // newest. But only while the copy in hand is still the one this save
+      // carried: two presses can send the same draft, and the one that won
+      // the lock has already settled the place and moved the base on. Its
+      // twin refusing afterwards would refuse a save the file would take,
+      // and offer to reload away whatever has been typed since.
+      const settledSince = useEditorStore.getState().base !== base;
+      if (!settledSince) useEditorStore.getState().outdate(scope);
+      if (settledSince) return;
       if (onScreen()) refuseOnScreen(scope, load);
       else if (mine())
         useEditorStore.setState({ error: outdatedElsewhere(scope) });

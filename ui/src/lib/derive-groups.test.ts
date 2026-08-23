@@ -69,8 +69,10 @@ describe("groupScopes", () => {
 });
 
 // A package page is about one installation — its path, its open actions,
-// its broken-link state. Before the customized mark, every route into the
-// page arrived at the first one, so which it was never mattered.
+// its broken-link state — and it has to be the installation in the place
+// the page was opened at. A mark names any place the package lives in, so
+// taking the first install instead would describe a location the reader
+// never asked about.
 
 describe("installationIn", () => {
   const group = () =>
