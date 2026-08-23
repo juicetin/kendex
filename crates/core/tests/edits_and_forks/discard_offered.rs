@@ -322,3 +322,70 @@ fn a_target_added_after_the_fork_still_decides_the_discard() {
         "the tool that cannot take it decides too: {held:?}"
     );
 }
+
+/// Parsing is not the planner's whole test for an agent either. The file
+/// can read, and its frontmatter can be perfectly well formed, and the
+/// harness can still refuse what the planner generates from it — a name
+/// that disagrees with the agent being installed is refused as breakage.
+/// A discard offered on the parse alone names that way out too.
+#[test]
+#[allow(clippy::unwrap_used)]
+fn a_forked_agent_the_harness_will_not_take_offers_no_discard() {
+    let w = world();
+    let dir = w.upstream.join("agents");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("rev.md"),
+        "---\nname: rev\ndescription: agent rev\n---\nAgent body.\n",
+    )
+    .unwrap();
+    commit(&w.upstream, "one");
+    declare(&w, "[agents.rev]\nsource = \"cat\"\n");
+    sync_and_apply(&w);
+
+    let installed = w.home.join("app/.claude/agents/rev.md");
+    fs::write(
+        &installed,
+        "---\nname: rev\ndescription: mine now\n---\nMy agent.\n",
+    )
+    .unwrap();
+    let plan = fork::fork(&w.env, &w.scope, ItemKind::Agent, "rev", HarnessId::Claude).unwrap();
+    apply::execute(&w.env, &plan, None).unwrap();
+    let report = audit(&w.env, &w.scope).unwrap();
+    apply::execute(&w.env, &report.plan, None).unwrap();
+    fs::write(&installed, "edited after forking").unwrap();
+
+    let row = |w: &World| {
+        updates::updates(&w.env, &w.scope)
+            .unwrap()
+            .rows
+            .into_iter()
+            .find(|row| row.name == "rev")
+            .unwrap()
+    };
+    assert!(row(&w).can_discard, "the copy is there to put back");
+
+    // Well formed, and about a different agent: Claude reads the name in
+    // the file and this one no longer answers to the one being installed.
+    let Scope::Project { root } = &w.scope else {
+        unreachable!("the test world is a project")
+    };
+    let local = root.join(".kendex-local/agents/rev.md");
+    fs::write(
+        &local,
+        "---\nname: someone-else\ndescription: mine now\n---\nMy agent.\n",
+    )
+    .unwrap();
+    assert!(
+        kendex_core::render::agent::parse_source_agent(&fs::read_to_string(&local).unwrap())
+            .is_ok(),
+        "it parses — the parse is not the thing that refuses it"
+    );
+
+    let held = row(&w);
+    assert!(
+        !held.can_discard,
+        "the harness would refuse what this renders to: {held:?}"
+    );
+    assert!(held.forked, "still this place's own copy: {held:?}");
+}

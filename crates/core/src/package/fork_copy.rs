@@ -64,12 +64,30 @@ pub(super) fn local_copy_resolves(
                 .any(|finding| finding.is_breakage())
             })
         }
-        // Read is not enough for an agent: the planner parses the file it
-        // reads, and a copy that is readable but has no usable frontmatter
-        // is refused there as unmeasured. Offering a discard on the
-        // strength of the read alone names a way out that cannot run.
-        _ => sealed
-            .read_to_string(&root.join("agents").join(format!("{name}.md")))
-            .is_ok_and(|text| crate::render::agent::parse_source_agent(&text).is_ok()),
+        // Read is not enough for an agent, and neither is the parse. The
+        // planner parses what it reads and then puts the result past each
+        // harness's own rules, where a name that disagrees with the agent
+        // being installed is refused like any other breakage — so the read
+        // and the parse together still name a way out that cannot run.
+        // Checked per tool for the same reason the skill tree is: the
+        // rules differ between them and the discard writes for all of them.
+        _ => {
+            let Ok(text) = sealed.read_to_string(&root.join("agents").join(format!("{name}.md")))
+            else {
+                return false;
+            };
+            if crate::render::agent::parse_source_agent(&text).is_err() {
+                return false;
+            }
+            harnesses.iter().all(|harness| {
+                !crate::render::validate::validate_agent(
+                    *harness,
+                    &crate::harness::rendered_name(*harness, name),
+                    &text,
+                )
+                .iter()
+                .any(|finding| finding.is_breakage())
+            })
+        }
     }
 }
