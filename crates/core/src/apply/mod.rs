@@ -5,6 +5,9 @@ use crate::env::Env;
 use crate::error::{CoreError, Result};
 use crate::model::Scope;
 
+mod base;
+#[cfg(test)]
+mod base_tests;
 mod common;
 pub mod journal;
 mod op;
@@ -134,36 +137,15 @@ pub fn execute(env: &Env, plan: &Plan, fail_after: Option<usize>) -> Result<Appl
     Ok(ApplyOutcome {
         applied,
         recovered_first,
-        // Still under `_guard`, which is the closest this can get: the lock
-        // serialises kendex's own writers, so no other apply is between
-        // the write and this read. It does not serialise anything else —
-        // an editor saving kendex.toml in that window would be read here
-        // as though this apply had left it, and the base handed back would
-        // describe bytes this apply never wrote. Deriving it from the
-        // bytes the manifest op actually wrote is the way to close that,
-        // and it needs the executor to report them: KEN-513. Its own
-        // failure is not this apply's — the ops are committed either way.
-        manifest_base: manifest_base(env, &plan.scope),
+        // The lock serialises kendex's own writers, so no other apply is
+        // between the write and this read — but it serialises nothing
+        // else, and an editor saving kendex.toml in that window would be
+        // read here as though this apply had left it. So where this plan
+        // wrote the manifest, what is on disk is checked against what the
+        // op put there. Its own failure is not this apply's: the ops are
+        // committed either way, and the answer is only the base.
+        manifest_base: base::base_this_apply_left(env, plan),
     })
-}
-
-/// The scope's manifest as it stands, for an apply that still holds the
-/// lock. Derived from the bytes read here, like every other base, and
-/// `None` where they could not be read — every caller of this is past the
-/// point of undoing anything, so a read that fails costs the answer and
-/// never the apply.
-///
-/// "As it stands" is the honest phrasing: this reads the file rather than
-/// being told what was written, so it describes whatever is there now.
-/// Under kendex's own lock that is what this apply left; against a writer
-/// that does not take the lock it is not (KEN-513).
-pub(super) fn manifest_base(env: &Env, scope: &Scope) -> Option<crate::manifest::Base> {
-    let path = crate::manifest::manifest_path(env, scope);
-    match crate::fs::read_if_exists(&path) {
-        Ok(Some(text)) => Some(crate::manifest::Base::of(&text)),
-        Ok(None) => Some(crate::manifest::Base::absent()),
-        Err(_) => None,
-    }
 }
 
 /// The one transaction engine, under a lock the caller already holds for

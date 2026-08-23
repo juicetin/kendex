@@ -59,7 +59,7 @@ pub fn execute_common<T>(
             recovered_first,
             // Common state is machine-wide and writes no scope manifest;
             // the caller that needs one writes it through `execute`.
-            manifest_base: super::manifest_base(env, scope),
+            manifest_base: super::base::manifest_base(env, scope),
         },
         extra,
     ))

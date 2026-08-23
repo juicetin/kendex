@@ -405,6 +405,10 @@ changes carry a **Breaking** call-out with their migration note inline.
   will do. Rows that are not about a package, like a settings file kendex
   could not write, are listed without a link, since there is no page to
   open for them.
+- Editing a project's `kendex.toml` in another editor at the moment kendex
+  finishes writing it no longer costs you that edit. The Customize tab's
+  next save is refused with the reload it offers for any file that moved
+  under it, instead of landing on top.
 - Saving the Customize tab is refused, with the reason and a way to reload,
   when something else rewrote that project's settings while you were typing.
   Before, the save put the older copy back and whatever had just been

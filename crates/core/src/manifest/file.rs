@@ -80,11 +80,17 @@ pub fn parse_text(path: &Path, text: &str) -> Result<ManifestFile> {
 }
 
 pub fn save(path: &Path, manifest: &Manifest) -> Result<()> {
-    let text = toml::to_string_pretty(manifest).map_err(|e| CoreError::TomlParse {
+    atomic_write(path, &as_text(path, manifest)?)
+}
+
+/// The bytes `save` would write. Named so a caller that has to know what a
+/// write put on disk can ask, rather than reading the file back and
+/// trusting that nothing else touched it in between.
+pub fn as_text(path: &Path, manifest: &Manifest) -> Result<String> {
+    toml::to_string_pretty(manifest).map_err(|e| CoreError::TomlParse {
         path: path.to_path_buf(),
         message: e.to_string(),
-    })?;
-    atomic_write(path, &text)
+    })
 }
 
 /// Load for mutation: a legacy file is a hard error, never a write target.
