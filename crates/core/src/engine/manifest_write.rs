@@ -63,6 +63,21 @@ pub(super) fn plan_manifest_write(
 /// write, or the repository move's surgical text edit. A caller about to
 /// insert its own save must count both: a second write to the same file
 /// binds to bytes the first one replaces and could never run.
+/// The manifest a plan puts on disk, where it plans one.
+///
+/// A caller that handed a manifest in cannot assume that is what lands:
+/// creating the file seeds it, saving names a custom hook that arrived
+/// without one, and the planner itself can record what an agent's mapping
+/// gained upstream. Asking the plan what it will write is one question
+/// that covers all of those, and any later one — the alternative is a
+/// list of normalizations that has to be kept complete by hand.
+pub fn written_manifest(ops: &[PlannedOp]) -> Option<&Manifest> {
+    ops.iter().find_map(|op| match &op.op {
+        Op::WriteManifest { manifest, .. } => Some(manifest.as_ref()),
+        _ => None,
+    })
+}
+
 pub fn persists_manifest(ops: &[PlannedOp]) -> bool {
     ops.iter().any(|op| {
         matches!(op.op, Op::WriteManifest { .. })

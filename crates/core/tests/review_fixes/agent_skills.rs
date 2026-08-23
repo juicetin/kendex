@@ -74,3 +74,44 @@ fn a_declaration_under_the_base_agents_key_holds_on_the_first_apply() {
         "the prefix match the declaration replaced does not come back: {rendered}"
     );
 }
+
+/// What the plan will write, asked of the plan.
+///
+/// The editor hands a manifest in and needs to know whether that is what
+/// lands, because a copy typed while the write is away descends from what
+/// was sent and not from what the planner added. Merging back what upstream
+/// gained is one of those additions, and it reaches a manifest that already
+/// exists — so it is not covered by anything the caller can check before
+/// planning.
+#[test]
+#[allow(clippy::unwrap_used)]
+fn the_plan_says_the_manifest_it_writes_is_not_the_one_it_was_given() {
+    let w = world();
+    let scope = project(&w);
+    declare(
+        &w,
+        &scope,
+        "[agents.rust]\nsource = \"cat\"\n\n[agent-skills]\nrust = [\"gh\"]\n",
+    );
+    apply_now(&w, &scope);
+
+    // Upstream gains a skill the declaration has never heard of.
+    add_skill(&w.source, "rust-perf");
+    let sent = loaded_manifest(&w, &scope);
+    let report = kendex_core::engine::plan_scope(
+        &w.env,
+        &scope,
+        &sent,
+        &kendex_core::lock::load(&kendex_core::lock::lock_path(&w.env, &scope)).unwrap(),
+        &kendex_core::engine::PlanOptions::default(),
+    )
+    .unwrap();
+
+    let written = kendex_core::engine::written_manifest(&report.plan.ops)
+        .expect("the pass records what the mapping gained");
+    assert_ne!(
+        written, &sent,
+        "the file will hold more than the caller handed in"
+    );
+    assert_eq!(written.agent_skills["rust"], ["gh", "rust-perf"]);
+}

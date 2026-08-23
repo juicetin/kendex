@@ -3,7 +3,7 @@ pub mod audit;
 mod commands;
 mod community;
 pub mod decisions;
-mod editor;
+pub mod editor;
 // Nothing outside Linux reaches this: the fixes it decides are for GTK
 // and for how the Linux app is packaged.
 #[cfg(target_os = "linux")]

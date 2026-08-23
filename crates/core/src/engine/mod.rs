@@ -37,7 +37,7 @@ mod item_plan;
 pub use edited::{EditedHere, edited_here};
 mod item_record;
 mod manifest_write;
-pub use manifest_write::persists_manifest;
+pub use manifest_write::{persists_manifest, written_manifest};
 mod item_source;
 mod observed;
 pub mod ops;

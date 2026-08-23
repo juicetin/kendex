@@ -8,6 +8,7 @@
 
 use kendex_core::apply::{self, Op, PlannedOp, Pre};
 use kendex_core::engine::{self, PlanOptions, ops};
+use kendex_core::env::Env;
 use kendex_core::lock::{load as load_lock, lock_path};
 use kendex_core::manifest::{self, Finding, Manifest};
 use kendex_core::model::Scope;
@@ -131,19 +132,21 @@ fn on_first_creation(manifest: &mut Manifest, seed: Manifest) -> bool {
     filled
 }
 
-/// Bring what the caller sent to what actually goes on disk, and say
-/// whether the two differ. `seed` is present only where there is no file
-/// yet, which is the one moment seeding happens.
+/// Bring what the caller sent to what goes on disk. `seed` is present only
+/// where there is no file yet, which is the one moment seeding happens.
 ///
-/// Both normalizations answer here so neither can be added without the
-/// caller being told: a write that quietly holds more than it was sent is
-/// a write the editor will mistake for its own copy.
-fn as_written(manifest: &mut Manifest, seed: Option<Manifest>) -> bool {
-    let seeded = seed.is_some_and(|seed| on_first_creation(manifest, seed));
+/// Whether the two differ is not answered here. These are the changes made
+/// before planning; the planner makes its own — an agent's mapping that
+/// gained a skill upstream is recorded by the plan — and a list of them
+/// kept by hand goes stale the first time another is added. The write's
+/// own plan is asked instead.
+fn as_written(manifest: &mut Manifest, seed: Option<Manifest>) {
+    if let Some(seed) = seed {
+        on_first_creation(manifest, seed);
+    }
     // A custom hook's name is its identity everywhere downstream; saving is
     // when a derived one stops being derived.
-    let named = kendex_core::hook::name_custom_hooks(manifest);
-    seeded || named
+    kendex_core::hook::name_custom_hooks(manifest);
 }
 
 /// Write an edited manifest and reconcile the scope to it.
@@ -161,8 +164,18 @@ pub fn update_manifest(
     manifest: Manifest,
     base: Option<String>,
 ) -> Result<ManifestWritten, WriteRefused> {
-    let env = env()?;
-    let path = manifest::manifest_path(&env, &scope);
+    write_manifest(&env()?, scope, manifest, base)
+}
+
+/// The write itself, against a given environment — which is what makes it
+/// reachable from a test. The command above only finds the environment.
+pub fn write_manifest(
+    env: &Env,
+    scope: Scope,
+    manifest: Manifest,
+    base: Option<String>,
+) -> Result<ManifestWritten, WriteRefused> {
+    let path = manifest::manifest_path(env, &scope);
     // The bytes behind this base were read in the editor, so it arrives as
     // a claim and is only ever compared, never believed.
     let claimed = manifest::Base::claimed(base);
@@ -174,14 +187,17 @@ pub fn update_manifest(
     if let Err(error) = manifest::check_base(&path, &claimed) {
         return Err(refusal(error));
     }
+    // Kept as it arrived, to compare the file against once the plan says
+    // what the file will be.
+    let sent = manifest.clone();
     let mut manifest = manifest;
     let seed = match manifest::load_for_mutation(&path).map_err(|e| e.to_string())? {
         Some(_) => None,
-        None => Some(ops::manifest_for_mutation(&env, &scope).map_err(|e| e.to_string())?),
+        None => Some(ops::manifest_for_mutation(env, &scope).map_err(|e| e.to_string())?),
     };
-    let wrote_more = as_written(&mut manifest, seed);
+    as_written(&mut manifest, seed);
     check(&manifest)?;
-    let lock = load_lock(&lock_path(&env, &scope)).map_err(|e| e.to_string())?;
+    let lock = load_lock(&lock_path(env, &scope)).map_err(|e| e.to_string())?;
     // Whoever plans a write of this file, it is the copy on screen being
     // written, so the plan binds its own manifest write to the file that
     // copy came from. Binding afterwards by path cannot: a scope still
@@ -193,7 +209,14 @@ pub fn update_manifest(
         ..PlanOptions::default()
     };
     let mut report =
-        engine::plan_scope(&env, &scope, &manifest, &lock, &options).map_err(|e| e.to_string())?;
+        engine::plan_scope(env, &scope, &manifest, &lock, &options).map_err(|e| e.to_string())?;
+    // What the file will hold, asked of the plan rather than assembled from
+    // a list of the ways it can differ. The planner records its own
+    // changes — an agent's mapping that gained a skill upstream is one —
+    // and a caller told only about the changes made before planning hands
+    // its base to a copy that never held them.
+    let wrote_more = engine::written_manifest(&report.plan.ops)
+        .map_or(manifest != sent, |written| written != &sent);
     let persisted = engine::persists_manifest(&report.plan.ops);
     if !persisted {
         report.plan.ops.insert(
@@ -222,7 +245,7 @@ pub fn update_manifest(
     // check gives — so it reaches the editor as the same choice. Told as a
     // failure it would reach them as a message they cannot act on, which
     // is the whole reason the refusal is a shape and not a string.
-    let outcome = apply::execute(&env, &report.plan, None).map_err(|error| {
+    let outcome = apply::execute(env, &report.plan, None).map_err(|error| {
         match stale_at(&error, &targets) {
             true => WriteRefused::Stale,
             false => WriteRefused::Failed {
@@ -231,7 +254,7 @@ pub fn update_manifest(
         }
     })?;
     Ok(ManifestWritten {
-        view: view(&env, &scope),
+        view: view(env, &scope),
         // From the apply, which read it before letting the scope go. Read
         // here instead and the answer could already be somebody else's,
         // handed back paired with the copy this write came from.
@@ -312,11 +335,11 @@ mod tests {
         assert!(declared.install.harnesses.is_empty());
     }
 
-    // Both normalizations are the same fact to the caller: the file holds
-    // something no copy in hand does. Naming a hook is the one that reaches
-    // a manifest that already exists.
+    // Naming a hook is the normalization that reaches a manifest which
+    // already exists, so it is the one a save can meet on any ordinary
+    // file rather than only on the first.
     #[test]
-    fn naming_a_hook_is_the_write_holding_more_than_it_was_sent() {
+    fn saving_names_a_custom_hook_that_arrived_without_one() {
         let unnamed = || kendex_core::manifest::CustomHook {
             name: None,
             event: "PreToolUse".to_owned(),
@@ -329,18 +352,23 @@ mod tests {
             agents: kendex_core::manifest::HookAgents::One("all".to_owned()),
         };
 
-        // An existing file, so nothing is seeded: the naming alone answers.
+        // An existing file, so nothing is seeded: the naming alone changes
+        // it, and what goes on disk is no longer what the caller sent.
         let mut arriving = manifest();
         arriving.custom_hooks.push(unnamed());
-        assert!(as_written(&mut arriving, None));
+        let sent = arriving.clone();
+        as_written(&mut arriving, None);
         assert!(arriving.custom_hooks[0].name.is_some());
+        assert_ne!(arriving, sent);
 
-        // And a manifest the write leaves exactly as it came says so, or
-        // every ordinary save would refuse the copy that made it.
+        // And a manifest that arrives already named is left exactly as it
+        // came, or every ordinary save would refuse the copy that made it.
         let mut settled = manifest();
         settled.custom_hooks.push(unnamed());
         settled.custom_hooks[0].name = Some("guard".to_owned());
-        assert!(!as_written(&mut settled, None));
+        let untouched = settled.clone();
+        as_written(&mut settled, None);
+        assert_eq!(settled, untouched);
     }
 
     #[test]
