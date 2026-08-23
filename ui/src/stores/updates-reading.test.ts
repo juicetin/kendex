@@ -5,10 +5,17 @@
 // now is waiting on.
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { commands } from "@/bindings";
+import { useEditorStore } from "./editor";
 import { updatesReading, useUpdatesStore } from "./updates";
 
 vi.mock("@/bindings", () => ({
-  commands: { updatesOverview: vi.fn(), updatesRefresh: vi.fn() },
+  commands: {
+    updatesOverview: vi.fn(),
+    updatesRefresh: vi.fn(),
+    updateSetIgnored: vi.fn(),
+    getManifest: vi.fn(),
+    editorInventory: vi.fn(),
+  },
 }));
 
 vi.mock("sonner", () => ({
@@ -104,5 +111,37 @@ describe("whether a read of the standing is running", () => {
 
     read.resolve(empty);
     await done;
+  });
+});
+
+// Muting an update is a preference of this machine's, recorded in kendex's
+// own settings. It touches no project's file, so the things owed to a file
+// a save would write back are not owed here: a draft open in Customize
+// does not block it, and it does not hold the Save bar down.
+describe("muting an update", () => {
+  it("is not refused by unsaved customization", async () => {
+    vi.mocked(commands.updateSetIgnored).mockResolvedValue({
+      status: "ok",
+      data: { rows: [], warnings: [] },
+    });
+    // Typing waiting in the very place the row belongs to.
+    useEditorStore.setState({
+      scope: { scope: "global" },
+      draft: { schema: 1, install: {}, "skill-instructions": { gh: "mine" } },
+      dirty: true,
+      held: {},
+    });
+
+    await useUpdatesStore.getState().setIgnored(
+      {
+        scope: { scope: "global" },
+        kind: "skill",
+        name: "gh",
+        repo: "owner/catalog",
+      } as never,
+      true,
+    );
+
+    expect(commands.updateSetIgnored).toHaveBeenCalled();
   });
 });
