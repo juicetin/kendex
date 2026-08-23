@@ -1,10 +1,12 @@
+use std::collections::BTreeSet;
+
 use clap::Args;
 
 use kendex_core::engine::{
     EditedHere, PlanOptions, edited_here, plan_scope, planned_declarations, plans_kind,
 };
 use kendex_core::env::Env;
-use kendex_core::lock::{load as load_lock, lock_path};
+use kendex_core::lock::{Lock, load as load_lock, lock_path};
 use kendex_core::manifest::{Manifest, load_for_mutation, manifest_path};
 use kendex_core::model::{ItemKind, Scope};
 
@@ -39,18 +41,30 @@ pub struct DiscardArgs {
 /// `kendex remove` matches on name alone — it has no kind to be given — so
 /// where a package of another kind shares this name, running it removes
 /// that one too. The advice says so rather than reading as a safe exit.
+///
+/// The declarations are half the answer. A package can outlive the line
+/// that asked for it and go on living in the lock, and `remove` reaches
+/// those too — reading only what is declared calls the command safe over
+/// the files it is about to take.
 fn removal_advice(
+    lock: &Lock,
     env: &Env,
     scope: &Scope,
     manifest: &Manifest,
     kind: ItemKind,
     name: &str,
 ) -> String {
-    let also: Vec<ItemKind> = planned_declarations(env, scope, manifest)
+    let mut also: BTreeSet<ItemKind> = planned_declarations(env, scope, manifest)
         .iter()
         .filter(|item| item.name == name && item.kind != kind)
         .map(|item| item.kind)
         .collect();
+    also.extend(
+        lock.entries
+            .values()
+            .filter(|entry| entry.name == name && entry.kind != kind)
+            .map(|entry| entry.kind),
+    );
     if also.is_empty() {
         return format!("remove it with 'kendex remove {name}'");
     }
@@ -112,7 +126,7 @@ pub fn run(env: &Env, args: DiscardArgs) -> CliResult {
             "{} '{}' is installed here but nothing needs it any more — there is no declared content to put it back to; {}",
             kind.name(),
             args.name,
-            removal_advice(env, &scope, &manifest, kind, &args.name)
+            removal_advice(&lock, env, &scope, &manifest, kind, &args.name)
         )
         .into());
     }
@@ -139,7 +153,7 @@ pub fn run(env: &Env, args: DiscardArgs) -> CliResult {
                 "{} '{}' could not be read from its source, so there is nothing to put its files back to — fix the source, or {}",
                 kind.name(),
                 args.name,
-                removal_advice(env, &scope, &manifest, kind, &args.name)
+                removal_advice(&lock, env, &scope, &manifest, kind, &args.name)
             )
             .into());
         }
