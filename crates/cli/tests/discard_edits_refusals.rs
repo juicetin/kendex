@@ -312,3 +312,57 @@ fn a_required_dependency_the_gate_holds_refuses_the_whole_restore() {
         "the edit is left where it is, since nothing replaced it"
     );
 }
+
+/// `kendex remove` matches on name alone, so recommending it where two
+/// kinds share a name hands over a command that takes the other one with
+/// it. The advice says so instead of reading as a safe exit.
+#[test]
+#[allow(clippy::unwrap_used)]
+fn removal_advice_names_what_else_shares_the_name() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path();
+    let project = project_with_two_skills(home);
+    let catalog = home.join("catalog");
+    skill(&catalog, "helper", "Upstream helper.");
+    write(
+        &catalog,
+        "agents/helper.md",
+        "---\nname: helper\ndescription: about helper\n---\nAgent helper.\n",
+    );
+    // The skill arrives as gh's dependency; the agent is declared outright.
+    write(
+        &catalog,
+        "skills/gh/SKILL.md",
+        "---\nname: gh\ndescription: about gh\ndependencies:\n  required: [helper]\n---\nUpstream gh.\n",
+    );
+    let manifest = project.join("kendex.toml");
+    let text = fs::read_to_string(&manifest).unwrap();
+    fs::write(
+        &manifest,
+        format!("{text}\n[agents.helper]\nsource = \"cat\"\n"),
+    )
+    .unwrap();
+    assert!(kendex(home, &project, &["apply", "-y"]).status.success());
+
+    // gh stops requiring the skill, so nothing needs it any more.
+    write(
+        &catalog,
+        "skills/gh/SKILL.md",
+        "---\nname: gh\ndescription: about gh\n---\nUpstream gh.\n",
+    );
+    let helper = project.join(".claude/skills/helper/SKILL.md");
+    fs::write(&helper, "my helper edit").unwrap();
+
+    let output = kendex(home, &project, &["discard-edits", "skill", "helper"]);
+    let said = String::from_utf8_lossy(&output.stderr).into_owned()
+        + &String::from_utf8_lossy(&output.stdout);
+    assert!(!output.status.success(), "{said}");
+    assert!(
+        said.contains("would take the agent of that name with it"),
+        "it says what else the command would take: {said}"
+    );
+    assert!(
+        !said.contains("remove it with 'kendex remove helper'"),
+        "and never hands over the command as a safe exit: {said}"
+    );
+}

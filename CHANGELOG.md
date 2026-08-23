@@ -301,6 +301,11 @@ changes carry a **Breaking** call-out with their migration note inline.
   the package back — a safety finding, say — instead of reporting the
   content restored while your edited files are still there. The app's
   discard says the same.
+- Where `kendex discard-edits` cannot put a package back, what it says to
+  do instead no longer hands over a command that would take more with it.
+  `kendex remove` matches on a name alone, so where a package of another
+  kind shares that name it says which one would go too, rather than
+  reading as a safe way out.
 - `kendex discard-edits` on a package whose source cannot be read says so
   and stops, instead of reporting "no edits to discard" while your edited
   files are still there. The app's discard says the same.

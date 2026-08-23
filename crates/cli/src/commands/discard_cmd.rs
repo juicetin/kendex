@@ -5,7 +5,8 @@ use kendex_core::engine::{
 };
 use kendex_core::env::Env;
 use kendex_core::lock::{load as load_lock, lock_path};
-use kendex_core::manifest::{load_for_mutation, manifest_path};
+use kendex_core::manifest::{Manifest, load_for_mutation, manifest_path};
+use kendex_core::model::{ItemKind, Scope};
 
 use super::pin::parse_kind;
 use super::{CliResult, resolve_scopes, say};
@@ -28,6 +29,34 @@ pub struct DiscardArgs {
     /// project | global (default project)
     #[arg(long)]
     scope: Option<String>,
+}
+
+/// How to say "take this away" without handing over a command that takes
+/// more than the line it came from named.
+///
+/// `kendex remove` matches on name alone — it has no kind to be given — so
+/// where a package of another kind shares this name, running it removes
+/// that one too. The advice says so rather than reading as a safe exit.
+fn removal_advice(
+    env: &Env,
+    scope: &Scope,
+    manifest: &Manifest,
+    kind: ItemKind,
+    name: &str,
+) -> String {
+    let also: Vec<ItemKind> = planned_declarations(env, scope, manifest)
+        .iter()
+        .filter(|item| item.name == name && item.kind != kind)
+        .map(|item| item.kind)
+        .collect();
+    if also.is_empty() {
+        return format!("remove it with 'kendex remove {name}'");
+    }
+    let named: Vec<&str> = also.iter().map(|k| k.name()).collect();
+    format!(
+        "'kendex remove {name}' would take the {} of that name with it, since it matches on name alone — take this one away by hand instead",
+        named.join(" and the ")
+    )
 }
 
 pub fn run(env: &Env, args: DiscardArgs) -> CliResult {
@@ -78,10 +107,10 @@ pub fn run(env: &Env, args: DiscardArgs) -> CliResult {
         .any(|item| item.kind == kind && item.name == args.name);
     if !declared && !wanted {
         return Err(format!(
-            "{} '{}' is installed here but nothing needs it any more — there is no declared content to put it back to; remove it with 'kendex remove {}'",
+            "{} '{}' is installed here but nothing needs it any more — there is no declared content to put it back to; {}",
             kind.name(),
             args.name,
-            args.name
+            removal_advice(env, &scope, &manifest, kind, &args.name)
         )
         .into());
     }
@@ -105,10 +134,10 @@ pub fn run(env: &Env, args: DiscardArgs) -> CliResult {
         // and the discard itself has nothing to put back either way.
         EditedHere::Unmeasured => {
             return Err(format!(
-                "{} '{}' could not be read from its source, so there is nothing to put its files back to — fix the source, or remove it with 'kendex remove {}'",
+                "{} '{}' could not be read from its source, so there is nothing to put its files back to — fix the source, or {}",
                 kind.name(),
                 args.name,
-                args.name
+                removal_advice(env, &scope, &manifest, kind, &args.name)
             )
             .into());
         }
