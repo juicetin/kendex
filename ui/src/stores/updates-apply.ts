@@ -10,7 +10,7 @@ import { placeName, skippedPlaces, updatablePlaces } from "@/lib/update-groups";
 import { visibleUpdates } from "@/lib/update-rows";
 import { bulkUpdateToast } from "@/lib/update-toasts";
 import { useAuditStore } from "./audit";
-import { manifestRewritten } from "./manifest-sync";
+import { writing } from "./manifest-sync";
 import { useProblemsStore } from "./problems";
 import { useScanStore } from "./scan";
 import { refusesForUnsaved, refusesForUnsavedIn } from "./unsaved-first";
@@ -38,22 +38,22 @@ const apply = async (row: UpdateRow): Promise<boolean> => {
   // Held packages move by moving the hold; following ones come current
   // by applying the scope — which is what following means, and brings
   // any other pending changes in that scope along.
-  const response =
+  // Both branches rewrite this scope's kendex.toml — moving a hold writes
+  // the revision, applying writes whatever the plan settled — and the
+  // editor is told inside `writing`, whatever the outcome.
+  const attempt = await writing(row.scope, () =>
     row.pinned && row.latest
-      ? await commands.packageSetRev(
-          row.scope,
-          row.kind,
-          row.name,
-          row.latest.commit,
-        )
-      : await commands.applyPlan(row.scope, false, []);
-  if (response.status === "error") {
-    showError(UPDATE_ERROR_TITLE, response.error);
+      ? commands.packageSetRev(row.scope, row.kind, row.name, row.latest.commit)
+      : commands.applyPlan(row.scope, false, []),
+  );
+  if (!attempt.ok) {
+    showError(UPDATE_ERROR_TITLE, attempt.why);
     return false;
   }
-  // Both branches rewrite this scope's kendex.toml — moving a hold writes
-  // the revision, applying writes whatever the plan settled.
-  await manifestRewritten(row.scope);
+  if (attempt.value.status === "error") {
+    showError(UPDATE_ERROR_TITLE, attempt.value.error);
+    return false;
+  }
   return true;
 };
 
@@ -165,13 +165,19 @@ export const applyMany = async (wanted: UpdateRow[]): Promise<void> => {
         ok = false;
         break;
       }
-      const response = await commands.applyPlan(row.scope, false, []);
-      if (response.status === "error") {
-        showError(UPDATE_ERROR_TITLE, response.error);
+      const attempt = await writing(row.scope, () =>
+        commands.applyPlan(row.scope, false, []),
+      );
+      if (!attempt.ok) {
+        showError(UPDATE_ERROR_TITLE, attempt.why);
         ok = false;
         break;
       }
-      await manifestRewritten(row.scope);
+      if (attempt.value.status === "error") {
+        showError(UPDATE_ERROR_TITLE, attempt.value.error);
+        ok = false;
+        break;
+      }
       wrote += 1;
     }
     await finish(ok, applied.size + wrote > 0);

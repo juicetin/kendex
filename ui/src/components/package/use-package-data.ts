@@ -16,7 +16,7 @@ import {
 import { versionRowLabel } from "@/lib/versions";
 import { useAuditStore } from "@/stores/audit";
 import { useEditorStore } from "@/stores/editor";
-import { manifestRewritten } from "@/stores/manifest-sync";
+import { writing } from "@/stores/manifest-sync";
 import { useMarketplacesStore } from "@/stores/marketplaces";
 import type { PackageView as OpenedAt, PackageRef } from "@/stores/nav";
 import { useProblemsStore } from "@/stores/problems";
@@ -154,11 +154,8 @@ export function packageVersionActions(
     useProblemsStore
       .getState()
       .showError({ title: VERSION_ERROR_TITLE, message });
-  const afterChange = async () => {
+  const afterChange = () => {
     reload();
-    // Each of these rewrites this place's kendex.toml, and the editor holds
-    // a whole copy of it that a save would write back.
-    await manifestRewritten(ref.scope);
     void useScanStore.getState().refresh();
     void useAuditStore.getState().refresh({ force: true });
   };
@@ -175,21 +172,21 @@ export function packageVersionActions(
     setBusy(true);
     void (async () => {
       try {
-        const response = await call();
-        if (response.status === "error") {
-          showError(response.error);
+        // Busy stays up through this: it is one of the flags holding the
+        // Save bar down, and the editor is told inside `writing` — whatever
+        // the outcome, since a hold moved and a scope applied both land
+        // before anything here can fail.
+        const attempt = await writing(ref.scope, call);
+        if (!attempt.ok) {
+          showError(attempt.why);
+          return;
+        }
+        if (attempt.value.status === "error") {
+          showError(attempt.value.error);
           return;
         }
         toast.success(toastMessage);
-        // Busy is one of the flags holding the Save bar down, so it stays up
-        // until the editor has been told its copy is stale. Clearing it first
-        // leaves a window where a save passes the outdated check and writes
-        // the pre-change manifest back over what this just recorded.
-        await afterChange();
-      } catch (thrown) {
-        // A transport failure rejects rather than answering; without this the
-        // page would spin and the Save bar stay down for good.
-        showError(String(thrown));
+        afterChange();
       } finally {
         setBusy(false);
       }

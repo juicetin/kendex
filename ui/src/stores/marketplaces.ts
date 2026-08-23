@@ -11,12 +11,13 @@ import {
   type InstallItem,
   type Scope,
 } from "@/bindings";
+import { writing } from "./manifest-sync";
 import { catalogReads } from "./marketplaces-reads";
 import {
   cachedRepoCatalogs,
   catalogKey,
   dropCatalogCaches,
-  refreshDownstream,
+  refreshRest,
   subscription,
 } from "./marketplaces-shared";
 import { subscriptionOps } from "./marketplaces-subscriptions";
@@ -140,20 +141,24 @@ export const useMarketplacesStore = create<MarketplacesState>((set, get) => ({
     // or a refusal would leave every control waiting on nothing.
     if (refusesForUnsaved(destination ?? scope)) return false;
     set({ busy: true });
-    let response: Awaited<ReturnType<typeof commands.marketplaceInstall>>;
-    try {
-      response = await commands.marketplaceInstall(
+    // The install commits before it reads back the package list it answers
+    // with, so an error can arrive with the declarations already on disk.
+    const attempt = await writing(destination ?? scope, () =>
+      commands.marketplaceInstall(
         scope,
         source,
         items,
         bundle,
         destination ?? null,
         false,
-      );
-    } catch (thrown) {
+      ),
+    );
+    if (!attempt.ok) {
       set({ busy: false });
-      throw thrown;
+      toast.error(attempt.why);
+      return false;
     }
+    const response = attempt.value;
     if (response.status === "error") {
       set({ busy: false });
       toast.error(response.error);
@@ -174,12 +179,11 @@ export const useMarketplacesStore = create<MarketplacesState>((set, get) => ({
         ? items[0].name
         : `${items.length} packages`;
     toast.success(`Installed ${what}`);
-    // Busy stays up through the sync: it is what holds the Customize save
-    // down, and the manifest this install rewrote is only handed to the
-    // editor inside refreshDownstream. Lowering it first reopens the very
-    // window the flag exists to close.
+    // Busy stays up through the rest of the re-reads: it is what holds the
+    // Customize save down, and lowering it first reopens the window the
+    // flag exists to close.
     try {
-      await refreshDownstream(destination ?? scope);
+      await refreshRest();
     } finally {
       set({ busy: false });
     }

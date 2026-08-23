@@ -8,13 +8,13 @@
 import { toast } from "sonner";
 import type { CatalogSummary, MarketplaceRow, Scope } from "@/bindings";
 import { commands } from "@/bindings";
-import { manifestRewritten } from "./manifest-sync";
+import { manifestRewritten, writing } from "./manifest-sync";
 import {
   dropCatalogCaches,
   dropSummariesHeldBy,
   isRepoKey,
   openLead,
-  refreshDownstream,
+  refreshRest,
 } from "./marketplaces-shared";
 import { refusesForUnsaved } from "./unsaved-first";
 
@@ -84,17 +84,21 @@ export function subscriptionOps(set: Set, get: Get) {
       if (refusesForUnsaved(scope)) return false;
       set({ busy: true });
       try {
-        const response = await commands.marketplaceUnsubscribe(
-          scope,
-          source,
-          keep,
-          discardEdits,
+        // Keeping the packages detaches them and then resyncs, so an
+        // error can arrive with the fork records already in kendex.toml.
+        const attempt = await writing(scope, () =>
+          commands.marketplaceUnsubscribe(scope, source, keep, discardEdits),
         );
+        if (!attempt.ok) {
+          set({ error: attempt.why });
+          return false;
+        }
+        const response = attempt.value;
         if (response.status === "error") {
           set({ error: response.error });
           return false;
         }
-        await refreshDownstream(scope);
+        await refreshRest();
         set({ error: null });
         toast.success(
           keep
@@ -120,12 +124,21 @@ export function subscriptionOps(set: Set, get: Get) {
       if (refusesForUnsaved(scope)) return;
       set({ busy: true });
       try {
-        const response = await commands.sourceToggle(scope, source, enabled);
-        if (response.status === "error") {
-          toast.error(response.error);
+        // The manifest change lands before the overview it answers with is
+        // read, so an error here can arrive with the toggle already on
+        // disk.
+        const attempt = await writing(scope, () =>
+          commands.sourceToggle(scope, source, enabled),
+        );
+        if (!attempt.ok) {
+          toast.error(attempt.why);
           return;
         }
-        await refreshDownstream(scope);
+        if (attempt.value.status === "error") {
+          toast.error(attempt.value.error);
+          return;
+        }
+        await refreshRest();
         dropCatalogCaches(set);
         dropSummariesHeldBy(set, get().rows, scope, source);
         await get().load();

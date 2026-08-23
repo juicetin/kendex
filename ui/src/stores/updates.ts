@@ -2,7 +2,7 @@ import { create } from "zustand";
 import { commands, type ItemWarning, type UpdateRow } from "@/bindings";
 import { UPDATE_ERROR_TITLE } from "@/lib/copy";
 import { keepIfSame } from "@/lib/same-read";
-import { manifestRewritten } from "./manifest-sync";
+import { writing } from "./manifest-sync";
 import { useProblemsStore } from "./problems";
 import { refusesForUnsaved } from "./unsaved-first";
 import { applyMany, applyOne } from "./updates-apply";
@@ -174,20 +174,22 @@ export const useUpdatesStore = create<UpdatesState>((set) => {
       if (refusesForUnsaved(row.scope)) return;
       set({ busy: true });
       try {
-        const response = await commands.packageSetRev(
-          row.scope,
-          row.kind,
-          row.name,
-          auto ? null : hold,
+        // Holding a package at a version, or letting it follow again,
+        // writes that place's kendex.toml — and the editor is told inside
+        // `writing`, before the tables re-read, or a save of the copy the
+        // Customize tab holds puts the old file back over the record.
+        const attempt = await writing(row.scope, () =>
+          commands.packageSetRev(
+            row.scope,
+            row.kind,
+            row.name,
+            auto ? null : hold,
+          ),
         );
-        const wrote = response.status !== "error";
-        if (wrote) {
-          // Holding a package at a version, or letting it follow again,
-          // writes that place's kendex.toml — before the tables re-read,
-          // or a save of the copy the Customize tab holds puts the old
-          // file back over what this just recorded.
-          await manifestRewritten(row.scope);
-        } else showError(UPDATE_ERROR_TITLE, response.error);
+        const wrote = attempt.ok && attempt.value.status !== "error";
+        if (!attempt.ok) showError(UPDATE_ERROR_TITLE, attempt.why);
+        else if (attempt.value.status === "error")
+          showError(UPDATE_ERROR_TITLE, attempt.value.error);
         // Only a write earns the rank that retires a check already in
         // flight; a refusal moved nothing, so this is an ordinary poll.
         await reload(wrote);

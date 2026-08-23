@@ -8,7 +8,6 @@ import type {
   Scope,
 } from "@/bindings";
 import { useAuditStore } from "./audit";
-import { manifestRewritten } from "./manifest-sync";
 import { resetPreinstallSafety } from "./preinstall-safety";
 import { useScanStore } from "./scan";
 
@@ -97,8 +96,11 @@ export const catalogLabel = (catalog: Catalog | undefined): string | null =>
  *  the whole copy of it a save would write back. The scope is the place the
  *  command wrote — an install redirected into a project rewrote that
  *  project, not the subscription its packages were browsed from. */
-export async function refreshDownstream(scope: Scope) {
-  await manifestRewritten(scope);
+/** What the rest of the app re-reads once a place's file has been
+ *  rewritten. The editor is told separately, by the `writing` helper every
+ *  writer goes through — which runs whatever the outcome, where these two
+ *  only matter once something landed. */
+export async function refreshRest() {
   await useScanStore.getState().refresh();
   await useAuditStore.getState().refresh();
 }

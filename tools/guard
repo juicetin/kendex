@@ -146,6 +146,25 @@ for f in $(printf '%s\n' $files | grep -E '^ui/src/.*\.tsx?$' | grep -v '\.test\
     say "$f rewrites a manifest without refusing an unsaved draft first — call refusesForUnsaved(scope) before the write"
 done
 
+# Every writer of a place's kendex.toml tells the editor through the one
+# helper, whatever the outcome. Several of these commands write in stages —
+# a fork captures before it renders, an unsubscribe detaches before it
+# resyncs, an install commits before it reads back what it wrote — so an
+# error can arrive with the file already changed and nothing in the answer
+# saying which. A writer that calls the command directly decides that for
+# itself, and every one that has, has decided it wrong.
+for f in $(printf '%s\n' $files | grep -E '^ui/src/.*\.tsx?$' | grep -v '\.test\.'); do
+  [ -f "$f" ] || continue
+  case "$f" in
+    # The helper itself, and the module that asks the question every writer
+    # asks first — neither writes anything.
+    ui/src/stores/manifest-sync.ts | ui/src/stores/unsaved-first.ts) continue ;;
+  esac
+  grep -q 'refusesForUnsaved(' "$f" || continue
+  grep -q 'writing(' "$f" ||
+    say "$f writes a place's manifest without going through writing(scope, …) — the editor must be told whatever the outcome, rejections included"
+done
+
 # A write to a place's kendex.toml belongs in a store. A component that
 # writes one holds its busy flag in component state, and a flag that
 # unmounts with the page cannot be part of the gate that holds the
