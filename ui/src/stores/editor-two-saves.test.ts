@@ -120,12 +120,18 @@ describe("a second save pressed before the first answered", () => {
     });
     await Promise.all([one, two]);
 
+    const after = useEditorStore.getState();
     // The write that landed re-read its place, so the marks come off the
     // file as it now is rather than as it was before either press.
-    expect(useEditorStore.getState().saved.global).toEqual({
+    expect(after.saved.global).toEqual({
       schema: 1,
       install: {},
       "skill-instructions": { gh: "mine" },
     });
+    // And the copy on screen is settled by it: the content is on disk, so
+    // the Save bar comes down and the base is the file's rather than the
+    // one from before either press.
+    expect(after.dirty).toBe(false);
+    expect(after.base).toBe("written");
   });
 });

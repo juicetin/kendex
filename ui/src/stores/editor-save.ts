@@ -66,8 +66,15 @@ export const saveManifest = async (): Promise<void> => {
   writes += 1;
   const token = writes;
   const mine = () => token === writes;
+  // Who owns what the screen says about saving: the newest press, and only
+  // while the editor is still on the place it was about.
   const onScreen = () =>
     mine() && sameScope(useEditorStore.getState().scope, scope);
+  // Whether the editor is pointed at the place this write landed on. A
+  // different question, and the ticket is no part of it: the file moved
+  // whichever press won the lock, and the copy in hand is settled by that
+  // rather than by which press the screen is waiting for.
+  const here = () => sameScope(useEditorStore.getState().scope, scope);
   useEditorStore.setState({ saving: true });
   let response: Awaited<ReturnType<typeof commands.updateManifest>>;
   try {
@@ -132,7 +139,7 @@ export const saveManifest = async (): Promise<void> => {
   // away is a newer draft, and it stays unsaved until its own save. `edit`
   // builds a new draft rather than mutating, so identity is that test, and
   // the re-read below leaves a newer draft alone for the same reason.
-  if (onScreen()) {
+  if (here()) {
     // Whether the copy that went is still the one in hand: only then is
     // there nothing unsaved left here.
     const wrote = useEditorStore.getState().draft === draft;

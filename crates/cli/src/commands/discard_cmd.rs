@@ -17,8 +17,10 @@ use crate::scope::ScopeFilter;
 ///
 /// `refresh --discard-edits` is the whole scope: run it to resolve one
 /// package and every other hand-edited package in that scope loses its
-/// edits in the same pass. That is why the drift report names this per
-/// package, and why the app has only ever offered the targeted apply.
+/// edits in the same pass. Someone settling one package has not asked
+/// about the others, so this names the package and writes only it — which
+/// is why the drift report prints it per package rather than pointing at
+/// the scope-wide flag.
 #[derive(Args)]
 pub struct DiscardArgs {
     /// agent | skill | hook | command | mcp-server

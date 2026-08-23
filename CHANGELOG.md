@@ -327,6 +327,10 @@ changes carry a **Breaking** call-out with their migration note inline.
 - A project whose settings could not be re-read is no longer marked from the
   copy kendex last had. Its mark says the place could not be checked, which
   is what the count of unchecked places has always meant.
+- Ignoring a package, or taking that back, waits for unsaved customization
+  in that project the way every other change to its settings does.
+- A project added while the app is still opening is no longer forgotten by
+  whichever of its two startup reads happens to answer last.
 - Every action that rewrites a project's settings now waits for unsaved
   customization in that project, and says which project to go back to —
   updating, switching a package's version, holding or following one,

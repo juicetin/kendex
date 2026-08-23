@@ -200,7 +200,10 @@ export const useUpdatesStore = create<UpdatesState>((set) => {
 
     setIgnored: async (row, ignored) => {
       // Ignoring a package, or taking that back, is recorded in this
-      // place's kendex.toml like any other change to it.
+      // place's kendex.toml like any other change to it — so unsaved
+      // customization for that place refuses it, the way it refuses every
+      // other writer of the file.
+      if (refusesForUnsaved(row.scope)) return;
       const attempt = await writing(row.scope, () =>
         commands.updateSetIgnored(
           row.scope,

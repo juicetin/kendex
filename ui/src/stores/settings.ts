@@ -31,6 +31,15 @@ async function rescan() {
   await useScanStore.getState().refresh();
 }
 
+// Every read of the settings takes a ticket, so the one that answers is
+// the newest rather than the last to land.
+let reads = 0;
+const nextRead = (): number => {
+  reads += 1;
+  return reads;
+};
+const newest = (mine: number): boolean => mine === reads;
+
 export const useSettingsStore = create<SettingsState>((set, get) => ({
   busy: false,
   settings: null,
@@ -38,6 +47,12 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   ...zoomActions(set, get),
 
   load: async () => {
+    // Which read this is. Two start at once on any launch — this store's
+    // own, and the manifest pass asking who the projects are — and each
+    // waits on its capability and zoom calls before committing. Unranked,
+    // the slower one lands last and puts its older list back over a project
+    // registered since, which then reads as never having been added.
+    const mine = nextRead();
     // The size comes from the window, not from the file: the file holds
     // what the person asked for, and the zoom outlives the page, so a page
     // that has just reloaded is the one least able to work it out itself.
@@ -46,6 +61,8 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       commands.capabilityTable(),
       commands.windowZoomState(),
     ]);
+    // A newer read owns the answer, including what is said about it.
+    if (!newest(mine)) return;
     if (settings.status === "ok") {
       set({
         settings: settings.data,
