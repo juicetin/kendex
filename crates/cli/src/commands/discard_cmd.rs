@@ -79,11 +79,11 @@ pub fn run(env: &Env, args: DiscardArgs) -> CliResult {
     let lock = load_lock(&lock_path(env, &scope))?;
     // A name this scope has nothing by is a mistake worth saying out loud,
     // not a quiet success that ran a scope's pending work under it. What
-    // counts is what this place installs, not what it declares by name: a
-    // bundle member and a required dependency are installed here and can be
-    // discarded here, and the app has always offered exactly that. A guard
-    // reading declarations alone refuses the command for packages it should
-    // do its work on.
+    // counts is what this place installs, not what it declares by name. A
+    // bundle member and a required dependency have files here and content
+    // to put them back to, which is all a discard needs — neither is named
+    // in the manifest, so a guard reading declarations alone refuses the
+    // command for the packages it exists to work on.
     let installed_here = lock
         .entries
         .values()

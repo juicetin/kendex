@@ -48,40 +48,45 @@ export function dismissFinding(
       const attempt = await writing(scope, () =>
         commands.dismissFindings(scope, tokens, reason),
       );
-      // A rejection says less than an error does: it cannot even say
-      // whether the write ran. It reaches the reader as the untouched
-      // message, which is the honest half of what is known — the editor
-      // has already been told, whichever it was.
-      const response = attempt.ok
-        ? attempt.value
-        : {
-            status: "error" as const,
-            error: { kind: "untouched" as const, message: attempt.why },
-          };
-      if (response.status !== "ok") {
-        // The write comes before the read that describes it, so a failure
-        // here does not mean the file stood still. Told wrong, this says
-        // nothing changed and leaves the editor holding a copy of a file
-        // that moved — a copy whose save would put the decisions back.
-        const landed = response.error.kind === "written";
-        set({ error: response.error.message });
+      // Three outcomes, not two. The command answers with whether it got
+      // as far as writing; a rejection answers nothing at all, and saying
+      // "nothing was changed" of that is the one wrong guess that costs
+      // something — it invites a second attempt at a decision that may
+      // already be recorded.
+      const said = !attempt.ok
+        ? {
+            message: attempt.why,
+            title: "Couldn't tell whether the finding was settled",
+            step: "The refreshed list below is what is actually recorded — read it before deciding again",
+          }
+        : attempt.value.status === "ok"
+          ? null
+          : attempt.value.error.kind === "written"
+            ? {
+                message: attempt.value.error.message,
+                title: "Your decision was recorded, but the undo is not there",
+                step: "The finding is settled — what could not be read back is the way to take it back",
+              }
+            : {
+                message: attempt.value.error.message,
+                title: "Couldn't dismiss this finding",
+                step: "Nothing was changed — read the finding again and decide again",
+              };
+      if (said) {
+        set({ error: said.message });
         useProblemsStore.getState().showError({
-          title: landed
-            ? "Your decision was recorded, but the undo is not there"
-            : "Couldn't dismiss this finding",
-          message: response.error.message,
-          steps: [
-            landed
-              ? "The finding is settled — what could not be read back is the way to take it back"
-              : "Nothing was changed — read the finding again and decide again",
-          ],
+          title: said.title,
+          message: said.message,
+          steps: [said.step],
         });
         // The refusal usually means the page was showing findings a minute
-        // old; the fresh audit is what the person should decide on.
+        // old; the fresh audit is what the person should decide on — and
+        // where nothing could be told, it is the only thing that can say.
         await get().refresh({ force: true });
         return;
       }
-      const { view, records } = response.data;
+      if (!attempt.ok || attempt.value.status !== "ok") return;
+      const { view, records } = attempt.value.data;
       set({ views: replaceView(get().views, view), error: null });
       // How much of the undo is already done. It lives out here because a
       // retry runs the same closure again: each record's revoke is pinned

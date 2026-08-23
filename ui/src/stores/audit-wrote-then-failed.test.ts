@@ -118,6 +118,24 @@ describe("a dismissal that landed and then could not be described", () => {
     );
   });
 
+  // A rejection cannot say whether the write ran. Told "nothing was
+  // changed", the reader decides again — which is a second attempt at a
+  // decision that may already be recorded.
+  it("does not claim nothing changed when it could not tell", async () => {
+    vi.mocked(commands.dismissFindings).mockRejectedValue(
+      new Error("the channel closed"),
+    );
+
+    await useAuditStore.getState().dismiss(scope, ["gh:f1"], "intended");
+
+    const dialog = useProblemsStore.getState().dialog;
+    expect(dialog.title).toContain("Couldn't tell");
+    expect(dialog.steps?.[0]).not.toContain("Nothing was changed");
+    // The refreshed list is what can say, so it is what the reader is sent
+    // to — and the editor was told either way.
+    expect(commands.auditAll).toHaveBeenCalled();
+  });
+
   it("still says nothing changed when nothing was written", async () => {
     vi.mocked(commands.dismissFindings).mockResolvedValue({
       status: "error",

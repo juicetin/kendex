@@ -199,13 +199,22 @@ export const useUpdatesStore = create<UpdatesState>((set) => {
     },
 
     setIgnored: async (row, ignored) => {
-      const response = await commands.updateSetIgnored(
-        row.scope,
-        row.kind,
-        row.name,
-        row.repo,
-        ignored,
+      // Ignoring a package, or taking that back, is recorded in this
+      // place's kendex.toml like any other change to it.
+      const attempt = await writing(row.scope, () =>
+        commands.updateSetIgnored(
+          row.scope,
+          row.kind,
+          row.name,
+          row.repo,
+          ignored,
+        ),
       );
+      if (!attempt.ok) {
+        showError(UPDATE_ERROR_TITLE, attempt.why);
+        return;
+      }
+      const response = attempt.value;
       if (response.status === "ok")
         set({
           rows: response.data.rows,

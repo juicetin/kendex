@@ -103,9 +103,9 @@ fn an_edited_target_leaves_the_scope_pending_work_alone() {
 }
 
 /// A package installed here because something else needed it is a package
-/// installed here. The app has always offered its discard; a guard reading
-/// declarations alone refused the command for exactly the packages a person
-/// is most likely to have edited without declaring.
+/// installed here: it has files, and content to put them back to. A guard
+/// reading declarations alone refuses the command for exactly the packages
+/// a person is most likely to have edited without declaring.
 #[test]
 #[allow(clippy::unwrap_used)]
 fn a_dependency_nobody_declared_can_still_be_discarded() {

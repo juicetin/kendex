@@ -8,7 +8,7 @@
 import { toast } from "sonner";
 import type { CatalogSummary, MarketplaceRow, Scope } from "@/bindings";
 import { commands } from "@/bindings";
-import { manifestRewritten, writing } from "./manifest-sync";
+import { writing } from "./manifest-sync";
 import {
   dropCatalogCaches,
   dropSummariesHeldBy,
@@ -41,17 +41,22 @@ export function subscriptionOps(set: Set, get: Get) {
       if (refusesForUnsaved(scope)) return false;
       set({ busy: true });
       try {
-        const response = await commands.marketplaceSubscribe(
-          scope,
-          reference,
-          name,
+        // The subscription is applied before the answer is built, so an
+        // error — or a dropped response — can arrive with the source
+        // already recorded here.
+        const attempt = await writing(scope, () =>
+          commands.marketplaceSubscribe(scope, reference, name),
         );
+        if (!attempt.ok) {
+          set({ error: attempt.why });
+          return false;
+        }
+        const response = attempt.value;
         if (response.status === "error") {
           // The dialog shows the refusal beside the input; no toast on top.
           set({ error: response.error });
           return false;
         }
-        await manifestRewritten(scope);
         set({ error: null });
         toast.success(`Subscribed to '${response.data.name}'`);
         for (const note of response.data.notes) toast.message(note);
