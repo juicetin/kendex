@@ -265,39 +265,6 @@ fn same_artifact(
     matches!((resolved(a), resolved(b)), (Some(x), Some(y)) if x == y)
 }
 
-/// A fork's row: no versions, no update — the Library still needs to
-/// know it is a fork, and whether its files have been edited since. A fork
-/// is the one local source with a row, so a hardcoded "not edited" here
-/// would be the only place the measured edit is thrown away.
-/// Whether a fork's own copy can still be re-rendered from — asked of the
-/// sealed source, which is what the discard reads through. A path check
-/// answers a different question than the render does: a skill directory
-/// emptied of its `SKILL.md`, an agent file replaced by a directory, a
-/// symlink anywhere in the tree, a tree nested past the catalog depth or
-/// over its file and byte budgets all read as present and all refuse when
-/// the discard runs. Collecting the tree is the refusal, so it is the
-/// question — the fork's own tree, which this row already hashes to know
-/// it was edited.
-fn local_copy_resolves(env: &Env, scope: &Scope, kind: ItemKind, name: &str) -> bool {
-    let root = crate::source::local_source_root(env, scope);
-    let Ok(sealed) = crate::source_read::SealedSource::open(&root) else {
-        return false;
-    };
-    match kind {
-        ItemKind::Skill => {
-            let dir = root.join("skills").join(name);
-            sealed.is_file(&dir.join("SKILL.md")) && sealed.collect_skill_tree(&dir).is_ok()
-        }
-        // Read is not enough for an agent: the planner parses the file it
-        // reads, and a copy that is readable but has no usable frontmatter
-        // is refused there as unmeasured. Offering a discard on the
-        // strength of the read alone names a way out that cannot run.
-        _ => sealed
-            .read_to_string(&root.join("agents").join(format!("{name}.md")))
-            .is_ok_and(|text| crate::render::agent::parse_source_agent(&text).is_ok()),
-    }
-}
-
 fn fork_row(
     env: &Env,
     scope: &Scope,
@@ -320,13 +287,20 @@ fn fork_row(
         hold_owner: None,
         ignored: false,
         blocked_by_local_edit: !edited_harnesses.is_empty(),
+        // Measured before the field takes the vector.
+        can_discard: super::fork_copy::local_copy_resolves(
+            env,
+            scope,
+            kind,
+            name,
+            &edited_harnesses,
+        ),
         edited_harnesses,
         // A fork is already the user's own copy, so there is nothing left to
         // keep as one — but the copy itself is in the local source, so an
         // edit to it can be put back from there, as long as it is still
         // there to put back. Measured like every other row's, never asserted.
         forkable_harness: None,
-        can_discard: local_copy_resolves(env, scope, kind, name),
         can_take_latest: false,
         derived: false,
         forked: true,

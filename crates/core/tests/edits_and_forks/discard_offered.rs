@@ -194,3 +194,55 @@ fn a_forked_agent_whose_copy_will_not_parse_offers_no_discard() {
     );
     assert!(held.forked, "still this place's own copy: {held:?}");
 }
+
+/// The same rule for a skill. Collecting the tree says the files are there
+/// and readable; the planner renders what it collected and puts the result
+/// past the loader's own rules, and a tree refused there comes back
+/// unmeasured. A discard offered on the collection alone names a way out
+/// that cannot run.
+#[test]
+#[allow(clippy::unwrap_used)]
+fn a_forked_skill_whose_copy_will_not_render_offers_no_discard() {
+    let w = world();
+    write_skill(&w.upstream, "gh", "Upstream.");
+    commit(&w.upstream, "one");
+    declare(&w, "[skills.gh]\nsource = \"cat\"\n");
+    sync_and_apply(&w);
+    fs::write(
+        skill_file(&w),
+        "---\nname: gh\ndescription: mine\n---\nMy fork.\n",
+    )
+    .unwrap();
+    let plan = fork::fork(&w.env, &w.scope, ItemKind::Skill, "gh", HarnessId::Claude).unwrap();
+    apply::execute(&w.env, &plan, None).unwrap();
+    let report = audit(&w.env, &w.scope).unwrap();
+    apply::execute(&w.env, &report.plan, None).unwrap();
+    fs::write(skill_file(&w), "edited after forking").unwrap();
+
+    let row = |w: &World| {
+        updates::updates(&w.env, &w.scope)
+            .unwrap()
+            .rows
+            .into_iter()
+            .find(|row| row.name == "gh")
+            .unwrap()
+    };
+    assert!(row(&w).can_discard, "the copy is there to put back");
+
+    // The kept copy keeps its files and loses what makes it a skill: the
+    // tree still collects, and nothing can render it for the tool that
+    // edited it.
+    let Scope::Project { root } = &w.scope else {
+        unreachable!("the test world is a project")
+    };
+    let kept = root.join(".kendex-local/skills/gh/SKILL.md");
+    assert!(kept.is_file(), "the fork kept its own copy here");
+    fs::write(&kept, "no frontmatter, just words\n").unwrap();
+
+    let held = row(&w);
+    assert!(
+        !held.can_discard,
+        "nothing here can render it back: {held:?}"
+    );
+    assert!(held.forked, "still this place's own copy: {held:?}");
+}

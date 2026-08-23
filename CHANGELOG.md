@@ -315,9 +315,9 @@ changes carry a **Breaking** call-out with their migration note inline.
   date" before the first check has answered.
 - A package whose own copy can no longer be read, or can no longer be made
   sense of, says so instead of offering to put back a copy that would not
-  come back. An agent whose kept copy has lost its heading is the second
-  kind: the file is still there and still readable, and nothing can render
-  it.
+  come back. A kept copy whose heading is gone is the second kind — the
+  files are still there and still readable, and nothing can turn them back
+  into the package — and it is checked for skills and agents alike.
 - A package is no longer shown as your own copy on the strength of a check
   that did not finish, when its project's settings could not be read either.
   With neither read able to speak, the place says it could not be checked.
