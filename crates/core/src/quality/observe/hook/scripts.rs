@@ -29,8 +29,9 @@ pub(super) enum Named {
 const PROJECT_ROOT_SPELLINGS: &[&str] =
     &["$CLAUDE_PROJECT_DIR", "$(git rev-parse --show-toplevel)"];
 
-/// Characters that leave a token's spelling for the shell to finish at run
-/// time: a variable or command substitution, a glob, a tilde, an escape.
+/// Characters this reader treats as dynamic — ones that leave a token's
+/// spelling for the shell to finish at run time: a variable or command
+/// substitution, a glob, a tilde, an escape.
 /// A token still carrying one after kendex's own spelling is resolved
 /// names a path this audit cannot compute — `bash /tmp/$USER/guard.sh`
 /// runs whatever `$USER` expands to, while a literal read of the spelling
@@ -178,8 +179,9 @@ pub(super) const SHELL_OPERATORS: &[char] = &[';', '&', '|', '(', ')', '<', '>']
 /// boundary — and the caller refuses the whole line instead of trusting
 /// them. That rule, not the list of shapes above, is what keeps a desync
 /// from reading one script while another runs. No escape handling: kendex
-/// writes none, and a hand-written command that needs them either still
-/// reads the way the shell does or falls to this refusal.
+/// writes none. A hand-written escape that closes no quote or substitution
+/// is read literally — one that splits a script's extension (`evil.s\h`)
+/// names no candidate and says nothing; KEN-588 owns that gap.
 fn tokens(command: &str) -> Option<Vec<Token>> {
     fn flush(current: &mut String, single_quoted: &mut bool, out: &mut Vec<Token>) {
         if !current.is_empty() {
