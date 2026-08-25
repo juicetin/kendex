@@ -114,7 +114,7 @@ struct Token {
 /// names both scripts, and `x.sh>/dev/null` names `x.sh`. Leaving an
 /// operator glued to a path would hide the script from extension matching
 /// and let it execute unread.
-const SHELL_OPERATORS: &[char] = &[';', '&', '|', '(', ')', '<', '>'];
+pub(super) const SHELL_OPERATORS: &[char] = &[';', '&', '|', '(', ')', '<', '>'];
 
 /// Word-splitting that honors quotes: unquoted whitespace and unquoted
 /// operators end a word, quote characters are dropped the way the shell

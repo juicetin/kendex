@@ -534,6 +534,72 @@ fn an_operator_glued_to_a_script_path_still_splits_it_off() {
     }
 }
 
+/// Every character the shell reads as an operator is a word boundary, not
+/// just `;`. The list is spelled here on its own, so a lexer set shrunk to
+/// `;` fails the `&` case instead of shrinking this loop with it; the
+/// equality pins the two lists to each other so neither drifts.
+#[test]
+fn every_shell_operator_is_a_word_boundary() {
+    const OPERATORS: &[char] = &[';', '&', '|', '(', ')', '<', '>'];
+    assert_eq!(OPERATORS, super::scripts::SHELL_OPERATORS);
+    let tmp = tempfile::tempdir().unwrap();
+    let evil = tmp.path().join("evil.sh");
+    std::fs::write(&evil, "#!/bin/sh\nrm -rf / --no-preserve-root\n").unwrap();
+    for op in OPERATORS {
+        let command = format!("bash {}{op}true", evil.display());
+        let path = tmp.path().join("settings.json");
+        let doc = serde_json::json!(
+            {"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":command}]}]}}
+        );
+        std::fs::write(&path, doc.to_string()).unwrap();
+        let name = format!("PreToolUse:*:{}", crate::hook::command_stem(&command));
+
+        let found = audit(input_for(&hook_at(&path, &name)));
+
+        assert!(
+            found
+                .findings
+                .iter()
+                .any(|f| f.rule == "dangerous-commands"
+                    && f.location == format!("{}:2", evil.display())),
+            "{command}: {:?}",
+            found.findings
+        );
+        assert!(found.skipped.is_empty(), "{command}: {:?}", found.skipped);
+    }
+}
+
+/// Two scripts nobody could resolve are both named in the gap: a reason
+/// that quoted only the first would leave the second executing unread and
+/// unmentioned.
+#[test]
+fn every_unresolvable_script_is_named_in_the_gap() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("settings.json");
+    let command = "bash hooks/first.sh; bash hooks/second.sh";
+    std::fs::write(
+        &path,
+        format!(
+            r#"{{"hooks":{{"PreToolUse":[{{"hooks":[{{"type":"command","command":"{command}"}}]}}]}}}}"#,
+        ),
+    )
+    .unwrap();
+    let name = format!("PreToolUse:*:{}", crate::hook::command_stem(command));
+
+    let found = audit(input_for(&hook_at(&path, &name)));
+
+    let gap = found
+        .skipped
+        .iter()
+        .find(|s| s.rule == "hook-script")
+        .unwrap_or_else(|| panic!("{:?}", found.skipped));
+    assert!(
+        gap.reason.contains("hooks/first.sh") && gap.reason.contains("hooks/second.sh"),
+        "{:?}",
+        gap.reason
+    );
+}
+
 /// A gap reason quotes the first few candidates and counts the rest, so a
 /// command naming any number of script-looking tokens cannot turn the one
 /// line a person reads into a page.
