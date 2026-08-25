@@ -5,6 +5,9 @@ import type { ItemKind, ItemSafety, ItemWarning } from "@/bindings";
 
 export interface SkipGroup {
   reason: string;
+  /** The engine rule id behind the reason — a stable name where the reason
+   *  text itself is dynamic (a hook's script path rides inside it). */
+  rule: string;
   count: number;
   /** The shared kind, or null when the reason spans more than one kind. */
   kind: ItemKind | null;
@@ -18,9 +21,9 @@ export function groupSkipped(cleanRows: ItemSafety[]): SkipGroup[] {
   const groups = new Map<string, SkipGroup>();
   for (const row of cleanRows) {
     if (row.skipped.length === 0) continue;
-    const reason = row.skipped[0].reason;
+    const { reason, rule } = row.skipped[0];
     const group = groups.get(reason);
-    if (!group) groups.set(reason, { reason, count: 1, kind: row.kind });
+    if (!group) groups.set(reason, { reason, rule, count: 1, kind: row.kind });
     else {
       group.count += 1;
       if (group.kind !== row.kind) group.kind = null;

@@ -19,6 +19,12 @@ use crate::source_read::TREE_BOUND;
 
 use super::{AuditInput, Content};
 
+mod scripts;
+#[cfg(test)]
+mod tests;
+
+use scripts::{Named, plain, scripts_named};
+
 /// A hook found inside a shared config file whose registration was not
 /// there when the audit re-read the file.
 const UNREAD_HOOK_ENTRY: &str =
@@ -34,11 +40,11 @@ const HOOK_SCRIPT_UNREADABLE: &str =
 /// file — a relative path, or a variable kendex did not write.
 const HOOK_SCRIPT_UNRESOLVED: &str =
     "the script this hook's command names could not be resolved to a file on this machine";
-/// The named script candidates do not agree on one file — two distinct
-/// paths, or a path beside a spelling nobody could resolve — so nothing
-/// here can say which bytes the one listed observation stands for.
-const HOOK_SCRIPTS_AMBIGUOUS: &str =
-    "same-named registrations of this hook do not agree on one script, so none was read";
+/// The named script candidates do not agree on one file — one command
+/// naming two scripts, two registrations naming one each, or a path beside
+/// a spelling nobody could resolve — so nothing here can say which bytes
+/// the one listed observation stands for.
+const HOOK_SCRIPTS_AMBIGUOUS: &str = "this hook's command(s) name more than one script, or one beside a spelling nobody could resolve, so none was read";
 
 /// What this hook observation gives the rules to read, computing its own
 /// reading. [`super::score`] reads through [`config_entry_input`] instead,
@@ -108,8 +114,9 @@ pub(crate) fn config_entry_input(
                 script: reading.script.as_ref().map(|(path, bytes)| {
                     (
                         // The location came out of a command string, so it
-                        // is laundered of control characters like every
-                        // other command-derived text that reaches output.
+                        // is laundered of control and invisible characters
+                        // like every other command-derived text that
+                        // reaches output.
                         plain(&path.display().to_string()),
                         String::from_utf8_lossy(bytes).into_owned(),
                     )
@@ -202,7 +209,10 @@ fn script_of(
     }
     match (resolved.as_slice(), unresolved.as_slice()) {
         ([], []) => (None, None),
-        ([], [token, ..]) => (None, Some(format!("{HOOK_SCRIPT_UNRESOLVED} ({token})"))),
+        ([], tokens) => (
+            None,
+            Some(format!("{HOOK_SCRIPT_UNRESOLVED} ({})", tokens.join(", "))),
+        ),
         ([path], []) => match read_script(path) {
             Ok(bytes) => (Some((path.clone(), bytes)), None),
             Err(why) => (
@@ -226,116 +236,6 @@ fn script_of(
             )),
         ),
     }
-}
-
-/// What one command line says about one script it names.
-enum Named {
-    /// A file this machine can open: an absolute path with a script
-    /// extension, after kendex's own project spellings are resolved.
-    Path(PathBuf),
-    /// A token that is plainly a script — it has the extension — reached
-    /// through a spelling this audit cannot resolve.
-    Unresolved(String),
-}
-
-/// The spellings kendex itself registers a project hook's script under —
-/// see `engine::targets`. Each resolves to the scope's own root, which is
-/// exactly what the variable or substitution evaluates to when the harness
-/// runs the command from that project.
-const PROJECT_ROOT_SPELLINGS: &[&str] =
-    &["$CLAUDE_PROJECT_DIR", "$(git rev-parse --show-toplevel)"];
-
-/// Every script a hook's command line names — all of them, not the first:
-/// `bash /a/ok.sh; bash /b/evil.sh` runs both, and reading only the one a
-/// writer put first would bind a decision while the other executes
-/// unread. Tokens split on whitespace outside quotes — `$(git rev-parse
-/// --show-toplevel)` carries spaces and must stay one token — and quote
-/// characters are dropped, the way the shell drops them. An interpreter
-/// like `/bin/bash` has no script extension and is passed over.
-fn scripts_named(command: &str, scope: &Scope) -> Vec<Named> {
-    tokens(command)
-        .into_iter()
-        .filter(|token| script_ext(Path::new(token)))
-        .map(|token| match resolve_root(&token, scope) {
-            Some(path) if path.is_absolute() => Named::Path(path),
-            _ => Named::Unresolved(plain(&token)),
-        })
-        .collect()
-}
-
-/// `token` with kendex's own project spelling replaced by the scope root
-/// it evaluates to. A token carrying no spelling passes through; a project
-/// spelling outside a project scope, or one that is only the *prefix* of a
-/// longer identifier, resolves to nothing — `$CLAUDE_PROJECT_DIRS/run.sh`
-/// names a different variable, and the shell expands that one, so
-/// resolving it here would read and bind bytes the harness never runs.
-fn resolve_root(token: &str, scope: &Scope) -> Option<PathBuf> {
-    for spelling in PROJECT_ROOT_SPELLINGS {
-        let Some(rest) = token.strip_prefix(spelling) else {
-            continue;
-        };
-        if !(rest.is_empty() || rest.starts_with('/')) {
-            return None;
-        }
-        let Scope::Project { root } = scope else {
-            return None;
-        };
-        return Some(root.join(rest.trim_start_matches('/')));
-    }
-    Some(PathBuf::from(token))
-}
-
-/// `text` with every control character replaced, so a path a hostile
-/// config embeds terminal escapes in cannot recolor or rewrite the output
-/// it is reported through. Applied where command-derived text enters a
-/// reason or a location; every consumer downstream inherits it.
-fn plain(text: &str) -> String {
-    text.chars()
-        .map(|c| match c.is_control() {
-            true => '\u{FFFD}',
-            false => c,
-        })
-        .collect()
-}
-
-/// Whitespace-splitting that honors quotes, dropping the quote characters
-/// the way the shell does. No escape handling: kendex writes none, and a
-/// hand-written command that needs them simply resolves no script.
-fn tokens(command: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut current = String::new();
-    let mut quote: Option<char> = None;
-    for c in command.chars() {
-        match quote {
-            Some(q) if c == q => quote = None,
-            Some(_) => current.push(c),
-            None if c == '"' || c == '\'' => quote = Some(c),
-            None if c.is_whitespace() => {
-                if !current.is_empty() {
-                    out.push(std::mem::take(&mut current));
-                }
-            }
-            None => current.push(c),
-        }
-    }
-    if !current.is_empty() {
-        out.push(current);
-    }
-    out
-}
-
-/// Extensions a hook script is written in, matched case-insensitively —
-/// `GUARD.SH` is the same script. `ps1` because Copilot hooks run on
-/// Windows too; deliberately not shared with the plugin-source list, whose
-/// job is different.
-fn script_ext(path: &Path) -> bool {
-    matches!(
-        path.extension()
-            .and_then(|e| e.to_str())
-            .map(str::to_ascii_lowercase)
-            .as_deref(),
-        Some("sh" | "bash" | "zsh" | "py" | "js" | "ts" | "mjs" | "cjs" | "ps1")
-    )
 }
 
 /// The named script's bytes, under the same memory bound every other read

@@ -97,12 +97,6 @@ fn rows(env: &Env, scope: &kendex_core::model::Scope) -> Result<Vec<Reading>, Co
         .filter(|row| !row.findings.is_empty() || !row.skipped.is_empty())
         .collect();
 
-    // Same installation, same bytes: one reading, not two.
-    let same = |row: &ItemSafety, others: &[ItemSafety]| {
-        others
-            .iter()
-            .any(|other| other.key() == row.key() && other.review_hash == row.review_hash)
-    };
     let mut rows: Vec<Reading> = held
         .iter()
         .map(|row| Reading {
@@ -124,6 +118,18 @@ fn rows(env: &Env, scope: &kendex_core::model::Scope) -> Result<Vec<Reading>, Co
     );
     rows.sort_by_key(|reading| (!reading.row.blocked(), reading.row.safety.score));
     Ok(rows)
+}
+
+/// Same installation, same bytes: one reading, not two. "Same bytes" needs
+/// bytes on both sides — a skip-only row carries no review hash by
+/// construction, and treating two absent hashes as agreement would merge a
+/// held reading away on the strength of nothing having been read.
+fn same(row: &ItemSafety, others: &[ItemSafety]) -> bool {
+    others.iter().any(|other| {
+        other.key() == row.key()
+            && row.review_hash.is_some()
+            && other.review_hash == row.review_hash
+    })
 }
 
 fn print_row(reading: &Reading) {
@@ -190,5 +196,54 @@ fn print_row(reading: &Reading) {
             "    to install it anyway, review the findings above and apply with --allow-unsafe {}",
             allow_unsafe_flag(&row.name, review_hash)
         ));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hook_row(review_hash: Option<&str>) -> ItemSafety {
+        ItemSafety {
+            kind: kendex_core::model::ItemKind::Hook,
+            name: "PreToolUse:*:guard".to_owned(),
+            harness: kendex_core::model::HarnessId::Claude,
+            scope: kendex_core::model::Scope::Global,
+            location: "settings.json".to_owned(),
+            safety: kendex_core::quality::SafetyScore {
+                score: 100,
+                deductions: Vec::new(),
+            },
+            quality: None,
+            findings: Vec::new(),
+            skipped: Vec::new(),
+            verdict: kendex_core::quality::Verdict::Clean,
+            reasons: Vec::new(),
+            content_hash: "content".to_owned(),
+            review_hash: review_hash.map(str::to_owned),
+            provenance: None,
+            override_state: kendex_core::quality::overrides::OverrideState::Absent,
+            decisions: Vec::new(),
+        }
+    }
+
+    /// A hook whose script nobody could read has review hash `None` on both
+    /// readings by construction. Absent hashes are not the same bytes —
+    /// merging on them would print the held reading and silently drop the
+    /// installed one, gap and findings alike.
+    #[test]
+    fn two_absent_review_hashes_are_not_one_reading() {
+        let row = hook_row(None);
+        assert!(!same(&row, &[hook_row(None)]));
+    }
+
+    /// The merge still happens where it is proved: both hashes present and
+    /// equal. A differing or missing counterpart keeps both readings.
+    #[test]
+    fn only_matching_present_hashes_merge() {
+        let row = hook_row(Some("abc"));
+        assert!(same(&row, &[hook_row(Some("abc"))]));
+        assert!(!same(&row, &[hook_row(Some("def"))]));
+        assert!(!same(&row, &[hook_row(None)]));
     }
 }

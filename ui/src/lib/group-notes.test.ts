@@ -36,7 +36,9 @@ describe("groupSkipped", () => {
       }),
     );
     const groups = groupSkipped(rows);
-    expect(groups).toEqual([{ reason, count: 3, kind: "plugin" }]);
+    expect(groups).toEqual([
+      { reason, rule: "some-rule", count: 3, kind: "plugin" },
+    ]);
   });
 
   it("ignores rows with nothing skipped and nulls the kind when it varies", () => {
@@ -55,7 +57,7 @@ describe("groupSkipped", () => {
       }),
     ];
     const groups = groupSkipped(rows);
-    expect(groups).toEqual([{ reason, count: 2, kind: null }]);
+    expect(groups).toEqual([{ reason, rule: "r", count: 2, kind: null }]);
   });
 });
 

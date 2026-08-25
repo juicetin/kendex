@@ -11,7 +11,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::model::{FileState, ItemKind, ObservedItem};
+use crate::model::{FileState, HarnessId, ItemKind, ObservedItem};
 use crate::source_read::{TREE_BOUND, TreeBound};
 
 use super::{
@@ -79,10 +79,15 @@ pub fn input_for(item: &ObservedItem) -> AuditInput {
 /// directory, and a scope with eighty of them would spend most of an audit
 /// scoring each tree twice. No rule reads the harness — every one of them
 /// judges the bytes — so the key is everything that decides the outcome:
-/// kind, path and name. Two observations that agree here score the same by
-/// construction, never by guess.
-pub fn same_reading(item: &ObservedItem) -> (ItemKind, PathBuf, String) {
-    (item.kind, item.path.clone(), item.name.clone())
+/// kind, path and name. A hook is the exception: its reading *parses* the
+/// registry by harness (Copilot's inline shape against the shared one), so
+/// two harnesses pointed at one entry are two parses, and sharing one
+/// reading would score and bind the wrong parse for one of them. Two
+/// observations that agree here score the same by construction, never by
+/// guess.
+pub fn same_reading(item: &ObservedItem) -> (ItemKind, PathBuf, String, Option<HarnessId>) {
+    let parser = (item.kind == ItemKind::Hook).then_some(item.harness);
+    (item.kind, item.path.clone(), item.name.clone(), parser)
 }
 
 /// One observation's two hashes and what the rules made of it. The hashes

@@ -183,7 +183,10 @@ export function sentence(text: string): string {
   return text.charAt(0).toUpperCase() + text.slice(1);
 }
 
-export function skipReasonShort(reason: string): string {
+export function skipReasonShort(reason: string, rule?: string): string {
+  // A hook's script-gap reasons carry the script's own path, so the exact
+  // map above can never match them; the stable rule id names the family.
+  if (rule === "hook-script") return "its script could not be read";
   return SKIP_REASON_SHORT[reason] ?? "nothing here could be read";
 }
 

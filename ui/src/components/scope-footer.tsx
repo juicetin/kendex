@@ -77,7 +77,7 @@ export function ScopeFooter({
     const noun = group.kind
       ? kindLabel(group.kind, group.count).toLowerCase()
       : `item${group.count === 1 ? "" : "s"}`;
-    return `${group.count} ${noun} — ${skipReasonShort(group.reason)}`;
+    return `${group.count} ${noun} — ${skipReasonShort(group.reason, group.rule)}`;
   });
   const noted = groupWarnings(warnings);
   if (

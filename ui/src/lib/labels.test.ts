@@ -124,6 +124,15 @@ describe("labels", () => {
       "nothing here could be read",
     );
   });
+
+  it("labels hook script gaps by their rule id, since the reason carries a dynamic path", () => {
+    expect(
+      skipReasonShort(
+        "the script this hook's command invokes could not be read from disk (/home/x/guard.sh)",
+        "hook-script",
+      ),
+    ).toBe("its script could not be read");
+  });
 });
 
 describe("breadcrumbLabel for nested pages", () => {

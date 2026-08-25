@@ -62,7 +62,7 @@ function BlockedRowNotes({
       ) : null}
       {row.skipped.length > 0 ? (
         <p className="text-xs text-foreground/70">
-          {harnessPrefix}Not fully checked here: {row.skipped.length} rule
+          {harnessPrefix}Not fully checked here: {row.skipped.length} check
           {row.skipped.length === 1 ? "" : "s"} had nothing to read —{" "}
           {row.skipped[0].reason}
         </p>
