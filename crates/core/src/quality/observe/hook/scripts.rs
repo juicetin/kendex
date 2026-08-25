@@ -25,7 +25,12 @@ pub(super) enum Named {
 /// The spellings kendex itself registers a project hook's script under —
 /// see `engine::targets`. Each resolves to the scope's own root, which is
 /// exactly what the variable or substitution evaluates to when the harness
-/// runs the command from that project.
+/// runs the command from that project — provided the whole word sat
+/// inside double quotes, which is the only way kendex writes it. Unquoted,
+/// the shell word-splits and globs the expansion, so a root holding a
+/// space or a glob character runs something other than the one path
+/// kendex would read and bind; that spelling is one kendex did not write,
+/// and it falls to the said gap.
 const PROJECT_ROOT_SPELLINGS: &[&str] =
     &["$CLAUDE_PROJECT_DIR", "$(git rev-parse --show-toplevel)"];
 
@@ -42,10 +47,10 @@ const PROJECT_ROOT_SPELLINGS: &[&str] =
 /// gap, and it does so whenever a script extension appears *anywhere* in
 /// it, not only at its tail: `$(bash /b/evil.sh)`, `<(bash /b/evil.sh)`
 /// and `/b/evil.sh$x` all run evil.sh, and a tail-only match would drop
-/// each of them in silence. Quotes make no difference: the lexer has
-/// dropped them, and a quoted `$` the shell keeps literal takes the same
-/// gap rather than a literal read — only the managed spellings kendex
-/// writes resolve.
+/// each of them in silence. Quote characters are gone by the time this
+/// list is consulted, and a quoted `$` the shell keeps literal takes the
+/// same gap rather than a literal read — only the managed spellings
+/// kendex writes resolve, and those only as it writes them.
 const DYNAMIC: &[char] = &['$', '`', '*', '?', '[', '~', '\\', '(', ')', '<', '>'];
 
 /// Every script a hook's command line names — all of them, not the first:
@@ -103,7 +108,10 @@ fn named(token: &Token, scope: &Scope) -> Option<Named> {
 /// `$CLAUDE_PROJECT_DIRS/run.sh` names a different variable and
 /// `'$CLAUDE_PROJECT_DIR/run.sh'` is a literal `$` path the shell never
 /// expands, so resolving either here would read and bind bytes the harness
-/// never runs. What is left of the token once the spelling is taken off
+/// never runs. An unquoted spelling — any character of the word outside
+/// quotes, `"$CLAUDE_PROJECT_DIR"/run.sh` included — resolves to nothing
+/// for the reason on [`PROJECT_ROOT_SPELLINGS`]. What is left of the token
+/// once the spelling is taken off
 /// must be literal too — a [`DYNAMIC`] character in it is refused the same
 /// way. The check is on the token's own text, never on the joined path:
 /// the scope root is a directory this machine already knows, whatever
@@ -116,10 +124,10 @@ fn literal(token: &Token, scope: &Scope) -> Option<PathBuf> {
         if !(rest.is_empty() || rest.starts_with('/')) {
             return None;
         }
-        // The flag is token-wide, so a spelling merely adjacent to a
-        // single-quoted span is refused too — that falls to the said gap,
-        // never to reading the wrong bytes.
-        if token.single_quoted || rest.contains(DYNAMIC) {
+        // Both flags are token-wide, so a spelling merely adjacent to a
+        // single-quoted or an unquoted span is refused too — that falls
+        // to the said gap, never to reading the wrong bytes.
+        if token.single_quoted || token.unquoted || rest.contains(DYNAMIC) {
             return None;
         }
         let Scope::Project { root } = scope else {
@@ -159,12 +167,17 @@ pub(super) fn plain(text: &str) -> String {
     crate::quality::redact(&stripped)
 }
 
-/// One word of a command line, with the quoting fact resolution needs.
+/// One word of a command line, with the quoting facts resolution needs.
 struct Token {
     text: String,
     /// Some of these characters sat inside single quotes, where the shell
     /// expands nothing — a variable spelling in there is a literal `$`.
     single_quoted: bool,
+    /// Some of these characters sat outside any quote, where the shell
+    /// word-splits and globs whatever an expansion produces. A managed
+    /// spelling resolves only when neither flag is set: the whole word
+    /// inside double quotes, as kendex writes it.
+    unquoted: bool,
 }
 
 /// Characters the shell reads as operators outside quotes and outside a
@@ -214,18 +227,20 @@ pub(super) const SHELL_OPERATORS: &[char] = &[';', '&', '|', '(', ')', '<', '>']
 /// character the shell keeps: the token carries it, and if that token
 /// names a script it falls to the said gap through [`DYNAMIC`].
 fn tokens(command: &str) -> Option<Vec<Token>> {
-    fn flush(current: &mut String, single_quoted: &mut bool, out: &mut Vec<Token>) {
+    fn flush(current: &mut String, quoting: &mut (bool, bool), out: &mut Vec<Token>) {
         if !current.is_empty() {
             out.push(Token {
                 text: std::mem::take(current),
-                single_quoted: *single_quoted,
+                single_quoted: quoting.0,
+                unquoted: quoting.1,
             });
         }
-        *single_quoted = false;
+        *quoting = (false, false);
     }
     let mut out = Vec::new();
     let mut current = String::new();
-    let mut single_quoted = false;
+    // (some character sat in single quotes, some sat outside any quote)
+    let mut quoting = (false, false);
     // The innermost open quote, at whatever depth.
     let mut quote: Option<char> = None;
     // Open parentheses of the substitution the word is inside, if any, and
@@ -264,6 +279,10 @@ fn tokens(command: &str) -> Option<Vec<Token>> {
         match quote {
             Some(q) if c == q => quote = None,
             _ if opens(c, quote) && chars.peek() == Some(&'(') => {
+                // The substitution's own quoting is the quote it opened
+                // in; its insides inherit that and set no flag of their
+                // own.
+                quoting.1 |= quote.is_none();
                 current.push(c);
                 current.push('(');
                 chars.next();
@@ -271,20 +290,23 @@ fn tokens(command: &str) -> Option<Vec<Token>> {
                 resume = quote.take();
             }
             Some(q) => {
-                single_quoted |= q == '\'';
+                quoting.0 |= q == '\'';
                 current.push(c);
             }
             None if c == '"' || c == '\'' => quote = Some(c),
             None if c.is_whitespace() || SHELL_OPERATORS.contains(&c) => {
-                flush(&mut current, &mut single_quoted, &mut out);
+                flush(&mut current, &mut quoting, &mut out);
             }
-            None => current.push(c),
+            None => {
+                quoting.1 = true;
+                current.push(c);
+            }
         }
     }
     if depth > 0 || quote.is_some() {
         return None;
     }
-    flush(&mut current, &mut single_quoted, &mut out);
+    flush(&mut current, &mut quoting, &mut out);
     Some(out)
 }
 
