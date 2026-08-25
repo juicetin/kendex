@@ -1,8 +1,9 @@
 //! How a command line names the scripts it runs.
 //!
 //! A hook's command is read the way the shell reads it — words split on
-//! unquoted whitespace and unquoted operators, quote characters dropped —
-//! because what the audit resolves has to be what the harness executes. Everything here answers one question: which files
+//! unquoted whitespace and unquoted operators, quote characters dropped, a
+//! command substitution kept whole — because what the audit resolves has
+//! to be what the harness executes. Everything here answers one question: which files
 //! does this line name, and can this machine open them?
 
 use std::path::{Path, PathBuf};
@@ -109,19 +110,32 @@ struct Token {
     single_quoted: bool,
 }
 
-/// Characters the shell reads as operators outside quotes. Each one ends
-/// the word before it, wherever it sits: `bash /b/evil.sh;bash /a/ok.sh`
-/// names both scripts, and `x.sh>/dev/null` names `x.sh`. Leaving an
-/// operator glued to a path would hide the script from extension matching
-/// and let it execute unread.
+/// Characters the shell reads as operators outside quotes and outside a
+/// substitution. Each one ends the word before it, wherever it sits:
+/// `bash /b/evil.sh;bash /a/ok.sh` names both scripts, and
+/// `x.sh>/dev/null` names `x.sh`. Leaving an operator glued to a path
+/// would hide the script from extension matching and let it execute
+/// unread.
 pub(super) const SHELL_OPERATORS: &[char] = &[';', '&', '|', '(', ')', '<', '>'];
 
 /// Word-splitting that honors quotes: unquoted whitespace and unquoted
 /// operators end a word, quote characters are dropped the way the shell
 /// drops them, and everything inside quotes — an operator included — is
 /// part of the word. The operators themselves are never words: no script
-/// is spelled `;`. No escape handling: kendex writes none, and a
-/// hand-written command that needs them simply resolves no script.
+/// is spelled `;`.
+///
+/// A substitution — `$(`, `<(` or `>(` through its matching `)` — is part
+/// of the word it sits in, parentheses nested inside it counted rather
+/// than split on. Splitting `$(pwd)/x.sh` at its parentheses would leave
+/// `/x.sh` standing alone as an absolute path: kendex would read a file at
+/// the root of this machine and bind a decision to it while the harness
+/// runs the copy under whatever `pwd` says. Kept whole, the word begins
+/// with `$` and falls to the said gap, the way every spelling kendex did
+/// not write does. A substitution never closed runs to the end of the
+/// line as one unresolvable word, which reads nothing.
+///
+/// No escape handling: kendex writes none, and a hand-written command
+/// that needs them simply resolves no script.
 fn tokens(command: &str) -> Vec<Token> {
     fn flush(current: &mut String, single_quoted: &mut bool, out: &mut Vec<Token>) {
         if !current.is_empty() {
@@ -136,12 +150,29 @@ fn tokens(command: &str) -> Vec<Token> {
     let mut current = String::new();
     let mut single_quoted = false;
     let mut quote: Option<char> = None;
-    for c in command.chars() {
+    // Open parentheses of the substitution the word is inside, if any.
+    let mut depth = 0usize;
+    let mut chars = command.chars().peekable();
+    while let Some(c) = chars.next() {
         match quote {
             Some(q) if c == q => quote = None,
             Some(q) => {
                 single_quoted |= q == '\'';
                 current.push(c);
+            }
+            None if depth > 0 => {
+                current.push(c);
+                match c {
+                    '(' => depth += 1,
+                    ')' => depth -= 1,
+                    _ => {}
+                }
+            }
+            None if matches!(c, '$' | '<' | '>') && chars.peek() == Some(&'(') => {
+                current.push(c);
+                current.push('(');
+                chars.next();
+                depth = 1;
             }
             None if c == '"' || c == '\'' => quote = Some(c),
             None if c.is_whitespace() || SHELL_OPERATORS.contains(&c) => {

@@ -25,6 +25,8 @@ mod hostile;
 mod scripts;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod words;
 
 use scripts::{Named, plain, scripts_named};
 
