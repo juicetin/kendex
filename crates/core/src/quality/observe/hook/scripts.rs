@@ -3,8 +3,10 @@
 //! A hook's command is read the way the shell reads it — words split on
 //! unquoted whitespace and unquoted operators, quote characters dropped, a
 //! command substitution kept whole — because what the audit resolves has
-//! to be what the harness executes. Everything here answers one question: which files
-//! does this line name, and can this machine open them?
+//! to be what the harness executes. A line this reader cannot follow to
+//! its end is refused whole rather than read by guesswork. Everything
+//! here answers one question: which files does this line name, and can
+//! this machine open them?
 
 use std::path::{Path, PathBuf};
 
@@ -35,8 +37,19 @@ const PROJECT_ROOT_SPELLINGS: &[&str] =
 /// and parentheses inside its quotes and stays one token — and quote
 /// characters are dropped, the way the shell drops them. An interpreter
 /// like `/bin/bash` has no script extension and is passed over.
+///
+/// A line the reader could not follow to its end — a quote or a
+/// substitution still open when the text runs out — has no words this
+/// audit can vouch for, so the whole line is one unresolvable spelling:
+/// whatever the shell makes of it, nothing was read and the gap is said.
+/// Reading the words as far as they were understood would let "read
+/// nothing" coincide with "said nothing", which is the one outcome this
+/// module exists to rule out.
 pub(super) fn scripts_named(command: &str, scope: &Scope) -> Vec<Named> {
-    tokens(command)
+    let Some(tokens) = tokens(command) else {
+        return vec![Named::Unresolved(plain(command))];
+    };
+    tokens
         .into_iter()
         .filter(|token| script_ext(Path::new(&token.text)))
         .map(|token| match resolve_root(&token, scope) {
@@ -131,12 +144,22 @@ pub(super) const SHELL_OPERATORS: &[char] = &[';', '&', '|', '(', ')', '<', '>']
 /// the root of this machine and bind a decision to it while the harness
 /// runs the copy under whatever `pwd` says. Kept whole, the word begins
 /// with `$` and falls to the said gap, the way every spelling kendex did
-/// not write does. A substitution never closed runs to the end of the
-/// line as one unresolvable word, which reads nothing.
+/// not write does. Quotes inside a substitution are tracked the way they
+/// are outside one: a parenthesis inside them is text, not nesting, so
+/// `$(echo ")")` closes where the shell closes it and the words after it
+/// are the shell's words. `$(` opens a substitution inside double quotes
+/// too, as it does for the shell; the quote it interrupted resumes when
+/// the substitution closes.
 ///
-/// No escape handling: kendex writes none, and a hand-written command
-/// that needs them simply resolves no script.
-fn tokens(command: &str) -> Vec<Token> {
+/// `None` when the line ran out with a quote or a substitution still open.
+/// The words read up to there are not the shell's words — an escape, a
+/// comment, or a spelling this reader does not know may have moved a
+/// boundary — and the caller refuses the whole line instead of trusting
+/// them. That rule, not the list of shapes above, is what keeps a desync
+/// from reading one script while another runs. No escape handling: kendex
+/// writes none, and a hand-written command that needs them either still
+/// reads the way the shell does or falls to this refusal.
+fn tokens(command: &str) -> Option<Vec<Token>> {
     fn flush(current: &mut String, single_quoted: &mut bool, out: &mut Vec<Token>) {
         if !current.is_empty() {
             out.push(Token {
@@ -149,30 +172,48 @@ fn tokens(command: &str) -> Vec<Token> {
     let mut out = Vec::new();
     let mut current = String::new();
     let mut single_quoted = false;
+    // The innermost open quote, at whatever depth.
     let mut quote: Option<char> = None;
-    // Open parentheses of the substitution the word is inside, if any.
+    // Open parentheses of the substitution the word is inside, if any, and
+    // the quote that was open when it began — resumed when it closes.
     let mut depth = 0usize;
+    let mut resume: Option<char> = None;
     let mut chars = command.chars().peekable();
     while let Some(c) = chars.next() {
+        if depth > 0 {
+            current.push(c);
+            match (quote, c) {
+                (Some(q), _) if c == q => quote = None,
+                (Some(_), _) => {}
+                (None, '"' | '\'') => quote = Some(c),
+                (None, '(') => depth += 1,
+                (None, ')') => {
+                    depth -= 1;
+                    if depth == 0 {
+                        quote = resume.take();
+                    }
+                }
+                _ => {}
+            }
+            continue;
+        }
+        let opens = |c: char, quote: Option<char>| match quote {
+            None => matches!(c, '$' | '<' | '>'),
+            Some('"') => c == '$',
+            Some(_) => false,
+        };
         match quote {
             Some(q) if c == q => quote = None,
-            Some(q) => {
-                single_quoted |= q == '\'';
-                current.push(c);
-            }
-            None if depth > 0 => {
-                current.push(c);
-                match c {
-                    '(' => depth += 1,
-                    ')' => depth -= 1,
-                    _ => {}
-                }
-            }
-            None if matches!(c, '$' | '<' | '>') && chars.peek() == Some(&'(') => {
+            _ if opens(c, quote) && chars.peek() == Some(&'(') => {
                 current.push(c);
                 current.push('(');
                 chars.next();
                 depth = 1;
+                resume = quote.take();
+            }
+            Some(q) => {
+                single_quoted |= q == '\'';
+                current.push(c);
             }
             None if c == '"' || c == '\'' => quote = Some(c),
             None if c.is_whitespace() || SHELL_OPERATORS.contains(&c) => {
@@ -181,8 +222,11 @@ fn tokens(command: &str) -> Vec<Token> {
             None => current.push(c),
         }
     }
+    if depth > 0 || quote.is_some() {
+        return None;
+    }
     flush(&mut current, &mut single_quoted, &mut out);
-    out
+    Some(out)
 }
 
 /// Extensions a hook script is written in, matched case-insensitively —
