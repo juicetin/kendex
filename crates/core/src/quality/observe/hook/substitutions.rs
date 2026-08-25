@@ -110,10 +110,12 @@ fn the_quoted_git_toplevel_spelling_still_resolves() {
 /// $(echo \")` closes and reopens nothing for the shell, which runs
 /// evil.sh, while a text reading sees two quotes open and close, nothing
 /// open at the end of the line, and the tail as one extensionless word —
-/// no candidate, nothing read, nothing said. Any backslash outside single
-/// quotes refuses the line whole: every form here says a hook-script gap,
-/// and the benign-first form never binds a clean reading of benign.sh.
-/// Inside single quotes a backslash is literal and refuses nothing.
+/// no candidate, nothing read, nothing said. An escape directly inside
+/// double quotes desyncs the same way. Any backslash outside single quotes
+/// refuses the line whole — unquoted or double-quoted alike: every form
+/// here says a hook-script gap, and the benign-first form never binds a
+/// clean reading of benign.sh. Inside single quotes a backslash is literal
+/// and refuses nothing.
 #[test]
 fn a_backslash_outside_single_quotes_refuses_the_line() {
     let tmp = tempfile::tempdir().unwrap();
@@ -135,6 +137,12 @@ fn a_backslash_outside_single_quotes_refuses_the_line() {
         format!(r#"bash {b} $(echo \") ; bash {e} ; true $(echo \")"#),
         format!(r"bash $(echo \') ; bash {e} ; true $(echo \')"),
         format!(r"bash {b} $(echo \') ; bash {e} ; true $(echo \')"),
+        // The escape directly inside double quotes: the shell reads `A" `
+        // as one word and runs evil.sh, while a reader refusing only
+        // unquoted backslashes closes the quote at `\"`, drops `A\`, and
+        // reads ` ; bash evil.sh ` as one quoted literal whose extension
+        // is `sh ` — nothing read, nothing said.
+        format!(r#"bash "A\" " ; bash {e} " " ; true \""#),
     ];
     for command in &refused {
         let name = write(command);
