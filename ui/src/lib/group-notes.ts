@@ -13,13 +13,15 @@ export interface SkipGroup {
   kind: ItemKind | null;
 }
 
-// Every row here already passed with nothing found; a skipped rule only
-// says a rule had no bytes to read, not that anything is wrong. The first
-// skipped rule's reason stands in for the row, matching how a single row
-// already summarizes "not fully checked" today.
-export function groupSkipped(cleanRows: ItemSafety[]): SkipGroup[] {
+// A skipped rule says a rule had no bytes to read, not that anything is
+// wrong — and it says so whatever else the row carries: a hook whose
+// script could not be read still has a command and an entry that scored,
+// and findings on those must not hide the gap. The first skipped rule's
+// reason stands in for the row, matching how a single row already
+// summarizes "not fully checked" today.
+export function groupSkipped(rows: ItemSafety[]): SkipGroup[] {
   const groups = new Map<string, SkipGroup>();
-  for (const row of cleanRows) {
+  for (const row of rows) {
     if (row.skipped.length === 0) continue;
     const { reason, rule } = row.skipped[0];
     const group = groups.get(reason);

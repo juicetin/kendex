@@ -41,6 +41,7 @@ const LINK = "underline underline-offset-2 hover:text-muted-foreground";
 export function ScopeFooter({
   clean,
   settled,
+  audited,
   alsoScored,
   notes,
   warnings,
@@ -51,6 +52,12 @@ export function ScopeFooter({
   clean: ItemSafety[];
   /** Rows whose findings someone already ruled on. */
   settled: ItemSafety[];
+  /** Every installed row the check read, findings or none — the rows
+   *  whose not-fully-checked gaps this footer says. A hook with a finding
+   *  on its command and a script nobody could open carries both, and the
+   *  gap is said here beside the finding shown above. A held-back row says
+   *  its own gap beside its findings, so it is not among these. */
+  audited: ItemSafety[];
   /** Every other scored row a publisher's record could speak for — an item
    *  with open findings, or one the gate is holding back, can carry settled
    *  findings beside them. */
@@ -73,7 +80,7 @@ export function ScopeFooter({
     ...(clean.length > 0 ? [cleanSummaryLead(clean.length)] : []),
     ...(decided > 0 ? [settledSummaryLead(decided, byAuthor)] : []),
   ];
-  const skipped = groupSkipped(clean).map((group) => {
+  const skipped = groupSkipped(audited).map((group) => {
     const noun = group.kind
       ? kindLabel(group.kind, group.count).toLowerCase()
       : `item${group.count === 1 ? "" : "s"}`;

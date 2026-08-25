@@ -172,6 +172,7 @@ export function SyncScopeCard({
           <ScopeFooter
             clean={clean}
             settled={settled}
+            audited={[...clean, ...undecided, ...settled]}
             alsoScored={[...undecided, ...blocked]}
             notes={view.notes}
             warnings={view.warnings}
