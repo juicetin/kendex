@@ -481,6 +481,87 @@ fn a_trailing_shell_operator_does_not_hide_the_script() {
     assert!(found.skipped.is_empty(), "{:?}", found.skipped);
 }
 
+/// An operator glued to a path mid-token is a word boundary, as the shell
+/// reads it. Trimming only a *trailing* operator left `/b/evil.sh;bash`
+/// as one extensionless token — silently dropped while `/a/ok.sh` beside
+/// it was read and bound — and `x.sh>/dev/null` named no script at all.
+/// Every form here is a must-fail control on the old trim: the glued
+/// script is read and its finding lands in it, or it is named in the gap.
+#[test]
+fn an_operator_glued_to_a_script_path_still_splits_it_off() {
+    let tmp = tempfile::tempdir().unwrap();
+    let evil = tmp.path().join("evil.sh");
+    std::fs::write(&evil, "#!/bin/sh\nrm -rf / --no-preserve-root\n").unwrap();
+    let ok = tmp.path().join("ok.sh");
+    std::fs::write(&ok, "exit 0\n").unwrap();
+    // (what follows the path, whether evil.sh is then the only script)
+    let glued = [
+        (format!(";bash {}", ok.display()), false),
+        ("&&true".to_owned(), true),
+        ("|tee".to_owned(), true),
+        (">/dev/null".to_owned(), true),
+    ];
+    for (tail, alone) in &glued {
+        let command = format!("bash {}{tail}", evil.display());
+        let path = tmp.path().join("settings.json");
+        let doc = serde_json::json!(
+            {"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":command}]}]}}
+        );
+        std::fs::write(&path, doc.to_string()).unwrap();
+        let name = format!("PreToolUse:*:{}", crate::hook::command_stem(&command));
+
+        let found = audit(input_for(&hook_at(&path, &name)));
+
+        if *alone {
+            assert!(
+                found.findings.iter().any(|f| f.rule == "dangerous-commands"
+                    && f.location == format!("{}:2", evil.display())),
+                "{command}: {:?}",
+                found.findings
+            );
+            assert!(found.skipped.is_empty(), "{command}: {:?}", found.skipped);
+        } else {
+            // Two scripts named: neither is claimed, and the gap names the
+            // one the old trim hid.
+            assert!(
+                found.skipped.iter().any(|s| s.rule == "hook-script"
+                    && s.reason.contains("more than one script")
+                    && s.reason.contains("evil.sh")),
+                "{command}: {:?}",
+                found.skipped
+            );
+        }
+    }
+}
+
+/// A gap reason quotes the first few candidates and counts the rest, so a
+/// command naming any number of script-looking tokens cannot turn the one
+/// line a person reads into a page.
+#[test]
+fn a_gap_reason_caps_the_candidates_it_echoes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("settings.json");
+    let command = (0..11)
+        .map(|n| format!("hooks/s{n}.sh"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let doc = serde_json::json!(
+        {"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":command}]}]}}
+    );
+    std::fs::write(&path, doc.to_string()).unwrap();
+    let name = format!("PreToolUse:*:{}", crate::hook::command_stem(&command));
+
+    let found = audit(input_for(&hook_at(&path, &name)));
+
+    let gap = found
+        .skipped
+        .iter()
+        .find(|s| s.rule == "hook-script")
+        .unwrap_or_else(|| panic!("{:?}", found.skipped));
+    assert!(gap.reason.ends_with(", and 3 more)"), "{:?}", gap.reason);
+    assert_eq!(gap.reason.matches(".sh").count(), 8, "{:?}", gap.reason);
+}
+
 /// Inside single quotes the shell expands nothing: a single-quoted
 /// `$CLAUDE_PROJECT_DIR` spelling runs a literal-`$` path, so resolving it
 /// to the project root would read — and bind a decision to — bytes the

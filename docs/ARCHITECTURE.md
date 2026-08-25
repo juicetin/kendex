@@ -149,7 +149,8 @@ lives in one capability table read by core and UI.
     `.git`, `node_modules` and build dirs are not its bytes; one
     constructor (`SealedSource::collect_skill_tree`) excludes them so
     score, preview, install and catalog-check read the same files. The
-    outcome is a function of exactly kind, path and name
+    outcome is a function of exactly kind, path and name — plus the
+    harness for a hook, whose registry is parsed by harness
     (`quality::observe::same_reading`); no rule reads the harness. Distinct
     readings run on every core (`core/parallel.rs`) and return in the
     order given; two runs over the same disk produce byte-identical

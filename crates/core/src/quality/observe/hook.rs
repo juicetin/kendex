@@ -11,6 +11,7 @@
 //! instruction carrier — is still read whole, because there the file is
 //! the hook.
 
+use std::collections::BTreeSet;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
@@ -189,34 +190,45 @@ pub(crate) fn hook_reading(item: &ObservedItem) -> Result<HookReading, &'static 
     })
 }
 
+/// How many script candidates a gap reason quotes back. A command can name
+/// any number of distinct script-looking tokens; past this many the reason
+/// says how many more there were instead of echoing them all.
+const ECHOED_CANDIDATES: usize = 8;
+
 /// The one script these same-named registrations invoke, or the reason it
-/// was not read.
+/// was not read. Candidates collect into sets — a command naming the same
+/// script twice names one script, and a hostile command naming thousands
+/// of distinct ones costs a lookup each, not a scan of everything before.
 fn script_of(
     registrations: &[crate::scan::hooks::Registration],
     scope: &Scope,
 ) -> (Option<(PathBuf, Vec<u8>)>, Option<String>) {
-    let mut resolved: Vec<PathBuf> = Vec::new();
-    let mut unresolved: Vec<String> = Vec::new();
+    let mut resolved: BTreeSet<PathBuf> = BTreeSet::new();
+    let mut unresolved: BTreeSet<String> = BTreeSet::new();
     for reg in registrations {
         for named in scripts_named(&reg.command, scope) {
             match named {
-                Named::Path(path) if !resolved.contains(&path) => resolved.push(path),
-                Named::Path(_) => {}
-                Named::Unresolved(token) if !unresolved.contains(&token) => {
-                    unresolved.push(token);
+                Named::Path(path) => {
+                    resolved.insert(path);
                 }
-                Named::Unresolved(_) => {}
+                Named::Unresolved(token) => {
+                    unresolved.insert(token);
+                }
             }
         }
     }
-    match (resolved.as_slice(), unresolved.as_slice()) {
-        ([], []) => (None, None),
-        ([], tokens) => (
+    let mut paths = resolved.into_iter();
+    match (paths.next(), paths.next(), unresolved.is_empty()) {
+        (None, _, true) => (None, None),
+        (None, _, false) => (
             None,
-            Some(format!("{HOOK_SCRIPT_UNRESOLVED} ({})", tokens.join(", "))),
+            Some(format!(
+                "{HOOK_SCRIPT_UNRESOLVED} ({})",
+                echoed(unresolved.into_iter())
+            )),
         ),
-        ([path], []) => match read_script(path) {
-            Ok(bytes) => (Some((path.clone(), bytes)), None),
+        (Some(path), None, true) => match read_script(&path) {
+            Ok(bytes) => (Some((path, bytes)), None),
             Err(why) => (
                 None,
                 Some(format!("{why} ({})", plain(&path.display().to_string()))),
@@ -226,17 +238,32 @@ fn script_of(
         // spelling nobody could resolve — and nothing here can say which
         // bytes this observation stands for, so none are claimed and the
         // gap is said.
-        (many, _) => (
+        (first, second, _) => (
             None,
             Some(format!(
                 "{HOOK_SCRIPTS_AMBIGUOUS} ({})",
-                many.iter()
-                    .map(|p| plain(&p.display().to_string()))
-                    .chain(unresolved.iter().cloned())
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                echoed(
+                    first
+                        .into_iter()
+                        .chain(second)
+                        .chain(paths)
+                        .map(|p| plain(&p.display().to_string()))
+                        .chain(unresolved)
+                )
             )),
         ),
+    }
+}
+
+/// The first [`ECHOED_CANDIDATES`] candidates joined for a reason, and a
+/// count of the rest, so a reason stays one line however many a command
+/// named.
+fn echoed(mut candidates: impl Iterator<Item = String>) -> String {
+    let shown: Vec<String> = candidates.by_ref().take(ECHOED_CANDIDATES).collect();
+    let rest = candidates.count();
+    match rest {
+        0 => shown.join(", "),
+        _ => format!("{}, and {rest} more", shown.join(", ")),
     }
 }
 

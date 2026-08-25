@@ -122,8 +122,8 @@ fn rows(env: &Env, scope: &kendex_core::model::Scope) -> Result<Vec<Reading>, Co
 
 /// Same installation, same bytes: one reading, not two. "Same bytes" needs
 /// bytes on both sides — a skip-only row carries no review hash by
-/// construction, and treating two absent hashes as agreement would merge a
-/// held reading away on the strength of nothing having been read.
+/// construction, and treating two absent hashes as agreement would drop
+/// the installed reading on the strength of nothing having been read.
 fn same(row: &ItemSafety, others: &[ItemSafety]) -> bool {
     others.iter().any(|other| {
         other.key() == row.key()
@@ -203,13 +203,13 @@ fn print_row(reading: &Reading) {
 mod tests {
     use super::*;
 
-    fn hook_row(review_hash: Option<&str>) -> ItemSafety {
+    fn plugin_row(review_hash: Option<&str>) -> ItemSafety {
         ItemSafety {
-            kind: kendex_core::model::ItemKind::Hook,
-            name: "PreToolUse:*:guard".to_owned(),
+            kind: kendex_core::model::ItemKind::Plugin,
+            name: "guard".to_owned(),
             harness: kendex_core::model::HarnessId::Claude,
             scope: kendex_core::model::Scope::Global,
-            location: "settings.json".to_owned(),
+            location: "plugins/guard".to_owned(),
             safety: kendex_core::quality::SafetyScore {
                 score: 100,
                 deductions: Vec::new(),
@@ -227,23 +227,25 @@ mod tests {
         }
     }
 
-    /// A hook whose script nobody could read has review hash `None` on both
-    /// readings by construction. Absent hashes are not the same bytes —
-    /// merging on them would print the held reading and silently drop the
-    /// installed one, gap and findings alike.
+    /// A held-back plugin whose planned reading binds nothing, beside an
+    /// installed copy nobody could read, has review hash `None` on both
+    /// sides. (A hook cannot get here: its planned side always binds.)
+    /// Absent hashes are not the same bytes — merging on them would print
+    /// the held reading and silently drop the installed one, gap and
+    /// findings alike.
     #[test]
     fn two_absent_review_hashes_are_not_one_reading() {
-        let row = hook_row(None);
-        assert!(!same(&row, &[hook_row(None)]));
+        let row = plugin_row(None);
+        assert!(!same(&row, &[plugin_row(None)]));
     }
 
     /// The merge still happens where it is proved: both hashes present and
     /// equal. A differing or missing counterpart keeps both readings.
     #[test]
     fn only_matching_present_hashes_merge() {
-        let row = hook_row(Some("abc"));
-        assert!(same(&row, &[hook_row(Some("abc"))]));
-        assert!(!same(&row, &[hook_row(Some("def"))]));
-        assert!(!same(&row, &[hook_row(None)]));
+        let row = plugin_row(Some("abc"));
+        assert!(same(&row, &[plugin_row(Some("abc"))]));
+        assert!(!same(&row, &[plugin_row(Some("def"))]));
+        assert!(!same(&row, &[plugin_row(None)]));
     }
 }
