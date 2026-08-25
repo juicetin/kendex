@@ -87,4 +87,26 @@ describe("a hook with a finding and an unread script", () => {
     // nothing about this row.
     expect(footer([], row)).not.toContain("Not checked");
   });
+
+  // Two hooks missing two different scripts are one counted line, not two
+  // identical ones: the path in each reason is not part of what prints.
+  it("counts hooks missing different scripts on one line", () => {
+    const first = hookRow();
+    const second = {
+      ...hookRow(),
+      name: "PreToolUse:*:other",
+      skipped: [
+        {
+          rule: "hook-script",
+          reason:
+            "the script this hook's command invokes could not be read from disk (/home/me/.claude/hooks/other.sh)",
+        },
+      ],
+    };
+    const html = footer([first, second], first);
+    expect(html).toContain(
+      `Not checked: 2 hooks — ${skipReasonShort(SCRIPT_GAP.reason, SCRIPT_GAP.rule)}`,
+    );
+    expect(html.match(/Not checked/g)).toHaveLength(1);
+  });
 });

@@ -288,7 +288,7 @@ pub fn check_item(
                 "the review recorded for {fingerprint} is not one an install will honour"
             ),
             fix: match kind {
-                ItemKind::Hook => "remove it: a hook's review cannot travel to an install — it is scored from its script here and from the harness's settings file once installed".to_owned(),
+                ItemKind::Hook => "remove it: a hook's review cannot travel to an install — it is scored from its script here and from its registration plus that script once installed".to_owned(),
                 _ => "record it with `kendex dismiss --catalog`, whose reasons are the ones that travel — wrong-call or intended".to_owned(),
             },
             token: None,

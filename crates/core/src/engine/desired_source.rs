@@ -148,8 +148,9 @@ pub(super) fn published_review(
     state: &mut DesiredState,
 ) -> Result<Option<crate::quality::author::AuthorReview>> {
     // A hook is scored from the script this plan writes and audited from
-    // the shared settings file its registration lands in — two readings of
-    // different bytes, by design (see `engine::review_hash`). A record can
+    // its registration plus the script it invokes — two readings that agree
+    // only when the command names its script by a path the audit can open
+    // (see `engine::review_hash`). A record can
     // bind to one or the other and never both, so honouring one at the gate
     // would install an item the very next audit re-opens. Refused where it
     // is read, so the plan, the lock and the audit all answer alike.

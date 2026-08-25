@@ -59,6 +59,23 @@ describe("groupSkipped", () => {
     const groups = groupSkipped(rows);
     expect(groups).toEqual([{ reason, rule: "r", count: 2, kind: null }]);
   });
+
+  // A hook's script-gap reason names the script's path, so two hooks
+  // missing two scripts carry two reasons that print as one line.
+  it("counts hooks missing different scripts as one group", () => {
+    const gap = (path: string) =>
+      `the script this hook's command invokes could not be read from disk (${path})`;
+    const rows = ["/a/one.sh", "/b/two.sh"].map((path, index) =>
+      row({
+        name: `hook-${index}`,
+        skipped: [{ rule: "hook-script", reason: gap(path) }],
+      }),
+    );
+    const groups = groupSkipped(rows);
+    expect(groups).toEqual([
+      { reason: gap("/a/one.sh"), rule: "hook-script", count: 2, kind: "hook" },
+    ]);
+  });
 });
 
 describe("groupWarnings", () => {

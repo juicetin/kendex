@@ -102,16 +102,17 @@ fn dismiss_catalog(
         let Some((kind, name, fingerprint)) = dismissals::parse_token(token) else {
             return Err(format!("'{token}' is not a kind:name#fingerprint token").into());
         };
-        // A hook is scored from its script when a plan writes it and from
-        // the shared settings file its registration lands in when an audit
-        // reads it back. A record can bind to one or the other, never both,
-        // so an install refuses one — and writing a record nobody will ever
-        // honour is worse than saying so here.
+        // A hook is scored from its script when a plan writes it and, once
+        // installed, from the registration dug back out of its config file
+        // plus the script that registration invokes. A record can bind to
+        // one reading or the other, never both, so an install refuses one —
+        // and writing a record nobody will ever honour is worse than saying
+        // so here.
         if kind == kendex_core::model::ItemKind::Hook {
             return Err(format!(
                 "{token}: a hook's review cannot travel to an install — it is scored from its \
-                 script here and from the harness's settings file once installed. Fix the \
-                 finding, or narrow what the script does."
+                 script here and from its registration plus that script once installed. Fix \
+                 the finding, or narrow what the script does."
             )
             .into());
         }

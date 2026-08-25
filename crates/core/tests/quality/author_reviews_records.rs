@@ -163,9 +163,10 @@ fn a_clean_item_is_unaffected() {
     }
 }
 
-/// A hook is scored from the script a plan writes and audited from the
-/// shared settings file its registration lands in — two readings of
-/// different bytes, by design. A record can bind to one or the other and
+/// A hook is scored from the script a plan writes and audited from its
+/// registration plus the script it invokes — two readings that agree only
+/// when the command names its script by a path the audit can open. A
+/// record can bind to one or the other and
 /// never both, so it is refused where it is read: honouring it at the gate
 /// would install an item the very next audit re-opens.
 #[test]

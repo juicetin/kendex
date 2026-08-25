@@ -2,6 +2,7 @@
 // had nothing to read on a clean row, and render or parse warnings. Kept
 // apart from the finding grouping, which is what a decision targets.
 import type { ItemKind, ItemSafety, ItemWarning } from "@/bindings";
+import { skipReasonShort } from "@/lib/labels";
 
 export interface SkipGroup {
   reason: string;
@@ -19,13 +20,19 @@ export interface SkipGroup {
 // and findings on those must not hide the gap. The first skipped rule's
 // reason stands in for the row, matching how a single row already
 // summarizes "not fully checked" today.
+//
+// Rows group by the line they will print, not by the raw reason: a hook's
+// script-gap reason carries the script's own path, so three hooks missing
+// three scripts are three reasons but one line, and keyed by reason they
+// drew as three identical rows instead of one that counts.
 export function groupSkipped(rows: ItemSafety[]): SkipGroup[] {
   const groups = new Map<string, SkipGroup>();
   for (const row of rows) {
     if (row.skipped.length === 0) continue;
     const { reason, rule } = row.skipped[0];
-    const group = groups.get(reason);
-    if (!group) groups.set(reason, { reason, rule, count: 1, kind: row.kind });
+    const key = skipReasonShort(reason, rule);
+    const group = groups.get(key);
+    if (!group) groups.set(key, { reason, rule, count: 1, kind: row.kind });
     else {
       group.count += 1;
       if (group.kind !== row.kind) group.kind = null;
