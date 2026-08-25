@@ -19,6 +19,8 @@ use crate::source_read::TREE_BOUND;
 
 use super::{AuditInput, Content};
 
+#[cfg(test)]
+mod hostile;
 mod scripts;
 #[cfg(test)]
 mod tests;

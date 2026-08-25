@@ -73,3 +73,32 @@ fn a_kind_that_carries_none_is_the_publishers_throughout() {
         );
     }
 }
+
+/// The content hash's per-field digest, held by its must-fail control:
+/// joined raw, a command ending in the join character reads exactly like a
+/// different registration whose entry begins with it — `run a|` + `|` +
+/// `run b` and `run a` + `|` + `|run b` are one string — so two hook
+/// contents would share one hash and a dismissal recorded against one
+/// would stay live on the other. Digesting each field before the join
+/// keeps the boundary; reverting to the raw join turns this red.
+#[test]
+fn a_command_spelling_the_join_cannot_impersonate_another_entry() {
+    let hash = |command: &str, entry: &str| {
+        super::super::content_hash(&crate::quality::AuditInput {
+            kind: ItemKind::Hook,
+            name: "PreToolUse:*:run".to_owned(),
+            harness: Some(HarnessId::Claude),
+            location: "settings.json".to_owned(),
+            content: Content::Hook {
+                event: "PreToolUse".to_owned(),
+                matcher: None,
+                command: command.to_owned(),
+                entry: Some(entry.to_owned()),
+                script: None,
+                script_unread: None,
+            },
+        })
+    };
+
+    assert_ne!(hash("run a", "|run b"), hash("run a|", "run b"));
+}

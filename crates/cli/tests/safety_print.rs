@@ -116,3 +116,26 @@ fn a_finding_the_publisher_settled_prints_their_name_instead_of_a_fix() {
     assert!(printed.contains("[critical]"), "{printed}");
     assert!(printed.contains("SKILL.md:"), "{printed}");
 }
+
+/// A hook whose script nobody could resolve has no findings, only a gap —
+/// and `kendex findings` is where that gap is read. The row has to survive
+/// the no-findings filter and print its "not fully checked" line, or the
+/// unread script reads as a pass (KEN-558).
+#[test]
+#[allow(clippy::unwrap_used)]
+fn findings_says_not_fully_checked_for_an_unresolvable_hook_script() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path();
+    fs::create_dir_all(home.join(".claude")).unwrap();
+    fs::write(
+        home.join(".claude/settings.json"),
+        r#"{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"bash hooks/guard.sh"}]}]}}"#,
+    )
+    .unwrap();
+
+    let output = kendex(home, home, &["findings", "--global"]);
+
+    assert!(output.status.success(), "{output:?}");
+    let printed = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(printed.contains("not fully checked"), "{printed}");
+}

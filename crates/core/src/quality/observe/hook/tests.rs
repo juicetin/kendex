@@ -7,7 +7,7 @@ use crate::model::{FileState, HarnessId, ItemKind, ObservedItem, Scope};
 use crate::quality::audit;
 use crate::quality::observe::{Content, input_for, same_reading};
 
-fn hook_at(path: &Path, name: &str) -> ObservedItem {
+pub(super) fn hook_at(path: &Path, name: &str) -> ObservedItem {
     ObservedItem {
         kind: ItemKind::Hook,
         name: name.to_owned(),
@@ -419,35 +419,6 @@ fn an_uppercase_extension_still_resolves() {
     );
 }
 
-/// A hostile settings file cannot smuggle terminal escapes through a
-/// script path into the reasons a CLI prints — `\\u001b]0;` plus BEL is an
-/// OSC title escape riding inside the path.
-#[test]
-fn control_characters_in_a_script_path_render_inert() {
-    let tmp = tempfile::tempdir().unwrap();
-    let path = tmp.path().join("settings.json");
-    std::fs::write(
-        &path,
-        r#"{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"bash /nope/\u001b]0;pwn\u0007gone.sh"}]}]}}"#,
-    )
-    .unwrap();
-    let command = "bash /nope/\u{1b}]0;pwn\u{7}gone.sh";
-    let name = format!("PreToolUse:*:{}", crate::hook::command_stem(command));
-
-    let found = audit(input_for(&hook_at(&path, &name)));
-
-    let gap = found
-        .skipped
-        .iter()
-        .find(|s| s.rule == "hook-script")
-        .unwrap_or_else(|| panic!("{:?}", found.skipped));
-    assert!(
-        !gap.reason.chars().any(char::is_control),
-        "{:?}",
-        gap.reason
-    );
-}
-
 /// A credential in the hook's own entry — an `env` block, a header — is
 /// the hook's content, and the narrowed reading still reaches it.
 #[test]
@@ -571,38 +542,6 @@ fn the_same_hook_entry_under_two_parsers_is_two_readings() {
     };
 
     assert_ne!(same_reading(&claude), same_reading(&copilot));
-}
-
-/// Bidi overrides and zero-width characters are display spoofing the way
-/// terminal escapes are: a U+202E in a script path renders the gap reason
-/// visually reversed in trust-decision output. `plain` strips them with
-/// the control characters.
-#[test]
-fn bidi_and_zero_width_characters_in_a_script_path_render_inert() {
-    let tmp = tempfile::tempdir().unwrap();
-    let path = tmp.path().join("settings.json");
-    std::fs::write(
-        &path,
-        r#"{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"bash /nope/\u202Ehs.evil\u200B/gone.sh"}]}]}}"#,
-    )
-    .unwrap();
-    let command = "bash /nope/\u{202E}hs.evil\u{200B}/gone.sh";
-    let name = format!("PreToolUse:*:{}", crate::hook::command_stem(command));
-
-    let found = audit(input_for(&hook_at(&path, &name)));
-
-    let gap = found
-        .skipped
-        .iter()
-        .find(|s| s.rule == "hook-script")
-        .unwrap_or_else(|| panic!("{:?}", found.skipped));
-    assert!(
-        !gap.reason
-            .chars()
-            .any(|c| matches!(c, '\u{202E}' | '\u{200B}')),
-        "{:?}",
-        gap.reason
-    );
 }
 
 /// A hook that is its own file — opencode's instruction carrier — is still
