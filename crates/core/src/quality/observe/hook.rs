@@ -26,6 +26,8 @@ mod hostile;
 mod resolve;
 mod scripts;
 #[cfg(test)]
+mod substitutions;
+#[cfg(test)]
 mod tests;
 #[cfg(test)]
 mod words;

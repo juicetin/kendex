@@ -30,17 +30,23 @@ const PROJECT_ROOT_SPELLINGS: &[&str] =
     &["$CLAUDE_PROJECT_DIR", "$(git rev-parse --show-toplevel)"];
 
 /// Characters this reader treats as dynamic — ones that leave a token's
-/// spelling for the shell to finish at run time: a variable or command
-/// substitution, a glob, a tilde, an escape.
-/// A token still carrying one after kendex's own spelling is resolved
-/// names a path this audit cannot compute — `bash /tmp/$USER/guard.sh`
-/// runs whatever `$USER` expands to, while a literal read of the spelling
-/// opens a file that never runs (a planted decoy, or nothing) and binds a
-/// decision to it. Such a token falls to the said gap. Quotes make no
-/// difference: the lexer has dropped them, and a quoted `$` the shell
-/// keeps literal takes the same gap rather than a literal read — only the
-/// managed spellings kendex writes resolve.
-const DYNAMIC: &[char] = &['$', '`', '*', '?', '[', '~', '\\'];
+/// spelling for the shell to finish at run time: a variable, a command or
+/// process substitution (its parentheses and redirection arrows included:
+/// outside quotes those are operators, so inside a word they can only
+/// have come from a substitution or from quoted text), a glob, a tilde,
+/// an escape. A token carrying one anywhere but inside kendex's own
+/// spelling names a path this audit cannot compute — `bash
+/// /tmp/$USER/guard.sh` runs whatever `$USER` expands to, while a literal
+/// read of the spelling opens a file that never runs (a planted decoy, or
+/// nothing) and binds a decision to it. Such a token falls to the said
+/// gap, and it does so whenever a script extension appears *anywhere* in
+/// it, not only at its tail: `$(bash /b/evil.sh)`, `<(bash /b/evil.sh)`
+/// and `/b/evil.sh$x` all run evil.sh, and a tail-only match would drop
+/// each of them in silence. Quotes make no difference: the lexer has
+/// dropped them, and a quoted `$` the shell keeps literal takes the same
+/// gap rather than a literal read — only the managed spellings kendex
+/// writes resolve.
+const DYNAMIC: &[char] = &['$', '`', '*', '?', '[', '~', '\\', '(', ')', '<', '>'];
 
 /// Every script a hook's command line names — all of them, not the first:
 /// `bash /a/ok.sh; bash /b/evil.sh` runs both, and reading only the one a
@@ -51,7 +57,10 @@ const DYNAMIC: &[char] = &['$', '`', '*', '?', '[', '~', '\\'];
 /// characters are dropped, the way the shell drops them. An interpreter
 /// like `/bin/bash` has no script extension and is passed over. A token
 /// the shell would still evaluate — one carrying a [`DYNAMIC`] character
-/// after resolution — is an unresolvable spelling, never a literal read.
+/// outside kendex's own spelling — is an unresolvable spelling whenever a
+/// script extension appears anywhere in it, never a literal read and
+/// never a silent drop; the extension filter runs after that question,
+/// not before it.
 ///
 /// A line the reader could not follow to its end — a quote or a
 /// substitution still open when the text runs out — has no words this
@@ -66,19 +75,32 @@ pub(super) fn scripts_named(command: &str, scope: &Scope) -> Vec<Named> {
     };
     tokens
         .into_iter()
-        .filter(|token| script_ext(Path::new(&token.text)))
-        .map(|token| match resolve_root(&token, scope) {
-            Some(path) if path.is_absolute() => Named::Path(path),
-            _ => Named::Unresolved(plain(&token.text)),
-        })
+        .filter_map(|token| named(&token, scope))
         .collect()
 }
 
-/// The token with kendex's own project spelling replaced by the scope root
-/// it evaluates to. A token carrying no spelling passes through; a project
-/// spelling outside a project scope, one that is only the *prefix* of a
-/// longer identifier, or one written inside single quotes resolves to
-/// nothing — `$CLAUDE_PROJECT_DIRS/run.sh` names a different variable and
+/// What one word says about a script, if it names one. A literal word —
+/// kendex's own spelling plus a literal path, or a plain literal path —
+/// names a script by its tail extension, the way a file name does, and
+/// resolves if it is absolute. A word the shell still evaluates names one
+/// wherever the extension sits in it, and never resolves.
+fn named(token: &Token, scope: &Scope) -> Option<Named> {
+    match literal(token, scope) {
+        Some(path) => script_ext(&path).then(|| match path.is_absolute() {
+            true => Named::Path(path),
+            false => Named::Unresolved(plain(&token.text)),
+        }),
+        None => names_script(&token.text).then(|| Named::Unresolved(plain(&token.text))),
+    }
+}
+
+/// The literal path a token spells, with kendex's own project spelling
+/// replaced by the scope root it evaluates to — or nothing, when the
+/// shell would still have work to do on it. A token carrying no spelling
+/// and no [`DYNAMIC`] character passes through; a project spelling outside
+/// a project scope, one that is only the *prefix* of a longer identifier,
+/// or one written inside single quotes resolves to nothing —
+/// `$CLAUDE_PROJECT_DIRS/run.sh` names a different variable and
 /// `'$CLAUDE_PROJECT_DIR/run.sh'` is a literal `$` path the shell never
 /// expands, so resolving either here would read and bind bytes the harness
 /// never runs. What is left of the token once the spelling is taken off
@@ -86,7 +108,7 @@ pub(super) fn scripts_named(command: &str, scope: &Scope) -> Vec<Named> {
 /// way. The check is on the token's own text, never on the joined path:
 /// the scope root is a directory this machine already knows, whatever
 /// characters its name holds.
-fn resolve_root(token: &Token, scope: &Scope) -> Option<PathBuf> {
+fn literal(token: &Token, scope: &Scope) -> Option<PathBuf> {
     for spelling in PROJECT_ROOT_SPELLINGS {
         let Some(rest) = token.text.strip_prefix(spelling) else {
             continue;
@@ -173,15 +195,24 @@ pub(super) const SHELL_OPERATORS: &[char] = &[';', '&', '|', '(', ')', '<', '>']
 /// too, as it does for the shell; the quote it interrupted resumes when
 /// the substitution closes.
 ///
-/// `None` when the line ran out with a quote or a substitution still open.
-/// The words read up to there are not the shell's words — an escape, a
-/// comment, or a spelling this reader does not know may have moved a
-/// boundary — and the caller refuses the whole line instead of trusting
-/// them. That rule, not the list of shapes above, is what keeps a desync
-/// from reading one script while another runs. No escape handling: kendex
-/// writes none. A hand-written escape that closes no quote or substitution
-/// is read literally — one that splits a script's extension (`evil.s\h`)
-/// names no candidate and says nothing; KEN-588 owns that gap.
+/// `None` when the line ran out with a quote or a substitution still open,
+/// or when a backslash appears outside single quotes. The words read up
+/// to there are not the shell's words — a comment, or a spelling this
+/// reader does not know, may have moved a boundary — and the caller
+/// refuses the whole line instead of trusting them. That rule, not the
+/// list of shapes above, is what keeps a desync from reading one script
+/// while another runs.
+///
+/// No escape handling: kendex writes none. A backslash outside single
+/// quotes refuses the line whole. Read as text, `\"` inside a
+/// substitution would pair up for this reader and close a quote the
+/// shell keeps open — `bash $(echo \") ; bash /abs/evil.sh ; true $(echo
+/// \")` runs evil.sh while the tail read as one extensionless word, no
+/// candidate and no gap — and a reader that cannot tell which quotes are
+/// the shell's has no words to vouch for. A full escape reader is
+/// KEN-588's job. Inside single quotes a backslash is the literal
+/// character the shell keeps: the token carries it, and if that token
+/// names a script it falls to the said gap through [`DYNAMIC`].
 fn tokens(command: &str) -> Option<Vec<Token>> {
     fn flush(current: &mut String, single_quoted: &mut bool, out: &mut Vec<Token>) {
         if !current.is_empty() {
@@ -203,6 +234,11 @@ fn tokens(command: &str) -> Option<Vec<Token>> {
     let mut resume: Option<char> = None;
     let mut chars = command.chars().peekable();
     while let Some(c) = chars.next() {
+        // Only single quotes make a backslash literal; anywhere else the
+        // shell reads it as an escape this reader does not model.
+        if c == '\\' && quote != Some('\'') {
+            return None;
+        }
         if depth > 0 {
             current.push(c);
             match (quote, c) {
@@ -256,12 +292,30 @@ fn tokens(command: &str) -> Option<Vec<Token>> {
 /// `GUARD.SH` is the same script. `ps1` because Copilot hooks run on
 /// Windows too; deliberately not shared with the plugin-source list, whose
 /// job is different.
-fn script_ext(path: &Path) -> bool {
+fn is_script_ext(ext: &str) -> bool {
     matches!(
-        path.extension()
-            .and_then(|e| e.to_str())
-            .map(str::to_ascii_lowercase)
-            .as_deref(),
-        Some("sh" | "bash" | "zsh" | "py" | "js" | "ts" | "mjs" | "cjs" | "ps1")
+        ext.to_ascii_lowercase().as_str(),
+        "sh" | "bash" | "zsh" | "py" | "js" | "ts" | "mjs" | "cjs" | "ps1"
     )
+}
+
+/// A literal path's tail extension is a script extension.
+fn script_ext(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(is_script_ext)
+}
+
+/// A script extension appears anywhere in the word: a `.` followed by an
+/// extension and then by something that is not a letter or digit — the
+/// end of the word, a `)`, a `$`, a `<`. `.shell` and `.json` are not
+/// `.sh` and `.js`; `evil.sh)` and `evil.sh$x` are.
+fn names_script(text: &str) -> bool {
+    text.split('.').skip(1).any(|after| {
+        let run: String = after
+            .chars()
+            .take_while(char::is_ascii_alphanumeric)
+            .collect();
+        is_script_ext(&run)
+    })
 }
