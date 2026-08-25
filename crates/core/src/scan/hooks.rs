@@ -20,9 +20,12 @@ pub(crate) struct Registration {
     pub(crate) event: String,
     pub(crate) matcher: String,
     pub(crate) command: String,
-    /// The entry's own timeout, where it carries one. No rule reads it,
-    /// but a decision binds to the exact entry, and the entry includes it.
-    pub(crate) timeout: Option<u32>,
+    /// The entry object itself, every field of it — timeout, env, cwd,
+    /// headers, whatever the harness lets an entry carry. The audit scans
+    /// it and a decision binds to it: a field the three columns above do
+    /// not spell is still content, and dropping it here would hide it from
+    /// both.
+    pub(crate) entry: serde_json::Value,
 }
 
 impl Registration {
@@ -36,6 +39,55 @@ impl Registration {
             command_stem(&self.command)
         )
     }
+
+    /// This registration as the one text a decision binds to: the
+    /// canonical JSON of the full entry. The event and the group's matcher
+    /// are folded in because the entry object alone does not carry them in
+    /// every shape, and two entries under different events are different
+    /// registrations.
+    pub(crate) fn owned_text(&self) -> String {
+        owned_entry(&self.event, &self.matcher, &self.entry)
+    }
+
+    /// The text the rules scan for this registration: the same wrapper,
+    /// minus the field that carries the command — the command is already
+    /// its own document, and scanning it twice would count one dangerous
+    /// token as two findings. Matching by value rather than by key name
+    /// covers every spelling an entry carries its action under.
+    pub(crate) fn scanned_text(&self) -> String {
+        let mut entry = self.entry.clone();
+        if let Some(map) = entry.as_object_mut() {
+            map.retain(|_, value| value.as_str() != Some(self.command.as_str()));
+        }
+        owned_entry(&self.event, &self.matcher, &entry)
+    }
+}
+
+/// [`Registration::scanned_text`] from the parts the gate holds — the same
+/// stripping, so the doc the gate scans and the doc the audit scans are one
+/// text.
+pub(crate) fn scanned_entry(
+    event: &str,
+    matcher: &str,
+    entry: &serde_json::Value,
+    command: &str,
+) -> String {
+    let mut entry = entry.clone();
+    if let Some(map) = entry.as_object_mut() {
+        map.retain(|_, value| value.as_str() != Some(command));
+    }
+    owned_entry(event, matcher, &entry)
+}
+
+/// One registration as canonical text, from its parts. The gate builds the
+/// same text from the edit it is about to write, so the two sides of an
+/// install read one construction — see `engine::review_hash`.
+pub(crate) fn owned_entry(event: &str, matcher: &str, entry: &serde_json::Value) -> String {
+    crate::hash::canonical_json(&serde_json::json!({
+        "event": event,
+        "matcher": matcher,
+        "entry": entry,
+    }))
 }
 
 /// `{"hooks": {"<Event>": [{matcher?, hooks: [{command}]} | {command}]}}` —
@@ -96,10 +148,7 @@ fn registrations(value: serde_json::Value) -> Vec<Registration> {
                     event: event.clone(),
                     matcher: matcher.to_owned(),
                     command: command.to_owned(),
-                    timeout: handler
-                        .get("timeout")
-                        .and_then(serde_json::Value::as_u64)
-                        .and_then(|t| u32::try_from(t).ok()),
+                    entry: (*handler).clone(),
                 });
             }
         }

@@ -5,6 +5,9 @@ mod copilot;
 mod nested;
 mod text;
 
+pub(crate) use copilot::entry_json as copilot_entry_json;
+pub(crate) use nested::handler_json;
+
 use copilot::{remove_copilot_hook, upsert_copilot_hook};
 use nested::{remove_hook, upsert_hook};
 use text::codex_enable_hooks;

@@ -9,6 +9,18 @@ use serde_json::{Map, Value, json};
 
 use super::{ensure_object, names, one};
 
+/// The handler object `upsert_hook` writes. The gate's review hash binds
+/// this same object, through this same function, so the write and the hash
+/// cannot disagree about what an entry is — a drift between them would fail
+/// silently as a decision that never recognises its own install.
+pub(crate) fn handler_json(command: &str, timeout: Option<u32>) -> Value {
+    let mut handler = json!({"type": "command", "command": command});
+    if let Some(timeout) = timeout {
+        handler["timeout"] = json!(timeout);
+    }
+    handler
+}
+
 pub(super) fn upsert_hook(
     root: &mut Map<String, Value>,
     event: &str,
@@ -16,10 +28,7 @@ pub(super) fn upsert_hook(
     command: &str,
     timeout: Option<u32>,
 ) -> Result<(), String> {
-    let mut handler = json!({"type": "command", "command": command});
-    if let Some(timeout) = timeout {
-        handler["timeout"] = json!(timeout);
-    }
+    let handler = handler_json(command, timeout);
     let ours = |h: &Value| h.get("command").and_then(Value::as_str) == Some(command);
     let groups = ensure_object(root, "hooks")?
         .entry(event)

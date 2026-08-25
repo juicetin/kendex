@@ -2339,7 +2339,12 @@ export type SkillsShHit = {
 	installs: number,
 };
 
-/**  A rule that applies here but could not run, and why. */
+/**
+ *  A rule that applies here but could not run, and why — or a named part
+ *  of the input the rules could not read (`rule: "hook-script"`), so the
+ *  gap is visible beside whatever else was found instead of reading as a
+ *  pass over content nobody opened.
+ */
 export type SkippedRule = {
 	rule: string,
 	reason: string,

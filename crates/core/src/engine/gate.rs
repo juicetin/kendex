@@ -365,11 +365,20 @@ pub(crate) fn content_hash(input: &AuditInput) -> String {
             event,
             matcher,
             command,
+            entry,
             script,
+            script_unread,
         } => material.push_str(&format!(
-            "{event}|{}|{command}|{}",
+            "{event}|{}|{command}|{}|{}|{}",
             matcher.as_deref().unwrap_or_default(),
-            script.as_deref().unwrap_or_default()
+            entry.as_deref().unwrap_or_default(),
+            // The script's text, not its path: the same bytes at a moved
+            // path are the same content, the way a relocated skill tree is.
+            script
+                .as_ref()
+                .map(|(_, text)| text.as_str())
+                .unwrap_or_default(),
+            script_unread.as_deref().unwrap_or_default(),
         )),
         Content::Mcp(entry) => material.push_str(&format!("{entry:?}")),
         Content::Plugin(sources) => material.push_str(&format!("{sources:?}")),

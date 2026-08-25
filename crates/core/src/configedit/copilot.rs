@@ -13,6 +13,21 @@ const COPILOT_HOOK_VERSION: u64 = 1;
 
 /// Copilot's own hook shape: a flat list of entries per event, each with its
 /// command, its matcher and its timeout in seconds.
+/// The entry object `upsert_copilot_hook` writes. The gate's review hash
+/// binds this same object, through this same function, so the write and the
+/// hash cannot disagree about what an entry is — a drift between them would
+/// fail silently as a decision that never recognises its own install.
+pub(crate) fn entry_json(matcher: Option<&str>, command: &str, timeout: Option<u32>) -> Value {
+    let mut entry = json!({"type": "command", "bash": command});
+    if let Some(matcher) = matcher {
+        entry["matcher"] = json!(matcher);
+    }
+    if let Some(timeout) = timeout {
+        entry["timeoutSec"] = json!(timeout);
+    }
+    entry
+}
+
 pub(super) fn upsert_copilot_hook(
     root: &mut Map<String, Value>,
     event: &str,
@@ -26,13 +41,7 @@ pub(super) fn upsert_copilot_hook(
         .or_insert_with(|| json!([]))
         .as_array_mut()
         .ok_or("hook event is not an array")?;
-    let mut entry = json!({"type": "command", "bash": command});
-    if let Some(matcher) = matcher {
-        entry["matcher"] = json!(matcher);
-    }
-    if let Some(timeout) = timeout {
-        entry["timeoutSec"] = json!(timeout);
-    }
+    let entry = entry_json(matcher, command, timeout);
     // Refreshed where it already stands, so a re-apply moves nothing —
     // and only where this registration stands: an entry running the same
     // command under a matcher somebody else chose is theirs.

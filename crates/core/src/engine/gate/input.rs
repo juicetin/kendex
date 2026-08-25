@@ -91,9 +91,13 @@ fn registration(
     script: Option<&Script>,
     edits: &[(std::path::PathBuf, ConfigEdit)],
 ) -> (String, Content) {
-    let location = script
+    // The registry file, the way the audit locates the same hook: command
+    // and entry findings belong to the file that carries them, and only
+    // script findings to the script.
+    let location = edits
+        .first()
         .map(|(path, _)| path.display().to_string())
-        .or_else(|| edits.first().map(|(path, _)| path.display().to_string()))
+        .or_else(|| script.map(|(path, _)| path.display().to_string()))
         .unwrap_or_else(|| item.name.clone());
     let content = match item.kind {
         ItemKind::McpServer => match mcp_entry(edits) {
@@ -107,29 +111,34 @@ fn registration(
         ItemKind::Plugin => Content::Unread {
             why: UNREADABLE_PLUGIN,
         },
-        // A command-bodied hook (custom) has no script: the person's own
-        // command is the whole content, read off the registration edit so
-        // the rules judge exactly what the harness will run.
-        _ if script.is_none() => match hook_edit(edits) {
-            Some((event, matcher, command)) => Content::Hook {
-                event: event.clone(),
-                matcher: matcher.clone(),
-                command: command.clone(),
-                script: None,
-            },
-            None => Content::Hook {
-                event: String::new(),
-                matcher: None,
-                command: location.clone(),
-                script: None,
-            },
-        },
-        _ => Content::Hook {
-            event: String::new(),
-            matcher: None,
-            command: location.clone(),
-            script: script.map(|(_, bytes)| String::from_utf8_lossy(bytes).into_owned()),
-        },
+        // The registered command is the content, read off the registration
+        // edit so the rules judge exactly what the harness will run; the
+        // entry text is built by the same functions that write the file,
+        // so the gate scans and binds what the audit will read back.
+        _ => {
+            let entries = hook_entries(edits);
+            let (event, matcher, command) = match hook_edit(edits) {
+                Some((event, matcher, command)) => (
+                    event.clone(),
+                    matcher.clone().filter(|m| !m.is_empty()),
+                    command.clone(),
+                ),
+                None => (String::new(), None, location.clone()),
+            };
+            Content::Hook {
+                event,
+                matcher,
+                command,
+                entry: (!entries.is_empty()).then(|| entries.join("\n")),
+                script: script.map(|(path, bytes)| {
+                    (
+                        path.display().to_string(),
+                        String::from_utf8_lossy(bytes).into_owned(),
+                    )
+                }),
+                script_unread: None,
+            }
+        }
     };
     (location, content)
 }
@@ -152,6 +161,40 @@ fn hook_edit(
         } => Some((event, matcher, command)),
         _ => None,
     })
+}
+
+/// Every entry this plan registers, as the scanned text the audit's
+/// read-back produces for the same file — one construction on both sides,
+/// with the command stripped the same way, since it is its own document.
+fn hook_entries(edits: &[(std::path::PathBuf, ConfigEdit)]) -> Vec<String> {
+    edits
+        .iter()
+        .filter_map(|(_, edit)| match edit {
+            ConfigEdit::UpsertHook {
+                event,
+                matcher,
+                command,
+                timeout,
+            } => Some(crate::scan::hooks::scanned_entry(
+                event,
+                crate::configedit::spelled(matcher.as_deref()),
+                &crate::configedit::handler_json(command, *timeout),
+                command,
+            )),
+            ConfigEdit::UpsertCopilotHook {
+                event,
+                matcher,
+                command,
+                timeout,
+            } => Some(crate::scan::hooks::scanned_entry(
+                event,
+                crate::configedit::spelled(matcher.as_deref()),
+                &crate::configedit::copilot_entry_json(matcher.as_deref(), command, *timeout),
+                command,
+            )),
+            _ => None,
+        })
+        .collect()
 }
 
 /// The server entry this plan would write, taken from the config edit that

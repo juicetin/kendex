@@ -92,7 +92,7 @@ fn lines(report: &CatalogCheck) {
                         "    reviewed and intended? kendex dismiss --catalog <dir> --reason intended '{token}'"
                     )),
                     None => say(
-                        "    a hook's review cannot travel to an install — it is scored from its script here and from the harness's settings file once installed, so narrow what the script does",
+                        "    a hook's review cannot travel to an install — it is scored from its script here and from its registration plus that script once installed, so narrow what the script does",
                     ),
                 }
             }

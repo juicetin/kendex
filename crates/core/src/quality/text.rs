@@ -159,13 +159,17 @@ pub fn prepare(input: AuditInput) -> Prepared {
             event,
             matcher,
             command,
+            entry,
             script,
+            script_unread,
         } => hook_content(
             &input.location,
             event,
             matcher,
             command,
+            entry,
             script,
+            script_unread,
             &mut clean,
             &mut docs,
         ),
@@ -245,12 +249,19 @@ fn is_supporting(path: &std::path::Path) -> bool {
     })
 }
 
+/// Each part of a hook is a document where that part lives: the command
+/// and the entry in the registry file (`root`), the script in its own
+/// file. A command finding located at the script would name a file that
+/// does not contain the flagged text.
+#[allow(clippy::too_many_arguments)]
 fn hook_content(
     root: &str,
     event: String,
     matcher: Option<String>,
     command: String,
-    script: Option<String>,
+    entry: Option<String>,
+    script: Option<(String, String)>,
+    script_unread: Option<String>,
     clean: &mut impl FnMut(String, &str) -> String,
     docs: &mut Vec<Doc>,
 ) -> Content {
@@ -259,19 +270,29 @@ fn hook_content(
         location: format!("{root} (command)"),
         lines: lines(&command),
     });
-    let script = script.map(|body| {
-        let body = clean(root.to_owned(), &body);
+    let entry = entry.map(|text| {
+        let text = clean(format!("{root} (entry)"), &text);
         docs.push(Doc {
-            location: root.to_owned(),
+            location: format!("{root} (entry)"),
+            lines: lines(&text),
+        });
+        text
+    });
+    let script = script.map(|(at, body)| {
+        let body = clean(at.clone(), &body);
+        docs.push(Doc {
+            location: at.clone(),
             lines: lines(&body),
         });
-        body
+        (at, body)
     });
     Content::Hook {
         event,
         matcher,
         command,
+        entry,
         script,
+        script_unread,
     }
 }
 

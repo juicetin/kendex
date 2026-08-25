@@ -15,12 +15,14 @@ export const CLAUDE_HOOK_IDS = [
 ];
 
 // Every hook shells out through the same wrapper script, so the same line
-// of the same settings file trips the same finding for all seven.
+// of that one script trips the same finding for all seven — each hook is
+// scored on its own registration and the script it invokes, never on the
+// rest of the settings file.
 export const HOOK_SETTINGS_PATH = "/home/method/.claude/settings.json";
 export const HOOK_FINDING: Finding = {
   rule: "dangerous-commands",
   severity: "high",
-  location: `${HOOK_SETTINGS_PATH}:17`,
+  location: "/home/method/.claude/hooks/claude-hook.sh:3",
   message: "`mkfs` formats a filesystem",
   remediation:
     "narrow the command to the exact path it needs, and let the user see it before it runs",

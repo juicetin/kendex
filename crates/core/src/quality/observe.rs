@@ -11,7 +11,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::model::{ItemKind, ObservedItem};
+use crate::model::{FileState, ItemKind, ObservedItem};
 use crate::source_read::{TREE_BOUND, TreeBound};
 
 use super::{
@@ -20,7 +20,7 @@ use super::{
 };
 
 mod hook;
-pub(crate) use hook::hook_reading;
+pub use hook::HookReading;
 
 /// One tree's in-memory files as audit input, in the order the observed
 /// walk uses. The gate reads a plan's rendered bytes through this so both
@@ -98,15 +98,25 @@ pub struct Scored {
 
 /// Read what this observation points at and score it. Pure over the bytes
 /// on disk, so it can run on any thread and in any order.
+///
+/// A config-entry hook is read exactly once: the same [`HookReading`]
+/// feeds the audit input and the `review` closure, so the hash a decision
+/// binds to can never describe different bytes than the findings were
+/// scored from — two reads would be two filesystem snapshots.
 pub fn score(
     item: &ObservedItem,
     hash: impl Fn(&AuditInput) -> String,
-    review: impl Fn(&ObservedItem) -> Option<String>,
+    review: impl Fn(&ObservedItem, Option<&Result<HookReading, &'static str>>) -> Option<String>,
 ) -> Scored {
-    let input = input_for(item);
+    let reading = (item.kind == ItemKind::Hook && item.file_state == FileState::ConfigEntry)
+        .then(|| hook::hook_reading(item));
+    let input = match &reading {
+        Some(reading) => hook::config_entry_input(item, reading),
+        None => input_for(item),
+    };
     Scored {
         content: hash(&input),
-        review: review(item),
+        review: review(item, reading.as_ref()),
         result: super::audit(input),
     }
 }

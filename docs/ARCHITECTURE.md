@@ -855,7 +855,13 @@ lives in one capability table read by core and UI.
   *content hash* names what the rules read — reduced, symlinks stepped
   over, binary assets counted not kept, text decoded lossily — and is for
   scoring only. The *review hash* names every owned byte, or the exact
-  config entry, undecoded, and is what a decision binds to. Where bytes
+  config entry, undecoded, and is what a decision binds to. A hook
+  observed inside a shared config file binds its own entries plus the
+  bytes of the script its command invokes (kendex's project spellings
+  resolve against the scope root; a command-bodied hook binds its entries
+  alone and round-trips from gate to install) — never the rest of the
+  file; a script the command names but the audit could not read or
+  resolve binds nothing at all. Where bytes
   cannot be reached there is no review hash and no decision reads as live.
   Both cover every file to its last byte. The memory bound is asked of the
   tree a surface is about to read; past it, or where part of a tree will

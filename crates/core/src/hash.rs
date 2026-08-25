@@ -227,6 +227,32 @@ pub fn relevant_sections(
     out
 }
 
+/// `value` as text with object keys in one order. The JSON reader preserves
+/// the order it found, so two readings of one entry can serialize
+/// differently; anything keyed on the text — a decision's hash, a scanned
+/// line — must not change because somebody moved a key.
+pub(crate) fn canonical_json(value: &serde_json::Value) -> String {
+    use serde_json::Value;
+    match value {
+        Value::Object(map) => {
+            let mut pairs: Vec<(&String, &Value)> = map.iter().collect();
+            pairs.sort_by(|a, b| a.0.cmp(b.0));
+            let body: Vec<String> = pairs
+                .into_iter()
+                .map(|(key, value)| {
+                    format!("{}:{}", Value::String(key.clone()), canonical_json(value))
+                })
+                .collect();
+            format!("{{{}}}", body.join(","))
+        }
+        Value::Array(items) => {
+            let body: Vec<String> = items.iter().map(canonical_json).collect();
+            format!("[{}]", body.join(","))
+        }
+        other => other.to_string(),
+    }
+}
+
 pub(crate) fn hex(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len() * 2);
     for byte in bytes {

@@ -242,7 +242,20 @@ pub enum Content {
         event: String,
         matcher: Option<String>,
         command: String,
-        script: Option<String>,
+        /// The owning registry entry (or entries) as canonical JSON — env,
+        /// cwd, headers and every other field — scanned as authored text,
+        /// so a credential planted in a hook's own environment reaches the
+        /// rules the way its command does. `None` for a file-backed hook.
+        entry: Option<String>,
+        /// The script the command invokes: its own location and its text.
+        /// Script findings belong to the script's file, never the registry.
+        script: Option<(String, String)>,
+        /// A script the command names that could not be read, and why. The
+        /// command and entry still score — complete on their own — and this
+        /// is the honest marker that part of what would run was not read:
+        /// [`audit`] reports it as a skipped row, and a decision must not
+        /// bind while it is set.
+        script_unread: Option<String>,
     },
     Mcp(McpEntry),
     Plugin(PluginSources),
@@ -312,7 +325,10 @@ pub trait AuditRule: Send + Sync {
     fn check(&self, prepared: &Prepared) -> Outcome;
 }
 
-/// A rule that applies here but could not run, and why.
+/// A rule that applies here but could not run, and why — or a named part
+/// of the input the rules could not read (`rule: "hook-script"`), so the
+/// gap is visible beside whatever else was found instead of reading as a
+/// pass over content nobody opened.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct SkippedRule {
@@ -343,6 +359,19 @@ pub fn audit(input: AuditInput) -> AuditResult {
     let prepared = text::prepare(input);
     let mut findings = Vec::new();
     let mut skipped = Vec::new();
+    // A hook whose script could not be read still scores on its command
+    // and its entry — both complete on their own — but the gap is said,
+    // not passed over: what would run includes bytes nobody opened.
+    if let Content::Hook {
+        script_unread: Some(why),
+        ..
+    } = &prepared.input.content
+    {
+        skipped.push(SkippedRule {
+            rule: "hook-script".to_owned(),
+            reason: why.clone(),
+        });
+    }
     for rule in rules::registry() {
         match rule.check(&prepared) {
             Outcome::Ran(mut found) => findings.append(&mut found),

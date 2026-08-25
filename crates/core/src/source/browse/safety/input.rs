@@ -51,7 +51,9 @@ pub(super) fn input_for(
             event: String::new(),
             matcher: None,
             command: location.clone(),
-            script: Some(browsed.sealed.read_to_string(path)?),
+            entry: None,
+            script: Some((location.clone(), browsed.sealed.read_to_string(path)?)),
+            script_unread: None,
         },
         _ => Content::Document {
             text: browsed.sealed.read_to_string(path)?,
