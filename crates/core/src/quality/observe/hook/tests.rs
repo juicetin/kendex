@@ -478,6 +478,95 @@ fn every_unresolvable_script_is_named_in_the_gap() {
     );
 }
 
+/// A command naming the same script twice names one script: the resolved
+/// side reads it and lands the finding with no gap, and the unresolved
+/// side names the spelling once in the reason. Collecting candidates into
+/// a list instead of a set turns the first into a false ambiguity and the
+/// second into a stutter.
+#[test]
+fn a_script_named_twice_is_one_candidate() {
+    let tmp = tempfile::tempdir().unwrap();
+    let guard = tmp.path().join("guard.sh");
+    std::fs::write(&guard, "#!/bin/sh\nrm -rf / --no-preserve-root\n").unwrap();
+    let path = tmp.path().join("settings.json");
+    let write = |command: &str| {
+        let doc = serde_json::json!(
+            {"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":command}]}]}}
+        );
+        std::fs::write(&path, doc.to_string()).unwrap();
+        format!("PreToolUse:*:{}", crate::hook::command_stem(command))
+    };
+
+    let command = format!("bash {} && bash {}", guard.display(), guard.display());
+    let name = write(&command);
+    let found = audit(input_for(&hook_at(&path, &name)));
+    assert!(
+        found
+            .findings
+            .iter()
+            .any(|f| f.rule == "dangerous-commands"
+                && f.location == format!("{}:2", guard.display())),
+        "{:?}",
+        found.findings
+    );
+    assert!(found.skipped.is_empty(), "{:?}", found.skipped);
+
+    let command = "bash hooks/x.sh; bash hooks/x.sh";
+    let name = write(command);
+    let found = audit(input_for(&hook_at(&path, &name)));
+    let gap = found
+        .skipped
+        .iter()
+        .find(|s| s.rule == "hook-script")
+        .unwrap_or_else(|| panic!("{:?}", found.skipped));
+    assert_eq!(
+        gap.reason.matches("hooks/x.sh").count(),
+        1,
+        "{:?}",
+        gap.reason
+    );
+}
+
+/// The ambiguous arm caps what it echoes the way the unresolved arm does:
+/// nine resolvable scripts quote eight and count the ninth.
+#[test]
+fn an_ambiguous_reason_caps_the_candidates_it_echoes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let scripts: Vec<String> = (0..9)
+        .map(|n| {
+            let script = tmp.path().join(format!("s{n}.sh"));
+            std::fs::write(&script, "exit 0\n").unwrap();
+            script.display().to_string()
+        })
+        .collect();
+    let command = scripts
+        .iter()
+        .map(|s| format!("bash {s}"))
+        .collect::<Vec<_>>()
+        .join("; ");
+    let path = tmp.path().join("settings.json");
+    let doc = serde_json::json!(
+        {"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":command}]}]}}
+    );
+    std::fs::write(&path, doc.to_string()).unwrap();
+    let name = format!("PreToolUse:*:{}", crate::hook::command_stem(&command));
+
+    let found = audit(input_for(&hook_at(&path, &name)));
+
+    let gap = found
+        .skipped
+        .iter()
+        .find(|s| s.rule == "hook-script")
+        .unwrap_or_else(|| panic!("{:?}", found.skipped));
+    assert!(
+        gap.reason.contains("more than one script"),
+        "{:?}",
+        gap.reason
+    );
+    assert!(gap.reason.ends_with(", and 1 more)"), "{:?}", gap.reason);
+    assert_eq!(gap.reason.matches(".sh").count(), 8, "{:?}", gap.reason);
+}
+
 /// A gap reason quotes the first few candidates and counts the rest, so a
 /// command naming any number of script-looking tokens cannot turn the one
 /// line a person reads into a page.
