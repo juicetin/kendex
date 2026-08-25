@@ -399,7 +399,11 @@ lives in one capability table read by core and UI.
   scoped per staged file's owning `Cargo.toml`, and see none of the git
   redirects a hook's parent exports. Which repository a commit targets
   is git's question, answered where the target has an armed hook: the
-  `pre-commit-check` PreToolUse hook only word-matches for a commit,
+  `pre-commit-check` PreToolUse hook only word-matches for a commit —
+  over the command with its quoted multi-word arguments dropped, so an
+  issue description that merely mentions `--no-verify` is data, while a
+  quoted flag, a token split across quotes, and an interpreter's or
+  substitution's script argument are still shell —
   defers to the armed git pre-commit hook of its own working directory,
   and runs the chain in that directory only where none is armed there;
   sidestepping an armed one (`--no-verify`, `-n`) or injecting git config

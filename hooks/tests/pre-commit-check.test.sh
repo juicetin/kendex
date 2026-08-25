@@ -54,7 +54,7 @@ chmod +x "$BIN_DIR/kendex"
 # fail-closed case. The shim dir is deliberately absent.
 NO_KENDEX_BIN="$TMP_ROOT/no-kendex-bin"
 mkdir -p "$NO_KENDEX_BIN"
-for tool in git grep tr sed head bash cat; do
+for tool in git grep tr sed head bash cat awk; do
   ln -s "$(command -v "$tool")" "$NO_KENDEX_BIN/$tool"
 done
 
@@ -76,6 +76,13 @@ run_hook() {
 
 payload() {
   printf '{"tool_input":{"command":"%s"}}' "$1"
+}
+
+# payload() for a command that itself contains quotes or backslashes:
+# escapes them the way the harness's JSON encoder does.
+jpayload() {
+  printf '{"tool_input":{"command":"%s"}}' \
+    "$(printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g')"
 }
 
 assert_eq() {
@@ -319,6 +326,66 @@ assert_eq "$rc" "0" "a quoted path with a space is not a refusal"
 
 run_hook "$UNARMED" '{"tool_input":{"command":"git -C \"/tmp/my repo\" commit -m x"}}' KENDEX_EXIT=1
 assert_eq "$rc" "2" "the quoted-path commit still reaches the fallback gate"
+
+echo
+echo "a quoted mention is data, not a command"
+
+# The reported defect: an issue description that merely names the bypass
+# flag is not a commit that uses it. In each of these the words git,
+# commit and the flag live only inside a quoted multi-word argument to
+# some other tool, so nothing here is a commit and nothing is refused.
+MENTION='the hook refuses a git commit --no-verify'
+for form in \
+  "linear.sh issues create --description \"$MENTION\"" \
+  "linear.sh issues create --description '$MENTION'" \
+  "linear.sh issues create --description 'run \`git commit --no-verify\` to skip'" \
+  'echo "do not run git commit -n here"'; do
+  run_hook "$ARMED" "$(jpayload "$form")" KENDEX_EXIT=1
+  assert_eq "$rc" "0" "quoted data is not a commit: $form"
+  assert_not_contains "$err" "bypasses" "no bypass refusal for quoted data: $form"
+  run_hook "$UNARMED" "$(jpayload "$form")" KENDEX_EXIT=1
+  assert_eq "$rc" "0" "quoted data runs no fallback chain either: $form"
+  assert_not_contains "$log" "kendex" "no guard run for quoted data: $form"
+done
+
+# A real commit whose message quotes the flag: the commit is still
+# detected and gated, the mention inside the message is still not a bypass.
+run_hook "$UNARMED" "$(jpayload "git commit -m \"KEN-576: $MENTION\"")" KENDEX_EXIT=1
+assert_eq "$rc" "2" "a real commit is detected through a quoted message"
+assert_contains "$log" "kendex guard run pre-commit" "the chain ran for the real commit"
+assert_not_contains "$err" "bypasses this repository's armed git hooks" "the flag named in the message is not a bypass"
+
+run_hook "$ARMED" "$(jpayload "git commit -m \"KEN-576: $MENTION\"")" KENDEX_EXIT=0
+assert_eq "$rc" "0" "the same commit defers to the armed hook, unrefused"
+
+echo
+echo "quoting does not launder a real bypass"
+
+# Quotes that carry shell rather than prose: a quoted flag is still the
+# flag, a token split across quotes is still the token, an interpreter's
+# script argument is still shell, and so is a command substitution.
+for form in \
+  'git commit "--no-verify" -m x' \
+  'git commit --no-"verify" -m x' \
+  'git commit --no\-verify -m x' \
+  'git commit -m "wip message" --no-verify' \
+  'git -c "core.hooksPath=/dev/null" commit -m x' \
+  'bash -c "git commit --no-verify -m x"' \
+  'sh -lc "git commit -n -m x"' \
+  'eval "git commit --no-verify -m x"' \
+  'echo "$(git commit --no-verify -m x)"' \
+  'git commit --no-verify -m "unterminated'; do
+  run_hook "$ARMED" "$(jpayload "$form")" KENDEX_EXIT=0
+  assert_eq "$rc" "2" "still refused: $form"
+  assert_contains "$err" "bypasses this repository's armed git hooks" "the refusal names the bypass: $form"
+  assert_not_contains "$log" "kendex" "no chain stands in for the bypassed hooks: $form"
+done
+
+# Detection survives an interpreter's quotes too: no bypass, but the
+# commit inside still reaches the fallback gate.
+run_hook "$UNARMED" "$(jpayload 'bash -c "git commit -m x"')" KENDEX_EXIT=1
+assert_eq "$rc" "2" "a commit inside an interpreter argument reaches the fallback gate"
+assert_contains "$log" "kendex guard run pre-commit" "the chain ran for the interpreter's commit"
 
 echo
 echo "fail closed without kendex"

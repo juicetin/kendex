@@ -31,9 +31,78 @@ if [ -z "$COMMAND" ]; then
   echo "pre-commit-check: could not read the command out of the hook payload" >&2
   exit 2
 fi
-# JSON's whitespace escapes separate words too: `cargo fmt\ngit commit`
-# is two commands, not one word `ngit`.
-WORDS=" $(printf '%s' "$COMMAND" | sed 's/\\[ntr]/ /g' | tr -c 'a-zA-Z0-9_=-' ' ') "
+# A quoted multi-word argument is data, not shell: an issue description
+# that merely mentions the no-verify flag is not a commit that uses it.
+# Dropping those regions before the word scan is what separates the two,
+# and every ambiguity resolves the other way — toward keeping the text and
+# paying a refusal to reword. Kept, therefore: a quoted region with no
+# whitespace (a quoted flag, or half a token split across quotes, since
+# `--no-"verify"` is still the flag), a double-quoted region holding a
+# `$(` or a backtick (the shell runs that, so this lane reads it), and any
+# region handed to an interpreter — the argument after `eval` or after a
+# short-flag cluster ending in `c`, as `bash -c` and `sh -lc` spell it. An
+# unterminated quote is kept whole.
+#
+# JSON escapes are decoded first: `\"` is a real quote to the shell below,
+# and the whitespace escapes separate words — `cargo fmt\ngit commit` is
+# two commands, not one word `ngit`.
+#
+# Without awk the command cannot be read at all — the same case as a
+# payload this lane cannot parse, and refused for the same reason.
+if ! command -v awk >/dev/null 2>&1; then
+  echo "pre-commit-check: awk is not on PATH, so the command cannot be read — nothing here can judge this commit" >&2
+  exit 2
+fi
+BODY=$(printf '%s' "$COMMAND" | sed 's/^"command"[[:space:]]*:[[:space:]]*"//; s/"$//')
+SANITIZED=$(printf '%s\n' "$BODY" | awk '
+function keep(body, quote, sofar,   prev) {
+  if (body !~ /[ \t]/) return 1
+  if (quote == "\"" && (index(body, "$(") > 0 || index(body, "`") > 0)) return 1
+  sub(/[ \t]+$/, "", sofar)
+  prev = sofar
+  sub(/^.*[ \t]/, "", prev)
+  return (prev == "eval" || prev ~ /^-[a-zA-Z]*c$/)
+}
+{
+  # 1. JSON unescape. A \uXXXX escape becomes a space: this lane reads
+  #    shell syntax, and no harness spells its syntax that way.
+  cmd = ""
+  n = length($0)
+  for (i = 1; i <= n; i++) {
+    c = substr($0, i, 1)
+    if (c != "\\" || i == n) { cmd = cmd c; continue }
+    i++
+    e = substr($0, i, 1)
+    if (e ~ /^[ntrbf]$/) cmd = cmd " "
+    else if (e == "u") { i += 4; cmd = cmd " " }
+    else cmd = cmd e
+  }
+  # 2. Drop the quoted data regions, keeping the shell around them. A
+  #    backslash outside quotes escapes one character, which stays: the
+  #    shell reads `--no\-verify` as the flag, and so must this lane.
+  out = ""
+  n = length(cmd)
+  i = 1
+  while (i <= n) {
+    c = substr(cmd, i, 1)
+    if (c == "\\" && i < n) { out = out substr(cmd, i + 1, 1); i += 2; continue }
+    if (c != "\"" && c != "\047") { out = out c; i++; continue }
+    body = ""
+    j = i + 1
+    while (j <= n) {
+      d = substr(cmd, j, 1)
+      if (c == "\"" && d == "\\" && j < n) { body = body substr(cmd, j + 1, 1); j += 2; continue }
+      if (d == c) break
+      body = body d
+      j++
+    }
+    if (j > n) { out = out substr(cmd, i); break }
+    out = out (keep(body, c, out) ? body : " ")
+    i = j + 1
+  }
+  print out
+}')
+WORDS=" $(printf '%s' "$SANITIZED" | tr -c 'a-zA-Z0-9_=-' ' ') "
 printf '%s' "$WORDS" | grep -qE ' git( .*)? commit ' || exit 0
 
 # Repository-moving words (-C, --git-dir, --work-tree, cd, a GIT_DIR or

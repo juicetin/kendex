@@ -10,6 +10,9 @@ an outside contributor.
 
 ### Fixed
 
+- The `pre-commit-check` hook no longer refuses a command that merely
+  quotes `--no-verify` or `git commit` as text, in an issue description
+  or a commit message. A real bypass is still refused, quoted or not.
 - macOS builds are Developer ID signed and notarized: installing from any
   channel no longer ends in "kendex is damaged" or an `xattr -cr` workaround.
 
