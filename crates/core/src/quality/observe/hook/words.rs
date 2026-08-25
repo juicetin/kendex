@@ -154,6 +154,12 @@ fn an_unquoted_command_substitution_is_one_unresolved_word() {
             "bash $(pwd)/etc/profile.d/bash_completion.sh".to_owned(),
             "$(pwd)/etc/profile.d/bash_completion.sh",
         ),
+        // Nested: the inner parenthesis is counted, so the outer one closes
+        // where the shell closes it and the decoy's path never stands alone.
+        (
+            format!("bash $(dirname $(pwd)){}", decoy.display()),
+            "$(dirname $(pwd))",
+        ),
         // Process substitution: one word too, so the split cannot leave
         // the decoy's path standing alone. It names no script by
         // extension, so this case asserts only that nothing was read.
