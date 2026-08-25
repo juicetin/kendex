@@ -32,6 +32,9 @@ fd-lock = "4"
 # that releases a lock's open file description before the fd closes.
 rustix = { version = "1", features = ["fs"] }
 unicode-normalization = "0.1"
+# Only for O_NONBLOCK on the hook-script open: a FIFO opened for reading
+# without it blocks until a writer appears, wedging the audit.
+libc = "0.2"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

@@ -243,18 +243,19 @@ pub enum Content {
         matcher: Option<String>,
         command: String,
         /// The owning registry entry (or entries) as canonical JSON — env,
-        /// cwd, headers and every other field — scanned as authored text,
-        /// so a credential planted in a hook's own environment reaches the
-        /// rules the way its command does. `None` for a file-backed hook.
+        /// cwd, headers and every other field except the one carrying
+        /// `command`, which is already its own document — scanned as
+        /// authored text, so a credential planted in a hook's own
+        /// environment reaches the rules the way its command does. `None`
+        /// for a file-backed hook.
         entry: Option<String>,
         /// The script the command invokes: its own location and its text.
         /// Script findings belong to the script's file, never the registry.
         script: Option<(String, String)>,
         /// A script the command names that could not be read, and why. The
-        /// command and entry still score — complete on their own — and this
-        /// is the honest marker that part of what would run was not read:
-        /// [`audit`] reports it as a skipped row, and a decision must not
-        /// bind while it is set.
+        /// command and entry still score — complete on their own — while
+        /// [`audit`] reports the unread part as a skipped row, and a
+        /// decision must not bind while it is set.
         script_unread: Option<String>,
     },
     Mcp(McpEntry),
@@ -360,8 +361,7 @@ pub fn audit(input: AuditInput) -> AuditResult {
     let mut findings = Vec::new();
     let mut skipped = Vec::new();
     // A hook whose script could not be read still scores on its command
-    // and its entry — both complete on their own — but the gap is said,
-    // not passed over: what would run includes bytes nobody opened.
+    // and entry, but the gap is said: what would run includes unopened bytes.
     if let Content::Hook {
         script_unread: Some(why),
         ..

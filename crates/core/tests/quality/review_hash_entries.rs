@@ -178,6 +178,37 @@ fn a_hook_decision_survives_the_write_that_acts_on_it() {
     );
 }
 
+/// The enforcement half of the said-gap design: while a command names a
+/// script nobody could read or resolve, part of what would run is unread,
+/// and a decision must not bind — the hash is absent, not entries-only.
+#[test]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+fn an_unread_script_leaves_nothing_to_bind() {
+    let f = fixture();
+    let claude = f.project.join(".claude/settings.json");
+    fs::write(
+        &claude,
+        r#"{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"bash hooks/guard.sh"}]}]}}"#,
+    )
+    .unwrap();
+
+    let rows = observed_rows(&f.env, &f.scope).unwrap();
+    let hook = rows
+        .iter()
+        .find(|row| row.kind == kendex_core::model::ItemKind::Hook)
+        .expect("the hook is observed");
+    assert!(
+        hook.skipped.iter().any(|s| s.rule == "hook-script"),
+        "{:?}",
+        hook.skipped
+    );
+    assert!(
+        hook.review_hash.is_none(),
+        "nothing binds over unopened bytes: {:?}",
+        hook.review_hash
+    );
+}
+
 /// The join between parts of the binding material must not be forgeable
 /// from inside a command string: one registration whose command spells the
 /// old raw joiner must not hash like two registrations. Both files hold

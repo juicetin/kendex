@@ -34,10 +34,11 @@ const HOOK_SCRIPT_UNREADABLE: &str =
 /// file — a relative path, or a variable kendex did not write.
 const HOOK_SCRIPT_UNRESOLVED: &str =
     "the script this hook's command names could not be resolved to a file on this machine";
-/// Same-named registrations point at different scripts, so nothing here
-/// can say which bytes the one listed observation stands for.
+/// The named script candidates do not agree on one file — two distinct
+/// paths, or a path beside a spelling nobody could resolve — so nothing
+/// here can say which bytes the one listed observation stands for.
 const HOOK_SCRIPTS_AMBIGUOUS: &str =
-    "same-named registrations of this hook name different scripts, so neither was read";
+    "same-named registrations of this hook do not agree on one script, so none was read";
 
 /// What this hook observation gives the rules to read, computing its own
 /// reading. [`super::score`] reads through [`config_entry_input`] instead,
@@ -106,7 +107,10 @@ pub(crate) fn config_entry_input(
                 ),
                 script: reading.script.as_ref().map(|(path, bytes)| {
                     (
-                        path.display().to_string(),
+                        // The location came out of a command string, so it
+                        // is laundered of control characters like every
+                        // other command-derived text that reaches output.
+                        plain(&path.display().to_string()),
                         String::from_utf8_lossy(bytes).into_owned(),
                     )
                 }),
@@ -185,11 +189,15 @@ fn script_of(
     let mut resolved: Vec<PathBuf> = Vec::new();
     let mut unresolved: Vec<String> = Vec::new();
     for reg in registrations {
-        match script_named(&reg.command, scope) {
-            Named::Path(path) if !resolved.contains(&path) => resolved.push(path),
-            Named::Path(_) => {}
-            Named::Unresolved(token) => unresolved.push(token),
-            Named::None => {}
+        for named in scripts_named(&reg.command, scope) {
+            match named {
+                Named::Path(path) if !resolved.contains(&path) => resolved.push(path),
+                Named::Path(_) => {}
+                Named::Unresolved(token) if !unresolved.contains(&token) => {
+                    unresolved.push(token);
+                }
+                Named::Unresolved(_) => {}
+            }
         }
     }
     match (resolved.as_slice(), unresolved.as_slice()) {
@@ -197,17 +205,21 @@ fn script_of(
         ([], [token, ..]) => (None, Some(format!("{HOOK_SCRIPT_UNRESOLVED} ({token})"))),
         ([path], []) => match read_script(path) {
             Ok(bytes) => (Some((path.clone(), bytes)), None),
-            Err(why) => (None, Some(format!("{why} ({})", path.display()))),
+            Err(why) => (
+                None,
+                Some(format!("{why} ({})", plain(&path.display().to_string()))),
+            ),
         },
-        // Two candidates — or one plus a spelling nobody could resolve —
-        // and nothing here can say which bytes this observation stands
-        // for, so none are claimed and the gap is said.
+        // The candidates disagree — two distinct paths, or a path beside a
+        // spelling nobody could resolve — and nothing here can say which
+        // bytes this observation stands for, so none are claimed and the
+        // gap is said.
         (many, _) => (
             None,
             Some(format!(
                 "{HOOK_SCRIPTS_AMBIGUOUS} ({})",
                 many.iter()
-                    .map(|p| p.display().to_string())
+                    .map(|p| plain(&p.display().to_string()))
                     .chain(unresolved.iter().cloned())
                     .collect::<Vec<_>>()
                     .join(", ")
@@ -216,7 +228,7 @@ fn script_of(
     }
 }
 
-/// What one command line says about its script.
+/// What one command line says about one script it names.
 enum Named {
     /// A file this machine can open: an absolute path with a script
     /// extension, after kendex's own project spellings are resolved.
@@ -224,8 +236,6 @@ enum Named {
     /// A token that is plainly a script — it has the extension — reached
     /// through a spelling this audit cannot resolve.
     Unresolved(String),
-    /// No token looks like a script; the command is the whole content.
-    None,
 }
 
 /// The spellings kendex itself registers a project hook's script under —
@@ -235,39 +245,57 @@ enum Named {
 const PROJECT_ROOT_SPELLINGS: &[&str] =
     &["$CLAUDE_PROJECT_DIR", "$(git rev-parse --show-toplevel)"];
 
-/// The script file a hook's command line invokes. Tokens split on
-/// whitespace outside quotes — `$(git rev-parse --show-toplevel)` carries
-/// spaces and must stay one token — and quote characters are dropped, the
-/// way the shell drops them. An interpreter like `/bin/bash` has no script
-/// extension and is passed over.
-fn script_named(command: &str, scope: &Scope) -> Named {
-    for token in tokens(command) {
-        if !script_ext(Path::new(&token)) {
-            continue;
-        }
-        let resolved = resolve_root(&token, scope);
-        return match resolved {
+/// Every script a hook's command line names — all of them, not the first:
+/// `bash /a/ok.sh; bash /b/evil.sh` runs both, and reading only the one a
+/// writer put first would bind a decision while the other executes
+/// unread. Tokens split on whitespace outside quotes — `$(git rev-parse
+/// --show-toplevel)` carries spaces and must stay one token — and quote
+/// characters are dropped, the way the shell drops them. An interpreter
+/// like `/bin/bash` has no script extension and is passed over.
+fn scripts_named(command: &str, scope: &Scope) -> Vec<Named> {
+    tokens(command)
+        .into_iter()
+        .filter(|token| script_ext(Path::new(token)))
+        .map(|token| match resolve_root(&token, scope) {
             Some(path) if path.is_absolute() => Named::Path(path),
-            _ => Named::Unresolved(token),
-        };
-    }
-    Named::None
+            _ => Named::Unresolved(plain(&token)),
+        })
+        .collect()
 }
 
 /// `token` with kendex's own project spelling replaced by the scope root
 /// it evaluates to. A token carrying no spelling passes through; a project
-/// spelling outside a project scope resolves to nothing.
+/// spelling outside a project scope, or one that is only the *prefix* of a
+/// longer identifier, resolves to nothing — `$CLAUDE_PROJECT_DIRS/run.sh`
+/// names a different variable, and the shell expands that one, so
+/// resolving it here would read and bind bytes the harness never runs.
 fn resolve_root(token: &str, scope: &Scope) -> Option<PathBuf> {
     for spelling in PROJECT_ROOT_SPELLINGS {
         let Some(rest) = token.strip_prefix(spelling) else {
             continue;
         };
+        if !(rest.is_empty() || rest.starts_with('/')) {
+            return None;
+        }
         let Scope::Project { root } = scope else {
             return None;
         };
         return Some(root.join(rest.trim_start_matches('/')));
     }
     Some(PathBuf::from(token))
+}
+
+/// `text` with every control character replaced, so a path a hostile
+/// config embeds terminal escapes in cannot recolor or rewrite the output
+/// it is reported through. Applied where command-derived text enters a
+/// reason or a location; every consumer downstream inherits it.
+fn plain(text: &str) -> String {
+    text.chars()
+        .map(|c| match c.is_control() {
+            true => '\u{FFFD}',
+            false => c,
+        })
+        .collect()
 }
 
 /// Whitespace-splitting that honors quotes, dropping the quote characters
@@ -296,12 +324,16 @@ fn tokens(command: &str) -> Vec<String> {
     out
 }
 
-/// Extensions a hook script is written in. `ps1` because Copilot hooks run
-/// on Windows too; deliberately not shared with the plugin-source list,
-/// whose job is different.
+/// Extensions a hook script is written in, matched case-insensitively —
+/// `GUARD.SH` is the same script. `ps1` because Copilot hooks run on
+/// Windows too; deliberately not shared with the plugin-source list, whose
+/// job is different.
 fn script_ext(path: &Path) -> bool {
     matches!(
-        path.extension().and_then(|e| e.to_str()),
+        path.extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
         Some("sh" | "bash" | "zsh" | "py" | "js" | "ts" | "mjs" | "cjs" | "ps1")
     )
 }
@@ -312,15 +344,20 @@ fn script_ext(path: &Path) -> bool {
 /// swapped between them — and the read is capped at the bound so a file
 /// that grows under the open handle still cannot exhaust memory.
 fn read_script(path: &Path) -> Result<Vec<u8>, &'static str> {
-    // Refuse a FIFO or device before open: opening a FIFO for reading
-    // blocks until a writer appears, which would wedge the whole scan.
-    // The handle's own metadata below re-answers authoritatively for
-    // anything that changed in between.
-    match std::fs::metadata(path) {
-        Ok(meta) if meta.is_file() => {}
-        _ => return Err(HOOK_SCRIPT_UNREADABLE),
+    let mut open = std::fs::OpenOptions::new();
+    open.read(true);
+    // A FIFO opened for reading blocks until a writer appears, which would
+    // wedge the whole scan; O_NONBLOCK makes that open return instead and
+    // is a no-op on a regular file. A path pre-check could not close this —
+    // the file can become a FIFO between the check and the open — so the
+    // flag rides the open itself, and the handle's metadata below refuses
+    // whatever was opened that is not a regular file.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        open.custom_flags(libc::O_NONBLOCK);
     }
-    let Ok(file) = std::fs::File::open(path) else {
+    let Ok(file) = open.open(path) else {
         return Err(HOOK_SCRIPT_UNREADABLE);
     };
     let Ok(meta) = file.metadata() else {

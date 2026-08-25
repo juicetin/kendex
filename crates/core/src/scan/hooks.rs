@@ -49,23 +49,20 @@ impl Registration {
         owned_entry(&self.event, &self.matcher, &self.entry)
     }
 
-    /// The text the rules scan for this registration: the same wrapper,
-    /// minus the field that carries the command — the command is already
-    /// its own document, and scanning it twice would count one dangerous
-    /// token as two findings. Matching by value rather than by key name
-    /// covers every spelling an entry carries its action under.
+    /// The text the rules scan for this registration — see
+    /// [`scanned_entry`], the one place the stripping is defined.
     pub(crate) fn scanned_text(&self) -> String {
-        let mut entry = self.entry.clone();
-        if let Some(map) = entry.as_object_mut() {
-            map.retain(|_, value| value.as_str() != Some(self.command.as_str()));
-        }
-        owned_entry(&self.event, &self.matcher, &entry)
+        scanned_entry(&self.event, &self.matcher, &self.entry, &self.command)
     }
 }
 
-/// [`Registration::scanned_text`] from the parts the gate holds — the same
-/// stripping, so the doc the gate scans and the doc the audit scans are one
-/// text.
+/// One registration as the text the rules scan: the [`owned_entry`]
+/// wrapper, minus the field that carries the command — the command is
+/// already its own document, and scanning it twice would count one
+/// dangerous token as two findings. Matching by value rather than by key
+/// name covers every spelling an entry carries its action under. Both
+/// sides of an install scan through here: the audit via
+/// [`Registration::scanned_text`], the gate from the edit's parts.
 pub(crate) fn scanned_entry(
     event: &str,
     matcher: &str,

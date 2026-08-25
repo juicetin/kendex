@@ -169,30 +169,9 @@ fn hook_edit(
 fn hook_entries(edits: &[(std::path::PathBuf, ConfigEdit)]) -> Vec<String> {
     edits
         .iter()
-        .filter_map(|(_, edit)| match edit {
-            ConfigEdit::UpsertHook {
-                event,
-                matcher,
-                command,
-                timeout,
-            } => Some(crate::scan::hooks::scanned_entry(
-                event,
-                crate::configedit::spelled(matcher.as_deref()),
-                &crate::configedit::handler_json(command, *timeout),
-                command,
-            )),
-            ConfigEdit::UpsertCopilotHook {
-                event,
-                matcher,
-                command,
-                timeout,
-            } => Some(crate::scan::hooks::scanned_entry(
-                event,
-                crate::configedit::spelled(matcher.as_deref()),
-                &crate::configedit::copilot_entry_json(matcher.as_deref(), command, *timeout),
-                command,
-            )),
-            _ => None,
+        .filter_map(|(_, edit)| crate::configedit::hook_edit_parts(edit))
+        .map(|(event, matcher, entry, command)| {
+            crate::scan::hooks::scanned_entry(event, matcher, &entry, command)
         })
         .collect()
 }

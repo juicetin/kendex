@@ -167,10 +167,11 @@ fn seal(kind: ItemKind, inner: &str) -> String {
 /// plugin is one switch in a settings file and a removal has no entry at
 /// all, so there is nothing for a decision to bind to.
 ///
-/// A hook's entry text is built by the same functions that write the file
-/// (`configedit::handler_json` / `copilot_entry_json`), spelled by the same
-/// `owned_entry` the scanner's read-back uses — so the entry the gate binds
-/// and the entry the audit digs back out are one text by construction.
+/// A hook's entry text comes through `configedit::hook_edit_parts` — the
+/// same mapping the gate's scanned doc uses over the same builders the
+/// write uses — spelled by the same `owned_entry` the scanner's read-back
+/// uses, so the entry the gate binds and the entry the audit digs back out
+/// are one text by construction.
 fn registration(
     script: Option<&(PathBuf, Vec<u8>)>,
     edits: &[(PathBuf, ConfigEdit)],
@@ -178,32 +179,25 @@ fn registration(
     let mut entries: Vec<String> = Vec::new();
     let mut servers: Vec<String> = Vec::new();
     for (_, edit) in edits {
-        match edit {
-            ConfigEdit::UpsertHook {
-                event,
-                matcher,
-                command,
-                timeout,
-            } => entries.push(crate::scan::hooks::owned_entry(
-                event,
-                crate::configedit::spelled(matcher.as_deref()),
-                &crate::configedit::handler_json(command, *timeout),
-            )),
-            ConfigEdit::UpsertCopilotHook {
-                event,
-                matcher,
-                command,
-                timeout,
-            } => entries.push(crate::scan::hooks::owned_entry(
-                event,
-                crate::configedit::spelled(matcher.as_deref()),
-                &crate::configedit::copilot_entry_json(matcher.as_deref(), command, *timeout),
-            )),
-            ConfigEdit::UpsertMcpServer { value, .. } => servers.push(canonical(value)),
-            _ => {}
+        match crate::configedit::hook_edit_parts(edit) {
+            Some((event, matcher, entry, _)) => {
+                entries.push(crate::scan::hooks::owned_entry(event, matcher, &entry));
+            }
+            None => {
+                if let ConfigEdit::UpsertMcpServer { value, .. } = edit {
+                    servers.push(canonical(value));
+                }
+            }
         }
     }
     if !servers.is_empty() {
+        // One plan item registers one kind of entry; a hook entry beside a
+        // server entry would silently drop out of the binding below, so
+        // the assumption is enforced rather than trusted.
+        debug_assert!(
+            entries.is_empty(),
+            "hook entries alongside MCP server edits would be dropped from the binding"
+        );
         // The MCP construction predates the hook one and stays as it is:
         // changing it would stale every server decision already recorded.
         let mut parts: Vec<String> = Vec::new();

@@ -89,9 +89,12 @@ fn rows(env: &Env, scope: &kendex_core::model::Scope) -> Result<Vec<Reading>, Co
         .into_iter()
         .filter(ItemSafety::blocked)
         .collect();
+    // Skip-only rows stay in: a hook whose script nobody could read has no
+    // finding, and dropping the row would drop the one place this surface
+    // says so.
     let installed: Vec<ItemSafety> = observed_safety(env, scope)?
         .into_iter()
-        .filter(|row| !row.findings.is_empty())
+        .filter(|row| !row.findings.is_empty() || !row.skipped.is_empty())
         .collect();
 
     // Same installation, same bytes: one reading, not two.
@@ -176,6 +179,7 @@ fn print_row(reading: &Reading) {
             }
         }
     }
+    super::engine_common::print_skipped(row);
     // Only what the gate is holding back can be accepted this way. Content
     // already on disk that nothing declares is not waiting on a grant, and
     // offering one would name bytes no plan is about.

@@ -179,13 +179,16 @@ fn print_safety_rows(
     }
 }
 
-/// The rules that apply to this kind and had no bytes to read here.
-fn print_skipped(row: &kendex_core::engine::ItemSafety) {
+/// The checks that apply to this kind and had no bytes to read here — a
+/// rule with nothing to open, or a named part of the input (a hook's
+/// script) nobody could read. Shared with `findings`, so the gap shows on
+/// every surface that shows the findings it sits beside.
+pub(super) fn print_skipped(row: &kendex_core::engine::ItemSafety) {
     let Some(first) = row.skipped.first() else {
         return;
     };
     say(&format!(
-        "  not fully checked: {} rule(s) had nothing to read — {}",
+        "  not fully checked: {} check(s) had nothing to read — {}",
         row.skipped.len(),
         first.reason
     ));

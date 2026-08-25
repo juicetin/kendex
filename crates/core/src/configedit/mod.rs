@@ -8,6 +8,40 @@ mod text;
 pub(crate) use copilot::entry_json as copilot_entry_json;
 pub(crate) use nested::handler_json;
 
+/// A hook edit's parts in the spelling the scanner reads back: event, the
+/// spelled matcher, the entry object the write produces, and the command.
+/// The one mapping from an edit to what it puts in the file — every
+/// consumer (the gate's scanned doc, the review hash's binding) goes
+/// through here, so none of them can drift from the write or from each
+/// other.
+pub(crate) fn hook_edit_parts(edit: &ConfigEdit) -> Option<(&str, &str, serde_json::Value, &str)> {
+    match edit {
+        ConfigEdit::UpsertHook {
+            event,
+            matcher,
+            command,
+            timeout,
+        } => Some((
+            event,
+            spelled(matcher.as_deref()),
+            handler_json(command, *timeout),
+            command,
+        )),
+        ConfigEdit::UpsertCopilotHook {
+            event,
+            matcher,
+            command,
+            timeout,
+        } => Some((
+            event,
+            spelled(matcher.as_deref()),
+            copilot_entry_json(matcher.as_deref(), command, *timeout),
+            command,
+        )),
+        _ => None,
+    }
+}
+
 use copilot::{remove_copilot_hook, upsert_copilot_hook};
 use nested::{remove_hook, upsert_hook};
 use text::codex_enable_hooks;
