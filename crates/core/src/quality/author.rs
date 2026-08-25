@@ -247,13 +247,13 @@ pub fn one(
     let Some(review) = review else {
         return Read::default();
     };
-    // A hook is scored from the script a plan writes and from the shared
-    // settings file its registration lands in once installed — two readings
-    // of different bytes, by design. A record can bind to one or the other
-    // and never both, so no reading of one is honoured anywhere: refused
-    // here, in the one reader every path goes through, rather than at each
-    // of them, so the authoring check, the preview and the install cannot
-    // answer differently.
+    // A hook is scored from the script a plan writes and, once installed,
+    // from the registration dug out of its config file plus the script it
+    // invokes — readings that agree only when the command names its script
+    // by a path the audit can open. A record can bind to one reading and
+    // not reliably both, so no reading of one is honoured anywhere: refused
+    // here, in the one reader every path goes through, so the authoring
+    // check, the preview and the install cannot answer differently.
     if kind == ItemKind::Hook {
         return Read {
             review: None,

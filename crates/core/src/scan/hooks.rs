@@ -20,12 +20,15 @@ pub(crate) struct Registration {
     pub(crate) event: String,
     pub(crate) matcher: String,
     pub(crate) command: String,
+    /// The entry's own timeout, where it carries one. No rule reads it,
+    /// but a decision binds to the exact entry, and the entry includes it.
+    pub(crate) timeout: Option<u32>,
 }
 
 impl Registration {
     /// How a scan names this entry. One rendering, in one place, from the
     /// parts — so nothing downstream has to take it apart again.
-    fn name(&self) -> String {
+    pub(crate) fn name(&self) -> String {
         format!(
             "{}:{}:{}",
             self.event,
@@ -93,6 +96,10 @@ fn registrations(value: serde_json::Value) -> Vec<Registration> {
                     event: event.clone(),
                     matcher: matcher.to_owned(),
                     command: command.to_owned(),
+                    timeout: handler
+                        .get("timeout")
+                        .and_then(serde_json::Value::as_u64)
+                        .and_then(|t| u32::try_from(t).ok()),
                 });
             }
         }

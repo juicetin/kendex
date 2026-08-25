@@ -71,6 +71,10 @@ pub(crate) fn registrations_text(text: &str) -> Result<Vec<Registration>, String
                 matcher: crate::configedit::spelled(entry.get("matcher").and_then(Value::as_str))
                     .to_owned(),
                 command,
+                timeout: entry
+                    .get("timeoutSec")
+                    .and_then(Value::as_u64)
+                    .and_then(|t| u32::try_from(t).ok()),
             });
         }
     }

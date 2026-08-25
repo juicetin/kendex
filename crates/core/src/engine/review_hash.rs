@@ -17,14 +17,18 @@
 //! read as live, which is the same rule that reports an artifact kendex
 //! cannot compare as uncompared rather than as passing.
 //!
-//! A hook is the one kind whose two paths read different things, and each
-//! hash follows what its rules read. The gate reads the script this plan
-//! would write and the registration it would add, and binds both. The
-//! scanner finds a hook as one registration inside a shared settings file
-//! and scores that whole file under the hook's name — so the observed hash
-//! is the whole file's bytes, not the entry alone: a dismissal bound to the
-//! entry would stay live while something else in the same file, which the
-//! rules did read, was rewritten underneath it.
+//! A hook's hash follows what its rules read on each path. The gate reads
+//! the script this plan would write and the registration it would add, and
+//! binds both. The audit digs the registration back out of the shared
+//! settings file it landed in and follows its command to the script on
+//! disk, and binds exactly that — the entry and the script's bytes, never
+//! the rest of the file. The rules do not read sibling entries or the
+//! permission lists (KEN-558), and a hash over bytes the rules never read
+//! would stale a hook's decisions every time anything else in the settings
+//! file moved. Where the audit cannot resolve the script a command names —
+//! a project path spelled through a variable — it binds the entry alone,
+//! which never matches the gate's hash: the fail-closed direction, a
+//! decision that simply does not carry.
 
 use std::path::PathBuf;
 
@@ -72,7 +76,12 @@ pub(super) fn observed(item: &ObservedItem) -> Option<String> {
         ItemKind::Agent | ItemKind::Command | ItemKind::PiExtension => {
             hash_bytes(&std::fs::read(&item.path).ok()?)
         }
-        ItemKind::Hook => hash_bytes(&std::fs::read(&item.path).ok()?),
+        ItemKind::Hook => match item.file_state {
+            crate::model::FileState::ConfigEntry => hook_config_entry(item)?,
+            // A hook that is its own file — opencode's instruction carrier —
+            // is read whole, so it binds whole.
+            _ => hash_bytes(&std::fs::read(&item.path).ok()?),
+        },
         ItemKind::McpServer => hash_bytes(
             canonical(&crate::quality::observe::mcp_entry(&item.path, &item.name)?).as_bytes(),
         ),
@@ -180,6 +189,30 @@ fn registration(
         true => None,
         false => Some(hash_bytes(parts.join("|").as_bytes())),
     }
+}
+
+/// A config-entry hook binds to what its rules read: the registrations
+/// under its name — the four values a harness loads each one by — and the
+/// bytes of the script they invoke. The same reading the rules score
+/// ([`crate::quality::observe::hook_reading`]) and the same construction
+/// [`registration`] builds for a plan, so where the script resolves to the
+/// file the plan wrote, a decision taken at the gate recognises the
+/// install once the write lands.
+fn hook_config_entry(item: &ObservedItem) -> Option<String> {
+    let reading = crate::quality::observe::hook_reading(item).ok()?;
+    let mut parts: Vec<String> = Vec::new();
+    if let Some((_, bytes)) = &reading.script {
+        parts.push(hash_bytes(bytes));
+    }
+    for entry in &reading.registrations {
+        parts.push(hook_entry(
+            &entry.event,
+            Some(&entry.matcher),
+            &entry.command,
+            entry.timeout,
+        ));
+    }
+    Some(hash_bytes(parts.join("|").as_bytes()))
 }
 
 /// One hook registration as the four values a harness loads it by. An empty

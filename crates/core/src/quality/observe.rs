@@ -19,6 +19,9 @@ use super::{
     UNREADABLE_PLUGIN,
 };
 
+mod hook;
+pub(crate) use hook::hook_reading;
+
 /// One tree's in-memory files as audit input, in the order the observed
 /// walk uses. The gate reads a plan's rendered bytes through this so both
 /// scoring paths hash one construction — an override granted against the
@@ -56,7 +59,7 @@ pub fn input_for(item: &ObservedItem) -> AuditInput {
     let content = match item.kind {
         ItemKind::Skill => read_tree(&item.path),
         ItemKind::Agent | ItemKind::Command | ItemKind::PiExtension => read_document(&item.path),
-        ItemKind::Hook => read_hook(&item.path),
+        ItemKind::Hook => return hook::hook_input(item),
         ItemKind::McpServer => read_mcp(&item.path, &item.name),
         ItemKind::Plugin => read_plugin(&item.path),
     };
@@ -132,20 +135,6 @@ fn read_document(path: &Path) -> Content {
         Err(_) => Content::Unread {
             why: UNREADABLE_FILE,
         },
-    }
-}
-
-fn read_hook(path: &Path) -> Content {
-    let Content::Document { text } = read_document(path) else {
-        return Content::Unread {
-            why: UNREADABLE_FILE,
-        };
-    };
-    Content::Hook {
-        event: String::new(),
-        matcher: None,
-        command: path.display().to_string(),
-        script: Some(text),
     }
 }
 

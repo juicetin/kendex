@@ -10,6 +10,9 @@ an outside contributor.
 
 ### Fixed
 
+- Each hook is safety-checked on its own registration, command, and script,
+  so a `permissions.ask` guard naming `mkfs` no longer flags every hook in
+  the file; a script kendex cannot read or resolve is reported as a gap.
 - Customize › Customized packages now lists every package you changed at
   that location, hand-edited and forked ones included, so it matches the
   Library's "Customized in" mark instead of only packages with settings.
