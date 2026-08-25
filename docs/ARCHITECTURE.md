@@ -401,9 +401,11 @@ lives in one capability table read by core and UI.
   is git's question, answered where the target has an armed hook: the
   `pre-commit-check` PreToolUse hook only word-matches for a commit —
   over the command with its quoted multi-word arguments dropped, so an
-  issue description that merely mentions `--no-verify` is data, while a
-  quoted flag, a token split across quotes, and an interpreter's or
-  substitution's script argument are still shell —
+  issue description that merely mentions `--no-verify` is data; a quoted
+  single-word flag is still the flag, and a line carrying any sign that
+  quoted text could be executed (`eval`, a `-c`-style cluster, a pipe, a
+  substitution, a here-string, a heredoc) drops nothing and is scanned
+  whole —
   defers to the armed git pre-commit hook of its own working directory,
   and runs the chain in that directory only where none is armed there;
   sidestepping an armed one (`--no-verify`, `-n`) or injecting git config

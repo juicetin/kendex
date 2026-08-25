@@ -338,7 +338,6 @@ MENTION='the hook refuses a git commit --no-verify'
 for form in \
   "linear.sh issues create --description \"$MENTION\"" \
   "linear.sh issues create --description '$MENTION'" \
-  "linear.sh issues create --description 'run \`git commit --no-verify\` to skip'" \
   'echo "do not run git commit -n here"'; do
   run_hook "$ARMED" "$(jpayload "$form")" KENDEX_EXIT=1
   assert_eq "$rc" "0" "quoted data is not a commit: $form"
@@ -362,8 +361,11 @@ echo
 echo "quoting does not launder a real bypass"
 
 # Quotes that carry shell rather than prose: a quoted flag is still the
-# flag, a token split across quotes is still the token, an interpreter's
-# script argument is still shell, and so is a command substitution.
+# flag, and a token split across quotes is still the token. Past those,
+# nothing here decides which quoted region an interpreter will run — any
+# sign that one might (eval, a -c cluster whatever separates it from its
+# script, a pipe, a substitution, a here-string, a heredoc) drops nothing
+# at all, so a form this list does not name is scanned rather than missed.
 for form in \
   'git commit "--no-verify" -m x' \
   'git commit --no-"verify" -m x' \
@@ -374,12 +376,31 @@ for form in \
   'sh -lc "git commit -n -m x"' \
   'eval "git commit --no-verify -m x"' \
   'echo "$(git commit --no-verify -m x)"' \
-  'git commit --no-verify -m "unterminated'; do
+  'git commit --no-verify -m "unterminated' \
+  'bash -c -- "git commit --no-verify -m x"' \
+  'sh -c -- "git commit --no-verify -m x"' \
+  'eval -- "git commit --no-verify -m x"' \
+  "eval 'x=1;' 'git commit --no-verify -m x'" \
+  "bash <<< 'git commit --no-verify -m x'" \
+  'printf "git commit --no-verify -m x" | bash'; do
   run_hook "$ARMED" "$(jpayload "$form")" KENDEX_EXIT=0
   assert_eq "$rc" "2" "still refused: $form"
   assert_contains "$err" "bypasses this repository's armed git hooks" "the refusal names the bypass: $form"
   assert_not_contains "$log" "kendex" "no chain stands in for the bypassed hooks: $form"
 done
+
+# A heredoc, whose newlines arrive as \n escapes in the payload.
+run_hook "$ARMED" "$(payload 'bash <<EOF\ngit commit --no-verify -m x\nEOF')" KENDEX_EXIT=0
+assert_eq "$rc" "2" "a heredoc feeding an interpreter is refused"
+assert_contains "$err" "bypasses this repository's armed git hooks" "the refusal names the heredoc's bypass"
+
+# The deliberate trade for that: prose quoting the flag is data only while
+# nothing on the line could execute it. A backtick anywhere — inert inside
+# single quotes, but this lane does not parse quoting to prove it — costs a
+# refusal, and rewording the description is the fix.
+run_hook "$ARMED" "$(jpayload "linear.sh issues create --description 'run \`git commit --no-verify\` to skip'")" KENDEX_EXIT=0
+assert_eq "$rc" "2" "a backtick on the line keeps the quoted mention in the scan"
+assert_contains "$err" "bypasses this repository's armed git hooks" "and that mention reads as the bypass it spells"
 
 # Detection survives an interpreter's quotes too: no bypass, but the
 # commit inside still reaches the fallback gate.

@@ -33,19 +33,22 @@ if [ -z "$COMMAND" ]; then
 fi
 # A quoted multi-word argument is data, not shell: an issue description
 # that merely mentions the no-verify flag is not a commit that uses it.
-# Dropping those regions before the word scan is what separates the two,
-# and every ambiguity resolves the other way — toward keeping the text and
-# paying a refusal to reword. Kept, therefore: a quoted region with no
-# whitespace (a quoted flag, or half a token split across quotes, since
-# `--no-"verify"` is still the flag), a double-quoted region holding a
-# `$(` or a backtick (the shell runs that, so this lane reads it), and any
-# region handed to an interpreter — the argument after `eval` or after a
-# short-flag cluster ending in `c`, as `bash -c` and `sh -lc` spell it. An
-# unterminated quote is kept whole.
+# Dropping those regions before the word scan is what separates the two —
+# but only on a line where nothing could execute quoted text. Any sign
+# that something might — `eval`, an interpreter's short-flag cluster
+# ending in c, a pipe, `$(`, a backtick, a here-string or heredoc (`<<`)
+# — and nothing is dropped at all: the whole command is scanned, as it was
+# before this lane learned to drop anything. The case it does not
+# recognise is therefore the conservative one, and an execution form
+# nobody has thought of yet makes it stricter rather than porous.
+#
+# The deliberate cost: mentioning the flag inside quotes on a line that
+# also carries one of those signs is refused, and rewording is cheap. A
+# quoted region with no whitespace is kept, since `--no-"verify"` is the flag.
 #
 # JSON escapes are decoded first: `\"` is a real quote to the shell below,
-# and the whitespace escapes separate words — `cargo fmt\ngit commit` is
-# two commands, not one word `ngit`.
+# and the whitespace escapes separate words rather than welding the
+# commands they stand between into one.
 #
 # Without awk the command cannot be read at all — the same case as a
 # payload this lane cannot parse, and refused for the same reason.
@@ -55,14 +58,6 @@ if ! command -v awk >/dev/null 2>&1; then
 fi
 BODY=$(printf '%s' "$COMMAND" | sed 's/^"command"[[:space:]]*:[[:space:]]*"//; s/"$//')
 SANITIZED=$(printf '%s\n' "$BODY" | awk '
-function keep(body, quote, sofar,   prev) {
-  if (body !~ /[ \t]/) return 1
-  if (quote == "\"" && (index(body, "$(") > 0 || index(body, "`") > 0)) return 1
-  sub(/[ \t]+$/, "", sofar)
-  prev = sofar
-  sub(/^.*[ \t]/, "", prev)
-  return (prev == "eval" || prev ~ /^-[a-zA-Z]*c$/)
-}
 {
   # 1. JSON unescape. A \uXXXX escape becomes a space: this lane reads
   #    shell syntax, and no harness spells its syntax that way.
@@ -77,9 +72,14 @@ function keep(body, quote, sofar,   prev) {
     else if (e == "u") { i += 4; cmd = cmd " " }
     else cmd = cmd e
   }
-  # 2. Drop the quoted data regions, keeping the shell around them. A
-  #    backslash outside quotes escapes one character, which stays: the
-  #    shell reads `--no\-verify` as the flag, and so must this lane.
+  # 2. Where quoted text could be executed, drop nothing.
+  if (index(cmd, "$(") || index(cmd, "`") || index(cmd, "<<") || index(cmd, "|") \
+      || (" " cmd " ") ~ /[^a-zA-Z0-9_.\/-]eval[^a-zA-Z0-9_.\/-]/ \
+      || cmd ~ /(^|[ \t])-[a-zA-Z]*c([ \t]|$)/) { print cmd; next }
+  # 3. Otherwise drop the quoted data regions, keeping the shell around
+  #    them. A backslash outside quotes escapes one character, which
+  #    stays: the shell reads a backslash inside the flag as the flag,
+  #    and so must this lane.
   out = ""
   n = length(cmd)
   i = 1
@@ -97,7 +97,7 @@ function keep(body, quote, sofar,   prev) {
       j++
     }
     if (j > n) { out = out substr(cmd, i); break }
-    out = out (keep(body, c, out) ? body : " ")
+    out = out (body ~ /[ \t]/ ? " " : body)
     i = j + 1
   }
   print out
