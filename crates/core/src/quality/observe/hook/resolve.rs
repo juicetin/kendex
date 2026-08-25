@@ -329,14 +329,23 @@ fn a_dynamic_segment_after_the_project_spelling_is_not_resolved() {
 /// substitution expands to, so a root holding a space or a glob character
 /// runs something other than the one path a literal join produces — and
 /// that join is exactly where each form here plants a dangerous decoy.
-/// The decoy stays unread, the gap is said, and the partly quoted form
-/// takes the same gap: only the whole word in double quotes resolves.
+/// The decoy stays unread, the gap is said, and the partly quoted forms —
+/// the spelling quoted and the tail bare, or the spelling bare and the
+/// tail quoted — take the same gap: only the whole word in double quotes
+/// resolves.
 #[test]
 fn an_unquoted_project_spelling_is_not_resolved() {
     for command in [
         "bash $CLAUDE_PROJECT_DIR/hooks/guard.sh",
         "bash $(git rev-parse --show-toplevel)/hooks/guard.sh",
         "bash \"$CLAUDE_PROJECT_DIR\"/hooks/guard.sh",
+        // The substitution itself unquoted and only the tail in quotes:
+        // the shell still word-splits and globs the expansion. The
+        // substitution's insides set no flag, and the tail is quoted, so
+        // only the flag set when a substitution opens outside quotes
+        // refuses this form.
+        "bash $(git rev-parse --show-toplevel)\"/hooks/guard.sh\"",
+        "bash $CLAUDE_PROJECT_DIR\"/hooks/guard.sh\"",
     ] {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("app");
