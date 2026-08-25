@@ -3,7 +3,7 @@ use std::path::Path;
 use serde_json::Value;
 
 use super::RawEntry;
-use super::hooks::Registration;
+use super::hooks::{Action, Registration};
 use super::readers::read_json;
 use crate::hook::command_stem;
 
@@ -33,7 +33,7 @@ pub fn read(path: &Path) -> Result<Vec<RawEntry>, String> {
             continue;
         };
         for entry in list {
-            let Some(action) = action(entry) else {
+            let Some((_, action)) = action(entry) else {
                 continue;
             };
             let matcher = crate::configedit::spelled(entry.get("matcher").and_then(Value::as_str));
@@ -63,7 +63,7 @@ pub(crate) fn registrations_text(text: &str) -> Result<Vec<Registration>, String
             continue;
         };
         for entry in list {
-            let Some(command) = action(entry) else {
+            let Some((action, command)) = action(entry) else {
                 continue;
             };
             found.push(Registration {
@@ -71,6 +71,7 @@ pub(crate) fn registrations_text(text: &str) -> Result<Vec<Registration>, String
                 matcher: crate::configedit::spelled(entry.get("matcher").and_then(Value::as_str))
                     .to_owned(),
                 command,
+                action,
                 entry: entry.clone(),
             });
         }
@@ -78,13 +79,21 @@ pub(crate) fn registrations_text(text: &str) -> Result<Vec<Registration>, String
     Ok(found)
 }
 
-/// What one entry does, in the words of whichever key it used. A `command`
-/// entry names a shell for its command line, an `http` entry posts to a url,
-/// and a `prompt` entry hands text to the model.
-fn action(entry: &Value) -> Option<String> {
-    for key in ["bash", "powershell", "command", "url", "prompt"] {
+/// What one entry does, and in the words of whichever key it used. A
+/// `command` entry names a shell for its command line, an `http` entry
+/// posts to a url, and a `prompt` entry hands text to the model. The kind
+/// travels with the text because only a command line's words name scripts
+/// the harness runs.
+fn action(entry: &Value) -> Option<(Action, String)> {
+    for (key, kind) in [
+        ("bash", Action::Command),
+        ("powershell", Action::Command),
+        ("command", Action::Command),
+        ("url", Action::Http),
+        ("prompt", Action::Prompt),
+    ] {
         if let Some(value) = entry.get(key).and_then(Value::as_str) {
-            return Some(value.to_owned());
+            return Some((kind, value.to_owned()));
         }
     }
     None

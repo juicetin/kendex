@@ -9,6 +9,23 @@ use crate::hook::command_stem;
 /// matcher with a read one has to use.
 pub(crate) const ANY_MATCHER: &str = "*";
 
+/// What a registration does with its text. Only a command line names
+/// scripts: a URL that happens to end in `.sh` is posted to, not run, and
+/// a prompt naming an absolute path hands words to the model. Following
+/// either to a file on this machine would read — and bind a decision to —
+/// bytes the harness never executes, and a URL's `.sh` would be a gap for
+/// a script nobody runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Action {
+    /// A shell command line: `command` in the shared shape; `bash`,
+    /// `powershell` or `command` in Copilot's.
+    Command,
+    /// An endpoint Copilot posts the event to.
+    Http,
+    /// Text Copilot hands to the model.
+    Prompt,
+}
+
 /// One registration as a hooks document keys it, with the parts kept
 /// apart. The one-line name a scan displays is built from these; it is
 /// never read back out of, because two of the three parts may hold the
@@ -19,10 +36,14 @@ pub(crate) const ANY_MATCHER: &str = "*";
 pub(crate) struct Registration {
     pub(crate) event: String,
     pub(crate) matcher: String,
+    /// What the entry does, in the words of whichever key it used: the
+    /// command line, the URL, or the prompt. Which of those it is — and so
+    /// whether any script in it is one the harness runs — is `action`.
     pub(crate) command: String,
+    pub(crate) action: Action,
     /// The entry object itself, every field of it — timeout, env, cwd,
     /// headers, whatever the harness lets an entry carry. The audit scans
-    /// it and a decision binds to it: a field the three columns above do
+    /// it and a decision binds to it: a field the columns above do
     /// not spell is still content, and dropping it here would hide it from
     /// both.
     pub(crate) entry: serde_json::Value,
@@ -145,6 +166,8 @@ fn registrations(value: serde_json::Value) -> Vec<Registration> {
                     event: event.clone(),
                     matcher: matcher.to_owned(),
                     command: command.to_owned(),
+                    // The shared shape reads only `command` entries.
+                    action: Action::Command,
                     entry: (*handler).clone(),
                 });
             }

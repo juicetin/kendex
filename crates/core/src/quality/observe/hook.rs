@@ -22,6 +22,8 @@ use super::{AuditInput, Content};
 
 #[cfg(test)]
 mod hostile;
+#[cfg(test)]
+mod resolve;
 mod scripts;
 #[cfg(test)]
 mod tests;
@@ -201,6 +203,9 @@ const ECHOED_CANDIDATES: usize = 8;
 /// was not read. Candidates collect into sets — a command naming the same
 /// script twice names one script, and a hostile command naming thousands
 /// of distinct ones costs a lookup each, not a scan of everything before.
+/// Only a command line is asked for scripts: a URL or a prompt still
+/// scores as the hook's content, but the harness runs no file it names,
+/// so it names none here and says no gap.
 fn script_of(
     registrations: &[crate::scan::hooks::Registration],
     scope: &Scope,
@@ -208,6 +213,9 @@ fn script_of(
     let mut resolved: BTreeSet<PathBuf> = BTreeSet::new();
     let mut unresolved: BTreeSet<String> = BTreeSet::new();
     for reg in registrations {
+        if reg.action != crate::scan::hooks::Action::Command {
+            continue;
+        }
         for named in scripts_named(&reg.command, scope) {
             match named {
                 Named::Path(path) => {

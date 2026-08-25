@@ -29,6 +29,18 @@ pub(super) enum Named {
 const PROJECT_ROOT_SPELLINGS: &[&str] =
     &["$CLAUDE_PROJECT_DIR", "$(git rev-parse --show-toplevel)"];
 
+/// Characters that leave a token's spelling for the shell to finish at run
+/// time: a variable or command substitution, a glob, a tilde, an escape.
+/// A token still carrying one after kendex's own spelling is resolved
+/// names a path this audit cannot compute — `bash /tmp/$USER/guard.sh`
+/// runs whatever `$USER` expands to, while a literal read of the spelling
+/// opens a file that never runs (a planted decoy, or nothing) and binds a
+/// decision to it. Such a token falls to the said gap. Quotes make no
+/// difference: the lexer has dropped them, and a quoted `$` the shell
+/// keeps literal takes the same gap rather than a literal read — only the
+/// managed spellings kendex writes resolve.
+const DYNAMIC: &[char] = &['$', '`', '*', '?', '[', '~', '\\'];
+
 /// Every script a hook's command line names — all of them, not the first:
 /// `bash /a/ok.sh; bash /b/evil.sh` runs both, and reading only the one a
 /// writer put first would bind a decision while the other executes
@@ -36,7 +48,9 @@ const PROJECT_ROOT_SPELLINGS: &[&str] =
 /// `"$(git rev-parse --show-toplevel)/x.sh"` kendex writes carries spaces
 /// and parentheses inside its quotes and stays one token — and quote
 /// characters are dropped, the way the shell drops them. An interpreter
-/// like `/bin/bash` has no script extension and is passed over.
+/// like `/bin/bash` has no script extension and is passed over. A token
+/// the shell would still evaluate — one carrying a [`DYNAMIC`] character
+/// after resolution — is an unresolvable spelling, never a literal read.
 ///
 /// A line the reader could not follow to its end — a quote or a
 /// substitution still open when the text runs out — has no words this
@@ -66,7 +80,11 @@ pub(super) fn scripts_named(command: &str, scope: &Scope) -> Vec<Named> {
 /// nothing — `$CLAUDE_PROJECT_DIRS/run.sh` names a different variable and
 /// `'$CLAUDE_PROJECT_DIR/run.sh'` is a literal `$` path the shell never
 /// expands, so resolving either here would read and bind bytes the harness
-/// never runs.
+/// never runs. What is left of the token once the spelling is taken off
+/// must be literal too — a [`DYNAMIC`] character in it is refused the same
+/// way. The check is on the token's own text, never on the joined path:
+/// the scope root is a directory this machine already knows, whatever
+/// characters its name holds.
 fn resolve_root(token: &Token, scope: &Scope) -> Option<PathBuf> {
     for spelling in PROJECT_ROOT_SPELLINGS {
         let Some(rest) = token.text.strip_prefix(spelling) else {
@@ -78,13 +96,16 @@ fn resolve_root(token: &Token, scope: &Scope) -> Option<PathBuf> {
         // The flag is token-wide, so a spelling merely adjacent to a
         // single-quoted span is refused too — that falls to the said gap,
         // never to reading the wrong bytes.
-        if token.single_quoted {
+        if token.single_quoted || rest.contains(DYNAMIC) {
             return None;
         }
         let Scope::Project { root } = scope else {
             return None;
         };
         return Some(root.join(rest.trim_start_matches('/')));
+    }
+    if token.text.contains(DYNAMIC) {
+        return None;
     }
     Some(PathBuf::from(&token.text))
 }
