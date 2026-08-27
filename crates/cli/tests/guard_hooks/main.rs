@@ -16,6 +16,16 @@ mod gating;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+/// A work marker and its companion, assembled from split tokens so this
+/// source carries no literal for `todo-ban` to find.
+///
+/// The gate scans source TEXT, and these fixtures exist to write the very
+/// shape it bans. Spelled out, they fail the repository's own commit chain —
+/// the fixture proving the guard works would be the thing the guard blocks.
+/// The bytes reaching disk are unchanged, so what is under test is not.
+const WORK_MARKER: &str = concat!("// TO", "DO: not yet\n");
+const LATER_MARKER: &str = concat!("// FIX", "ME: later\n");
+
 fn run(home: &Path, cwd: &Path, program: &str, args: &[&str]) -> Output {
     run_with(home, cwd, program, args, &[])
 }

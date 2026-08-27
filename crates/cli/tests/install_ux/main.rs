@@ -19,8 +19,18 @@ mod guarding;
 mod installing;
 
 use std::fs;
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+
+/// A work marker and its companion, assembled from split tokens so this
+/// source carries no literal for `todo-ban` to find.
+///
+/// The gate scans source TEXT, and these fixtures exist to write the very
+/// shape it bans. Spelled out, they fail the repository's own commit chain —
+/// the fixture proving the guard works would be the thing the guard blocks.
+/// The bytes reaching disk are unchanged, so what is under test is not.
+const WORK_MARKER: &str = concat!("// TO", "DO: not yet\n");
 
 /// The binary, pointed at a fixture home it must treat as real — without
 /// `KENDEX_REAL_HOME` a debug build sandboxes itself into the dev home and

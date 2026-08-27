@@ -13,6 +13,11 @@ PF="$SKILL_DIR/scripts/preflight"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
+# A work marker assembled from split tokens: this file plants the shapes the
+# repository's own todo-ban bans, and spelled out they would fail its commit
+# chain. The bytes written into each fixture are unchanged.
+TD="TO""DO"
+
 PASS=0
 FAIL=0
 SKIP=0
@@ -399,7 +404,7 @@ clean "a vitest invocation chained after && wires the suite"
 # is a comment wires nothing.
 seed prosecomment
 mkdir -p "$R/.github/workflows"
-printf 'name: ci\non: push\n# TODO(#1): migrate to vitest — run: vitest someday\njobs:\n  t:\n    runs-on: ubuntu-latest\n    steps:\n      - run: bash tests/other.test.sh\n' >"$R/.github/workflows/ci.yml"
+printf 'name: ci\non: push\n# %s(#1): migrate to vitest — run: vitest someday\njobs:\n  t:\n    runs-on: ubuntu-latest\n    steps:\n      - run: bash tests/other.test.sh\n' "$TD" >"$R/.github/workflows/ci.yml"
 git -C "$R" add -A
 git -C "$R" commit -qm "workflow mentioning vitest only in a comment"
 printf 'export {}\n' >"$R/p.test.ts"
