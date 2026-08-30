@@ -280,3 +280,274 @@ describe("pi-hooks bash guard passthrough", () => {
 		}
 	});
 });
+
+type TurnHandler = (event: Record<string, unknown>, ctx: Record<string, unknown>) => Promise<unknown>;
+type SentMessage = { customType: string; content: string; display: boolean };
+/** Both arguments of every `pi.sendMessage` call: the options decide delivery, so they are asserted. */
+type SentCall = { message: SentMessage; options: Record<string, unknown> | undefined };
+type TurnHooks = { onToolResult: TurnHandler; onTurnEnd: TurnHandler; onTurnStart: TurnHandler; sent: SentCall[] };
+
+function installTurnHandlers(): TurnHooks {
+	const handlers = new Map<string, TurnHandler>();
+	const sent: SentCall[] = [];
+	const pi = {
+		on(event: string, cb: TurnHandler) {
+			handlers.set(event, cb);
+		},
+		sendMessage(message: SentMessage, options?: Record<string, unknown>) {
+			sent.push({ message, options });
+		},
+	};
+	piHooks(pi as never);
+	const onToolResult = handlers.get("tool_result");
+	const onTurnEnd = handlers.get("turn_end");
+	const onTurnStart = handlers.get("turn_start");
+	if (!onToolResult || !onTurnEnd || !onTurnStart) throw new Error("turn hooks were not registered");
+	return { onToolResult, onTurnEnd, onTurnStart, sent };
+}
+
+/** A project whose settings arm the end-of-turn check the fixtures above leave off. */
+function initClippyProject(): string {
+	const dir = mkdtempSync(join(tmpdir(), "pi-hooks-clippy-"));
+	mkdirSync(join(dir, ".pi"), { recursive: true });
+	writeFileSync(join(dir, ".pi", "settings.json"), JSON.stringify({
+		kendex: {
+			extensionManager: {
+				config: { [CONFIG_ID]: { enabled: true, taskCompletedCheck: true, sessionDriftCheck: false, clippyTimeoutMs: 4000 } },
+			},
+		},
+	}));
+	mkdirSync(join(dir, "src"), { recursive: true });
+	writeFileSync(join(dir, "src", "lib.rs"), "pub fn answer() -> i32 { 42 }\n");
+	return dir;
+}
+
+/** A cargo naming `root` as the workspace and failing clippy with one error line. FAKE_CLIPPY_EXIT and FAKE_CLIPPY_SILENT vary the run. */
+function fakeClippyBin(dir: string, root: string): string {
+	const bin = join(dir, "bin");
+	mkdirSync(bin, { recursive: true });
+	const cargo = join(bin, "cargo");
+	writeFileSync(cargo, [
+		// A `/bin/sh` shebang, not `/usr/bin/env`: these fixtures run with PATH
+		// narrowed to this directory, so nothing else is there to look up.
+		"#!/bin/sh",
+		"set -eu",
+		'if [ "$1" = "metadata" ]; then',
+		`  printf '{"workspace_root":"%s"}' ${JSON.stringify(root)}`,
+		"  exit 0",
+		"fi",
+		// A line no error filter recognises, so the run reads as unavailable
+		// rather than as errors.
+		'if [ "${FAKE_CLIPPY_SILENT:-}" = "1" ]; then',
+		"  printf '%s\\n' 'warning: nothing an error filter matches'",
+		"else",
+		"  printf '%s\\n' 'error[E0425]: cannot find value nope in this scope'",
+		"fi",
+		'exit "${FAKE_CLIPPY_EXIT:-101}"',
+		"",
+	].join("\n"));
+	chmodSync(cargo, 0o755);
+	return bin;
+}
+
+async function onPath(bin: string, run: () => Promise<void>): Promise<void> {
+	const oldPath = process.env.PATH;
+	process.env.PATH = bin;
+	try {
+		await run();
+	} finally {
+		if (oldPath === undefined) delete process.env.PATH;
+		else process.env.PATH = oldPath;
+	}
+}
+
+describe("pi-hooks end-of-turn clippy", () => {
+	/** One turn that edits a `.rs` file, against an already-installed extension. */
+	async function editingTurn(hooks: TurnHooks, project: string, ctx: Record<string, unknown>): Promise<void> {
+		await hooks.onToolResult({ toolName: "edit", input: { path: join(project, "src", "lib.rs") } }, ctx);
+		await hooks.onTurnEnd({}, ctx);
+	}
+
+	async function turnEditing(project: string, ctxExtras: Record<string, unknown>): Promise<SentCall[]> {
+		const hooks = installTurnHandlers();
+		await editingTurn(hooks, project, { cwd: project, isProjectTrusted: () => true, ...ctxExtras });
+		return hooks.sent;
+	}
+
+	// `triggerTurn: true` is the whole delivery: since pi#8022 a `triggerTurn:
+	// false` message is recorded without steering the active run, so a headless
+	// run that is ending never reads it.
+	function expectSteered(call: SentCall): void {
+		expect(call.options).toEqual({ triggerTurn: true });
+		expect(call.message.customType).toBe("kendex-clippy");
+		expect(call.message.display).toBe(false);
+	}
+
+	test("a headless turn hands the agent the clippy summary", async () => {
+		const project = initClippyProject();
+		const cargoRoot = mkdtempSync(join(tmpdir(), "pi-hooks-cargo-"));
+		try {
+			await onPath(fakeClippyBin(cargoRoot, project), async () => {
+				// No `hasUI`, no `ui`: the notification lane a headless Pi lacks.
+				const sent = await turnEditing(project, {});
+				expect(sent).toHaveLength(1);
+				expectSteered(sent[0]);
+				expect(sent[0].message.content).toContain("clippy reported 1 workspace error(s)");
+				expect(sent[0].message.content).toContain("cannot find value nope");
+			});
+		} finally {
+			rmSync(project, { recursive: true, force: true });
+			rmSync(cargoRoot, { recursive: true, force: true });
+		}
+	});
+
+	test("an interactive turn notifies and hands the agent the same summary", async () => {
+		const project = initClippyProject();
+		const cargoRoot = mkdtempSync(join(tmpdir(), "pi-hooks-cargo-"));
+		const notices: string[] = [];
+		try {
+			await onPath(fakeClippyBin(cargoRoot, project), async () => {
+				const sent = await turnEditing(project, {
+					hasUI: true,
+					ui: { notify: (message: string) => notices.push(message) },
+				});
+				expect(notices).toHaveLength(1);
+				expect(notices[0]).toContain("clippy reported 1 workspace error(s)");
+				expect(sent).toHaveLength(1);
+				expectSteered(sent[0]);
+				expect(sent[0].message.content).toBe(notices[0]);
+			});
+		} finally {
+			rmSync(project, { recursive: true, force: true });
+			rmSync(cargoRoot, { recursive: true, force: true });
+		}
+	});
+
+	// The control: the same fixture with clippy passing must stay silent, or
+	// the two tests above would pass on a hook that reports every turn.
+	test("a clean turn says nothing in either lane", async () => {
+		const project = initClippyProject();
+		const cargoRoot = mkdtempSync(join(tmpdir(), "pi-hooks-cargo-"));
+		const notices: string[] = [];
+		process.env.FAKE_CLIPPY_EXIT = "0";
+		try {
+			await onPath(fakeClippyBin(cargoRoot, project), async () => {
+				const sent = await turnEditing(project, {
+					hasUI: true,
+					ui: { notify: (message: string) => notices.push(message) },
+				});
+				expect(sent).toHaveLength(0);
+				expect(notices).toHaveLength(0);
+			});
+		} finally {
+			delete process.env.FAKE_CLIPPY_EXIT;
+			rmSync(project, { recursive: true, force: true });
+			rmSync(cargoRoot, { recursive: true, force: true });
+		}
+	});
+
+	test("a turn clippy could not judge says so rather than reading as clean", async () => {
+		const project = initClippyProject();
+		const emptyBin = mkdtempSync(join(tmpdir(), "pi-hooks-nocargo-"));
+		try {
+			await onPath(emptyBin, async () => {
+				const sent = await turnEditing(project, {});
+				expect(sent).toHaveLength(1);
+				expectSteered(sent[0]);
+				expect(sent[0].message.content).toContain("proved nothing about the tree");
+			});
+		} finally {
+			rmSync(project, { recursive: true, force: true });
+			rmSync(emptyBin, { recursive: true, force: true });
+		}
+	});
+
+	// A failed workspace lookup is a condition the session can leave: if it were
+	// cached, every later turn would report the tree unexaminable however
+	// available cargo had since become.
+	test("a workspace found after a failed lookup is reported on the next turn", async () => {
+		const project = initClippyProject();
+		const cargoRoot = mkdtempSync(join(tmpdir(), "pi-hooks-cargo-"));
+		const emptyBin = mkdtempSync(join(tmpdir(), "pi-hooks-nocargo-"));
+		try {
+			const hooks = installTurnHandlers();
+			const ctx = { cwd: project, isProjectTrusted: () => true };
+			await onPath(emptyBin, () => editingTurn(hooks, project, ctx));
+			await onPath(fakeClippyBin(cargoRoot, project), () => editingTurn(hooks, project, ctx));
+			expect(hooks.sent).toHaveLength(2);
+			expect(hooks.sent[0].message.content).toContain("proved nothing about the tree");
+			expect(hooks.sent[1].message.content).toContain("clippy reported 1 workspace error(s)");
+		} finally {
+			rmSync(project, { recursive: true, force: true });
+			rmSync(cargoRoot, { recursive: true, force: true });
+			rmSync(emptyBin, { recursive: true, force: true });
+		}
+	});
+
+	// Clippy failing while printing nothing the filter recognises. The workspace
+	// lookup succeeds here, so this reaches the branch the no-cargo-on-PATH case
+	// never gets to.
+	test("clippy failing with no error line is reported as unjudgeable", async () => {
+		const project = initClippyProject();
+		const cargoRoot = mkdtempSync(join(tmpdir(), "pi-hooks-cargo-"));
+		process.env.FAKE_CLIPPY_SILENT = "1";
+		try {
+			await onPath(fakeClippyBin(cargoRoot, project), async () => {
+				const sent = await turnEditing(project, {});
+				expect(sent).toHaveLength(1);
+				expectSteered(sent[0]);
+				expect(sent[0].message.content).toContain("cargo clippy exited 101 printing no error line");
+			});
+		} finally {
+			delete process.env.FAKE_CLIPPY_SILENT;
+			rmSync(project, { recursive: true, force: true });
+			rmSync(cargoRoot, { recursive: true, force: true });
+		}
+	});
+
+	// The behaviour a repeat guard used to suppress, asserted rather than left
+	// as an absence. An agent that cannot fix an error hears the same advisory
+	// each turn: noisy and self-correcting, where withholding it can leave a
+	// headless turn told nothing when there was something to say.
+	test("a second identical failing turn steers again", async () => {
+		const project = initClippyProject();
+		const cargoRoot = mkdtempSync(join(tmpdir(), "pi-hooks-cargo-"));
+		try {
+			await onPath(fakeClippyBin(cargoRoot, project), async () => {
+				const hooks = installTurnHandlers();
+				const ctx = { cwd: project, isProjectTrusted: () => true };
+				await editingTurn(hooks, project, ctx);
+				await editingTurn(hooks, project, ctx);
+				await editingTurn(hooks, project, ctx);
+				expect(hooks.sent).toHaveLength(3);
+				expect(hooks.sent[2].message.content).toBe(hooks.sent[0].message.content);
+			});
+		} finally {
+			rmSync(project, { recursive: true, force: true });
+			rmSync(cargoRoot, { recursive: true, force: true });
+		}
+	});
+
+	// What bounds the reporting now that nothing suppresses a repeat: the turn
+	// state. A steered turn that writes no `.rs` file runs no clippy and reports
+	// nothing, so each further report costs the agent an edit.
+	test("a turn that touched no Rust steers nothing, however the last one ended", async () => {
+		const project = initClippyProject();
+		const cargoRoot = mkdtempSync(join(tmpdir(), "pi-hooks-cargo-"));
+		try {
+			await onPath(fakeClippyBin(cargoRoot, project), async () => {
+				const hooks = installTurnHandlers();
+				const ctx = { cwd: project, isProjectTrusted: () => true };
+				await editingTurn(hooks, project, ctx);
+				expect(hooks.sent).toHaveLength(1);
+				// The turn the steered message provokes, editing nothing.
+				await hooks.onTurnStart({}, ctx);
+				await hooks.onTurnEnd({}, ctx);
+				expect(hooks.sent).toHaveLength(1);
+			});
+		} finally {
+			rmSync(project, { recursive: true, force: true });
+			rmSync(cargoRoot, { recursive: true, force: true });
+		}
+	});
+});

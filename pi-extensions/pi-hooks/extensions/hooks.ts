@@ -5,7 +5,7 @@ import { isBareCd, preCommitGate } from "./bash-guards.js";
 import { refusalReason, repoCopyRefusal } from "./repo-copy-guard.js";
 import { getBool, getNumber, readConfig, recordProjectTrust } from "./config.js";
 import { deliverDrift, runDriftCheck } from "./drift-check.js";
-import { workspaceClippyErrors } from "./lint-hooks.js";
+import { workspaceClippyOutcome } from "./lint-hooks.js";
 
 const INSTALL_SYMBOL = Symbol.for("kendex.pi-hooks.installed");
 
@@ -113,14 +113,30 @@ export default function piHooks(pi: ExtensionAPI): void {
 		if (!getBool(cfg, "taskCompletedCheck")) return undefined;
 		if (turn.rustFilesTouched.size === 0) return undefined;
 
-		const issues = workspaceClippyErrors(ctx.cwd, getNumber(cfg, "clippyTimeoutMs"));
-		if (issues.length > 0 && ctx.hasUI) {
-			const preview = issues.slice(0, 5).join("\n");
-			ctx.ui.notify(
-				`pi-hooks: clippy reported ${issues.length} workspace error(s) at turn end:\n${preview}`,
-				"warning",
-			);
-		}
+		const outcome = workspaceClippyOutcome(ctx.cwd, getNumber(cfg, "clippyTimeoutMs"));
+		if (outcome.kind === "clean") return undefined;
+		const summary = outcome.kind === "errors"
+			? `pi-hooks: clippy reported ${outcome.lines.length} workspace error(s) at turn end:\n${outcome.lines.slice(0, 5).join("\n")}`
+			: `pi-hooks: end-of-turn clippy proved nothing about the tree: ${outcome.reason}.`;
+
+		// Pi discards a turn_end handler's return value, and since pi#8022 a
+		// `triggerTurn: false` message is recorded without steering, which a
+		// headless run that is ending never reads. `triggerTurn: true` steers
+		// the active run, so the loop drains it after this event and the agent
+		// answers for its own errors in every mode. Every failing turn reports:
+		// an agent that cannot fix an error hears the same advisory each turn,
+		// which is noisy and self-correcting, where suppressing a repeat can
+		// leave a headless turn told nothing when there was something to say.
+		// The turn state above is the bound — a turn that writes no `.rs` file
+		// runs no clippy — so a report costs an edit, not a loop.
+		//
+		// `display: false` leaves interactive rendering to the notification
+		// below, which a headless session never sees.
+		pi.sendMessage(
+			{ customType: "kendex-clippy", content: summary, display: false },
+			{ triggerTurn: true },
+		);
+		if (ctx.hasUI) ctx.ui.notify(summary, outcome.kind === "errors" ? "warning" : "info");
 		return undefined;
 	});
 }
