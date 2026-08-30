@@ -128,6 +128,22 @@ shipped list alone — exact single-threshold behavior needs the repo's own
 entries in the shipped list, so a README or a doc under a `tests/` directory
 is judged as the document it is.
 
+First match wins except on a frozen path, where the class inversion applies.
+[README.md § Path classes](README.md#path-classes) is the only statement of
+that rule; `path_threshold` implements it, one branch per exit. Nothing here
+restates it — a rule paraphrased at six sites loses a clause at one of them.
+
+What belongs here is the shape of the implementation. Both lists are parsed
+into one indexed array, the repo's entries first, and `REPO_CLASS_COUNT`
+divides them; a repo entry whose pattern the shipped list also carries is
+marked in `CLASS_RESTATED` once, after both parses. `path_threshold` stamps
+every repo entry it passes over or lets decide, so the verdict line can be
+assembled after the classification pass rather than at parse time — it
+reports what each entry actually governed, and an entry that decided nothing
+is named as such however it got there, because a run printing an inert entry
+as the mapping in force would be a clean run advertising a threshold no file
+was judged against.
+
 A directory name takes both class forms: `*` may match nothing but the
 literal `/` in `*/tests/*` still must be there, so `*/tests/*` covers
 `pkg/tests/x` and never a root-level `tests/x` — that one needs `tests/*`.
@@ -198,7 +214,16 @@ see one — the reason belongs in the commit body, where review reads it.
 `SIZE_RATCHET_FROZEN_CLASSES` refuses a RAISE regardless of that
 declaration, and defaults to every markdown class and every test class. It
 does not refuse a first row: a new path still gets its bootstrap row, which
-is what a repo adopting a class needs on day one.
+is what a repo adopting a class needs on day one. Every size remedy follows
+one predicate, whether HEAD's baseline carries the path — a path HEAD does
+not carry names the bootstrap beside the split, a path HEAD carries names
+the split alone in a frozen class. The verdict label decides nothing: `new
+offender` appears on both sides of that line, since a change can delete a row
+HEAD still carries.
+
+The setting carries a second duty: frozen paths are where the class
+inversion applies, so a glob added here changes which class decides those
+paths too. [README.md § Path classes](README.md#path-classes) says how.
 
 Rows already at HEAD are grandfathered, because the gate judges the change
 and not the history it inherited. A HEAD with no baseline (an unborn HEAD,

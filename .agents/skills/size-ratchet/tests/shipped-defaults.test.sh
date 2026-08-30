@@ -248,6 +248,216 @@ run
 has "skills/x/SKILL.md" && bad "control: SKILL.md passes under the shipped class" "$OUT" \
   || ok "control: without the override the 10000-byte SKILL.md is under 24k and passes"
 
+echo "=== a repo class scoped to a directory does not shadow a frozen class ==="
+# `*` crosses `/`, so `ui/*.ts` reaches the test files under ui/ too, and an
+# entry written for components would retitle the class the package ships for
+# them. The rule these arms pin: README.md "Path classes".
+new_repo shadow
+mklines ui/src/App.ts 300
+mklines ui/src/App.test.ts 500
+mklines docs/guide.md 300
+git -C "$R" add -A
+run 'SIZE_RATCHET_CLASSES=ui/*.ts=250;ui/*.tsx=250'
+if [ "$RC" -eq 1 ] \
+  && has "ui/src/App.ts — 300 lines > threshold 250 (class ui/*.ts)" \
+  && ! has "ui/src/App.test.ts" && ! has "docs/guide.md"; then
+  ok "the repo class judges the component and hands the frozen test and doc back to the shipped list"
+else
+  bad "a directory-scoped repo class spares frozen paths" "rc=$RC out=$OUT"
+fi
+# The control: the freeze is what routes those two paths. Drop it and the same
+# repo class takes them at 250 — which is the defect this section pins.
+run 'SIZE_RATCHET_CLASSES=ui/*.ts=250;ui/*.tsx=250' SIZE_RATCHET_FROZEN_CLASSES=
+if [ "$RC" -eq 1 ] && has "ui/src/App.test.ts — 500 lines > threshold 250 (class ui/*.ts)"; then
+  ok "control: with nothing frozen the same class does take the test file at 250"
+else
+  bad "control: the freeze is what routes the shadowed path" "rc=$RC out=$OUT"
+fi
+# Markdown carries the unit too: the shadow would have judged 300 lines where
+# the shipped class judges bytes.
+run 'SIZE_RATCHET_CLASSES=docs/*=250'
+[ "$RC" -eq 0 ] && ok "a doc under a directory-scoped class keeps its shipped byte ceiling" \
+  || bad "markdown keeps its class under a directory-scoped repo entry" "rc=$RC out=$OUT"
+run 'SIZE_RATCHET_CLASSES=docs/*=250' SIZE_RATCHET_FROZEN_CLASSES=
+if [ "$RC" -eq 1 ] && has "docs/guide.md — 300 lines > threshold 250 (class docs/*)"; then
+  ok "control: unfrozen, that same entry judges the doc in lines at 250"
+else
+  bad "control: markdown shadow" "rc=$RC out=$OUT"
+fi
+# Restating the shipped class's own pattern is how a repo names the class it
+# means to move, and that entry decides the frozen path.
+run 'SIZE_RATCHET_CLASSES=ui/*.ts=250;*.test.*=100'
+if [ "$RC" -eq 1 ] && has "ui/src/App.test.ts — 500 lines > threshold 100 (class *.test.*)"; then
+  ok "an entry restating a shipped pattern wins on a frozen path"
+else
+  bad "restating a shipped pattern wins" "rc=$RC out=$OUT"
+fi
+
+# A frozen path the shipped list names no class for still takes the repo's
+# entry: the base threshold is a number nobody wrote for it. The shipped list
+# is non-empty and simply names nothing under ui/, which is the shape a
+# consumer meets; the emptied-list arm below is the degenerate one.
+run 'SIZE_RATCHET_CLASSES=ui/*.ts=250' 'SIZE_RATCHET_DEFAULT_CLASSES=*.rs=100'
+if [ "$RC" -eq 1 ] && has "ui/src/App.test.ts — 500 lines > threshold 250 (class ui/*.ts)"; then
+  ok "with no shipped class to hand the frozen path to, the repo entry still decides it"
+else
+  bad "skipped entry stands where the shipped list claims nothing" "rc=$RC out=$OUT"
+fi
+run 'SIZE_RATCHET_CLASSES=ui/*.ts=250' SIZE_RATCHET_DEFAULT_CLASSES=
+if [ "$RC" -eq 1 ] && has "ui/src/App.test.ts — 500 lines > threshold 250 (class ui/*.ts)"; then
+  ok "and the same holds with the shipped list dropped entirely"
+else
+  bad "skipped entry stands with an empty shipped list" "rc=$RC out=$OUT"
+fi
+# Two entries reach the frozen path and both are skipped. The FIRST is the one
+# that stands, the way first-match-wins decides every other path.
+run 'SIZE_RATCHET_CLASSES=ui/*.ts=250;ui/*=900' SIZE_RATCHET_DEFAULT_CLASSES=
+if [ "$RC" -eq 1 ] && has "ui/src/App.test.ts — 500 lines > threshold 250 (class ui/*.ts)" \
+  && ! has "class ui/*)"; then
+  ok "the first skipped entry stands, not the last"
+else
+  bad "the fallback keeps first-match-wins" "rc=$RC out=$OUT"
+fi
+
+# The rule protects the shipped class that NAMES the path, not any one number,
+# so it runs in both directions: a looser repo entry is skipped too.
+new_repo shadowloose
+mklines ui/src/Wide.test.ts 900
+git -C "$R" add -A
+run 'SIZE_RATCHET_CLASSES=ui/*=2000'
+if [ "$RC" -eq 1 ] && has "ui/src/Wide.test.ts — 900 lines > threshold 800 (class *.test.*)"; then
+  ok "a LOOSER repo entry is skipped too — the shipped 800 judges the ui test file"
+else
+  bad "the skip is direction-agnostic" "rc=$RC out=$OUT"
+fi
+# The control: the same entry governs the same directory where nothing is
+# frozen, so the fixture really is within its reach at 2000.
+run 'SIZE_RATCHET_CLASSES=ui/*=2000' SIZE_RATCHET_FROZEN_CLASSES=
+[ "$RC" -eq 0 ] && ok "control: unfrozen, that entry does take the 900-line file at 2000" \
+  || bad "control: the looser entry reaches the fixture" "rc=$RC out=$OUT"
+
+echo "=== the verdict line reports what each repo entry actually governed ==="
+# An entry that decided no counted path governs nothing, and a run printing it
+# as the mapping in force would advertise a threshold nothing was judged
+# against. Three shapes arrive at that state and the line names none of them,
+# because the engine holds no state that tells them apart: every arm below
+# asserts the SAME reason.
+new_repo shadownote
+mklines ui/src/App.ts 300
+mklines ui/src/App.test.ts 500
+git -C "$R" add -A
+NOTHING="(governed nothing: decided no counted path)"
+# Shape one: every path it matches is frozen, so it is passed over on all of
+# them.
+run 'SIZE_RATCHET_CLASSES=ui/src/*.test.ts=100'
+if [ "$RC" -eq 0 ] && has "classes ui/src/*.test.ts=100 $NOTHING"; then
+  ok "an entry every one of whose paths is frozen is reported as governing nothing"
+else
+  bad "a wholly yielded entry says so on the verdict line" "rc=$RC out=$OUT"
+fi
+# Shape two: it matches a counted path, but an EARLIER repo entry already
+# claimed it. Nothing was frozen and nothing yielded.
+run SIZE_RATCHET_DEFAULT_CLASSES= SIZE_RATCHET_FROZEN_CLASSES= 'SIZE_RATCHET_CLASSES=*.ts=400;ui/*.ts=250'
+if [ "$RC" -eq 1 ] && has "classes *.ts=400;ui/*.ts=250 $NOTHING"; then
+  ok "an entry an earlier one shadows is reported the same way, with no cause claimed"
+else
+  bad "an ordering-shadowed entry says the same thing" "rc=$RC out=$OUT"
+fi
+# Shape three: no counted path matches it at all.
+run 'SIZE_RATCHET_CLASSES=uii/*.ts=1'
+if [ "$RC" -eq 0 ] && has "classes uii/*.ts=1 $NOTHING"; then
+  ok "an entry no counted path matches is reported the same way"
+else
+  bad "a never-matched entry says the same thing" "rc=$RC out=$OUT"
+fi
+# An entry that DOES govern its own paths and was passed over on frozen ones
+# is a different statement, and that one the engine can stand behind.
+run 'SIZE_RATCHET_CLASSES=ui/*.ts=400'
+if [ "$RC" -eq 0 ] && has "classes ui/*.ts=400 (yielded on frozen paths)" && ! has "governed nothing"; then
+  ok "an entry that governs some paths and is passed over on frozen ones says exactly that"
+else
+  bad "a partly yielded entry says so on the verdict line" "rc=$RC out=$OUT"
+fi
+# The control: an entry that governs its paths with nothing frozen carries no
+# annotation at all, so the annotations above are not on every entry.
+run 'SIZE_RATCHET_CLASSES=ui/*.ts=400' SIZE_RATCHET_FROZEN_CLASSES=
+if [ "$RC" -eq 1 ] && has "classes ui/*.ts=400," && ! has "governed nothing" && ! has "yielded"; then
+  ok "control: with nothing frozen the same entry is reported plain"
+else
+  bad "control: an unyielded entry carries no annotation" "rc=$RC out=$OUT"
+fi
+
+echo "=== the remedy follows HEAD's baseline, not the verdict label ==="
+# One predicate decides every size remedy: whether HEAD's baseline carries the
+# path. A path HEAD does not carry has no row to raise, so the declaration
+# admits a first one in every class; a path HEAD carries is a raise, which a
+# frozen class refuses. The NEW label appears on both sides of that line, so
+# reading the label instead misdirects in one direction or the other.
+new_repo bootstrap
+mklines src/a.test.ts 900
+mklines src/big.ts 500
+mkdir -p "$R/tools"
+printf 'src/big.ts	500
+' >"$R/$BASE"
+git -C "$R" add -A
+git -C "$R" commit -q -m seed
+run
+if [ "$RC" -eq 1 ] && has "new offender: src/a.test.ts — 900 lines > threshold 800 (class *.test.*)" \
+  && has "remedy: split at a concept seam, or declare the row with RATCHET_RAISE=1"; then
+  ok "a frozen new offender is offered the bootstrap, not a remedy the freeze forbids"
+else
+  bad "NEW on a frozen path names the bootstrap" "rc=$RC out=$OUT"
+fi
+# The control: writing that row turns the same path into the ADDED verdict,
+# which names the same remedy, and the declaration then carries the run.
+printf 'src/a.test.ts	900
+src/big.ts	500
+' >"$R/$BASE"
+git -C "$R" add -A
+run
+if [ "$RC" -eq 1 ] && has "baseline row added: src/a.test.ts" \
+  && has "remedy: split at a concept seam, or declare the row with RATCHET_RAISE=1"; then
+  ok "control: the ADDED verdict for the same path names the same remedy"
+else
+  bad "control: ADDED names the bootstrap" "rc=$RC out=$OUT"
+fi
+run RATCHET_RAISE=1
+[ "$RC" -eq 0 ] && ok "control: and the declaration carries that first row in a frozen class" \
+  || bad "control: the bootstrap is admitted in a frozen class" "rc=$RC out=$OUT"
+
+# The other direction, same NEW label: HEAD carries the row, the change deletes
+# it and the file grows. Bootstrapping is impossible here — restoring the row
+# at the new size is the raise a frozen class refuses — so the remedy is the
+# split, and the arm above is its control.
+new_repo remedy-head
+mkbytes docs/guide.md 30000
+mkdir -p "$R/tools"
+printf 'docs/guide.md	30000b
+' >"$R/$BASE"
+git -C "$R" add -A
+git -C "$R" commit -q -m row
+mkbytes docs/guide.md 70000
+: >"$R/$BASE"
+git -C "$R" add -A
+run
+if [ "$RC" -eq 1 ] && has "new offender: docs/guide.md — 70000 bytes > threshold 65536 (class *.md)" \
+  && has "remedy: split at a concept seam (a frozen class never raises an existing row)"; then
+  ok "a NEW verdict for a path HEAD's baseline carries is offered the split, not a bootstrap"
+else
+  bad "the deleted-row NEW verdict names the raise it cannot have" "rc=$RC out=$OUT"
+fi
+# And the route the bootstrap wording would have sent its author down is the
+# one the gate refuses, which is why that wording must not appear here.
+printf 'docs/guide.md	70000b
+' >"$R/$BASE"
+git -C "$R" add -A
+run RATCHET_RAISE=1
+if [ "$RC" -eq 1 ] && has "frozen baseline row raised: docs/guide.md — row 30000 -> 70000 bytes"; then
+  ok "control: restoring that row and declaring it is refused, so the bootstrap remedy would misdirect"
+else
+  bad "control: the declared raise of the restored row is refused" "rc=$RC out=$OUT"
+fi
+
 echo "=== the package excludes CHANGELOG*.md by default ==="
 new_repo changelog
 mkbytes CHANGELOG.md 200000

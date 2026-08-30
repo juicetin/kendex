@@ -1,8 +1,12 @@
 # Threshold change sweep
 
-Run this before a changed `SIZE_RATCHET_THRESHOLD`, `SIZE_RATCHET_CLASSES` or
-`SIZE_RATCHET_DEFAULT_CLASSES` entry lands, in either direction, and when an entry changes UNIT — the
-number a path is judged against moves either way. Run it at `--seed` too when
+Run this before a changed `SIZE_RATCHET_THRESHOLD`, `SIZE_RATCHET_CLASSES`,
+`SIZE_RATCHET_DEFAULT_CLASSES` or `SIZE_RATCHET_FROZEN_CLASSES` entry lands, in
+either direction, and when an entry changes UNIT — the number a path is judged
+against moves either way. The frozen list moves it too, through the class
+inversion in [README.md § Path
+classes](../README.md#path-classes): a glob added or removed there moves
+matching paths between a repo class and a shipped one. Run it at `--seed` too when
 the repo already had a prose size rule: seeding records no row for an
 under-threshold fragment, so the repo inherits that rule's fragments and
 nothing else points at them.
