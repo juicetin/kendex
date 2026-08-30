@@ -206,7 +206,18 @@ a first `--seed`, a baseline this change introduces) has nothing to compare,
 so the raise gate alone is skipped — every other verdict still judges the
 snapshot and can fail it — and the verdict line says the added and raised
 checks did not run, because "no reference" must never read as "checked and
-clean". A row whose
+clean". A commit that MOVES the
+baseline reaches that same emptiness without being one of the three, and every
+raise in it would land unjudged, so it is refused instead. The gate does not
+follow the move: where HEAD's baseline was is a question only HEAD's settings
+answer, and they resolve through a chain this script consults but does not
+own, so answering it means keeping a second implementation of that contract in
+step with it. The discriminator is what the change does to the old file, a path
+HEAD carried a row set at that the judged snapshot no longer carries, which
+none of the three bootstraps produces. A move whose rows arrive byte for byte
+as they left passes, because no row rose across it. The bound worth knowing is
+that a change pointing the setting elsewhere while leaving the old file tracked
+removes nothing, and is not a move the check can name. A row whose
 file is at or under its threshold is reported as stale instead, so one root
 cause reads as one verdict. A class that changes its UNIT does not escape:
 HEAD's row is re-expressed in the unit the class counts now, measured from
