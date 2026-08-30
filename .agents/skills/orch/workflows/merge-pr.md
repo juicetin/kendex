@@ -50,7 +50,7 @@ High-severity findings (conflicts) abort early with the issues shown. Otherwise 
 
 ### 3.2 Act On The Result
 
-`CHECK.state` decides first: `MERGED` → run § 4 EXCEPT § 4.1 and § 5's preamble (`MAIN_REPO_ROOT`), then continue at § 5 step 2 for sync and cleanup, skipping step 1; `CLOSED` → report that it was closed unmerged and stop.
+`CHECK.state` decides first: `MERGED` → set `[ALREADY_MERGED]=true`, run § 4 EXCEPT § 4.1, then enter § 5 step 1 to create and claim its lifecycle before post-merge work; `CLOSED` → report that it was closed unmerged and stop.
 
 `can_merge: true` → § 4, showing any warnings. `false` → show the issues with their suggested fixes and ask: `Skip` | `Fix and retry` | `Force merge`.
 
@@ -73,10 +73,29 @@ Bot-specific signals — emoji reactions, sticky-comment prose, checklist text �
 ```bash
 .agents/skills/github/scripts/github.sh pr-issue [PR_NUMBER] --format=text
 .agents/skills/worktree/scripts/worktree exists "$ISSUE"
+.agents/skills/worktree/scripts/worktree path "$ISSUE"
 .agents/skills/github/scripts/github.sh bot-token
 ```
 
-Note whether a worktree exists for `ISSUE` — § 5 step 4 disposes of it by rule, no question. `bot-token` reporting `.configured: false` → ask `Merge as current user` | `Abort`.
+Use the extracted issue as `[ISSUE]`. Set `[STATE_KEY]` to `[ISSUE]` when nonempty;
+otherwise use `pr-[PR_NUMBER]`. This repository-local key cannot collide with
+normalized GitHub key `issue-N`. Use worktree commands only with an `[ISSUE]`.
+When no issue worktree exists, set `[WORKTREE_PATH]` to `[MAIN_REPO_ROOT]` and
+`[CLEANUP_WORKTREE]=false`. Read the PR branch, then initialize workflow state;
+the command is idempotent for managed sessions and creates it for standalone
+`merge-pr`:
+
+```bash
+.agents/skills/orch/scripts/git-context common-root .
+```
+```bash
+env -u GH_REPO -u GITHUB_REPOSITORY gh pr view [PR_NUMBER] --json headRefName --jq .headRefName
+```
+```bash
+.agents/skills/orch/scripts/merge-queue-watch init --worktree [WORKTREE_PATH] --issue [STATE_KEY] --branch [PR_BRANCH]
+```
+
+`bot-token` reporting `.configured: false` → ask `Merge as current user` | `Abort`.
 
 ### 4.1 Detach Orphaned Children
 
@@ -126,39 +145,83 @@ Use the output as `MAIN_REPO_ROOT`.
 
 1. **Merge**, before any cleanup:
 
-   ```bash
-   [MAIN_REPO_ROOT]/.agents/skills/github/scripts/github.sh -C [MAIN_REPO_ROOT] pr-merge [PR_NUMBER] [--force]
-   ```
-
-   Exit `0` = merged → step 2.
-
-   Exit `1` BLOCKED → run `[MAIN_REPO_ROOT]/.agents/skills/github/scripts/github.sh -C [MAIN_REPO_ROOT] ci-classify-refusal [PR_NUMBER]` and route on its `cause:` line: `ci_pending` — or `none` when the merge output names a base branch requiring merges through a queue — → re-run with `--auto` (`--auto` never bypasses the § 3 gates). Any other cause is surfaced with the printed detail and returns to § 3.2 — do not queue it.
+   Resolve the repository, gate mode, and exact head, then prepare the lifecycle before
+   any merge attempt. `[RECOVERY_COUNT]` is `0` initially and the latest consume result thereafter.
 
    ```bash
-   [MAIN_REPO_ROOT]/.agents/skills/github/scripts/github.sh -C [MAIN_REPO_ROOT] pr-merge [PR_NUMBER] --auto
+   env -u GH_REPO -u GITHUB_REPOSITORY gh repo view --json nameWithOwner --jq .nameWithOwner
+   ```
+   ```bash
+   .agents/skills/orch/scripts/approval-wait --resolve-mode
+   ```
+   ```bash
+   env -u GH_REPO -u GITHUB_REPOSITORY gh pr view [PR_NUMBER] --json headRefOid --jq .headRefOid
+   ```
+   ```bash
+   .agents/skills/orch/scripts/merge-queue-watch prepare --worktree [WORKTREE_PATH] --issue [STATE_KEY] --repo [OWNER/REPO] --pr [PR_NUMBER] --head [PREPARED_HEAD] --root [MAIN_REPO_ROOT] --gate-mode [GATE_MODE] --recovery-count [RECOVERY_COUNT] --cleanup-worktree [CLEANUP_WORKTREE]
    ```
 
-   Exit `75` = queued or armed. Watch it with queue-wait:
+   `[ALREADY_MERGED]=true` skips the mutation, runs `direct-merged` below, and
+   continues to step 2. Otherwise attempt only the prepared head:
 
    ```bash
-   .agents/skills/orch/scripts/queue-wait [PR_NUMBER] 30 2400 --json
+   [MAIN_REPO_ROOT]/.agents/skills/github/scripts/github.sh -C [MAIN_REPO_ROOT] pr-merge [PR_NUMBER] [--force] --expected-head [PREPARED_HEAD]
    ```
 
-   Never poll `gh pr view --json mergeable` yourself — queue-wait reads it and reports `conflicting`. Each session's own watch owns its recovery; parallel sessions never coordinate.
+   Exit `0` runs `direct-merged` below, then continues to step 2.
 
-   | `verdict` | Meaning | Action |
-   |-----------|---------|--------|
-   | `merged` | Merge landed | → step 2 |
-   | `conflicting` | GitHub reports the head in conflict with the base (`cause: base_conflict`). The queue rejects it and an armed merge never fires | Restack cycle below |
-   | `ejected` | The merge-group CI run failed and GitHub removed this PR from the queue | Recovery cycle below |
-   | `disarmed` | Auto-merge cleared, or a required check failed (`cause` says which) | Recovery cycle below |
-   | `dequeued` | The late-findings guard saw a NEW unresolved review thread while queued/armed and pulled the arming (`cause: late_findings`) — or tried and failed (`cause: late_findings_dequeue_failed`: the PR is STILL queued and the merge may fire; dequeue manually before triage) | Late-findings triage below |
-   | `closed` | The PR was closed out from under the merge | Skip steps 2-4 and hand back |
-   | `queued` | Deadline reached, still armed. `cause: still_progressing` = queue-entry or check-run movement within the last 3 polls, or a check-run still running on the merge-group head; `stalled` = neither (`progressing` is `null` when unobservable). `unconfirmed_verdict` names a conflict, ejection or disarm the last poll saw that never held long enough to route; a re-run re-observes a conflict but not an ejection or disarm, so read the queue state before acting on `not_queued` | Not a failure — never re-arm or recover on `still_progressing`. Re-run the same `queue-wait` on it. Only when the session cannot keep waiting: skip steps 2-4 and note in § 6 that sync and cleanup need `merge-pr [PR_NUMBER]` re-run once merged |
-   | `not_queued` | The `--auto` merge never armed | Re-run `pr-merge [PR_NUMBER] --auto` once; still unarmed → surface and hand back |
-   | `unknown` | `status: error` — the queue state could not be read at all (`gh` missing, no auth, repo unresolvable, or GitHub rejected the query). The `stderr` line says which | Surface and hand back. Never re-arm: nothing read the queue state, so an arming already live would be re-armed blind |
+   Exit `1` BLOCKED → run `[MAIN_REPO_ROOT]/.agents/skills/github/scripts/github.sh -C [MAIN_REPO_ROOT] ci-classify-refusal [PR_NUMBER]` and route on its `cause:` line: `ci_pending` — or `none` when the merge output names a base branch requiring merges through a queue — → re-run the prepared head with `--auto`. Any other cause terminalizes the prepared lifecycle with `--cause merge_blocked`, surfaces the detail, and returns to § 3.2.
 
-   A verdict with no row above is never re-armed: surface it and hand it back.
+   The prepare result supplies `[WATCH_ID]`, `[PREPARED_HEAD]`, and absolute artifact and diagnostic paths. Arm only that head:
+
+   ```bash
+   [MAIN_REPO_ROOT]/.agents/skills/github/scripts/github.sh -C [MAIN_REPO_ROOT] pr-merge [PR_NUMBER] --auto --expected-head [PREPARED_HEAD]
+   ```
+
+   Exit `75` launches the prepared one-shot watch, then returns immediately:
+
+   ```bash
+   .agents/skills/orch/scripts/merge-queue-watch launch --root [MAIN_REPO_ROOT] --issue [STATE_KEY] --watch-id [WATCH_ID]
+   ```
+
+   Exit `0` claims the same prepared head as an immediate merge, then continues
+   to step 2:
+
+   ```bash
+   .agents/skills/orch/scripts/merge-queue-watch direct-merged --root [MAIN_REPO_ROOT] --issue [STATE_KEY] --watch-id [WATCH_ID]
+   ```
+
+   Launch setup failures persist `resume_launch`; fix the diagnostic and rerun launch for the same watch. Do not hand back while that action is active. Exact-head arm failures remain terminal:
+
+   ```bash
+   .agents/skills/orch/scripts/merge-queue-watch fail --root [MAIN_REPO_ROOT] --issue [STATE_KEY] --watch-id [WATCH_ID] --cause arm_failed
+   ```
+
+   Never poll merge state by hand. At a lane boundary, run `consume` and route
+   only on its normalized `action`:
+
+   ```bash
+   .agents/skills/orch/scripts/merge-queue-watch consume --root [MAIN_REPO_ROOT] --issue [STATE_KEY]
+   ```
+
+   | `action` | Route |
+   |----------|-------|
+   | `pending` | Return; the detached supervisor is live and within its deadline |
+   | `resume_launch` | Fix the persisted setup failure and rerun launch for the same watch; never hand back |
+   | `postmerge` | Step 2 |
+   | `resume_postmerge` | Resume the already-claimed step 2 path after interruption |
+   | `restack`, `resume_restack` | Run or resume the guarded Restack cycle below |
+   | `recovery` | Recovery cycle below, using the persisted gate mode and recovery count |
+   | `resume_recovery` | Resume the persisted recovery cycle; do not increment or delegate a new cycle |
+   | `triage` | Late-findings triage below |
+   | `resume_triage`, `resume_manual_dequeue` | Resume the already-claimed review path |
+   | `manual_dequeue` | Confirm dequeue or disarm before late-findings triage |
+   | `rewatch` | Prepare and launch a new watch without re-arming |
+   | `rearm` | Prepare, re-arm the exact head once, and launch |
+   | `resume_rewatch`, `resume_rearm` | Resume the claimed next-generation setup without replaying consume |
+   | `lane_postmerge`, `resume_cleanup`, `acknowledge` | Continue in `lane-postmerge.md`; never replay merge-pr steps 2-4 |
+   | `complete` | No-op; lifecycle already finished |
+   | `failed`, `abandoned` | Hand back with the durable diagnostic; no replay |
 
    **Recovery cycle** — route the failure back into ci-fix, never fix CI by hand:
 
@@ -175,40 +238,36 @@ Use the output as `MAIN_REPO_ROOT`.
       .agents/skills/orch/scripts/approval-wait [PR_NUMBER] 15 300 --json --mode [GATE_MODE]
       ```
 
-   3. Re-run `pr-merge [PR_NUMBER] --auto`, then `queue-wait` with a fresh poll budget.
+   3. Return to step 1's prepare, exact-head arm, and launch sequence.
 
-   **Restack cycle** — the base, not CI, is the blocker; never route a conflict into ci-fix:
-
-   1. **Unarmed, then out of the queue, before anything is pushed.** A queued PR rejects the push, and an arming that survives the restack fires on the new head as soon as its checks clear — before step 4 re-confirms the gate. The order is the one queue-wait's own guard enforces: disarm BEFORE dequeuing, because an armed PR re-enqueues itself the moment requirements go green and a bare dequeue can be raced straight back into the queue. From the verdict JSON: `auto_merge_enabled` true → disable auto-merge first; then `in_merge_queue` true → dequeue (GraphQL `dequeuePullRequest`, whose `id` input takes the PR node id — read it with `gh pr view [PR_NUMBER] --json id`; no verdict JSON carries it). Re-read both and confirm they are off; either still set → hand back rather than push.
-   2. Bind `[WT_PATH]`, then run the guarded rebase:
-
-      ```bash
-      [MAIN_REPO_ROOT]/.agents/skills/worktree/scripts/worktree path [ISSUE]
-      ```
-      ```bash
-      [MAIN_REPO_ROOT]/.agents/skills/worktree/scripts/worktree create [ISSUE] --restack
-      ```
-
-      It pauses in the conflict state. Resolve each file it lists, stage it with `git -C [WT_PATH] add [FILE]`, then `worktree restack continue [ISSUE]`, repeating while it stops. No worktree for `[ISSUE]`, or a rebase that cannot be resolved → surface the conflicting paths and hand back; never force-push over the base.
-   3. Push the restacked branch:
-
-      ```bash
-      [MAIN_REPO_ROOT]/.agents/skills/orch/scripts/worktree-push --worktree [WT_PATH] --issue [ISSUE]
-      ```
-
-   4. The restack moved the head: re-confirm the gate exactly as recovery step 2 above, then re-run `pr-merge [PR_NUMBER] --auto` and `queue-wait` with a fresh poll budget — the re-arm step 1 undid.
+   **Restack cycle** — the base, not CI, is the blocker. Follow `workflows/merge-pr-restack.md`,
+   then return to step 1's exact-head sequence. Never route a conflict into ci-fix.
 
    **Late-findings triage** — the findings, not CI, are the blocker:
 
-   1. On `cause: late_findings_dequeue_failed` first confirm the dequeue by hand, in the restack cycle's step 1 order and with the PR node id read the way it says: disable auto-merge, then `dequeuePullRequest`. The PR must be out of the queue before triage pushes.
+   1. On `cause: late_findings_dequeue_failed`, first apply the disarm-then-dequeue order and PR-node-id lookup from `merge-pr-restack.md`; the PR must be out of the queue before triage pushes.
    2. `⤵ workflows/review-pr-comments.md [PR_NUMBER] § 1-8 → § 5 step 1` with managed context — every new thread replied to and resolved.
-   3. Triage may have pushed a new head: re-confirm the gate exactly as recovery step 2 above, then re-run `pr-merge [PR_NUMBER] --auto` and `queue-wait` with a fresh poll budget.
+   3. Triage may have pushed a new head. Return to step 1's prepare, exact-head arm, and launch sequence.
 
 2. **Sync the tracker and close a finished container** — **Linear only**. Skip the WHOLE step for GitHub work items: resolve the tracker first; an `issue-N` key in any casing is a GitHub item.
 
    ```bash
    [MAIN_REPO_ROOT]/.agents/skills/linear/scripts/linear.sh sync --reconcile
    ```
+
+   The lane owns tracker completion after a detached merge; the overseer does
+   not substitute for it. When `[ISSUE]` was extracted, read it from the synced
+   cache. A completed state needs no write. A live state completes now:
+
+   ```bash
+   [MAIN_REPO_ROOT]/.agents/skills/linear/scripts/linear.sh cache issues get [ISSUE]
+   ```
+   ```bash
+   [MAIN_REPO_ROOT]/.agents/skills/linear/scripts/linear.sh issues complete [ISSUE]
+   ```
+
+   A canceled or unreadable issue is a tracker failure, not a completed merge
+   record. Carry the diagnostic into § 6 and do not claim tracker completion.
 
    **The container closes LAST.** If `[ISSUE]` was the final open child of a container parent, complete the container now. Skip when no `[ISSUE]` was extracted.
 
@@ -240,7 +299,7 @@ Use the output as `MAIN_REPO_ROOT`.
 
    The outputs are `[LOCAL_SHA]` and `[ORIGIN_SHA]`. A failed ref read stays in the warning as its cause. Never record the sync as done.
 
-4. **Clean up branches and worktrees**, scoped to this PR by default — never enumerate unrelated branches or sibling worktrees.
+4. **Prepare branch and worktree cleanup**, scoped to this PR by default — never enumerate unrelated branches or sibling worktrees.
 
    ```bash
    env -u GH_REPO -u GITHUB_REPOSITORY gh pr view [PR_NUMBER] --json headRefName --jq .headRefName
@@ -271,15 +330,35 @@ Use the output as `MAIN_REPO_ROOT`.
 
    For `merge-pr all` or an explicit user request, also sweep the project. Check each local branch with `env -u GH_REPO -u GITHUB_REPOSITORY gh pr list --head [BRANCH] --base [BASE_BRANCH] --state all --json number,state,headRefOid,isCrossRepository`, and auto-delete only a branch with no worktree whose tip equals the `headRefOid` of one of its **merged**, non-cross-repository PRs — the predicate `worktree cleanup` applies. Neither state nor a merge into another base is the test: a closed PR merged nothing, a PR merged into a release or other side branch left its commit out of `[BASE_BRANCH]` with this ref possibly the last ordinary one holding it, and a merged PR whose head differs from the tip left the extra commits reachable from this ref alone. Leave every other branch alone, and ask before removing a stale worktree or a branch with no PR. Compare `ls [TREES_DIR]/` against `worktree list --porcelain` for orphan directories, asking before removing any.
 
-   Finally, when the rule selected the worktree for removal, remove it — **last** (it destroys the session cwd):
+   After every branch/worktree cleanup decision is recorded, persist the return
+   point for the lane's outer post-merge work. The lifecycle file lives under
+   the shared git directory and survives worktree removal:
 
    ```bash
-   [MAIN_REPO_ROOT]/.agents/skills/worktree/scripts/worktree remove "[ISSUE_ID]"
+   .agents/skills/orch/scripts/merge-queue-watch merge-pr-complete --root [MAIN_REPO_ROOT] --issue [STATE_KEY] --watch-id [WATCH_ID]
    ```
 
-   If that prints `SESSION CWD DESTROYED`, present § 6 immediately and tell the user to end the session.
+   Keep the issue worktree through the managed lane post-merge phase. That phase
+   removes it from the main repository after project verification succeeds.
 
 ## 6. Present Results
+
+An armed or queued PR returns this result as soon as its detached watch reports
+ready. It is not a merge claim:
+
+<output_format>
+
+### ⏳ ARMED — PR #[N]: [TITLE]
+
+| Field | Value |
+|-------|-------|
+| Head | `[PREPARED_HEAD]` |
+| Queue watch | `[WATCH_ID]` detached; diagnostics at `[LOG_PATH]` |
+| Lane | released; this session owns the later verdict |
+
+</output_format>
+
+A completed merge uses the result below.
 
 <output_format>
 
@@ -288,14 +367,14 @@ Use the output as `MAIN_REPO_ROOT`.
 | Field | Value |
 |-------|-------|
 | Branch | [BRANCH_NAME] (deleted / kept) |
-| Worktree | removed / kept — [cause] |
-| Issue Tracker | [ISSUE_ID] → Done (via magic words) |
+| Worktree | pending lane cleanup / kept — [cause] |
+| Issue Tracker | [ISSUE_ID] → Done (completed by the lane after merge) |
 | Container | [PARENT_ID] → Done / deferred — [pending ids, restorations, or cause] |
 | Base sync | local `[BASE_BRANCH]` → [NEW_SHA] |
 
 </output_format>
 
-The `Container` row appears only when § 5 step 2 found a container parent. The `Base sync` row is never omitted. When § 5 step 3 hit a blocking outcome it carries the warning instead of a sha: `⚠️ local [BASE_BRANCH] STALE at [LOCAL_SHA] (origin/[BASE_BRANCH] at [ORIGIN_SHA]) — [CAUSE]`. The `Worktree` row reports `removed`, or `kept — [dirty tree | branch not merged | foreign lease]` when the § 5 step 4 rule declined removal (no worktree existed → omit the row). Add a `Review gate` row only when the merge did not proceed on a plain `approved`/`reviewed` verdict — `⚠️ reviewer-down proceed (no reviewer posted; PR_REVIEW_ON_TIMEOUT=proceed)` or `⚠️ forced (user override)`.
+The `Container` row appears only when § 5 step 2 found a container parent. The `Base sync` row is never omitted. When § 5 step 3 hit a blocking outcome it carries the warning instead of a sha: `⚠️ local [BASE_BRANCH] STALE at [LOCAL_SHA] (origin/[BASE_BRANCH] at [ORIGIN_SHA]) — [CAUSE]`. The `Worktree` row reports `pending lane cleanup`, or `kept — [dirty tree | branch not merged | foreign lease]` when § 5 step 4 found it ineligible (no worktree existed → omit the row). Add a `Review gate` row only when the merge did not proceed on a plain `approved`/`reviewed` verdict — `⚠️ reviewer-down proceed (no reviewer posted; PR_REVIEW_ON_TIMEOUT=proceed)` or `⚠️ forced (user override)`.
 
 For `merge-pr all`, add the cross-PR analysis and a merge table:
 
@@ -317,4 +396,5 @@ Legend: ✅ merged  ⏭️ skipped (user)  ❌ skipped (error)
 
 ## 7. Return
 
-**Managed**: return to the parent workflow's next section. **Standalone**: session complete.
+**Managed**: return to `workflows/lane-postmerge.md`. **Standalone**: session
+complete after any `awaiting_lane_postmerge` record is explicitly acknowledged.

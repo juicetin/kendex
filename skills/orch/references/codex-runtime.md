@@ -14,7 +14,7 @@ rg -n '\x60kendex refresh\x60' skills/
 
 Rewrites:
 
-- Polling loops → the orch waiters `ci-wait`, `approval-wait`, `queue-wait`. Launch a waiter ONCE as a single blocking command and stay on it until it returns — when the harness `exec` yields early, keep issuing `wait` at the harness's maximum duration against the same command; never re-run the waiter or slice the wait into short polls.
+- Polling loops → the orch waiters `ci-wait`, `approval-wait`, `queue-wait`. Launch `ci-wait` and `approval-wait` once as blocking commands and stay on them until they return. Merge-pr calls `merge-queue-watch launch`, which owns queue-wait's detached process and durable result. Never re-run a waiter merely because the harness yielded early or slice it into short polls.
 - Multi-item sweeps → one simple command per item.
 - Derived values → helper scripts (`git-context`, `workflow-state`), never substitution.
 - File writes → harness file tools or `apply_patch`, never redirection.

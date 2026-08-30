@@ -29,6 +29,10 @@ run_merge() {
     (cd "$TMPDIR/repo" && PATH="$TMPDIR/bin:$PATH" env -u GH_TOKEN -u GITHUB_TOKEN "$PR_MERGE" 123 --auto --keep-branch)
 }
 
+run_merge_expected() {
+    (cd "$TMPDIR/repo" && PATH="$TMPDIR/bin:$PATH" env -u GH_TOKEN -u GITHUB_TOKEN "$PR_MERGE" 123 --auto --keep-branch --expected-head "$1")
+}
+
 run_merge_immediate() {
     (cd "$TMPDIR/repo" && PATH="$TMPDIR/bin:$PATH" env -u GH_TOKEN -u GITHUB_TOKEN "$PR_MERGE" 123 --keep-branch)
 }
@@ -254,6 +258,17 @@ echo "=== pr-merge post-mutation outcomes (kendex#608) ==="
 
 checks='[{"name":"CI Required","state":"SUCCESS","bucket":"pass"}]'
 
+call_log="$TMPDIR/expected-head-calls.log"
+: > "$call_log"
+set +e
+out=$(STUB_CHECKS="$checks" STUB_HEAD=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+    STUB_CALL_LOG="$call_log" run_merge_expected bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb 2>&1)
+status=$?
+set -e
+assert_eq "$status" "1" "prepared head drift fails before arming"
+assert_contains "$out" "prepared head changed before merge attempt" "prepared-head refusal names the race"
+assert_not_contains "$(cat "$call_log")" "pr merge" "prepared-head mismatch never reaches merge mutation"
+
 # Exact Hyprtrade PR #263 false-negative shape at head
 # 28132e9b990a595417f79f4e213b4e984bf676fd: gh accepted the guarded
 # mutation, the PR remained OPEN, autoMergeRequest was null, and the active
@@ -275,7 +290,7 @@ assert_eq "$status" "75" "active mergeQueueEntry is success-pending"
 assert_contains "$out" "QUEUED IN MERGE QUEUE PR #123" "merge-queue outcome is explicit"
 assert_contains "$out" "queueState=QUEUED" "merge-queue state is preserved"
 assert_contains "$out" "VOLATILE" "queued exit 75 states the state is volatile"
-assert_contains "$out" ".agents/skills/orch/scripts/queue-wait 123" "queued exit 75 names the ejection watcher by runnable path"
+assert_contains "$out" ".agents/skills/orch/scripts/merge-queue-watch once" "queued exit 75 names the durable lifecycle by installed path"
 assert_contains "$out" ".agents/skills/github/scripts/github.sh pr-merge 123 --auto" "queued exit 75 names the re-arm by runnable path"
 
 set +e
@@ -290,7 +305,7 @@ set -e
 assert_eq "$status" "75" "classic auto-merge remains success-pending"
 assert_contains "$out" "AUTO-MERGE ENABLED PR #123" "classic auto-merge outcome is distinct"
 assert_contains "$out" "VOLATILE" "auto-merge exit 75 states the state is volatile"
-assert_contains "$out" ".agents/skills/orch/scripts/queue-wait 123" "auto-merge exit 75 names the ejection watcher by runnable path"
+assert_contains "$out" ".agents/skills/orch/scripts/merge-queue-watch once" "auto-merge exit 75 names the durable lifecycle by installed path"
 
 set +e
 out=$(STUB_CHECKS="$checks" \
