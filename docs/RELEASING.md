@@ -139,25 +139,50 @@ updater artifacts, so set `TAURI_SIGNING_PRIVATE_KEY` or pass `--no-sign`.
 
 Entries are written one file at a time, under
 `changelog.d/<section>/<name>.md` (`changelog.d/README.md` has the format).
-Nothing edits `CHANGELOG.md` by hand: `tools/guard` refuses a line under
-`## [Unreleased]` that HEAD does not already carry.
+Nothing edits `CHANGELOG.md` by hand: the growth-guards `changelog-entries`
+lane refuses a line under `## [Unreleased]` that HEAD does not already carry.
 
 Before tagging, run `tools/changelog-collate`. It folds every fragment git
 carries into `## [Unreleased]` under its section heading, in Keep a Changelog
 order and filename order within a section, then deletes the fragments; no
 fragments is a no-op. Exit codes follow the guard family: 0 clean, 1 a
-fragment the format refuses, 2 could not run — and nothing is written until
-every fragment passes, so `CHANGELOG.md` is replaced whole or not at all. It
-reads each fragment from the working tree, so it also refuses a `changelog.d`
-the index and the disk disagree about, rather than publishing an unstaged
-edit and deleting it. A nonzero exit halts the release: read the message, fix
+fragment or a record the judge refuses, 2 could not run — the collation asks
+the `changelog-entries` lane which paths are fragments, where the record's
+`## [Unreleased]` section begins and ends, and which headings sit inside it,
+then folds in exactly those; nothing is written until every one passes, so
+`CHANGELOG.md` is replaced whole or not at all. A record with no section, or
+one naming a heading that is no Keep a Changelog section, is the judge's
+refusal at the commit that wrote it rather than a surprise at the tag. It
+reads each fragment, and `CHANGELOG.md` itself, from the working tree, so it
+also refuses a `changelog.d` or a `CHANGELOG.md` the index and the disk
+disagree about, rather than publishing an unstaged edit the judge never
+measured. A nonzero exit halts the release: read the message, fix
 the fragment or `CHANGELOG.md`, run it again. Then rename `## [Unreleased]` to
 `## [X.Y.Z] - YYYY-MM-DD` and open a fresh empty one, which leaves the guard
 nothing gained to refuse.
 
-`CHANGELOG_COLLATE=1` declares a deliberate write under `## [Unreleased]`.
-It is needed only when the guard or the commit runs while the collated
-entries are still under that heading.
+**The release commit carries `GROWTH_GUARDS_CHANGELOG_COLLATE=1`:**
+
+```
+GROWTH_GUARDS_CHANGELOG_COLLATE=1 git commit -m "chore(release): vX.Y.Z"
+```
+
+That declaration is what makes `CHANGELOG.md` count as the changelog entry
+the commit owes. The release commit stages the version bump under `crates/`,
+which `GROWTH_GUARDS_CHANGELOG_REQUIRED_PATHS` names, and the fragments that
+would otherwise be its entry were just deleted by the collator — deleting one
+is not writing one. Without the declaration the `commit-msg` lane refuses the
+release commit, and `[no-changelog]` would be a lie about a commit that ships
+every entry there is.
+
+The same declaration also stands the record scope's comparison down, which
+matters when the guard or the commit runs while the collated entries are
+still under `## [Unreleased]` — renaming that heading first leaves nothing
+gained, so that half is usually already satisfied. It bypasses the comparison
+alone, and is read at one point so that stays true: a record that is a
+symlink, binary or not valid UTF-8, one carrying an unclosed fence or a
+second `## [Unreleased]`, one staging that heading away, and one deleted
+outright are all refused either way.
 
 ## Version bumps
 

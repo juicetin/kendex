@@ -13,9 +13,17 @@ docs live in README.md.
 - `scripts/install-git-hooks` — hook installer, remover, and `--check` verdict
 - `scripts/lib/common.sh`, `scripts/lib/settings.sh` — shared helpers and
   layered settings resolution
-- `scripts/lib/configured-paths.sh` — the configured-path-list concept for the
-  lanes scoped by one: the glob list, the walk over the index records, and
+- `scripts/lib/configured-paths.sh` — the glob-list concept for the lanes
+  scoped by one: the configured list, the excludes list read from the index,
+  the one matcher both answer through, the walk over the index records, and
   what may be measured at a matched path
+- `scripts/lib/commit-header.sh`, `scripts/lib/changelog-grammar.sh` — what
+  a commit header and a changelog ARE to this family: the two changelog
+  scopes both lanes resolve from, and the grammars each is judged by, kept
+  apart from the scans that run them
+- `scripts/lib/changelog-record-scope.sh` — the record half of the
+  `changelog-entries` judge: one tracked file against HEAD's copy, kept apart
+  from the fragment-tree walk it shares nothing with but a verdict
 - `scripts/lib/hook-check.sh` — the read-only verdict `install-git-hooks
   --check` returns over the shims this installer writes
 - `scripts/lib/hooks-path.sh` — where git reads hooks from, and whether

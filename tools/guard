@@ -3,10 +3,10 @@
 # growth-guards pre-commit chain (GROWTH_GUARDS_PRE_COMMIT_LOCAL). Every rule
 # a shipped package already judges is that package's: size-ratchet caps file
 # size and gates its own baseline rows, byte-ceiling caps bytes,
-# changelog-entries caps changelog entries, todo-ban catches work markers,
-# suppression-ban catches blanket allows, conflict-markers catches merge
-# markers, prose keeps history out of the markdown agents load. What is here
-# is what none of them ships.
+# changelog-entries judges the changelog (fragments and the collated record
+# alike), todo-ban catches work markers, suppression-ban catches blanket
+# allows, conflict-markers catches merge markers, prose keeps history out of
+# the markdown agents load. What is here is what none of them ships.
 # Checks the working tree, not the staged index — accepted trade-off:
 # agents commit whole files; partial staging is out of scope.
 set -uo pipefail
@@ -15,6 +15,16 @@ fail=0
 say() {
   echo "guard: $1"
   fail=1
+}
+
+# The hit lines below are a tracked file's own bytes, and a source file may
+# carry an ESC or another C0 control as legitimate content. Printed raw they
+# reach a terminal as control codes rather than as the line that broke a rule,
+# so every hit goes through here: one line each, every C0 control except tab
+# and DEL replaced. The growth-guards library spells this gg_scrubbed; this
+# script does not load it, and the rule is small enough to carry itself.
+show() { # HITS — the same lines, safe to print
+  printf '%s\n' "$1" | LC_ALL=C awk '{ gsub(/[\001-\010\013-\037\177]/, "?"); print }'
 }
 
 files=$({ git ls-files; git diff --cached --name-only; } | sort -u)
@@ -34,37 +44,6 @@ scan() {
   done <<<"$files"
 }
 
-# The fragment format has one judge, and it is the tool that has to read the
-# fragments: tools/changelog-collate --check names every path and body it
-# would refuse, and writes nothing.
-if [ -x tools/changelog-collate ]; then
-  if ! collate_out=$(tools/changelog-collate --check 2>&1); then
-    say "changelog.d holds a fragment the collator refuses:
-$(printf '%s\n' "$collate_out" | head -5 | sed 's/^/  /')"
-  fi
-else
-  say "tools/changelog-collate is missing or not executable — the fragment format check could not run"
-fi
-
-# Two branches that both write CHANGELOG.md's [Unreleased] list insert at the
-# same line, and the merge queue ejects the trailing one. Entries go to
-# changelog.d instead. CHANGELOG_COLLATE=1 is the release commit saying the
-# new lines are the collator's, the way RATCHET_RAISE=1 declares a raised
-# size-ratchet row.
-if [ "${CHANGELOG_COLLATE:-}" != "1" ] && [ -f CHANGELOG.md ] && git cat-file -e HEAD:CHANGELOG.md 2>/dev/null; then
-  unreleased() { awk '/^## / { seen = ($0 ~ /^## \[Unreleased\]/); next } seen && NF'; }
-  # One collation for the sort and for comm, or comm calls a byte-ordered
-  # file unsorted and prints lines neither side gained. No -u either: a
-  # second copy of a line HEAD carries once is a line this tree gained.
-  if head_ur=$(git show HEAD:CHANGELOG.md | unreleased) && work_ur=$(unreleased <CHANGELOG.md) &&
-    added=$(LC_ALL=C comm -13 <(printf '%s\n' "$head_ur" | LC_ALL=C sort) <(printf '%s\n' "$work_ur" | LC_ALL=C sort)); then
-    [ -n "$added" ] && say "CHANGELOG.md gained lines under [Unreleased] — write changelog.d/<section>/<name>.md instead; tools/changelog-collate folds it in at release:
-$(printf '%s\n' "$added" | head -5 | sed 's/^/  /')"
-  else
-    say "CHANGELOG.md could not be compared against HEAD — the [Unreleased] rule could not run"
-  fi
-fi
-
 # Every module that reads a catalog's own bytes is listed, so a raw read of a
 # catalog path is caught wherever it is added. source/browse/safety.rs is not
 # here on purpose: its one fs read is of kendex's own cache record under the
@@ -74,25 +53,25 @@ fi
 # install back to CLI-only.
 hits=$(scan 'class Kendex < Formula' '^packaging/homebrew/')
 [ -n "$hits" ] && {
-  echo "$hits"
+  show "$hits"
   say "a Homebrew formula claims the plain kendex name — the cask owns it; name the formula KendexCli"
 }
 
 hits=$(scan 'std::fs::read|crate::fs::read' '^crates/core/src/(source\.rs|check_catalog\.rs|library\.rs|source/(about|browse|bundles|catalog|config|discover|index|meta|plugin_registry)\.rs|source/browse/preview\.rs|render/skill\.rs|engine/(desired|ops))|^crates/app/src/editor\.rs')
 [ -n "$hits" ] && {
-  echo "$hits" | head -5
+  show "$hits" | head -5
   say "raw filesystem read over catalog paths — go through source_read::SealedSource"
 }
 
 hits=$(scan '@tauri-apps/' '^ui/src/')
 [ -n "$hits" ] && {
-  echo "$hits"
+  show "$hits"
   say "UI reaches Tauri directly — only generated ui/src/bindings.ts may import @tauri-apps"
 }
 
 hits=$(scan '#[0-9a-fA-F]{3}([0-9a-fA-F]{3})?\b|rgba?\(|hsla?\(' '^ui/src/.*\.tsx?$')
 [ -n "$hits" ] && {
-  echo "$hits" | head -5
+  show "$hits" | head -5
   say "raw color literal in UI code — use theme tokens; color lives in the stylesheet"
 }
 
@@ -106,7 +85,7 @@ hits=$(scan '#[0-9a-fA-F]{3}([0-9a-fA-F]{3})?\b|rgba?\(|hsla?\(' '^ui/src/.*\.ts
 # and are likewise not tool launches.
 hits=$(scan 'Command::new' '^crates/(core|cli)/src/' | grep -v '^crates/core/src/process/')
 [ -n "$hits" ] && {
-  echo "$hits" | head -5
+  show "$hits" | head -5
   say "raw Command::new — external processes go through process::Hardened"
 }
 
@@ -124,7 +103,7 @@ hits=$(grep -rlE '\.env\("HOME"' crates/*/tests 2>/dev/null | while IFS= read -r
   ' "$f"
 done)
 [ -n "$hits" ] && {
-  echo "$hits" | head -5
+  show "$hits" | head -5
   say 'fixture HOME without KENDEX_REAL_HOME on the next line — that command would run in the dev sandbox'
 }
 
@@ -197,7 +176,7 @@ if ! temp_fixture_hits=$(awk '
   say "temporary fixture declarations could not be checked"
 fi
 [ -n "$temp_fixture_hits" ] && {
-  echo "$temp_fixture_hits" | head -5
+  show "$temp_fixture_hits" | head -5
   say 'temporary fixture bypasses rooted(): import crates/test_util.rs and bind the canonical root on the next source line'
 }
 
