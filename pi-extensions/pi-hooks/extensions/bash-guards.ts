@@ -42,16 +42,25 @@ function setBypass(scan: CommandScan, token: string): void {
  * config key, ANSI-C quoting, a line continuation inside quotes, and a shift
  * operator inside arithmetic, which is not the heredoc this reads it as. Seeing
  * one is the whole rule. Each decoder added here invites the next construct, and
- * the answer to text this cannot read is to refuse, not to parse harder. Only a
- * command naming git is this gate to judge, so `echo $'hi'` is left alone. */
-function unmodelled(command: string, quotedContinuation: boolean): string | null {
-	if (!command.includes("git")) return null;
+ * the answer to text this cannot read is to refuse, not to parse harder.
+ *
+ * They are asked of the NORMALIZED command — quote characters removed — so a
+ * spelling the shell assembles reads as its letters and `com''mit` holds the
+ * word. One text test over text this cannot parse, rather than a parse. An
+ * alias key is the exception and keeps the bare git prerequisite: it defines
+ * the commit under another name, so the word can be absent altogether. */
+function unmodelled(command: string, quotedContinuation: boolean, norm: string): string | null {
+	if (!norm.includes("git")) return null;
 	if (command.toLowerCase().includes("alias.")) return "an alias config key";
+	if (!norm.includes("commit")) return null;
 	if (command.includes("$'")) return "ANSI-C quoting";
 	if (quotedContinuation) return "a line continuation inside quotes";
 	if (/\(\([^)]*<</.test(command)) return "a shift inside arithmetic";
 	return null;
 }
+/** Quote characters carry no letters of their own, so removing them joins the
+ * fragments a word was split into and leaves everything else where it was. */
+const normalize = (command: string): string => command.replace(/['"]/g, "");
 
 /** The rule over the live words of one command. */
 function judge(tokens: string[], scan: CommandScan): void {
@@ -264,7 +273,7 @@ export function scanCommand(command: string): CommandScan {
 		}
 	}
 	endCommand();
-	scan.unmodelled = unmodelled(command, quotedContinuation);
+	scan.unmodelled = unmodelled(command, quotedContinuation, normalize(command));
 	return scan;
 }
 

@@ -333,6 +333,19 @@ describe("pre-commit gate: the bash hook's contract", () => {
 			"cat <<$'EOF'\nbody\nEOF\ngit commit -m x",
 			`git commit "--no-veri\\\nfy" -m x`,
 			"x=$(( 1 << 2 )) && git commit -m x",
+			// The prerequisite is read off the command with its quote characters
+			// removed, so a spelling the shell assembles reads as its letters. Each
+			// of these is the word once the quotes come out, and one also spells git.
+			"git com''mit $'--no-verify' -m x",
+			"git $'com''mit' --no-verify -m x",
+			"git status && $'g''it' commit --no-verify -m x",
+			// The alias key keeps the bare git prerequisite: it defines the commit
+			// under another name, so no normalizing brings the word back.
+			"git -c alias.c='co' co --allow-empty -m x",
+			// Accepted on KEN-866 and pinned so it cannot flip in silence: the
+			// pattern supplies the word, and no text test tells it from the
+			// subcommand.
+			"git log --oneline | grep 'commit$'",
 		]) {
 			for (const repo of [armed, unarmed]) {
 				const { verdict, ran } = await gate(repo, command);
@@ -348,6 +361,13 @@ describe("pre-commit gate: the bash hook's contract", () => {
 		await both("git -c core.pager=cat log", "allow", "allow");
 		expect((await gate(armed, "echo $'hi'")).verdict).toEqual({ kind: "allow" });
 		expect((await gate(armed, "x=$(( 1 << 2 ))")).verdict).toEqual({ kind: "allow" });
+		// The KEN-866 regression. Removing quote characters joins fragments and
+		// moves nothing else, so a pattern anchored to end-of-line names no commit.
+		await both("grep -rn 'foo$' .git/config", "allow", "allow");
+		await both("git log --oneline | grep 'fix$'", "allow", "allow");
+		await both("git status --short | grep 'M$'", "allow", "allow");
+		await both("git log --grep='fix$' | head", "allow", "allow");
+		await both('git log --grep="foo\\\nbar"', "allow", "allow");
 	});
 
 	test("only <<- accepts a tab-indented terminator", async () => {
