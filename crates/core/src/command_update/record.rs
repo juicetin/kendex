@@ -3,10 +3,11 @@
 //!
 //! `install.sh` writes it, `kendex update` refreshes it for the binary it
 //! is running as, and every replacement rewrites it for the bytes that
-//! landed. A replacement made under another account writes that account's
-//! record instead, so the next run from the recorded path moves this one to
-//! the bytes it finds there. Read by `command_update::command_beside_app`,
-//! which will not replace a file no record vouches for.
+//! landed. A replacement made by a privileged run writes no record at all
+//! — see [`acting_as_root`] — so the next run from the recorded path moves
+//! this one to the bytes it finds there. Read by
+//! `command_update::command_beside_app`, which will not replace a file no
+//! record vouches for.
 
 use std::path::{Path, PathBuf};
 
@@ -30,6 +31,79 @@ pub struct InstalledCommand {
     pub digest: String,
 }
 
+/// Whether this process is acting as root.
+///
+/// Every path written below is resolved from the environment this process
+/// was handed — `HOME` and `XDG_DATA_HOME` decide where [`Env`] puts the
+/// record — and a privileged run was handed that environment by whoever
+/// invoked it. `sudo` resets it on most machines, but a `sudoers` carrying
+/// `env_keep HOME` does not, and then a root process opens a file every
+/// component of whose name belongs to the invoking account: a link there
+/// is followed, and root writes wherever it points.
+///
+/// So a run acting as root writes no record. Nothing is lost by that:
+/// [`refresh_the_replaced_bytes`] moves the digest on any later run from
+/// the recorded path, so the person's own next unprivileged run — any
+/// verb, `--version` included — records the bytes the privileged run put
+/// there, into the file their own account owns.
+///
+/// The effective uid and nothing else. `sudo`, `su`, `doas` and a root
+/// login are one case here and none of them is distinguishable by a
+/// variable: `SUDO_USER` and its neighbours are set by whoever invoked the
+/// command, so a check reading one would be a check the invoker decides.
+#[cfg(unix)]
+fn acting_as_root() -> bool {
+    rustix::process::geteuid().is_root()
+}
+
+/// Windows has no uid to answer with, and none of the elevation this
+/// guards for — a command re-run under another account against the first
+/// account's environment — is reachable there.
+#[cfg(not(unix))]
+fn acting_as_root() -> bool {
+    false
+}
+
+/// What a run is asking to record. The three entries below differ only in
+/// this value, so [`acting_as_root`] is read in one place: a wrapper that
+/// read it for itself would be a second place to get wrong, and only that
+/// wrapper's own test would ever notice.
+pub(super) enum Write<'a> {
+    /// The path a replacement landed at, and the bytes now there.
+    Command(&'a Path, &'a [u8]),
+    /// The file this process is running from.
+    FirstRun(&'a Path),
+    /// A path whose bytes are still on disk to be read.
+    Installed(&'a Path),
+}
+
+/// Make the write, unless this process is one that may not make it.
+fn record(env: &Env, write: Write<'_>) -> Result<(), String> {
+    record_as(env, write, acting_as_root())
+}
+
+/// The same, told who is making it, so a suite drives either arm whatever
+/// uid it is running under. Every caller outside a test comes through
+/// [`record`], which asks the process.
+///
+/// Guarded here and nowhere below, ahead of every read and every
+/// `create_dir_all`: a root run does nothing at all, rather than part of it
+/// into a tree the invoking account named.
+pub(super) fn record_as(env: &Env, write: Write<'_>, root: bool) -> Result<(), String> {
+    if root {
+        return Ok(());
+    }
+    match write {
+        Write::Command(path, bytes) => write_the_command(env, path, bytes),
+        Write::FirstRun(running) => write_the_first_run(env, running),
+        Write::Installed(path) => {
+            let bytes = std::fs::read(path)
+                .map_err(|error| format!("{} could not be read: {error}", path.display()))?;
+            write_the_command(env, path, &bytes)
+        }
+    }
+}
+
 /// The `kendex` command an installer recorded.
 ///
 /// Absent where nothing has been recorded — an install older than this
@@ -50,7 +124,16 @@ pub fn recorded_command(env: &Env) -> Option<InstalledCommand> {
 /// the command there, and rewritten by whatever replaces it: a record left
 /// naming bytes that are gone is a record that stops matching, which
 /// refuses a command kendex does own rather than replacing one it does not.
+///
+/// A run acting as root writes nothing and says so with success — see
+/// [`record_as`].
 pub fn record_command(env: &Env, path: &Path, bytes: &[u8]) -> Result<(), String> {
+    record(env, Write::Command(path, bytes))
+}
+
+/// The write itself. Reached only through [`record_as`], which has already
+/// established this process may make it.
+fn write_the_command(env: &Env, path: &Path, bytes: &[u8]) -> Result<(), String> {
     let file = env.installed_command_file();
     if let Some(parent) = file.parent() {
         std::fs::create_dir_all(parent)
@@ -129,7 +212,16 @@ fn stage(
 /// reads it as no record and the app refuses the command, which is the safe
 /// direction; `kendex update` rewrites it, because that is the run replacing
 /// the bytes.
+///
+/// A run acting as root writes nothing here either — see [`record_as`].
 pub fn record_first_run(env: &Env, running: &Path) -> Result<(), String> {
+    record(env, Write::FirstRun(running))
+}
+
+/// The bootstrap itself. Reached only through [`record_as`], which refuses
+/// a root run ahead of the `create_dir_all` below: that call is already
+/// root writing into a tree the invoking account named.
+fn write_the_first_run(env: &Env, running: &Path) -> Result<(), String> {
     let file = env.installed_command_file();
     let Some(parent) = file.parent() else {
         return Err(format!("{} names no directory", file.display()));
@@ -198,12 +290,12 @@ pub fn record_first_run(env: &Env, running: &Path) -> Result<(), String> {
 /// Move the digest of a record that names the file this process is running
 /// from, where the bytes at that file are no longer the ones it names.
 ///
-/// An update run with the privilege the desktop app lacks writes its record
-/// into the privileged account's data directory, so the record here keeps
-/// naming the bytes that run replaced. `command_beside_app` then stops
-/// matching a command kendex does own, and the card that offered the one
-/// command out of that state falls to the arm that names nobody. The person
-/// is left with a current command the app will never offer to move again.
+/// An update run with the privilege the desktop app lacks writes no record
+/// at all — see [`acting_as_root`] — so the record here keeps naming the
+/// bytes that run replaced. `command_beside_app` then stops matching a
+/// command kendex does own, and the card that offered the one command out
+/// of that state falls to the arm that names nobody. The person is left
+/// with a current command the app will never offer to move again.
 ///
 /// What licenses the write is what licenses a first run, and it is the same
 /// file: a process running from the recorded path is the recorded command,
@@ -293,10 +385,11 @@ fn stamp(file: &Path, written_at: std::time::SystemTime) -> Result<(), String> {
 
 /// The same record, taken from a file already on disk — the running
 /// command identifying itself, where the bytes are not in hand.
+///
+/// A run acting as root writes nothing here either, and does not read the
+/// file to find that out — see [`record_as`].
 pub fn record_installed(env: &Env, path: &Path) -> Result<(), String> {
-    let bytes = std::fs::read(path)
-        .map_err(|error| format!("{} could not be read: {error}", path.display()))?;
-    record_command(env, path, &bytes)
+    record(env, Write::Installed(path))
 }
 
 #[cfg(test)]
