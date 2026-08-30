@@ -3,7 +3,7 @@
 #
 # Two classes share the word. A construct the scanner has no rule for — coproc,
 # an operator inside a substitution, an append assignment — leaves the words
-# standing and takes the word-order rule. The four it names are refused unread
+# standing and takes the word-order rule. The ones it names are refused unread
 # instead, each behind its own prerequisite: a construct whose purpose is hiding
 # the commit cannot be gated on seeing one.
 set -euo pipefail
@@ -40,8 +40,21 @@ ANSIC="cat <<\$'EOF'\\nbody\\nEOF\\ngit commit -m x"
 unmodelled "git -c alias.c='commit $NV' c --allow-empty -m x" "an alias key defining a commit"
 unmodelled "git config alias.c 'commit $NV' && git c --allow-empty -m x" "a persisted alias key"
 unmodelled "$ANSIC" "ANSI-C quoting"
-unmodelled 'git commit \"--no-veri\\\nfy\" -m x' "a line continuation inside quotes"
 unmodelled 'x=$(( 1 << 2 )) && git commit -m x' "a shift inside arithmetic"
+
+# The prerequisite takes either answer to where the commit is, and each of these
+# has only one of them.
+#
+# The first two have only the assembled word: the alias value spells the commit
+# out of an escape and across a continuation, so no text of the command ever
+# holds it. The third has only the text: the scanner reads the shift as a
+# heredoc opener, and the body it then skips swallows the commit line bash does
+# run, so no live word holds it either. Behind a real heredoc that same body is
+# the control — there bash runs nothing in it, and it passes.
+unmodelled 'git config alias.c \"com\\\nmit -n\" && git c --allow-empty -m x' "a commit assembled in an alias value"
+unmodelled 'git config alias.c com\\mit && git c '"$NV"' -m x' "a commit escaped in an alias value"
+unmodelled 'x=$(( 1 << EOF ))\ngit commit '"$NV"' -m x\nEOF\ngit status' "a shift whose body swallows the commit"
+both 'cat <<EOF\ngit commit '"$NV"' -m x\nEOF\ngit status' 0 0 "the same body behind a real heredoc"
 
 # The prerequisite is read off the command with its quote characters removed, so
 # a spelling the shell assembles reads as its letters. Both of these are the
@@ -50,9 +63,29 @@ unmodelled "git com''mit \$'--no-verify' -m x" "a quote-split commit word"
 unmodelled "git \$'com''mit' --no-verify -m x" "a commit word spelled by the construct"
 unmodelled "git status && \$'g''it' commit --no-verify -m x" "a construct spelling the git word"
 
-# The alias key keeps the bare git prerequisite: it defines the commit under
-# another name, so no normalizing brings the word back.
-unmodelled "git -c alias.c='co' co --allow-empty -m x" "an alias key naming no commit"
+# An alias key carried inline keeps the bare git prerequisite: it renames the
+# subcommand of this very invocation, so no normalizing brings the word back.
+# It is read off the live words, so a key the shell assembles across a line
+# continuation is that key however the text was written, and the same text in a
+# heredoc body is no word at all.
+unmodelled "git -c alias.c='co' co --allow-empty -m x" "an inline alias key naming no commit"
+unmodelled 'git -c alias.c\\\n=com\\\nmit c '"$NV"' -m x' "a key split across a continuation"
+unmodelled 'git -c \"ali\\\nas.c=com\\\nmit -n\" c --allow-empty -m x' "a key split inside quotes"
+both 'cat <<EOF\ngit -c alias.c=co co\nEOF\ngit status' 0 0 "an alias key in a heredoc body"
+
+# The KEN-870 regression. A trigger fires where the construct can change what
+# the command runs, not wherever its text appears. A key written to the config
+# runs nothing here — it takes effect on later commands, which arrive as their
+# own payloads — so it is judged behind the commit word like any other text, and
+# a body hiding the commit in a script it names is out of model exactly as that
+# script is. A line continuation inside quotes is joined rather than named, so
+# what is judged is the word it assembles: a flag either side of the break is
+# that flag, and a message either side of it is prose.
+both "git config alias.st status" 0 0 "an alias key written and never run"
+both "git config alias.c 'status' && git c" 0 0 "an alias written and used, naming no commit"
+both 'git commit \"a\\\nb\"' 0 2 "a continuation inside a message"
+both 'git commit \"--no-veri\\\nfy\" -m x' 2 2 "a continuation assembling the flag"
+both 'git commit -m \"line one\\nline two\"' 0 2 "a message spanning lines without a backslash"
 
 # The KEN-866 regression. Removing quote characters joins fragments and moves
 # nothing else, so a pattern anchored to end-of-line still names no commit.
