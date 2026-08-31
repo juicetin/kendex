@@ -11,6 +11,7 @@ fn default_role_skills(role: Option<Role>) -> &'static [&'static str] {
         Some(Role::Analyst) => &["linear", "github"],
         Some(Role::Engineer) => &["dev", "github", "worktree"],
         Some(Role::Manager) => &["project-management", "linear", "dev", "github", "worktree"],
+        Some(Role::Planner) => &["linear", "github"],
         None => &[],
     }
 }
@@ -210,6 +211,23 @@ mod tests {
         ["dev", "github", "worktree", "rust-perf", "rust", "linear"]
             .map(str::to_owned)
             .to_vec()
+    }
+
+    /// The built-in table, row by row. Asked of the table rather than
+    /// through `upstream_skills`, which filters it against what a source
+    /// carries and would read a shortened list as a correct one. `None` is
+    /// pinned beside the roles because a role added with no row of its own
+    /// renders exactly like it: with no fleet skills at all.
+    #[test]
+    fn the_built_in_role_table_holds_one_list_per_role() {
+        let of = |role| default_role_skills(Some(role));
+        assert_eq!(of(Role::Reviewer), ["dev"]);
+        assert_eq!(of(Role::Analyst), ["linear", "github"]);
+        assert_eq!(of(Role::Planner), ["linear", "github"]);
+        assert_eq!(of(Role::Engineer), ["dev", "github", "worktree"]);
+        let manager = ["project-management", "linear", "dev", "github", "worktree"];
+        assert_eq!(of(Role::Manager), manager);
+        assert!(default_role_skills(None).is_empty());
     }
 
     #[test]

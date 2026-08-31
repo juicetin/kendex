@@ -2,7 +2,7 @@ use super::{
     EffectiveAgent, GENERATED_BANNER, RenderedAgent, Role, default_pane, hooks_prose, skills_prose,
 };
 use crate::model::{HarnessId, Scope};
-use crate::render::permission::{Access, PermissionIntent};
+use crate::render::permission::PermissionIntent;
 use crate::render::vocab::rewrite_prose;
 use crate::render::yaml_scalar;
 
@@ -12,7 +12,7 @@ use crate::render::yaml_scalar;
 /// vocabulary: an allowlist cannot be expressed and cannot be complemented
 /// without widening, so it refuses.
 pub fn generate(agent: &EffectiveAgent) -> Result<RenderedAgent, String> {
-    let deny = access(agent)?.deny;
+    let deny = denied(agent)?;
     let source = agent.source;
     let o = &agent.overrides;
     let allowed = allowed_subagents(agent);
@@ -99,21 +99,17 @@ fn allowed_subagents(agent: &EffectiveAgent) -> Vec<String> {
     out
 }
 
-/// What Pi's own rules leave this agent able to use. `Err` is Pi refusing
-/// the intent, the refusal [`generate`] returns: nothing is installed, so
-/// there is no access to compare. Pi's surface is deny-only over an
-/// open-ended vocabulary, so the policy is all deny and no allowlist.
-pub(super) fn access(agent: &EffectiveAgent) -> Result<Access, String> {
+/// The deny list Pi writes. `Err` is Pi refusing the intent, the refusal
+/// [`generate`] returns: nothing is installed at all. Pi's surface is
+/// deny-only over an open-ended vocabulary, so there is no allow side.
+fn denied(agent: &EffectiveAgent) -> Result<Vec<String>, String> {
     if matches!(agent.permissions, PermissionIntent::AllowOnly { .. }) {
         return Err(
             "Pi cannot express a tool allowlist and denying by complement would widen access — set an explicit deny-tools override for Pi or exclude Pi from this agent's harnesses"
                 .to_owned(),
         );
     }
-    Ok(Access {
-        allow: None,
-        deny: deny_tools(agent, &allowed_subagents(agent)),
-    })
+    Ok(deny_tools(agent, &allowed_subagents(agent)))
 }
 
 fn deny_tools(agent: &EffectiveAgent, allowed: &[String]) -> Vec<String> {
@@ -130,7 +126,7 @@ fn deny_tools(agent: &EffectiveAgent, allowed: &[String]) -> Vec<String> {
     if allowed.is_empty() {
         tools.push("delegate_subagent".to_owned());
     }
-    if agent.source.name != "planner" {
+    if agent.source.role != Some(Role::Planner) {
         tools.push("question".to_owned());
     }
     if agent.source.role == Some(Role::Reviewer) {
@@ -312,7 +308,9 @@ mod tests {
 
     #[test]
     fn planner_keeps_questions_and_overrides_win_over_source() {
-        let source = source("planner", "analyst", "opus");
+        // Named for nothing in particular: `role:` is what keeps the
+        // question, so a planner under any name keeps it.
+        let source = source("strategist", "planner", "opus");
         let scope = Scope::Project {
             root: "/tmp/proj".into(),
         };

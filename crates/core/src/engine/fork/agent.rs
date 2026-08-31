@@ -37,9 +37,6 @@ use wrapper::{Wrapper, wrapper};
 pub(super) struct CapturedAgent {
     pub bytes: Vec<u8>,
     pub carry: Option<AgentCarry>,
-    /// The captured bytes as the source parser reads them, which is what
-    /// the fork's own renderings will be generated from.
-    pub agent: SourceAgent,
     /// The catalog revision those bytes were read at. Every harness the
     /// fork answers for has to be installed from it, or one capture
     /// cannot speak for all of them.
@@ -123,7 +120,6 @@ pub(super) fn capture_agent(of: &ForkOf, edited: &Path) -> Result<CapturedAgent>
         return Ok(CapturedAgent {
             bytes,
             carry,
-            agent: captured,
             read_at,
         });
     };
@@ -148,7 +144,6 @@ pub(super) fn capture_agent(of: &ForkOf, edited: &Path) -> Result<CapturedAgent>
     Ok(CapturedAgent {
         bytes,
         carry: (!carry.is_empty()).then_some(carry),
-        agent: captured,
         read_at,
     })
 }

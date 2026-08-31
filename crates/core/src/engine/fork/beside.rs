@@ -4,7 +4,6 @@
 //! source's content under the name it always had, the edits under the name
 //! the user chose.
 
-use super::access::{Side, one_revision, refuse_if_widened};
 use super::{
     Capture, Captured, ForkOf, capture, capture_ops, carries_name, edited_rendering, named_bytes,
     provenance, vacant_name,
@@ -58,7 +57,6 @@ pub fn fork_beside(
         }
     };
     let edited = edited_rendering(env, scope, kind, name, harness)?;
-    let mut before = manifest.clone();
     let captured = capture(
         &ForkOf {
             env,
@@ -75,7 +73,6 @@ pub fn fork_beside(
     let Captured {
         files,
         carry,
-        agent,
         read_at,
     } = captured;
     let mut ops = capture_ops(env, scope, kind, new_name, &edited, named(files, new_name)?)?;
@@ -87,13 +84,6 @@ pub fn fork_beside(
     // and goes on rendering under the name it always had.
     rekey_agent_tables(&mut manifest, kind, name, new_name, OldName::Kept);
     if let Some(carry) = carry {
-        // The same carry lands on both sides of the access proof: on the
-        // copy under its new name, and on the original under the name it
-        // already answers to. The catalog's own per-harness defaults reach
-        // the manifest only through this, so folding it into one side
-        // alone would read a default the copy keeps as a restriction that
-        // vanished — and refuse a fork that widens nothing.
-        carry.clone().apply(&mut before, name);
         carry.apply(&mut manifest, new_name);
     }
 
@@ -114,34 +104,15 @@ pub fn fork_beside(
             .rev = Some(commit);
     }
 
-    // The declaration as the fork will write it against the declaration as
-    // it stands, proven before any of it reaches disk. The two differ in
-    // the name and nothing else, which is what makes a difference in what
-    // a harness denies the name's doing.
-    if let Some(agent) = &agent {
+    // One capture, read at one revision, is what every harness renders from
+    // once the fork lands, so every harness it answers for has to be at
+    // that revision now. Proven before any of it reaches disk.
+    if kind == ItemKind::Agent {
         let declared = manifest
             .declared(kind)
             .get(new_name)
             .unwrap_or_else(|| unreachable!("declared above"));
-        // One capture, read at one revision, is what every harness renders
-        // from once the fork lands. Establishing that they are all at that
-        // revision now is what lets the proof below read one source form
-        // for all of them.
-        let one = one_revision(env, scope, &manifest, declared, name, read_at.as_deref())?;
-        refuse_if_widened(
-            scope,
-            declared,
-            agent,
-            Side {
-                manifest: &before,
-                name,
-            },
-            Side {
-                manifest: &manifest,
-                name: new_name,
-            },
-            one,
-        )?;
+        super::revision::one_revision(env, scope, &manifest, declared, name, read_at.as_deref())?;
     }
 
     let manifest_path = manifest::manifest_path(env, scope);

@@ -12,6 +12,7 @@ mod available;
 mod beside;
 mod disabled;
 mod edited_harness;
+mod revision;
 mod vacant;
 
 mod forks;
