@@ -11,7 +11,7 @@ use std::process::Command;
 
 #[path = "../../test_util.rs"]
 mod test_util;
-use test_util::rooted;
+use test_util::{SUDO_STUB, install_stub, rooted};
 
 #[allow(clippy::unwrap_used)]
 fn write_exe(path: &Path, body: &str) {
@@ -35,14 +35,14 @@ fn requested_urls(os: &str, arch: &str) -> String {
 #[allow(clippy::unwrap_used)]
 fn run_install(os: &str, arch: &str, fail: Option<(&str, i32)>) -> (std::process::Output, String) {
     let tmp = tempfile::tempdir().unwrap();
-    run_install_in(os, arch, fail, tmp.path())
+    run_install_in(os, arch, fail, tmp.path(), &[])
 }
 
 /// The same run against a home the caller keeps, for a test that reads what
 /// the script left behind rather than only what it fetched.
 #[allow(clippy::unwrap_used)]
 fn run_install_at(os: &str, arch: &str, home: &Path) -> (std::process::Output, String) {
-    run_install_in(os, arch, None, home)
+    run_install_in(os, arch, None, home, &[])
 }
 
 /// What `uname -s` answers on the machine running these tests.
@@ -65,6 +65,7 @@ fn run_install_in(
     arch: &str,
     fail: Option<(&str, i32)>,
     home: &Path,
+    path_ahead: &[&str],
 ) -> (std::process::Output, String) {
     let fake = home.join("fake-bin");
     let bindir = home.join(".local/bin");
@@ -74,6 +75,10 @@ fn run_install_in(
         &fake.join("uname"),
         &format!("#!/bin/sh\ncase \"$1\" in -s) echo {os} ;; -m) echo {arch} ;; esac\n"),
     );
+    // The host's own `PATH` is appended below, so both commands the script
+    // writes through resolve outside the fixture. Neither may reach past it.
+    write_exe(&fake.join("sudo"), SUDO_STUB);
+    write_exe(&fake.join("install"), &install_stub(home));
     // Logs the URL; `-o FILE` gets a runnable stand-in for the download,
     // and the release lookup gets a tag.
     let miss = fail.map_or(String::new(), |(url, code)| {
@@ -96,9 +101,16 @@ fn run_install_in(
         .env("KENDEX_REAL_HOME", "1")
         .env(
             "PATH",
+            // `path_ahead` sits between the fake tools and the home
+            // `bindir`, so a caller can put another of the script's
+            // candidates in front of the one it would otherwise find.
             format!(
-                "{}:{}:{}",
+                "{}:{}{}:{}",
                 fake.display(),
+                path_ahead
+                    .iter()
+                    .map(|dir| format!("{dir}:"))
+                    .collect::<String>(),
                 bindir.display(),
                 std::env::var("PATH").unwrap_or_default()
             ),
@@ -273,6 +285,102 @@ fn every_directory_the_installer_can_choose_is_a_candidate() {
             expanded.display()
         );
     }
+}
+
+/// The invocation `install.sh` publishes for itself, read out of the
+/// script's own header rather than restated here. A header this cannot
+/// parse fails the same way a changed command does, because a silent
+/// no-match would be the drift it exists to catch.
+#[allow(clippy::unwrap_used)]
+fn published_invocation(script: &str) -> String {
+    script
+        .lines()
+        .find_map(|line| {
+            let shown = line.strip_prefix('#')?.trim();
+            (shown.starts_with("curl ") && shown.ends_with("| sh")).then(|| shown.to_owned())
+        })
+        .expect("install.sh's header shows the curl invocation that runs it")
+}
+
+/// The command the app's update card hands a person whose `kendex` command
+/// sits where the app cannot write. They have no in-app remedy — that is
+/// what the card's arm means — so a command that has drifted from the one
+/// the script publishes leaves them with nothing that works, and `curl`
+/// failing inside a pipe into `sh` still exits 0.
+///
+/// Read against the script itself, the way the `bindir` list above is, and
+/// through the card rather than the constant behind it: an arm that stopped
+/// offering the invocation would pass an equality check against that
+/// constant and fail a person just as completely.
+#[test]
+#[allow(clippy::unwrap_used)]
+fn the_card_offers_the_invocation_the_script_publishes() {
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../install.sh");
+    let card = kendex_core::command_update::CommandNotice::for_card(
+        &kendex_core::command_update::CommandBeside::NeedsPrivilege("/usr/local/bin/kendex".into()),
+    );
+    let Some(kendex_core::command_update::CommandNotice::NeedsPrivilege { command, .. }) = card
+    else {
+        panic!("the card owes a command kendex cannot write an installer, and offered {card:?}");
+    };
+    assert_eq!(
+        published_invocation(&fs::read_to_string(&script).unwrap()),
+        command,
+        "install.sh publishes one invocation and the update card offers another"
+    );
+}
+
+/// Where a re-run of `install.sh` lands, so the card can go on saying the
+/// installer picks its own directory rather than naming one.
+///
+/// Two halves, and the name claims only what both together can see. Read:
+/// the script's candidate list puts the home directory first. Run: with
+/// `/usr/local/bin` ahead of the home directory on `PATH`, the command
+/// still lands in the home directory, so `PATH` order does not decide.
+///
+/// What neither half can see is whether the home directory was taken
+/// because it matched or because nothing did: `install.sh` falls back to
+/// that same directory when no candidate is on `PATH` at all, so a run and
+/// a fallback are one destination here. Separating them means a run that
+/// lands in `/usr/local/bin`, which is a privileged write this suite will
+/// not make. Hence the list is read rather than inferred.
+#[test]
+#[allow(clippy::unwrap_used)]
+fn path_order_does_not_decide_where_a_re_run_lands() {
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../install.sh");
+    let dirs = installer_bin_dirs(&fs::read_to_string(&script).unwrap());
+    assert!(
+        dirs.first().is_some_and(|first| first.starts_with("$HOME")),
+        "install.sh tries {dirs:?} in that order; the home directory is no longer first"
+    );
+    // Without a second kind of candidate the order above is trivially
+    // held and the run below settles nothing.
+    assert!(
+        dirs.iter().any(|dir| !dir.starts_with("$HOME")),
+        "install.sh names only home candidates, so nothing here is about order: {dirs:?}"
+    );
+
+    let tmp = tempfile::tempdir().unwrap();
+    let home = rooted(&tmp);
+    let (output, _) = run_install_in(HOST_UNAME, "x86_64", None, &home, &["/usr/local/bin"]);
+    // Asked first, because it is the answer a drifted script gives: a run
+    // that chose the system directory stops at the stub, and reading the
+    // destination first would report only that it never said one.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("tried to escalate") && !stderr.contains("outside its fixture"),
+        "install.sh reached past the fixture: {stderr}"
+    );
+    let said = String::from_utf8_lossy(&output.stdout);
+    let installed = said
+        .lines()
+        .find_map(|line| line.strip_prefix("Installed the kendex command to "))
+        .unwrap_or_else(|| panic!("install.sh did not say where it installed:\n{said}"));
+    assert_eq!(
+        PathBuf::from(installed),
+        home.join(".local/bin/kendex"),
+        "install.sh chose {installed} with /usr/local/bin ahead of the home directory on PATH"
+    );
 }
 
 /// The same contract from the other end, run rather than read: install.sh

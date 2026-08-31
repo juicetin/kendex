@@ -33,24 +33,85 @@ pub enum CommandNotice {
     /// Nothing names an owner and no record proves the file is kendex's,
     /// so there is no name to print and no command to offer.
     Unknown,
-    /// Kendex's own command, where this app cannot write. `command` is
-    /// what carries it across with the privilege the app lacks.
+    /// Kendex's own command, where this app cannot write. `path` names
+    /// the file the notice is about; `command` is the installer, which
+    /// installs to the directory it selects rather than to that file.
     NeedsPrivilege { path: String, command: String },
+    /// The same, on a platform with no installer to run. `path` names the
+    /// file; `page` is where its release is downloaded, because there is
+    /// nothing here to hand a person to run.
+    NeedsDownload { path: String, page: String },
 }
 
-/// What `kendex update` is spelled as when it has to run as root.
-const ELEVATED_UPDATE: &str = "sudo kendex update";
+/// The invocation `install.sh` publishes for itself. The script is the
+/// source of it and this is its only spelling in Rust;
+/// `crates/cli/tests/install_script.rs` reads it out of the script's own
+/// header and compares it against what the card offers, so the two cannot
+/// drift — the way the `bindir` constants in this crate are pinned through
+/// `command_candidates`, and through the public surface rather than by
+/// exposing the constant.
+///
+/// It names no path, which is the whole of why it is this and not a
+/// command aimed at the file. `sudo kendex update` resolves a bare name
+/// against sudo's `secure_path` rather than the person's `PATH`, so it
+/// reaches a second `kendex` or none at all; spelling the path into it
+/// instead hands a root shell a name an unprivileged account decides,
+/// because every route to that path — a write probe on a directory its
+/// owner can open up again, a prefix an account owns — is one that account
+/// can arrange.
+///
+/// What it costs: `kendex update` holds every download to the release key
+/// before it writes, and this re-run does not — `install.sh` says so in
+/// its own header, because minisign is not on a machine that has installed
+/// nothing. What keeping the key check would have cost is the offer above:
+/// `sudo` at the recorded path, which hands a root shell a name the account
+/// arranges. So the trade is an unverified download against a local
+/// privilege escalation, and the escalation is the worse of the two. The
+/// card is text a person reads; nothing here runs either one.
+///
+/// It installs to the directory the script selects, which need not be the
+/// file the card names — the copy beside it says so rather than promising
+/// that file moves.
+const INSTALLER_RERUN: &str = "curl -fsSL https://kendex.ai/install.sh | sh";
+
+/// Where a release is downloaded, for a platform `install.sh` refuses.
+/// `README.md` publishes it and this is its only spelling in Rust; the
+/// suite beside this one reads it back out of the README, so the two
+/// cannot drift — the same pin the invocation above carries.
+const DOWNLOAD_PAGE: &str = "https://kendex.ai/download";
+
+/// Whether this platform has an installer to re-run. `install.sh` takes
+/// Linux and macOS and rejects everything else by name, and Windows has no
+/// installer of its own — a `kendex.exe` is downloaded from the release —
+/// so a pipeline offered there is an instruction that cannot be followed.
+const HAS_INSTALLER: bool = !cfg!(windows);
 
 impl CommandNotice {
     /// What the card owes a person about this command, or `None` where it
     /// owes them nothing.
     pub fn for_card(beside: &CommandBeside) -> Option<Self> {
+        Self::for_card_where(beside, HAS_INSTALLER)
+    }
+
+    /// The same, told whether this platform has an installer, so a suite
+    /// drives either arm whatever it is running on. Every caller outside a
+    /// test comes through [`Self::for_card`], which asks the platform.
+    pub(crate) fn for_card_where(beside: &CommandBeside, installer: bool) -> Option<Self> {
         match beside {
             CommandBeside::Ours(_) | CommandBeside::Absent => None,
-            CommandBeside::NeedsPrivilege(path) => Some(Self::NeedsPrivilege {
-                path: shown(&path.display().to_string()),
-                command: ELEVATED_UPDATE.to_owned(),
-            }),
+            CommandBeside::NeedsPrivilege(path) => {
+                let path = shown(&path.display().to_string());
+                Some(match installer {
+                    true => Self::NeedsPrivilege {
+                        path,
+                        command: INSTALLER_RERUN.to_owned(),
+                    },
+                    false => Self::NeedsDownload {
+                        path,
+                        page: DOWNLOAD_PAGE.to_owned(),
+                    },
+                })
+            }
             CommandBeside::NotOurs(InstallChannel::Managed { manager, command }) => {
                 Some(Self::Managed {
                     manager: manager.clone(),
