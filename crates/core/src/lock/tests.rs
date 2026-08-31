@@ -17,7 +17,6 @@ fn lock_round_trips_and_missing_file_is_empty() {
         entry_key(ItemKind::Skill, "github", HarnessId::Claude),
         LockEntry {
             registration: None,
-            left_pi_reserved_name: false,
             name: "github".into(),
             kind: ItemKind::Skill,
             harness: HarnessId::Claude,
@@ -67,25 +66,6 @@ fn lock_round_trips_and_missing_file_is_empty() {
     assert!(std::fs::read_to_string(&path).unwrap().ends_with('\n'));
 }
 
-/// A record from before installations carried reasons reads back as one
-/// the user asked for — the only reading that invents nothing.
-#[test]
-fn entries_without_reasons_read_as_requested() {
-    let tmp = tempfile::tempdir().unwrap();
-    let path = tmp.path().join(".kendex-lock.json");
-    std::fs::write(
-        &path,
-        format!(
-            r#"{{"version":2,"root":{},"entries":{{"skill:gh:claude":{{"name":"gh","kind":"skill","harness":"claude","source":"kendex","sourceRepo":"vanillagreencom/kendex","method":"symlink","installedAt":"2026-01-01T00:00:00Z","sourceHash":"abc","enabled":true}}}}}}"#,
-            json(tmp.path())
-        ),
-    )
-    .unwrap();
-    let lock = load(&path).unwrap();
-    let entry = &lock.entries["skill:gh:claude"];
-    assert_eq!(entry.reasons, BTreeSet::from([Reason::Requested]));
-}
-
 #[test]
 fn timestamps_are_iso8601() {
     let ts = crate::clock::timestamp();
@@ -95,10 +75,11 @@ fn timestamps_are_iso8601() {
 }
 
 /// A v1 lock (bare-name keys, a `harnesses` array, no singular
-/// `harness`) must read as a recognized legacy shape, never as a raw
-/// serde "missing field" error.
+/// `harness`) is a shape this build does not read. Nothing converts it:
+/// the load fails, and the message names the path out — move it aside and
+/// install fresh.
 #[test]
-fn a_v1_lock_reads_as_legacy_not_a_parse_error() {
+fn a_v1_lock_fails_to_load_and_names_the_fresh_install() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join(".kendex-lock.json");
     std::fs::write(
@@ -106,8 +87,43 @@ fn a_v1_lock_reads_as_legacy_not_a_parse_error() {
         r#"{"version":1,"entries":{"gh":{"name":"gh","kind":"skill","source":"kendex","source_repo":"vanillagreencom/kendex","harnesses":["claude-code"],"method":"symlink","installed_at":"2026-01-01T00:00:00Z","source_hash":"abc"}}}"#,
     )
     .unwrap();
-    assert!(matches!(load_file(&path).unwrap(), LockFile::Legacy { .. }));
-    assert!(matches!(load(&path), Err(CoreError::LegacyLock { .. })));
+    let error = load_file(&path).unwrap_err();
+    assert!(matches!(error, CoreError::LockCorrupt { .. }), "{error}");
+    let said = error.to_string();
+    assert!(said.contains("install fresh"), "{said}");
+    // Two things this message must keep saying. It names the pi files
+    // beside a scope root, because this record is the only thing naming
+    // them and nothing in this build looks there — a person who threw the
+    // lock away alone would be left with the hook registered twice. And
+    // it asks for them to be moved, never deleted: this refusal covers a
+    // damaged current lock as much as an older one, and an older one may
+    // record that the move out of the reserved name already finished,
+    // after which those files are the person's own. Nothing here can tell
+    // the two apart, so nothing here tells anyone to delete anything.
+    assert!(said.contains("hooks.json"), "{said}");
+    assert!(
+        !said.contains("delet"),
+        "no remedy of ours is destructive: {said}"
+    );
+    assert!(matches!(load(&path), Err(CoreError::LockCorrupt { .. })));
+}
+
+/// The same refusal reaches Personal and a project alike, and the two
+/// scopes keep their locks under different names: `lock.json` under the
+/// app's config directory, `.kendex-lock.json` in a project. So the
+/// message names the path it was handed and nothing else, which is a rule
+/// that stays true for both. The app's steps for this kind carry the same
+/// rule beside their own copy, in ui/src/lib/error-copy.test.ts.
+#[test]
+fn the_lock_refusal_names_no_path_of_its_own() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("lock.json");
+    std::fs::write(&path, "{not json").unwrap();
+    let said = load_file(&path).unwrap_err().to_string();
+    assert!(said.contains("install fresh"), "{said}");
+    for named in [".kendex-lock.json", "kendex.toml", ".pi"] {
+        assert!(!said.contains(named), "names {named}: {said}");
+    }
 }
 
 /// Malformed JSON is reported as a damaged lock, distinct from the v1
@@ -155,21 +171,36 @@ fn a_newer_lock_refuses_to_load() {
     );
 }
 
-/// An empty `entries` map is indistinguishable between v1 and v2 — it
-/// reads as v2, since that is the only reading a fresh scope can mean.
+/// The version is the whole gate: a record naming this build's number
+/// loads whatever else it holds, and one naming any other number — or
+/// none — is refused, because every field a later version added is a fact
+/// this build reads and an older record does not carry.
 #[test]
-fn an_empty_lock_reads_as_current() {
+fn only_this_builds_version_loads() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join(".kendex-lock.json");
-    std::fs::write(
-        &path,
-        format!(
-            r#"{{"version":1,"root":{},"entries":{{}}}}"#,
-            json(tmp.path())
-        ),
-    )
-    .unwrap();
+    let write = |version: &str| {
+        std::fs::write(
+            &path,
+            format!(r#"{{{version}"root":{},"entries":{{}}}}"#, json(tmp.path())),
+        )
+        .unwrap();
+    };
+
+    write(&format!(r#""version":{LOCK_VERSION},"#));
     assert!(matches!(load_file(&path).unwrap(), LockFile::Current(_)));
+
+    for older in ["1", "2", &(LOCK_VERSION - 1).to_string()] {
+        write(&format!(r#""version":{older},"#));
+        let error = load_file(&path).unwrap_err();
+        assert!(matches!(error, CoreError::LockCorrupt { .. }), "{error}");
+        assert!(error.to_string().contains("install fresh"), "{error}");
+    }
+
+    write("");
+    let error = load_file(&path).unwrap_err();
+    assert!(matches!(error, CoreError::LockCorrupt { .. }), "{error}");
+    assert!(error.to_string().contains("names no version"), "{error}");
 }
 
 /// A path as JSON data rather than text spliced into a literal: a
@@ -351,7 +382,6 @@ fn a_project_lock_is_never_written_claiming_another_tree() {
         entry_key(ItemKind::Skill, "gh", HarnessId::Claude),
         LockEntry {
             registration: None,
-            left_pi_reserved_name: false,
             name: "gh".into(),
             kind: ItemKind::Skill,
             harness: HarnessId::Claude,

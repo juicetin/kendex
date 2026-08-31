@@ -36,9 +36,14 @@ use super::desired::{Artifact, Desired};
 /// An answer short of certainty retires nothing, and outside pi it holds
 /// nothing either: the pass registers under the identity it renders and
 /// leaves the person's entries to them, because all a refresh writes is
-/// its own registration. Pi's reserved-name move is the one consumer
-/// that deletes what it identifies, so for pi an entry the document
-/// cannot settle holds the installation instead.
+/// its own registration, and a settings document is one the person writes
+/// in too — an entry there that the record cannot account for is most
+/// likely theirs, and holding on it would sit in conflict on every refresh
+/// with nothing able to settle it. Pi is the exception: its registry is a
+/// file kendex renders whole, under a segment of its own, so an entry
+/// running kendex's command that the record cannot place is a question
+/// rather than somebody else's business, and the hook holds until it is
+/// answered.
 ///
 /// Nothing is retired where the record names what this pass names anyway,
 /// so a settled installation plans nothing. The edit goes to the file
@@ -51,8 +56,9 @@ pub(super) enum Previous {
     Settled,
     /// The entry to take out first, named exactly.
     Retire(PathBuf, ConfigEdit),
-    /// More than one entry runs this command, and nothing here can say
-    /// which was kendex's. Writing beside them would add a third.
+    /// The document runs this command somewhere the record does not name,
+    /// or runs it more than once, and nothing here can tell kendex's entry
+    /// from anyone else's. Writing beside them would add one more.
     Ambiguous(String),
 }
 
@@ -69,37 +75,30 @@ pub(super) fn retire_previous(item: &Desired, existing: Option<&LockEntry>) -> P
     let Some(entry) = existing else {
         return Previous::Settled;
     };
-    let migration = item.harness == crate::model::HarnessId::Pi;
-    let previous = match &entry.registration {
-        // The record names an entry. Whether it is still there is the
-        // document's to say, not the record's: trusting the record here
-        // is how a registration somebody moved by hand came to be left
-        // alone while a second one went in beside it.
-        Some(recorded) => found(
-            &named,
-            Some(&recorded.event),
-            recorded.matcher.as_deref(),
-            &recorded.command,
-        ),
-        // A record too old to name what it registered has only the
-        // command to look one up by — a search that reads the person's
-        // own registration of the same command as kendex's leftovers.
-        // Only pi's move, which deletes what it finds, needs it; every
-        // other harness settles and earns the record this pass.
-        None if !migration => return Previous::Settled,
-        None => found(&named, None, None, named.command),
+    // The record names an entry. Whether it is still there is the
+    // document's to say, not the record's: trusting the record here is how
+    // a registration somebody moved by hand came to be left alone while a
+    // second one went in beside it. A record too old to name what it
+    // registered has only the command to look one up by, which would read
+    // the person's own registration of the same command as kendex's
+    // leftovers — so it settles and earns the record this pass.
+    let Some(recorded) = &entry.registration else {
+        return Previous::Settled;
     };
-    let previous = match previous {
-        Found::One(entry) => entry,
+    let previous = match found(
+        &named,
+        &recorded.event,
+        recorded.matcher.as_deref(),
+        &recorded.command,
+    ) {
+        Found::One(previous) => previous,
         Found::None => return Previous::Settled,
-        // An entry the document cannot settle as kendex's is the
-        // person's to keep. All this pass writes is its own
-        // registration, so it registers under the identity it renders
-        // and leaves theirs where they put it — held instead, the hook
-        // sat in conflict on every refresh with nothing to settle it.
-        // Pi holds: its move deletes bytes, and must not guess whose.
-        Found::Several(_) | Found::Moved(_) if !migration => return Previous::Settled,
-        Found::Several(why) | Found::Moved(why) => return Previous::Ambiguous(why),
+        Found::Unsettled(why) => {
+            return match item.harness == crate::model::HarnessId::Pi {
+                true => Previous::Ambiguous(why),
+                false => Previous::Settled,
+            };
+        }
     };
     if previous.event == named.event
         && previous.command == named.command
@@ -138,20 +137,21 @@ struct Recorded {
 enum Found {
     One(Recorded),
     None,
-    Several(String),
-    Moved(String),
+    /// The command runs, but not as one entry where the record left it:
+    /// somebody moved it, or something else runs it too.
+    Unsettled(String),
 }
 
 /// The entry kendex left, read out of the document this pass registers
-/// in, by everything there is to look it up by: the command, and the
-/// event and matcher wherever the record kept them.
+/// in, by everything the record kept to look it up by: the command, the
+/// event, and the matcher.
 ///
 /// Exactly one answering is the answer. More than one is a question
 /// nothing here can settle, since what the record kept cannot tell them
 /// apart. And nothing answering, while something else runs that command,
-/// is an entry somebody moved: it is not kendex's to take, and writing
-/// beside it would leave the hook firing twice — so it waits for them.
-fn found(named: &Named, event: Option<&str>, matcher: Option<&str>, command: &str) -> Found {
+/// is an entry somebody moved: writing beside it would leave the hook
+/// firing twice. Nothing running the command at all is nothing to retire.
+fn found(named: &Named, event: &str, matcher: Option<&str>, command: &str) -> Found {
     let Ok(Some(text)) = crate::fs::read_if_exists(named.path) else {
         return Found::None;
     };
@@ -164,12 +164,12 @@ fn found(named: &Named, event: Option<&str>, matcher: Option<&str>, command: &st
     };
     let mut answering = entries.iter().filter(|entry| {
         entry.command == command
-            && event.is_none_or(|event| entry.event == event)
+            && entry.event == event
             && matcher.is_none_or(|matcher| entry.matcher == matcher)
     });
     let Some(only) = answering.next() else {
         return match entries.iter().any(|entry| entry.command == command) {
-            true => Found::Moved(format!(
+            true => Found::Unsettled(format!(
                 "{} no longer runs {command} where kendex left it, and what runs it now is not kendex's to take — move it back, or take it out, and the next refresh settles this",
                 named.path.display()
             )),
@@ -177,7 +177,7 @@ fn found(named: &Named, event: Option<&str>, matcher: Option<&str>, command: &st
         };
     };
     if answering.next().is_some() {
-        return Found::Several(format!(
+        return Found::Unsettled(format!(
             "{} runs {command} more than once and the record does not say which entry is kendex's — take the ones you did not put there out, and the next refresh settles the rest",
             named.path.display()
         ));

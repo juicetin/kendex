@@ -38,14 +38,13 @@ pub enum CoreError {
     },
 
     #[error(
-        "{path} is a v1 manifest (no schema key) — no importer exists; move it aside or delete it, then install fresh"
+        "{path}: this manifest could not be read — {message}; move it aside and install fresh, declaring again from the file you moved"
     )]
-    LegacyManifest { path: PathBuf },
+    LegacyManifest { path: PathBuf, message: String },
 
-    #[error("{path} is a v1 lock — no importer exists; move it aside or delete it")]
-    LegacyLock { path: PathBuf },
-
-    #[error("{path}: this lock file is damaged and could not be read — {message}")]
+    #[error(
+        "{path}: this lock file could not be read — {message}; move it aside and install fresh. Keep it: it is the only record naming a pi hooks.json or hooks/ beside a scope root, so move those aside as well"
+    )]
     LockCorrupt { path: PathBuf, message: String },
 
     #[error(
@@ -479,6 +478,25 @@ impl CoreError {
             path: path.into(),
             source,
         }
+    }
+
+    /// Whether this is a record kendex cannot read: a lock or manifest
+    /// another version wrote, or one damaged past parsing. Two policies
+    /// key off this one list. A read that only annotates rows absorbs
+    /// exactly it to empty ([`crate::manifest::observed`],
+    /// [`crate::lock::observed`]); a verb walking several scopes skips
+    /// exactly it, names the scope, and still fails the run. Everything
+    /// else propagates from both: an IO failure, or a lock another project
+    /// wrote, is not a file kendex merely declines to convert.
+    /// `kendex_app::audit::ScopeError` gives each of the three a kind of
+    /// its own, and a test there holds the two lists together.
+    pub fn is_unreadable_record(&self) -> bool {
+        matches!(
+            self,
+            CoreError::LegacyManifest { .. }
+                | CoreError::LockCorrupt { .. }
+                | CoreError::SchemaTooNew { .. }
+        )
     }
 }
 

@@ -29,6 +29,7 @@ pub fn run(env: &Env, names: Vec<String>, filter: ScopeFilter, mode: Removal) ->
     }
     ui::intro("kendex remove");
     let mut removed_any = false;
+    let mut skipped: Vec<String> = Vec::new();
     for scope in resolve_scopes(env, filter)? {
         let planned = {
             let _planning = ui::spinner(&format!("planning {}", scope_label(&scope)));
@@ -41,8 +42,21 @@ pub fn run(env: &Env, names: Vec<String>, filter: ScopeFilter, mode: Removal) ->
         };
         let report = match planned {
             Ok(report) => report,
-            // A scope without a v2 manifest has nothing of ours to remove.
-            Err(error) if super::engine_common::is_legacy(&error) => continue,
+            // A scope whose files this build cannot read has nothing of
+            // ours this run could account for. Skipped and named, so the
+            // scopes after it are still visited — aborting here would
+            // leave them untouched with nothing saying so — and collected,
+            // so the run still fails: the person asked for a removal that
+            // did not happen everywhere they asked for it.
+            Err(error) if error.is_unreadable_record() => {
+                warn(&format!(
+                    "skipped {}: {}",
+                    scope_label(&scope),
+                    shown(&error.to_string())
+                ));
+                skipped.push(scope_label(&scope));
+                continue;
+            }
             Err(error) => return Err(error.into()),
         };
         let report = match mode {
@@ -95,8 +109,18 @@ pub fn run(env: &Env, names: Vec<String>, filter: ScopeFilter, mode: Removal) ->
             &[],
         );
     }
-    if !removed_any {
+    // A run that could read nothing removed nothing for a reason, and
+    // "Nothing removed" on its own reads as "there was nothing to remove".
+    if !removed_any && skipped.is_empty() {
         ui::ledger("Nothing removed", &[]);
+    }
+    if !skipped.is_empty() {
+        return Err(format!(
+            "could not read {} scope(s): {}",
+            skipped.len(),
+            skipped.join(", ")
+        )
+        .into());
     }
     Ok(())
 }

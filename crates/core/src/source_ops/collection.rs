@@ -44,9 +44,17 @@ pub fn collection_steps(
     scope: &Scope,
     collection: &Collection,
 ) -> Result<Vec<CollectionStep>> {
+    // Mutation semantics, not observation: this plans what `kendex add
+    // <collection>` is about to write, and the manifest decides which
+    // members reuse a subscription and which subscribe fresh. Read as
+    // declaring nothing, a manifest this build cannot read would plan
+    // every member as a fresh subscription, print that listing, ask the
+    // person to confirm it, and fetch every repository — before the
+    // install reloaded the same file and refused. So the refusal comes
+    // out here, at the door, in the record's own words.
     let manifest = match crate::manifest::load(&crate::manifest::manifest_path(env, scope))? {
         ManifestFile::Current(manifest) => *manifest,
-        _ => Manifest::default(),
+        ManifestFile::Absent => Manifest::default(),
     };
     let mut by_repo: BTreeMap<String, CollectionStep> = BTreeMap::new();
     for member in &collection.members {

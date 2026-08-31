@@ -9,6 +9,16 @@ use std::collections::BTreeMap;
 mod test_util;
 use test_util::source_path;
 
+/// A project scope with no kendex.toml at all: the state the editor opens
+/// an empty draft for, and the one a first save creates the file from.
+fn scope_without_manifest() -> (tempfile::TempDir, Env, Scope) {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = Env::fake(tmp.path(), kendex_core::env::FakeOs::Linux);
+    let project = tmp.path().join("dev/app");
+    std::fs::create_dir_all(project.join(".claude")).unwrap();
+    (tmp, env, Scope::Project { root: project })
+}
+
 /// A project scope with a manifest already on disk, under a sandboxed
 /// home, so a save runs the real plan-and-apply.
 fn scope_with_manifest() -> (tempfile::TempDir, Env, Scope) {
@@ -18,10 +28,68 @@ fn scope_with_manifest() -> (tempfile::TempDir, Env, Scope) {
     std::fs::create_dir_all(project.join(".claude")).unwrap();
     std::fs::write(
         project.join("kendex.toml"),
-        "schema = 5\n\n[install]\nharnesses = [\"claude\"]\n",
+        format!("schema = {MANIFEST_SCHEMA}\n\n[install]\nharnesses = [\"claude\"]\n"),
     )
     .unwrap();
     (tmp, env, Scope::Project { root: project })
+}
+
+/// A scope whose agent's role gained a skill upstream since it was
+/// installed: the one thing that still makes the plan write the manifest
+/// itself, and so the one write `PlanOptions::manifest_base` binds.
+///
+/// Two phases, because the addition is measured against what the lock
+/// recorded: install once with the role carrying `recon`, then let the
+/// catalog give the role `probe` as well.
+fn scope_gaining_a_catalog_skill() -> (tempfile::TempDir, Env, Scope) {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = Env::fake(tmp.path(), kendex_core::env::FakeOs::Linux);
+    let project = tmp.path().join("dev/app");
+    std::fs::create_dir_all(project.join(".claude")).unwrap();
+    let catalog = tmp.path().join("catalog");
+    std::fs::create_dir_all(catalog.join("agents")).unwrap();
+    let skill = |name: &str| {
+        std::fs::create_dir_all(catalog.join("skills").join(name)).unwrap();
+        std::fs::write(
+            catalog.join("skills").join(name).join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: skill {name}\n---\nBody.\n"),
+        )
+        .unwrap();
+    };
+    skill("recon");
+    skill("probe");
+    std::fs::write(
+        catalog.join("agents/rev.md"),
+        "---\nname: rev\ndescription: agent rev\nrole: reviewer\n---\nBody.\n",
+    )
+    .unwrap();
+    let role_skills = |carried: &str| {
+        std::fs::write(
+            catalog.join("kendex.toml"),
+            format!("is_source_catalog = true\n\n[role-skills]\nreviewer = [{carried}]\n"),
+        )
+        .unwrap();
+    };
+    role_skills("\"recon\"");
+    std::fs::write(
+        project.join("kendex.toml"),
+        format!(
+            "schema = {MANIFEST_SCHEMA}\n\n[sources.cat]\n{}\n\n[install]\nharnesses = [\"claude\"]\nmethod = \"copy\"\n\n[agents.rev]\nsource = \"cat\"\n\n[skills.recon]\nsource = \"cat\"\n\n[agent-skills]\nrev = [\"recon\"]\n",
+            source_path(&catalog)
+        ),
+    )
+    .unwrap();
+    let scope = Scope::Project {
+        root: project.clone(),
+    };
+
+    // Phase one: install, so the lock records the upstream set an addition
+    // is measured against.
+    crate::audit::apply_scope(&env, &scope, false).unwrap();
+
+    // Phase two: the role gains a skill the manifest does not name.
+    role_skills("\"recon\", \"probe\"");
+    (tmp, env, scope)
 }
 
 /// The chain that turns a mid-apply refusal into the stale choice,
@@ -32,21 +100,17 @@ fn scope_with_manifest() -> (tempfile::TempDir, Env, Scope) {
 /// file instead of taking the base would accept this writer.
 #[test]
 fn a_writer_landing_after_the_editor_read_is_refused_mid_apply() {
-    let (_tmp, env, scope) = scope_with_manifest();
+    let (_tmp, env, scope) = scope_gaining_a_catalog_skill();
     let path = manifest::manifest_path(&env, &scope);
-    std::fs::write(&path, "schema = 4\n\n[install]\nharnesses = [\"claude\"]\n").unwrap();
     let (read, base) = manifest::read_for_mutation(&path).unwrap();
-    let mut editor_copy = read.unwrap();
-    // Reading for mutation normalizes the schema; the engine plans the
-    // upgrade write when the copy it is handed still carries the old
-    // one — and must bind that write to the base when one is given.
-    editor_copy.schema = 4;
+    let editor_copy = read.unwrap();
 
     // The writer in between: lands after the editor copy left, before
     // the plan is made.
+    let original = std::fs::read_to_string(&path).unwrap();
     std::fs::write(
         &path,
-        "schema = 4\n\n[install]\nharnesses = [\"claude\"]\n\n[skill-instructions]\nall = \"kept\"\n",
+        format!("{original}\n[skill-instructions]\nall = \"kept\"\n"),
     )
     .unwrap();
 
@@ -57,12 +121,8 @@ fn a_writer_landing_after_the_editor_read_is_refused_mid_apply() {
     };
     let report = engine::plan_scope(&env, &scope, &editor_copy, &lock, &options).unwrap();
     assert!(
-        report
-            .plan
-            .ops
-            .iter()
-            .any(|op| op.line().contains("Upgrade")),
-        "the schema upgrade is the plan's manifest write: {:?}",
+        engine::persists_manifest(&report.plan.ops),
+        "the catalog's new skill is the plan's manifest write: {:?}",
         report.plan.ops
     );
 
@@ -87,15 +147,7 @@ fn a_writer_landing_after_the_editor_read_is_refused_mid_apply() {
 #[cfg(unix)]
 #[test]
 fn a_refusal_through_a_symlinked_root_is_still_the_stale_choice() {
-    let tmp = tempfile::tempdir().unwrap();
-    let env = Env::fake(tmp.path(), kendex_core::env::FakeOs::Linux);
-    let real = tmp.path().join("dev/app");
-    std::fs::create_dir_all(real.join(".claude")).unwrap();
-    std::fs::write(
-        real.join("kendex.toml"),
-        "schema = 4\n\n[install]\nharnesses = [\"claude\"]\n",
-    )
-    .unwrap();
+    let (tmp, env, _real) = scope_gaining_a_catalog_skill();
     std::os::unix::fs::symlink(tmp.path().join("dev"), tmp.path().join("via")).unwrap();
     let scope = Scope::Project {
         root: tmp.path().join("via/app"),
@@ -103,21 +155,24 @@ fn a_refusal_through_a_symlinked_root_is_still_the_stale_choice() {
 
     let path = manifest::manifest_path(&env, &scope);
     let (read, base) = manifest::read_for_mutation(&path).unwrap();
-    let mut editor_copy = read.unwrap();
-    // The old schema keeps the upgrade in the plan — the manifest write
-    // the base binds to, exactly as in the direct-spelling test above.
-    editor_copy.schema = 4;
+    let editor_copy = read.unwrap();
     let lock = load_lock(&lock_path(&env, &scope)).unwrap();
     let options = PlanOptions {
         manifest_base: Some(base),
         ..PlanOptions::default()
     };
     let report = engine::plan_scope(&env, &scope, &editor_copy, &lock, &options).unwrap();
+    assert!(
+        engine::persists_manifest(&report.plan.ops),
+        "{:?}",
+        report.plan.ops
+    );
 
     // The writer in between, landing through the same link.
+    let original = std::fs::read_to_string(&path).unwrap();
     std::fs::write(
         &path,
-        "schema = 4\n\n[skill-instructions]\nall = \"kept\"\n",
+        format!("{original}\n[skill-instructions]\nall = \"kept\"\n"),
     )
     .unwrap();
 
@@ -129,6 +184,42 @@ fn a_refusal_through_a_symlinked_root_is_still_the_stale_choice() {
         ),
         "{error:?}"
     );
+}
+
+/// The first save on a scope with no kendex.toml creates the file. The
+/// schema the draft arrives with is what decides it: `check` runs before
+/// the plan's `manifest::save` would stamp one, so a draft naming any
+/// other version is refused and nothing is created. That is why the
+/// editor's empty draft reads the number off the exported
+/// `MANIFEST_SCHEMA` rather than keeping a copy — see `emptyDraft` in
+/// ui/src/lib/editor-draft.ts.
+#[test]
+fn a_first_save_creates_the_manifest_and_the_draft_schema_decides_it() {
+    let (_tmp, env, scope) = scope_without_manifest();
+    let path = manifest::manifest_path(&env, &scope);
+    assert!(!path.exists(), "{}", path.display());
+
+    let stale = Manifest {
+        schema: MANIFEST_SCHEMA - 1,
+        ..Manifest::default()
+    };
+    let Err(refused) = write_customize(&env, scope.clone(), Some((stale, Base::absent())), None)
+    else {
+        panic!("a draft below this build's schema must not create a file");
+    };
+    let WriteRefused::Failed { message } = &refused else {
+        panic!("the schema refusal is a validation failure, not a stale copy: {refused:?}");
+    };
+    assert!(message.contains("schema"), "{message}");
+    assert!(!path.exists(), "and nothing is created: {}", path.display());
+
+    let draft = Manifest {
+        schema: MANIFEST_SCHEMA,
+        ..Manifest::default()
+    };
+    write_customize(&env, scope, Some((draft, Base::absent())), None).unwrap();
+    let (created, _) = manifest::read_for_mutation(&path).unwrap();
+    assert_eq!(created.unwrap().schema, MANIFEST_SCHEMA);
 }
 
 #[test]

@@ -1,0 +1,1 @@
+- **Breaking:** kendex reads only the format it writes. Move a refused lock file aside, keep it, and apply again: it is the only record naming a pi `hooks/` or `hooks.json` beside its root.

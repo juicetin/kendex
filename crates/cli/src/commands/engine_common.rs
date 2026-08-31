@@ -2,7 +2,6 @@ pub use super::blocked::{print_conflicts, print_drift};
 
 use kendex_core::engine::{DriftRow, DriftState, EngineReport};
 use kendex_core::env::Env;
-use kendex_core::error::CoreError;
 use kendex_core::model::{HarnessId, ItemKind};
 use kendex_core::names::shown;
 
@@ -22,8 +21,8 @@ pub fn parse_harnesses(values: &[String]) -> Result<Vec<HarnessId>, String> {
 }
 
 /// What the plan declined to do, in its own words. A note is the only
-/// channel some passes have — the reserved-name move says here which file
-/// it left alone and why — so a verb that prints nothing else about the
+/// channel some passes have — the settings seed and the git posture say
+/// here what they found — so a verb that prints nothing else about the
 /// plan still prints these.
 pub fn print_notes(report: &EngineReport) {
     for line in &report.notes {
@@ -284,11 +283,4 @@ pub fn refresh_failures(report: &EngineReport) -> Vec<String> {
         })
         .cloned()
         .collect()
-}
-
-pub fn is_legacy(error: &CoreError) -> bool {
-    matches!(
-        error,
-        CoreError::LegacyManifest { .. } | CoreError::LegacyLock { .. }
-    )
 }

@@ -15,9 +15,15 @@ fn env() -> Result<Env, String> {
 #[derive(Serialize, Type)]
 #[serde(rename_all = "kebab-case")]
 pub enum ScopeErrorKind {
-    /// The lock exists but isn't readable as JSON, or as this build's lock
-    /// shape — damaged, not merely old.
+    /// The lock is not readable as this build's lock: damaged JSON, or a
+    /// record an older kendex wrote. Nothing converts either, and the way
+    /// out is the same — move it aside and apply again.
     LockCorrupt,
+    /// The manifest was written by an older kendex: it parses, but not
+    /// into a shape this build reads, and nothing converts it. Kept
+    /// apart from a damaged lock because the file is intact and the
+    /// person's own — moving it aside loses what they wrote in it.
+    ManifestOutdated,
     /// The manifest or lock was written by a newer kendex than this one.
     SchemaTooNew,
     /// The manifest parses but fails validation.
@@ -69,6 +75,7 @@ impl From<&CoreError> for ScopeError {
     fn from(error: &CoreError) -> Self {
         let kind = match error {
             CoreError::LockCorrupt { .. } => ScopeErrorKind::LockCorrupt,
+            CoreError::LegacyManifest { .. } => ScopeErrorKind::ManifestOutdated,
             CoreError::SchemaTooNew { .. } => ScopeErrorKind::SchemaTooNew,
             CoreError::ManifestInvalid { .. } => ScopeErrorKind::ManifestInvalid,
             _ => ScopeErrorKind::Other,
@@ -145,19 +152,16 @@ pub fn audit_all() -> Result<Vec<AuditView>, String> {
 }
 
 /// The apply path plans through the same loader the audit view used, so
-/// the listed plan is what executes — including the schema upgrade a v0.1
-/// manifest is owed on its first apply. (Orphan removal is the one opt-in
-/// extra; the dialog lists each left-behind item beside its checkbox.)
+/// the listed plan is what executes, and a manifest the view refused is
+/// refused here too. (Orphan removal is the one opt-in extra; the dialog
+/// lists each left-behind item beside its checkbox.)
 pub fn apply_scope(env: &Env, scope: &Scope, remove_orphans: bool) -> Result<AuditView, String> {
-    // A manifest that vanished or turned legacy since the preview must be
-    // said out loud, not answered with a silent empty apply.
+    // A manifest that vanished since the preview must be said out loud,
+    // not answered with a silent empty apply.
     let path = manifest::manifest_path(env, scope);
     match manifest::load(&path).map_err(|e| e.to_string())? {
         manifest::ManifestFile::Current(_) => {}
         manifest::ManifestFile::Absent => return Err("no manifest for this scope yet".into()),
-        manifest::ManifestFile::Legacy { .. } => {
-            return Err(CoreError::LegacyManifest { path }.to_string());
-        }
     }
     let options = PlanOptions {
         remove_orphans,
@@ -212,8 +216,8 @@ pub fn replace_unmanaged(
     // change between the check and what it guards.
     //
     // Planned from the manifest as it sits on disk, like every apply: a
-    // normalized copy already looks current, so a scope still on an older
-    // schema would be written without the migration its own plan owes it.
+    // normalized copy already looks current, so planning from one would
+    // slip a file past the floor the audit and every other read refuse.
     let report = engine::plan_apply(
         env,
         scope,
@@ -269,4 +273,48 @@ pub fn remove_item(scope: Scope, kind: ItemKind, name: String) -> Result<AuditVi
         .map_err(|e| e.to_string())?;
     apply::execute(&env, &report.plan).map_err(|e| e.to_string())?;
     Ok(view(&env, &scope))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ScopeError, ScopeErrorKind};
+    use kendex_core::error::CoreError;
+    use std::path::PathBuf;
+
+    /// The two lists held together. `CoreError::is_unreadable_record` says
+    /// which refusals every read and every multi-scope verb keys off; this
+    /// says each of them reaches the page as a kind whose steps fit. A
+    /// fourth added to the predicate without a kind lands on `other`,
+    /// whose steps say to stop tracking the project, and this is where
+    /// that is caught.
+    #[test]
+    fn every_unreadable_record_reaches_a_kind_of_its_own() {
+        let path = || PathBuf::from("/w/app/kendex.toml");
+        let refusals = [
+            CoreError::LegacyManifest {
+                path: path(),
+                message: "it names no schema".to_owned(),
+            },
+            CoreError::LockCorrupt {
+                path: path(),
+                message: "it is a version 1 record".to_owned(),
+            },
+            CoreError::SchemaTooNew {
+                path: path(),
+                found: 99,
+            },
+        ];
+        for error in refusals {
+            assert!(error.is_unreadable_record(), "{error}");
+            assert!(
+                !matches!(ScopeError::from(&error).kind, ScopeErrorKind::Other),
+                "{error}"
+            );
+        }
+        // And the predicate is not a synonym for "failed": an IO error is
+        // nobody's file to move aside, and reads must propagate it.
+        let io = CoreError::io(path(), std::io::Error::other("disk"));
+        assert!(!io.is_unreadable_record());
+        assert!(matches!(ScopeError::from(&io).kind, ScopeErrorKind::Other));
+    }
 }

@@ -15,26 +15,21 @@ use crate::model::{ItemKind, Scope};
 /// Whether the user's hands are (or may be) on this installation's bytes.
 /// Automatic removals — refusals, sweeps, orphan cleanup nobody named —
 /// only take content they can prove is ours: every content path must hash
-/// to what apply last wrote. A record from before that hash existed cannot
-/// prove anything, so any content present holds — except a hook's outside
-/// pi, where anchor-less records are the common stock and holding them
-/// would exempt those hooks from cleanup for good. Explicitly asked-for
+/// to what apply last wrote. A record that cannot prove that holds
+/// whatever content is present, hooks included. Explicitly asked-for
 /// removals are not gated here: the trash keeps what they take.
 pub fn edit_holds(env: &Env, scope: &Scope, entry: &LockEntry) -> bool {
-    // A hook's anchor still proves its bytes wherever the record kept
-    // one. What an anchor-less record licenses splits by harness: pi's
-    // reserved-name move derives a new path the record never wrote, so a
-    // file already sitting there has to be proven before anything of
-    // this entry's is taken; everywhere else reading "no anchor" as
-    // "hands off" would quietly exempt every older hook install from
-    // every sweep.
-    let holdable = match entry.kind {
-        ItemKind::Skill | ItemKind::Agent | ItemKind::Command => true,
-        ItemKind::Hook => {
-            entry.harness == crate::model::HarnessId::Pi || entry.rendered_hash.is_some()
-        }
-        _ => false,
-    };
+    // A hook with no anchor used to sweep, read as the common stock of
+    // older installs that holding would exempt from cleanup for good. The
+    // version floor makes that reading false: a lock this build did not
+    // write is refused before any of this runs, so an absent anchor is no
+    // longer an old install. It is a current record this build cannot
+    // account for, and a removal that cannot prove the bytes are ours does
+    // not take them. The rule is the anchor, not the harness.
+    let holdable = matches!(
+        entry.kind,
+        ItemKind::Skill | ItemKind::Agent | ItemKind::Command | ItemKind::Hook
+    );
     if !holdable {
         return false;
     }
@@ -179,7 +174,6 @@ pub(super) fn orphans(
     lock: &Lock,
     state: &desired::DesiredState,
     options: &PlanOptions,
-    legacy_pi: &super::pi_hooks_move::Preflight,
     refused_keys: &BTreeSet<String>,
     guard: &mut TrashGuard,
     drift: &mut Vec<DriftRow>,
@@ -240,40 +234,10 @@ pub(super) fn orphans(
             new_lock.entries.insert(key.clone(), entry.clone());
             continue;
         }
-        // An installation the reserved-name move is holding is still
-        // live and still kendex's to account for: its record is the only
-        // thing a later pass can claim those files with, so it outlives
-        // the sweep whatever else this pass was told to remove.
-        if entry.kind == ItemKind::Hook
-            && entry.harness == crate::model::HarnessId::Pi
-            && let Some(hold) = legacy_pi.hold(&entry.name)
-        {
-            // The same causes, said the same way as on the path where the
-            // item is still declared: only the line for an edit differs,
-            // because what finishing the move means here is taking the
-            // copy away rather than replacing it.
-            let (detail, cause) = hold.row(
-                "no longer wanted, but its copy under the directory pi reserved is not the one kendex wrote — that copy still runs; discard the edits to finish moving it, or take it away by hand",
-            );
-            drift.push(DriftRow {
-                kind: entry.kind,
-                name: entry.name.clone(),
-                harness: entry.harness,
-                scope: scope.clone(),
-                state: DriftState::Conflict,
-                detail,
-                cause,
-                compared: None,
-                also_in_the_way: Vec::new(),
-            });
-            new_lock.entries.insert(key.clone(), entry.clone());
-            continue;
-        }
         // An automatic removal (a sweep, an unfiltered orphan cleanup)
         // never takes bytes a record could vouch for and does not —
-        // `edit_holds`' doc draws that line, and names the anchor-less
-        // non-pi hook whose record vouches for nothing; only naming the
-        // item, or asking for edits to be discarded, takes what it holds.
+        // `edit_holds`' doc draws that line; only naming the item, or
+        // asking for edits to be discarded, takes what it holds.
         if !named && !options.overwrite_edited && edit_holds(env, scope, entry) {
             drift.push(DriftRow {
                 kind: entry.kind,

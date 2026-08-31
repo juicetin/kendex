@@ -15,12 +15,11 @@ use super::{
     validate,
 };
 
-/// What sits at a manifest path. A schema-less file is a v1 manifest:
-/// nothing converts it, and every write path refuses it by name.
+/// What sits at a manifest path — absent, or the one schema this build
+/// reads. Anything else is refused by the read that classified it.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ManifestFile {
     Absent,
-    Legacy { raw: String },
     Current(Box<Manifest>),
 }
 
@@ -67,17 +66,28 @@ pub fn parse_text(path: &Path, text: &str) -> Result<ManifestFile> {
             path: path.to_path_buf(),
             message: e.to_string(),
         })?;
-    if !table.contains_key("schema") {
-        return Ok(ManifestFile::Legacy {
-            raw: text.to_owned(),
-        });
-    }
-    if let Some(schema) = table.get("schema").and_then(toml::Value::as_integer)
-        && schema > i64::from(MANIFEST_SCHEMA)
-    {
+    let schema = table.get("schema").and_then(toml::Value::as_integer);
+    if schema.is_some_and(|schema| schema > i64::from(MANIFEST_SCHEMA)) {
         return Err(CoreError::SchemaTooNew {
             path: path.to_path_buf(),
-            found: schema,
+            found: schema.unwrap_or_default(),
+        });
+    }
+    // The floor. Nothing converts an older file, and reading one is not the
+    // harmless half of that: every schema since 1 changed what a table
+    // means, so a value read under the wrong one is a wrong answer, and the
+    // write that follows makes it durable — including over the person's own
+    // comments. So the file is left exactly as they wrote it and the
+    // refusal says what to do with it.
+    if schema != Some(i64::from(MANIFEST_SCHEMA)) {
+        return Err(CoreError::LegacyManifest {
+            path: path.to_path_buf(),
+            message: match schema {
+                Some(schema) => format!(
+                    "it is a schema {schema} manifest, and this kendex writes schema {MANIFEST_SCHEMA}"
+                ),
+                None => "it names no schema, so nothing here can say what shape it is".to_owned(),
+            },
         });
     }
     let findings = validate(&table);
@@ -95,7 +105,32 @@ pub fn parse_text(path: &Path, text: &str) -> Result<ManifestFile> {
     Ok(ManifestFile::Current(Box::new(manifest)))
 }
 
+/// The scope's manifest for a read that only annotates rows: what the
+/// file declares, or nothing where there is no file and nothing this
+/// build can read. A browse, a library table or a marketplace page shows
+/// what is installed and marks which of it this scope declares; a scope
+/// whose manifest came from another version of kendex marks nothing, and
+/// blanking every other scope's rows over it is the failure this exists
+/// to stop. Everything else still propagates — the refusal absorbed here
+/// is exactly [`CoreError::is_unreadable_record`], never an IO error.
+pub fn observed(path: &Path) -> Result<Manifest> {
+    match load(path) {
+        Ok(ManifestFile::Current(manifest)) => Ok(*manifest),
+        Ok(ManifestFile::Absent) => Ok(Manifest::default()),
+        Err(error) if error.is_unreadable_record() => Ok(Manifest::default()),
+        Err(error) => Err(error),
+    }
+}
+
 pub fn save(path: &Path, manifest: &Manifest) -> Result<()> {
+    // Stamped at the write, the way the lock stamps its version: the
+    // schema is a fact about the build doing the writing, and two places
+    // deciding it is how a writer comes to put down something its own
+    // reader refuses.
+    let manifest = &Manifest {
+        schema: MANIFEST_SCHEMA,
+        ..manifest.clone()
+    };
     let text = toml::to_string_pretty(manifest).map_err(|e| CoreError::TomlParse {
         path: path.to_path_buf(),
         message: e.to_string(),
@@ -103,10 +138,9 @@ pub fn save(path: &Path, manifest: &Manifest) -> Result<()> {
     atomic_write(path, &text)
 }
 
-/// Load for mutation: a legacy file is a hard error, never a write target.
-/// Whatever schema was read, a mutation writes the current one — every
-/// write path upgrades as a side effect of writing at all.
-/// [`read_for_mutation`] with the base dropped, so the two cannot drift.
+/// Load for mutation. Only the current schema loads at all, so there is
+/// nothing to upgrade here. [`read_for_mutation`] with the base dropped, so
+/// the two cannot drift.
 pub fn load_for_mutation(path: &Path) -> Result<Option<Manifest>> {
     Ok(read_for_mutation(path)?.0)
 }
@@ -125,13 +159,7 @@ pub fn read_for_mutation(path: &Path) -> Result<(Option<Manifest>, Base)> {
     let base = Base::of(&text);
     match parse_text(path, &text)? {
         ManifestFile::Absent => Ok((None, base)),
-        ManifestFile::Legacy { .. } => Err(CoreError::LegacyManifest {
-            path: path.to_path_buf(),
-        }),
-        ManifestFile::Current(mut manifest) => {
-            manifest.schema = MANIFEST_SCHEMA;
-            Ok((Some(*manifest), base))
-        }
+        ManifestFile::Current(manifest) => Ok((Some(*manifest), base)),
     }
 }
 

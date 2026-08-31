@@ -233,3 +233,152 @@ fn nothing_lands_in_the_directory_names_pi_reserved() {
         "the reserved directory name makes pi warn at every start"
     );
 }
+
+/// Pi's registry is a file kendex renders whole, so an entry running
+/// kendex's command that the record cannot place is a question, not
+/// somebody else's business. Moved to another listener by hand, the hook
+/// holds: nothing new is registered beside it — which would leave it
+/// firing twice — and the conflict names the file to look at.
+#[test]
+#[allow(clippy::unwrap_used)]
+fn a_registration_moved_to_another_event_is_never_doubled() {
+    let w = world();
+    register_carrier(&w.project.join(".pi"));
+    declare_hook(&w, "PreToolUse");
+    let report = audit(&w.env, &scope(&w)).unwrap();
+    kendex_core::apply::execute(&w.env, &report.plan).unwrap();
+
+    let registry = w.project.join(".pi/kendex/hooks.json");
+    let installed = fs::read_to_string(&registry).unwrap();
+    assert_eq!(installed.matches("guard.sh").count(), 1, "{installed}");
+
+    // Moved by hand to a listener the record does not name.
+    let moved = installed.replace("tool_call", "turn_end");
+    assert_ne!(moved, installed);
+    fs::write(&registry, &moved).unwrap();
+
+    let report = audit(&w.env, &scope(&w)).unwrap();
+    let row = report
+        .drift
+        .iter()
+        .find(|row| row.name == "guard")
+        .unwrap_or_else(|| panic!("no row for the moved hook: {:?}", report.drift));
+    assert!(
+        row.detail.contains("hooks.json"),
+        "the row names the file to look at: {}",
+        row.detail
+    );
+
+    kendex_core::apply::execute(&w.env, &report.plan).unwrap();
+    let after = fs::read_to_string(&registry).unwrap();
+    assert_eq!(
+        after.matches("guard.sh").count(),
+        1,
+        "a second registration would leave the hook firing twice: {after}"
+    );
+    assert_eq!(after, moved, "and the entry they moved is left where it is");
+}
+
+/// The same hold for the other unsettled shape: the command answering
+/// more than once, which the record cannot tell apart either.
+#[test]
+#[allow(clippy::unwrap_used)]
+fn a_command_registered_twice_holds_rather_than_adding_a_third() {
+    let w = world();
+    register_carrier(&w.project.join(".pi"));
+    declare_hook(&w, "PreToolUse");
+    let report = audit(&w.env, &scope(&w)).unwrap();
+    kendex_core::apply::execute(&w.env, &report.plan).unwrap();
+
+    let registry = w.project.join(".pi/kendex/hooks.json");
+    let installed = fs::read_to_string(&registry).unwrap();
+    let entry = installed
+        .split_once("\"tool_call\": [")
+        .map(|(_, rest)| rest.split_once("\n    ]").unwrap().0.to_owned())
+        .unwrap();
+    let twice = installed.replace(&entry, &format!("{entry},{entry}"));
+    assert_eq!(twice.matches("guard.sh").count(), 2, "{twice}");
+    fs::write(&registry, &twice).unwrap();
+
+    let report = audit(&w.env, &scope(&w)).unwrap();
+    let row = report
+        .drift
+        .iter()
+        .find(|row| row.name == "guard")
+        .unwrap_or_else(|| panic!("no row for the doubled command: {:?}", report.drift));
+    assert!(row.detail.contains("hooks.json"), "{}", row.detail);
+
+    kendex_core::apply::execute(&w.env, &report.plan).unwrap();
+    assert_eq!(
+        fs::read_to_string(&registry)
+            .unwrap()
+            .matches("guard.sh")
+            .count(),
+        2,
+        "nothing is written beside entries the record cannot tell apart"
+    );
+}
+
+/// A scope carrying the layout an older kendex wrote: script and registry
+/// beside the root, nothing under `kendex/`. Everything here reads or
+/// writes one level down, so the files beside the root are outside every
+/// path this build takes — including removal's. They stay exactly as they
+/// are, the refresh renders the hook under `kendex/` on its own, and the
+/// pass after it changes nothing.
+///
+/// Said plainly because `docs/adapters/pi.md` says it: what is beside the
+/// root is the person's to deal with by hand. `kendex remove` does not
+/// touch it, and nothing in this build does.
+#[test]
+#[allow(clippy::unwrap_used)]
+fn the_older_layout_beside_the_root_is_left_exactly_where_it_is() {
+    let w = world();
+    register_carrier(&w.project.join(".pi"));
+    declare_hook(&w, "PreToolUse");
+    let report = audit(&w.env, &scope(&w)).unwrap();
+    kendex_core::apply::execute(&w.env, &report.plan).unwrap();
+
+    // Put the installation back where an older kendex kept it: script and
+    // registry beside the root, with kendex's own segment gone.
+    let home = w.project.join(".pi/kendex");
+    let beside_script = w.project.join(".pi/hooks/guard.sh");
+    let beside_registry = w.project.join(".pi/hooks.json");
+    fs::create_dir_all(beside_script.parent().unwrap()).unwrap();
+    fs::rename(home.join("hooks/guard.sh"), &beside_script).unwrap();
+    fs::rename(home.join("hooks.json"), &beside_registry).unwrap();
+    fs::remove_dir_all(&home).unwrap();
+    let left_script = fs::read_to_string(&beside_script).unwrap();
+    let left_registry = fs::read_to_string(&beside_registry).unwrap();
+
+    // The refresh renders the hook under `kendex/` and stops there.
+    let report = audit(&w.env, &scope(&w)).unwrap();
+    kendex_core::apply::execute(&w.env, &report.plan).unwrap();
+    assert!(home.join("hooks/guard.sh").is_file());
+    assert!(
+        fs::read_to_string(home.join("hooks.json"))
+            .unwrap()
+            .contains("guard.sh")
+    );
+
+    // And the pass after it settles.
+    let settled = audit(&w.env, &scope(&w)).unwrap();
+    assert!(settled.plan.ops.is_empty(), "{:?}", settled.plan.ops);
+
+    // Nothing touched what is beside the root — not the refresh, and not
+    // a removal, which derives its paths the same way.
+    let removal = kendex_core::engine::ops::remove(
+        &w.env,
+        &scope(&w),
+        std::slice::from_ref(&"guard".to_owned()),
+        None,
+        false,
+    )
+    .unwrap();
+    kendex_core::apply::execute(&w.env, &removal.plan).unwrap();
+    assert!(
+        !home.join("hooks/guard.sh").exists(),
+        "removal takes what this build wrote"
+    );
+    assert_eq!(fs::read_to_string(&beside_script).unwrap(), left_script);
+    assert_eq!(fs::read_to_string(&beside_registry).unwrap(), left_registry);
+}

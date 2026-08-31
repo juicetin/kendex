@@ -166,11 +166,9 @@ pub fn updates(env: &Env, scope: &Scope) -> Result<UpdatesReport> {
             last_fetched: None,
         });
     };
-    let lock = crate::lock::load_file(&crate::lock::lock_path(env, scope))?;
-    let lock = match lock {
-        crate::lock::LockFile::Current(lock) => lock,
-        _ => crate::lock::Lock::default(),
-    };
+    // The record annotates these rows; it does not produce them. A lock
+    // this build cannot read costs the annotations, never the page.
+    let lock = crate::lock::observed(&crate::lock::lock_path(env, scope))?;
     let eval = Eval {
         env,
         scope,
@@ -230,9 +228,8 @@ fn edited_items(
         // A plan the scope cannot produce (a broken manifest, an
         // unreadable source) must not fail open — reporting nothing edited
         // is exactly when edit detection could not run. Fall back to the
-        // conservative per-entry hold, which holds whatever a record could
-        // prove clean and cannot — `edit_holds` names the anchor-less
-        // non-pi hook record that can prove nothing and holds nothing.
+        // conservative per-entry hold, which holds whatever a record
+        // cannot prove clean.
         Err(_) => lock
             .entries
             .values()
@@ -346,9 +343,10 @@ pub fn set_ignored(
     Ok(())
 }
 
+/// What the scope declares, for a page that only lists it. A manifest
+/// this build cannot read declares nothing it can name, which is the same
+/// empty report a scope with no manifest gets.
 fn load_current(env: &Env, scope: &Scope) -> Result<Option<crate::manifest::Manifest>> {
-    match crate::manifest::load(&crate::manifest::manifest_path(env, scope))? {
-        crate::manifest::ManifestFile::Current(manifest) => Ok(Some(*manifest)),
-        _ => Ok(None),
-    }
+    let manifest = crate::manifest::observed(&crate::manifest::manifest_path(env, scope))?;
+    Ok((manifest != crate::manifest::Manifest::default()).then_some(manifest))
 }

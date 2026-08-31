@@ -133,9 +133,11 @@ lives in one capability table read by core and UI.
    the only writable surface; kendex never stages, commits, or resets in
    a repository it did not create. Work that must produce a commit runs
    in a disposable clone.
-10. Writes are byte-faithful: a file kendex edits round-trips
-    byte-identically except for the intended edit, trailing newline
-    included. Change detection compares exact bytes.
+10. Writes are byte-faithful where kendex edits in place: a structured
+    edit changes the keys it names and nothing else, newline included,
+    and a file it cannot read is refused, not rewritten. Change detection
+    compares exact bytes. kendex.toml is not edited in place: a write
+    serializes the manifest kendex read, losing comments and key order.
 11. Validation precedes mutation. Every input check for an operation runs
     before its first durable write, and a rejected operation leaves
     manifest, lock, and install tree byte-identical. Every rendering is
@@ -368,8 +370,8 @@ lives in one capability table read by core and UI.
   whose namespace it sits in; a cross-read (Copilot reading Claude Code's
   skills and settings) is an input to effective state, never a second
   installation.
-- Fresh manifest schema, no importer and no compat shims: a v1 manifest or
-  lock is refused, moved aside by hand, and the install starts fresh.
+- Fresh manifest schema, no importer and no compat shims: a manifest or
+  lock from any other version is refused, moved aside by hand, install fresh.
 - **One spelling per artifact.** A scope is `kendex.toml`,
   `.kendex-lock.json`, `.kendex-local/`, `kendex.settings.toml`; env vars
   are `KENDEX_*`; managed-block markers, report tags and the opencode
@@ -425,42 +427,30 @@ lives in one capability table read by core and UI.
   its own hooks directory included — whoever set it undoes it, and
   the changelog says which artifacts an old install left behind.
 - **A registration is reconciled, not added to.** What a hook registered
-  is recorded (`engine::item_record`); a catalog moving it to another
-  event retires the recorded entry where the document still has it,
-  applies what is rendered, records that. A first install retires nothing,
-  and neither does an answer short of certainty: an entry moved,
-  duplicated, or unnamed by the record is the person's to keep, and the
-  pass registers under the identity it renders beside it. Only a pi hook's
-  ambiguity holds (`engine::item_record::retire_previous`), because pi's
-  move deletes what it identifies (`engine::pi_hooks_move`). Removal reads
-  the same record; an editor rewrites only what its own registration
-  names; an entry no edit of kendex's can reach is neither reconciled nor
-  retired — proven by applying and reading back.
+  is recorded (`engine::item_record`); a catalog moving it to another event
+  retires the recorded entry where the document still has it, applies what
+  is rendered, records that. A first install retires nothing, and neither
+  does an answer short of certainty: an entry moved, duplicated, or
+  unnamed by the record is the person's to keep, and the pass registers
+  under the identity it renders beside it (`item_record::retire_previous`).
+  Pi holds instead: its registry is kendex's own file, so an entry there
+  the record cannot place is a question the hook waits on. Removal reads
+  the same record; an editor rewrites only its own registration; an entry
+  no edit of kendex's can reach is neither reconciled nor retired — proven
+  by applying and reading back.
 - **Pi hooks are enforced through the carrier.** The `pi-hooks` extension
   package hosts native listeners; hook content rides in the registry
   kendex renders beside them (`kendex/hooks/<name>.sh` plus
   `kendex/hooks.json`, keyed by Pi's listener names — tool call, tool
   result, turn end, session start). Pi reserves `hooks/` beside every root
-  it loads, so storage sits under `kendex/`; `engine::pi_hooks_move`
-  retires the old layout, taking only what this scope's lock names and
-  its bytes prove, holding whole what it cannot (installation and
-  registration together) and saying why — [docs/adapters/pi.md](adapters/pi.md)
-  carries the rules in full. A finished move is recorded in the lock
-  (`LockEntry::left_pi_reserved_name`), written only where proven; every
-  consumer reads that record (`Preflight`), and past it nothing under the
-  reserved name is asked about. A deletion asks for a plain file and binds
-  the type it proved with the hash (`preflight::provenance`,
-  `preflight::discardable`, `Pre::PlainHashIs`); every hold reaches the
-  conflict row through `Hold::row`. A held hook runs from the old
-  registry, so Pi's hook surface list carries that registry too while an
-  installation is still under the reserved name
-  (`pi_hooks_move::legacy_registry_lives`). The capability row says what
-  the mechanism supports; labels read carrier reality (`pi_ext::carrier`),
-  and Pi loads project and global settings both, so a project-installed
-  hook with only a global carrier is still enforced. The session-start
-  drift report rides the same mechanism: same script, same kill-switch,
-  fire-and-forget into session start; a reloaded or resumed session never
-  repeats it.
+  it loads, so storage sits under `kendex/` and nothing reads or writes a
+  registry beside the root — [docs/adapters/pi.md](adapters/pi.md) carries
+  the rules in full. The capability row says what the mechanism supports;
+  labels read carrier reality (`pi_ext::carrier`), and Pi loads project
+  and global settings both, so a project-installed hook with only a global
+  carrier is still enforced. The session-start drift report rides the same
+  mechanism: same script, same kill-switch, fire-and-forget into session
+  start; a reloaded or resumed session never repeats it.
 - **A seeded settings comment refreshes only while provably unedited.**
   Skills seed `[env]` defaults into `kendex.settings.toml` write-if-absent;
   the lock keeps, per key, the seeding skill and the FNV-1a hash of its
@@ -472,10 +462,12 @@ lives in one capability table read by core and UI.
   never adopted, and a note names every owner and differing default. A value
   no template completes is seeded from none, under a note naming the key.
   Seeding never touches a value; an edit rides that write, its span alone.
-- **Schemas are versioned and migrations are applies.** Manifest and lock
-  carry a format version; older files load, and the upgrade rides the
-  normal journaled, previewed plan as a surgical edit (the version line
-  only). Files from a newer kendex refuse to load.
+- **Schemas are versioned and nothing converts them.** Manifest and lock
+  carry a format version, and this build reads exactly the one it writes.
+  A file from an older kendex is refused as unreadable, left byte-for-byte
+  as written, with the move-it-aside-and-install-fresh remedy in the
+  message; one from a newer kendex refuses to load for the same reason in
+  the other direction.
 - **Permission intent is typed and never widens.** A source's tool
   allowlist survives parse, merge, and every renderer as
   `Unspecified | AllowOnly | DenyExtra`; explicit denies survive allowlist

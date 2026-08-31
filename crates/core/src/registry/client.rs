@@ -23,9 +23,11 @@ pub struct Authenticated {
 /// Run one authenticated call, refreshing a rejected access token once.
 /// Refresh rotation is locked across processes and saved before retry.
 /// Every path that answers `SignInExpired` removes the rejected credential
-/// first, and says in `why` when the store would not give it up. A family
-/// another writer installed by then is answered with `sign_in_changed`
-/// instead, and nothing is removed.
+/// first, and says in `why` when the store would not give it up. Only the
+/// server's own refusal ([`rejected_access`]) drops the refresh guard
+/// around the call it judges, so only that one can find a family another
+/// writer installed by then; it answers `sign_in_changed` and removes
+/// nothing.
 pub fn with_access(
     fetch: &dyn Fetch,
     store: &dyn CredentialStore,
@@ -84,13 +86,15 @@ fn rotate_locked(
     let pair = match refresh(fetch, &credential.refresh_token) {
         Ok(pair) => pair,
         Err(Refused::Definitive(why)) => {
-            // Older installed clients do not take this guard. A network call
-            // gives one time to replace the family, so re-read before clearing.
-            let removal = remove_rejected(store, &credential);
+            // Under the refresh guard this call holds: the family the
+            // server just refused is the installed one, and it goes.
+            let removal = match store.clear() {
+                Ok(()) => Removal::Done,
+                Err(error) => Removal::Failed(error),
+            };
             return Err(expired(
                 removal,
                 format!("your sign-in has expired ({why})"),
-                "refreshing",
             ));
         }
         Err(Refused::Transient(error)) => return Err(error),
@@ -103,12 +107,6 @@ fn rotate_locked(
         // Rotation replaces the tokens, never the sign-in they belong to.
         sign_in: credential.sign_in.clone(),
     };
-    // Mixed-version writers do not know this guard. Never replace a family
-    // an older client committed during the refresh request.
-    let current = required(store.load()?)?;
-    if current.refresh_token != credential.refresh_token {
-        return Err(sign_in_changed("refreshing"));
-    }
     store.save(&rotated)?;
     drop(refresh_guard);
 
@@ -154,14 +152,6 @@ pub fn logout(fetch: &dyn Fetch, store: &dyn CredentialStore) -> Result<bool> {
             why: format!("{error} — the local credential was kept so you can retry"),
         }
     })?;
-    // An older client can commit another family without taking this guard.
-    // Re-read after revocation so logout cannot clear that newer sign-in.
-    let Some(current) = store.load()? else {
-        return Ok(true);
-    };
-    if current.refresh_token != credential.refresh_token {
-        return Err(sign_in_changed("logging out"));
-    }
     store.clear()?;
     Ok(true)
 }
@@ -186,7 +176,6 @@ fn rejected_access(store: &dyn CredentialStore, authenticated_as: &Credential) -
     expired(
         removal,
         "the server does not accept this sign-in".to_owned(),
-        "authenticating",
     )
 }
 
@@ -200,11 +189,12 @@ enum Removal {
     Failed(CoreError),
 }
 
-/// The one re-read both producers make before they speak for the stored
-/// credential, taken under the credential transaction so the answer is
-/// not itself racing a rotation. A machine signed out in the meantime is
-/// not this credential's either, and leaves nothing to remove. Callers
-/// hold the refresh guard around this.
+/// The re-read [`rejected_access`] makes before it speaks for the stored
+/// credential, taken under the credential transaction so the answer is not
+/// itself racing a rotation. It is the one producer that needs it: the
+/// refresh path never lets go of the guard, so what it holds is what it
+/// refuses. A machine signed out in the meantime is not this credential's
+/// either, and leaves nothing to remove.
 fn remove_rejected(store: &dyn CredentialStore, rejected: &Credential) -> Removal {
     let installed = match store.load() {
         Ok(installed) => installed,
@@ -227,12 +217,16 @@ fn remove_rejected(store: &dyn CredentialStore, rejected: &Credential) -> Remova
 /// remedy rides in `why` because it depends on what the removal did: a
 /// credential still installed makes `kendex login` refuse, and the next
 /// attempt is what removes it.
-fn expired(removal: Removal, why: String, moved_while: &str) -> CoreError {
+fn expired(removal: Removal, why: String) -> CoreError {
     match removal {
         Removal::Done => CoreError::SignInExpired {
             why: format!("{why} — run `kendex login` again"),
         },
-        Removal::Moved => sign_in_changed(moved_while),
+        // Named here rather than taken from the caller: only
+        // [`rejected_access`] can reach this arm, because it is the one
+        // producer that drops the refresh guard around the call it judges,
+        // and authenticating is the moment it drops it for.
+        Removal::Moved => sign_in_changed("authenticating"),
         Removal::Failed(error) => CoreError::SignInExpired {
             why: format!(
                 "{why}, and the local copy could not be removed: {error} — \

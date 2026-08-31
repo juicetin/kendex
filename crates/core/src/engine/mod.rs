@@ -37,7 +37,6 @@ mod item_source;
 mod observed;
 pub mod ops;
 mod owned;
-pub(crate) mod pi_hooks_move;
 mod plan_pass;
 mod planned;
 pub mod posture;
@@ -137,15 +136,8 @@ fn plan_scope_once(
     let mut config_edits = config_edits::ConfigEditPlan::default();
 
     let base = options.manifest_base.as_ref();
-    // `declared`, never the planning copy: a synthetic pin serialized into
-    // the file is a hold the person never asked for.
-    plan_manifest_write(env, scope, declared, base, &state, &mut ops)?;
+    plan_manifest_write(env, scope, base, &state, &mut ops)?;
 
-    // Answered before anything is planned, and read again when the move is
-    // planned: a pi hook whose copy under the name pi reserved is not this
-    // pass's to take holds whole, so the fresh rendering never quietly
-    // takes over from bytes the person kept.
-    let legacy_pi = pi_hooks_move::preflight(env, scope, lock, options, &state);
     plan_pass::plan_items(
         env,
         &state,
@@ -153,7 +145,6 @@ fn plan_scope_once(
         lock,
         options,
         &owned::paths(env, scope, lock),
-        &legacy_pi,
         &mut drift,
         &mut ops,
         &mut config_edits,
@@ -162,8 +153,7 @@ fn plan_scope_once(
     )?;
 
     // Notes about the scope rather than about any one item: what the
-    // settings seed found, what the reserved-name move did, what the git
-    // posture changed.
+    // settings seed found, what the git posture changed.
     let mut scope_notes =
         plan_settings_seed(scope, &state, options, &mut new_lock, &mut ops, &mut drift)?;
 
@@ -172,24 +162,6 @@ fn plan_scope_once(
     // trash twice.
     let mut guard = removal::TrashGuard::new(&state.items);
 
-    // The reserved-name move reads both records: the lock says what
-    // kendex may take, and the desired state says whether a replacement is
-    // coming — a hook nothing declares any more is retired outright, one
-    // this pass could not render keeps what it has.
-    let moved_out = pi_hooks_move::plan_move(
-        env,
-        scope,
-        &manifest,
-        lock,
-        &state,
-        &legacy_pi,
-        &mut pi_hooks_move::Sink {
-            ops: &mut ops,
-            guard: &mut guard,
-            config_edits: &mut config_edits,
-            notes: &mut scope_notes,
-        },
-    )?;
     stale::stale_emitted(lock, &new_lock, &mut guard, &mut ops)?;
 
     let refused_keys = plan_pass::plan_refusals(
@@ -197,7 +169,6 @@ fn plan_scope_once(
         scope,
         lock,
         &state,
-        &legacy_pi,
         &mut guard,
         &mut drift,
         &mut ops,
@@ -212,7 +183,6 @@ fn plan_scope_once(
         lock,
         &state,
         options,
-        &legacy_pi,
         &refused_keys,
         &mut guard,
         &mut drift,
@@ -221,9 +191,6 @@ fn plan_scope_once(
         &mut new_lock,
     )?;
 
-    // Written here and nowhere else: every entry this pass keeps is in
-    // the record by now, the sweep's carry-forwards included.
-    pi_hooks_move::record_finished(&mut new_lock, &moved_out);
     stale::stale_instruction_rows(env, scope, lock, &new_lock, &mut config_edits)?;
     plan_config_edits(env, scope, config_edits, &mut ops)?;
     let set_changes = set_changes(lock, &new_lock);
@@ -269,8 +236,7 @@ fn scope_wide(scope: &Scope, ops: &mut Vec<PlannedOp>) -> Result<Vec<String>> {
 /// The synthetic holds come back out of the manifest this pass computed
 /// before anything can write it: that manifest is a copy of the pinned
 /// one, and no written manifest may carry a pin as if the person had
-/// chosen it. The plan's other manifest writes never see the pinned copy
-/// at all — [`plan_scope_once`] hands `plan_manifest_write` `declared`.
+/// chosen it.
 fn desired_pass<'a>(
     env: &Env,
     scope: &Scope,
@@ -307,8 +273,10 @@ fn fresh_lock(manifest: &Manifest, lock: &Lock, state: &desired::DesiredState) -
     }
 }
 
-/// Read-only audit for a scope. A legacy or absent manifest still reports
-/// unmanaged items; nothing is planned that would touch a legacy file.
+/// Read-only audit for a scope. A scope with no manifest still reports
+/// unmanaged items; one whose manifest or lock this build cannot read is
+/// refused at the door, so this answers for it with the refusal rather
+/// than with an empty report.
 pub fn audit(env: &Env, scope: &Scope) -> Result<EngineReport> {
     plan_apply(env, scope, &PlanOptions::default())
 }
@@ -330,32 +298,27 @@ pub fn plan_refresh(env: &Env, scope: &Scope) -> Result<EngineReport> {
 
 /// Plan what disk needs to match declaration, from the manifest as it sits
 /// on disk. This is the loader the audit view AND the confirmed apply both
-/// use — planning an apply from a mutation-normalized manifest would drop
-/// the schema-upgrade op the preview promised, leaving a v0.1 manifest
-/// beside a current lock forever.
+/// use: a mutation-normalized copy already looks current, so planning from
+/// one would slip a file past the floor that the audit and every other
+/// read refuse.
 pub fn plan_apply(env: &Env, scope: &Scope, options: &PlanOptions) -> Result<EngineReport> {
     let scope = &scope.canonical();
     let manifest_file = manifest::load(&manifest::manifest_path(env, scope))?;
-    let lock_file = crate::lock::load_file(&lock_path(env, scope))?;
-    // Absent reads as an empty current lock — a fresh scope, not a legacy
-    // one — so a first-ever install still plans through the normal path.
-    let fresh_lock = match &lock_file {
-        LockFile::Current(lock) => Some(lock.clone()),
-        LockFile::Absent => Some(Lock {
+    // Absent reads as an empty lock — a fresh scope — so a first-ever
+    // install still plans through the normal path.
+    let lock = match crate::lock::load_file(&lock_path(env, scope))? {
+        LockFile::Current(lock) => lock,
+        LockFile::Absent => Lock {
             version: crate::lock::LOCK_VERSION,
             ..Lock::default()
-        }),
-        LockFile::Legacy { .. } => None,
+        },
     };
-    if let (ManifestFile::Current(manifest), Some(lock)) = (&manifest_file, &fresh_lock) {
-        return plan_scope(env, scope, manifest, lock, options);
+    if let ManifestFile::Current(manifest) = &manifest_file {
+        return plan_scope(env, scope, manifest, &lock, options);
     }
 
-    // Either file can't be planned against as-is (a v1 lock, or a v1
-    // manifest paired with an already-migrated lock and vice versa) — the
-    // scope reads as observation-only rather than failing the whole audit,
-    // matching the manifest's existing legacy posture: nothing is planned
-    // that would touch a file this build won't write to.
+    // Nothing is declared here: the scope reads as observation-only rather
+    // than failing the whole audit, so a stranger's files still get a row.
     let mut report = EngineReport {
         drift: Vec::new(),
         plan: Plan::landed(scope.clone(), Vec::new())?,
@@ -368,21 +331,7 @@ pub fn plan_apply(env: &Env, scope: &Scope, options: &PlanOptions) -> Result<Eng
         repo_effects: Vec::new(),
         repo_effects_leaving: Vec::new(),
     };
-    // One fact, said once: files this build will read but not write. Which
-    // of the two is legacy is kendex's problem, not the reader's.
-    if matches!(manifest_file, ManifestFile::Legacy { .. })
-        || matches!(lock_file, LockFile::Legacy { .. })
-    {
-        report.notes.push(
-            "This scope's files are from version 1 — kendex reads them and writes nothing here until they are moved aside or deleted"
-                .into(),
-        );
-    }
     let empty = Manifest::default();
-    let lock = fresh_lock.unwrap_or_else(|| Lock {
-        version: crate::lock::LOCK_VERSION,
-        ..Lock::default()
-    });
     unmanaged_rows(env, scope, &empty, &lock, &[], &mut report.drift)?;
     Ok(report)
 }
