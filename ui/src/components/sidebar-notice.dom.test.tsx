@@ -106,6 +106,7 @@ beforeEach(() => {
     channel: { kind: "unknown" },
     installing: false,
     error: null,
+    note: null,
   });
   vi.mocked(commands.appVersion).mockResolvedValue(RUNNING);
   vi.mocked(commands.appUpdateCheck).mockResolvedValue(available());
@@ -301,11 +302,74 @@ describe("the action each channel allows", () => {
   });
 });
 
-describe("a replacement that did not happen", () => {
-  // The engine refuses an install whose command changed since the card was
-  // drawn, and it can only tell that if it is handed what the card said.
-  // Handing it nothing would leave every such install going ahead on an
-  // answer the person never saw.
+describe("a replacement that went through", () => {
+  // The install answered, so it did not restart, and what came back is the
+  // sentence it still owed about the command beside the app. The release
+  // is on disk: saying so in the failure colour and offering the action
+  // again would send a person to re-download what they already have.
+  it("says what is left over without calling the update a failure", async () => {
+    const left = "kendex 5.1.0 is installed and starts on the next launch";
+    vi.mocked(commands.appUpdateInstall).mockResolvedValue({
+      status: "ok",
+      data: left,
+    });
+    const container = await show({ kind: "direct" }, null);
+    vi.mocked(commands.appUpdateCommandChannel).mockResolvedValue({
+      status: "ok",
+      data: { kind: "unknown" },
+    });
+
+    await press(container, APP_UPDATE_INSTALL_LABEL);
+    await settle();
+
+    const said = [...container.querySelectorAll("p")].find(
+      (node) => node.textContent === left,
+    );
+    expect(said).toBeDefined();
+    expect(said?.className).not.toContain("text-critical");
+    // It arrives in the render that takes the button away, so nothing
+    // reads it unless the paragraph is a live region.
+    expect(said?.getAttribute("role")).toBe("status");
+    expect(useNoticeStore.getState().error).toBeNull();
+    // And the action is gone rather than disabled: there is nothing left
+    // to run, and the card now says what is beside the app.
+    expect(() => offer(container, APP_UPDATE_INSTALL_LABEL)).toThrow();
+    expect(container.textContent).toContain(APP_UPDATE_COMMAND_UNKNOWN_NOTE);
+  });
+
+  // A read that failed says nothing rather than guessing, which is the
+  // rule the first read follows too. Kept, the description on the card
+  // would be the one drawn before the install — a machine as it no longer
+  // is, with the action gone so nobody can ask again.
+  it("drops the command description it could not read again", async () => {
+    const left = "kendex 5.1.0 is installed and starts on the next launch";
+    vi.mocked(commands.appUpdateInstall).mockResolvedValue({
+      status: "ok",
+      data: left,
+    });
+    const container = await show({ kind: "direct" }, { kind: "unknown" });
+    expect(container.textContent).toContain(APP_UPDATE_COMMAND_UNKNOWN_NOTE);
+    vi.mocked(commands.appUpdateCommandChannel).mockResolvedValue({
+      status: "error",
+      error: "the command beside this app could not be read",
+    });
+
+    await press(container, APP_UPDATE_INSTALL_LABEL);
+    await settle();
+
+    expect(container.textContent).toContain(left);
+    expect(useNoticeStore.getState().commandChannel).toBeNull();
+    expect(container.textContent).not.toContain(
+      APP_UPDATE_COMMAND_UNKNOWN_NOTE,
+    );
+  });
+});
+
+describe("what pressing Update now hands the engine", () => {
+  // The engine says when the command it found was not the one the card
+  // described, and it can only tell that if it is handed what the card
+  // said. Handing it nothing would leave every such install going ahead on
+  // an answer the person never saw, and never hearing about it.
   it("hands the engine the note the card is showing", async () => {
     vi.mocked(commands.appUpdateInstall).mockResolvedValue({
       status: "ok",
@@ -320,15 +384,17 @@ describe("a replacement that did not happen", () => {
     await press(container, APP_UPDATE_INSTALL_LABEL);
     expect(commands.appUpdateInstall).toHaveBeenCalledWith(showing);
   });
+});
 
-  // The refusal tells the person the notice now says what is there, so the
-  // card has to read again — otherwise the sentence is false and pressing
-  // Update now again meets the same refusal forever.
-  it("reads the command again after a refusal, so the note is true", async () => {
+describe("a replacement that did not happen", () => {
+  // The card is the only surface left saying what happens to the command
+  // beside the app, and a failed install is where that answer is most
+  // likely to have moved. Left unread, the card the person is looking at
+  // describes a machine that has since changed.
+  it("reads the command again after a failure, so the note is true", async () => {
     vi.mocked(commands.appUpdateInstall).mockResolvedValue({
       status: "error",
-      error:
-        "the kendex command beside this app is no longer the one the notice described",
+      error: "the release could not be verified",
     });
     const changed: CommandNotice = { kind: "unknown" };
     const container = await show({ kind: "direct" }, null);
@@ -342,7 +408,7 @@ describe("a replacement that did not happen", () => {
 
     expect(useNoticeStore.getState().commandChannel).toEqual(changed);
     expect(container.textContent).toContain(APP_UPDATE_COMMAND_UNKNOWN_NOTE);
-    expect(container.textContent).toContain("no longer the one the notice");
+    expect(container.textContent).toContain("could not be verified");
   });
 
   it("says why on the card and leaves the action to try again", async () => {

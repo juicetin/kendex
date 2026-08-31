@@ -257,60 +257,30 @@ fn not_the_command(install: &AppInstall, running: Option<PathBuf>) -> Vec<PathBu
 /// Run the command half off the async runtime: it downloads a release
 /// binary over the network, which is not work to hold a runtime worker on.
 ///
-/// `shown` is what the card said about this command when it was drawn, and
-/// the lookup runs again here, so the two can disagree: a card is on screen
-/// for as long as a person leaves it there, and what is at a path in that
-/// time is not this app's to control. Disagreeing, nothing is written —
-/// see [`still_as_shown`].
+/// Answers what the card would say about the command this run found, so
+/// the caller can hold it against what the card said when it was drawn.
+/// The lookup runs again here, so the two can disagree: a card is on
+/// screen for as long as a person leaves it there, and what is at a path
+/// in that time is not this app's to control.
 async fn move_the_command(
     install: AppInstall,
     release: String,
-    shown: Option<CommandNotice>,
-) -> Result<CommandHalf, String> {
+) -> Result<(CommandHalf, Option<CommandNotice>), String> {
     let feed = feed_url();
     tauri::async_runtime::spawn_blocking(move || {
         let env = Env::detect().map_err(|error| error.to_string())?;
         let beside = command_beside(&env, &install, std::env::var_os("PATH").as_deref());
-        still_as_shown(&beside, shown.as_ref())?;
-        bring_command_across(
-            &env,
+        let half = bring_command_across(
             &beside,
             &feed,
             &release,
             env!("KENDEX_TARGET"),
             UPDATER_PUBLIC_KEY,
-        )
+        )?;
+        Ok((half, CommandNotice::for_card(&beside)))
     })
     .await
     .map_err(|error| format!("the kendex command half did not run: {error}"))?
-}
-
-/// Whether the command beside the app is still the one the card described.
-///
-/// The card is the whole of what a person is told about that command,
-/// because Update now restarts the app and takes the card with it. A
-/// disposition that changed while the card sat on screen is therefore a
-/// sentence that was never said: an app that went ahead anyway would
-/// replace itself, restart, and leave behind a command nothing had warned
-/// about — the silent split this flow exists to prevent, reached by
-/// another road.
-///
-/// Compared as what was *said*, not as what was found. Two `Ours` at
-/// different paths say the same nothing to a person and are the same
-/// answer here; `Ours` become `NotOurs` says something new, and so does
-/// the reverse, which would touch a file the card promised to leave alone.
-///
-/// Refused before the app half runs, so nothing is written and the card is
-/// still on screen to carry the refusal.
-fn still_as_shown(beside: &CommandBeside, shown: Option<&CommandNotice>) -> Result<(), String> {
-    if CommandNotice::for_card(beside).as_ref() == shown {
-        return Ok(());
-    }
-    Err(
-        "the kendex command beside this app is no longer the one the notice \
-         described, so nothing was updated; the notice now says what is there"
-            .to_owned(),
-    )
 }
 
 /// What to say when the app half would not land. A command already across
@@ -330,12 +300,17 @@ fn app_half_failed(release: &str, half: CommandHalf, error: &str) -> String {
 /// carrying across a `kendex` command that is kendex's to replace. One
 /// another installer owns stays where it is, named on the card before this
 /// runs; `shown` is what that card said, so a command that changed since is
-/// refused rather than acted on in silence. The manifest names a download
-/// and the signature over it, the release's own digests document names what
-/// this release published for this target, and the app's bytes are held to
-/// both. The discovery feed never supplies an install URL, and the command's
+/// reported rather than acted on in silence — see
+/// [`CommandNotice::not_as_shown`]. The manifest names a download and the
+/// signature over it, the release's own digests document names what this
+/// release published for this target, and the app's bytes are held to both.
+/// The discovery feed never supplies an install URL, and the command's
 /// bytes are held to the key the CLI holds them to. A failure leaves the
-/// running app untouched and usable.
+/// running app untouched and usable, and is the `Err` half alone: the
+/// report is `Ok(Some(_))`, answered after both halves have landed and in
+/// place of the restart, so a card carrying it is not calling a finished
+/// update a failure. `Ok(None)` is the restart, which no caller lives to
+/// read.
 ///
 /// The command moves first. What this flow's notice card reads is the
 /// app's own baked version, so the app is the state marker here and is
@@ -349,7 +324,7 @@ fn app_half_failed(release: &str, half: CommandHalf, error: &str) -> String {
 pub async fn app_update_install(
     app: tauri::AppHandle,
     shown: Option<CommandNotice>,
-) -> Result<(), String> {
+) -> Result<Option<String>, String> {
     // The notice offers this on no other channel; the command asks anyway,
     // so nothing a caller gets wrong can overwrite a package manager's files.
     let install = app_install()?;
@@ -366,7 +341,7 @@ pub async fn app_update_install(
         .await
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "this build is already the latest release".to_owned())?;
-    let half = move_the_command(install, update.version.clone(), shown).await?;
+    let (half, found) = move_the_command(install, update.version.clone()).await?;
     // Downloaded, then judged, then installed: the plugin's own check runs
     // on the way down, and what this release published for this target says
     // those bytes are the version being installed. The read is blocking, so
@@ -385,6 +360,15 @@ pub async fn app_update_install(
     let digests = read.map_err(|error| app_half_failed(&update.version, half, &error))?;
     install_published(&digests, bytes, &update)
         .map_err(|error| app_half_failed(&update.version, half, &error))?;
+    // Both halves have landed. The restart is what takes the card away, so
+    // anything still owed about the command is owed before it — and the
+    // card is left standing to carry it rather than restarting into a
+    // version with nowhere left to say it.
+    if let Some(unsaid) =
+        CommandNotice::not_as_shown(&update.version, half, found.as_ref(), shown.as_ref())
+    {
+        return Ok(Some(unsaid));
+    }
     app.restart()
 }
 

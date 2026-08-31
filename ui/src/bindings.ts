@@ -49,12 +49,17 @@ export const commands = {
 	 *  carrying across a `kendex` command that is kendex's to replace. One
 	 *  another installer owns stays where it is, named on the card before this
 	 *  runs; `shown` is what that card said, so a command that changed since is
-	 *  refused rather than acted on in silence. The manifest names a download
-	 *  and the signature over it, the release's own digests document names what
-	 *  this release published for this target, and the app's bytes are held to
-	 *  both. The discovery feed never supplies an install URL, and the command's
+	 *  reported rather than acted on in silence — see
+	 *  [`CommandNotice::not_as_shown`]. The manifest names a download and the
+	 *  signature over it, the release's own digests document names what this
+	 *  release published for this target, and the app's bytes are held to both.
+	 *  The discovery feed never supplies an install URL, and the command's
 	 *  bytes are held to the key the CLI holds them to. A failure leaves the
-	 *  running app untouched and usable.
+	 *  running app untouched and usable, and is the `Err` half alone: the
+	 *  report is `Ok(Some(_))`, answered after both halves have landed and in
+	 *  place of the restart, so a card carrying it is not calling a finished
+	 *  update a failure. `Ok(None)` is the restart, which no caller lives to
+	 *  read.
 	 * 
 	 *  The command moves first. What this flow's notice card reads is the
 	 *  app's own baked version, so the app is the state marker here and is
@@ -79,7 +84,7 @@ export const commands = {
  *  Kendex's own command, where this app cannot write. `command` is
  *  what carries it across with the privilege the app lacks.
  */
-{ kind: "needsPrivilege"; path: string; command: string } | null) => typedError<null, string>(__TAURI_INVOKE("app_update_install", { shown })),
+{ kind: "needsPrivilege"; path: string; command: string } | null) => typedError<string | null, string>(__TAURI_INVOKE("app_update_install", { shown })),
 	scanMachine: () => typedError<ScanResult, string>(__TAURI_INVOKE("scan_machine")),
 	getSettings: () => typedError<SettingsRead, string>(__TAURI_INVOKE("get_settings")),
 	/**
@@ -860,10 +865,12 @@ export type CatalogSummary = {
 };
 
 /**
- *  What the sidebar card says about the `kendex` command beside the app,
- *  before Update now is pressed — afterwards the app has restarted and
- *  there is no card left to say it on. `None` where there is nothing to
- *  say: no command here, or one Update now carries across itself.
+ *  What the sidebar card says about the `kendex` command beside the app.
+ *  Read before Update now is pressed, and read again after an install that
+ *  answered rather than restarting, which leaves the card up with this the
+ *  only thing on it that can still be true. An install that restarts takes
+ *  the card with it. `None` where there is nothing to say: no command
+ *  here, or one Update now carries across itself.
  * 
  *  Every string is fixed text decided by which arm ran, save the path,
  *  which names one file to a person who may have several — the rule the

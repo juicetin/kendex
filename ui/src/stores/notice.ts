@@ -32,6 +32,11 @@ interface NoticeState {
   /** Why the last action on the card did not happen, shown on the card
    *  with the app still usable. */
   error: string | null;
+  /** What an install that went through still owed the person about the
+   *  `kendex` command beside the app. Not a failure: the release is
+   *  installed and the next launch is what completes it, so the card says
+   *  this and stops offering to run the update again. */
+  note: string | null;
   load: () => Promise<void>;
   install: () => Promise<void>;
   openNotes: () => Promise<void>;
@@ -74,6 +79,7 @@ export const useNoticeStore = create<NoticeState>((set, get) => ({
   commandChannel: null,
   installing: false,
   error: null,
+  note: null,
 
   load: async () => {
     const [view, channel, commandChannel, current] = await Promise.all([
@@ -99,31 +105,42 @@ export const useNoticeStore = create<NoticeState>((set, get) => ({
       // send a person to a package manager that does not own it.
       commandChannel:
         commandChannel.status === "ok" ? commandChannel.data : null,
+      // A card being drawn again says nothing about an install before it.
+      note: null,
     });
   },
 
   install: async () => {
     if (get().installing) return;
-    set({ installing: true, error: null });
+    set({ installing: true, error: null, note: null });
     // What the card is showing about the command beside the app, handed
-    // over so the engine can refuse an install whose command changed since
-    // the card was drawn. The card is the only place that warning could
-    // have been read, and Update now takes the card away with the restart.
+    // over so the engine can say when the command it found was not the one
+    // this card described. The card is the only place that sentence could
+    // be read, and a successful install takes the card away with the
+    // restart.
     const response = await settled(
       commands.appUpdateInstall(get().commandChannel),
     );
-    // A replacement that worked does not come back: the app restarts into
-    // the new version. So only a failure ends the in-flight state, and it
-    // leaves the action on the card to try again.
-    if (response.status === "error") {
-      set({ installing: false, error: response.error });
-      // One of those failures is that the command is no longer what this
-      // card says, and the refusal tells the person the card now shows
-      // what is there. Read again so that is true, and so pressing Update
-      // now again acts on the answer rather than meeting the same refusal.
-      const fresh = await settled(commands.appUpdateCommandChannel());
-      if (fresh.status === "ok") set({ commandChannel: fresh.data });
-    }
+    // A replacement that restarts does not come back: the app relaunches
+    // into the new version. What does come back is an install that failed,
+    // or one that went through with something still to say about the
+    // command beside the app — told apart here rather than read out of the
+    // sentence, because a person whose update worked must not be shown a
+    // failure and invited to run it again.
+    if (response.status === "ok" && response.data === null) return;
+    set(
+      response.status === "ok"
+        ? { installing: false, note: response.data }
+        : { installing: false, error: response.error },
+    );
+    // Either answer is about a command that may have moved, so what the
+    // card says about it is read again — and a read that failed says
+    // nothing rather than guessing, the same rule the first read follows.
+    // Kept, the description would be the one drawn before the install, and
+    // the card would be describing a machine as it no longer is with no
+    // action left on it to ask again.
+    const fresh = await settled(commands.appUpdateCommandChannel());
+    set({ commandChannel: fresh.status === "ok" ? fresh.data : null });
   },
 
   openNotes: async () => {
@@ -141,7 +158,7 @@ export const useNoticeStore = create<NoticeState>((set, get) => ({
     // the old build with nothing to say so and no second offer.
     if (notice === null || get().installing) return;
     const refused = await mute(notice.latest);
-    if (refused === null) set({ notice: null, error: null });
+    if (refused === null) set({ notice: null, error: null, note: null });
     else set({ error: refused });
   },
 }));

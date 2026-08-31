@@ -306,11 +306,9 @@ fn where_a_real_install_puts_the_command_is_a_candidate() {
 
 /// The desktop app carries the command across only when an installer said
 /// which file it is, so `install.sh` has to leave that record where the
-/// app's own resolver looks — at the path it actually installed, and with
-/// the digest of the bytes it put there. A script that installs and
-/// records nothing leaves every app-driven update refusing a command it
-/// really does own; one that records a path alone leaves the app judging
-/// by a name, which the next file to arrive under that name inherits.
+/// app's own resolver looks, at the path it actually installed. A script
+/// that installs and records nothing leaves every app-driven update
+/// refusing a command it really does own.
 ///
 /// Read back through the resolver rather than by hand: what shape the
 /// record takes is core's to say, and a second spelling here agrees until
@@ -346,52 +344,43 @@ fn install_sh_records_the_command_it_installed() {
         )
     });
     assert_eq!(recorded.path, PathBuf::from(installed));
-    assert_eq!(
-        recorded.digest,
-        kendex_core::hash::sha256_hex(&fs::read(installed).unwrap()),
-        "the record names bytes other than the ones install.sh left at {installed}"
-    );
 }
 
-/// No way to compute a digest is a record this build could not check, so
-/// the script writes none and says so. A path on its own is exactly the
-/// record this change exists to stop being enough: written anyway, it
-/// would put the app back to judging a command by its name.
+/// A record the script cannot write costs the app-side update and never
+/// the install: the run says so on stderr and carries on. The branch fires
+/// on either write behind it failing — here the record path is a directory,
+/// so `mkdir -p` finds the state directory already there and the redirect
+/// has nowhere to land. A mode bit would have been the other spelling, and
+/// a run acting as root writes through those.
 #[test]
 #[allow(clippy::unwrap_used)]
-fn install_sh_records_nothing_it_cannot_take_a_digest_for() {
+fn install_sh_says_when_it_cannot_record_the_command() {
     let tmp = tempfile::tempdir().unwrap();
     let home = rooted(&tmp);
-    // Every spelling of the digest, ahead of the real ones on `PATH` and
-    // failing. `command -v` finds each, so the script reaches one and gets
-    // nothing back rather than falling through to a tool that works.
-    let fake = home.join("fake-bin");
-    fs::create_dir_all(&fake).unwrap();
-    for tool in ["sha256sum", "shasum", "openssl"] {
-        write_exe(&fake.join(tool), "#!/bin/sh\nexit 1\n");
-    }
+    // Asked of the resolver: the record path differs by platform, and a
+    // second spelling here agrees until it does not.
+    let env = kendex_core::env::Env::host_rooted(&home);
+    fs::create_dir_all(env.installed_command_file()).unwrap();
 
     let (output, _) = run_install_at(HOST_UNAME, "x86_64", &home);
+    let said = String::from_utf8_lossy(&output.stderr);
 
     assert!(
         output.status.success(),
-        "a missing digest tool costs the record, never the install:\n{}",
-        String::from_utf8_lossy(&output.stderr)
+        "a record that would not be written cost the install itself:\n{said}"
     );
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("could not record the command's identity"),
-        "the run said nothing about the record it did not write:\n{}",
-        String::from_utf8_lossy(&output.stderr)
+        String::from_utf8_lossy(&output.stdout).contains("Installed the kendex command to"),
+        "the command was never installed, so the record is not what this proves:\n{}",
+        String::from_utf8_lossy(&output.stdout)
     );
-    let env = kendex_core::env::Env::host_rooted(&home);
+    assert!(
+        said.contains("could not record the command's identity"),
+        "the run said nothing about the record it did not write:\n{said}"
+    );
     assert_eq!(
         kendex_core::command_update::recorded_command(&env),
         None,
-        "a record with no digest is one the app would judge by name alone"
-    );
-    assert!(
-        !env.installed_command_file().exists(),
-        "nothing half-written at {}",
-        env.installed_command_file().display()
+        "the app was handed a record install.sh never wrote"
     );
 }
