@@ -1,71 +1,24 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { spawnSync } from "node:child_process";
 
 import { runCargo } from "../extensions/cargo.ts";
-import piHooks from "../extensions/hooks.ts";
+import piHooks, { runRenderedHook } from "../extensions/hooks.ts";
+import {
+	CONFIG_ID,
+	initRustRepo,
+	installToolCallHandler,
+	readLog,
+	renderedHookPath,
+	renderStub,
+	runGit,
+	trusted,
+	useIsolatedGitEnv,
+} from "./harness.ts";
 
-const CONFIG_ID = "@vanillagreen/pi-hooks";
+useIsolatedGitEnv();
 
-type ToolCallHandler = (event: { toolName: string; input: Record<string, unknown> }, ctx: Record<string, unknown>) => Promise<unknown>;
-
-function runGit(args: string[], cwd: string): void {
-	const result = spawnSync("git", args, { cwd, encoding: "utf8" });
-	if (result.status !== 0) {
-		throw new Error(`git ${args.join(" ")} failed: ${result.stderr || result.stdout}`);
-	}
-}
-
-function writePiConfig(project: string): void {
-	mkdirSync(join(project, ".pi"), { recursive: true });
-	writeFileSync(join(project, ".pi", "settings.json"), JSON.stringify({
-		kendex: {
-			extensionManager: {
-				config: {
-					[CONFIG_ID]: {
-						enabled: true,
-						preCommitCheck: true,
-						taskCompletedCheck: false,
-						clippyTimeoutMs: 3000,
-					},
-				},
-			},
-		},
-	}, null, 2));
-}
-
-// Git reads no config of the developer's here: a global core.hooksPath
-// would disarm every fixture, and a global init.templateDir can leave git
-// init without the hooks directory the fixtures write into.
-const isolatedEnv: Record<string, string> = { GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
-const savedEnv: Record<string, string | undefined> = {};
-
-beforeAll(() => {
-	for (const [name, value] of Object.entries(isolatedEnv)) {
-		savedEnv[name] = process.env[name];
-		process.env[name] = value;
-	}
-});
-
-afterAll(() => {
-	for (const [name, value] of Object.entries(savedEnv)) {
-		if (value === undefined) delete process.env[name];
-		else process.env[name] = value;
-	}
-});
-
-function initRustRepo(prefix: string): string {
-	const dir = mkdtempSync(join(tmpdir(), prefix));
-	runGit(["init", "-q"], dir);
-	mkdirSync(join(dir, ".git", "hooks"), { recursive: true });
-	writePiConfig(dir);
-	mkdirSync(join(dir, "src"), { recursive: true });
-	writeFileSync(join(dir, "src", "lib.rs"), "pub fn answer() -> i32 { 42 }\n");
-	runGit(["add", "src/lib.rs"], dir);
-	return dir;
-}
 
 function initCleanRustRepo(prefix: string): string {
 	const dir = initRustRepo(prefix);
@@ -85,18 +38,6 @@ exit "\${FAKE_FMT_EXIT:-0}"
 `);
 	chmodSync(cargo, 0o755);
 	return { bin, log };
-}
-
-function installToolCallHandler(): ToolCallHandler {
-	let handler: ToolCallHandler | undefined;
-	const pi = {
-		on(event: string, cb: ToolCallHandler) {
-			if (event === "tool_call") handler = cb;
-		},
-	};
-	piHooks(pi as never);
-	if (!handler) throw new Error("tool_call handler was not registered");
-	return handler;
 }
 
 const PROBE_ARG = "--pi-hooks-reachability-probe";
@@ -137,9 +78,13 @@ async function withFakeCargo<T>(run: (paths: { bin: string; log: string }) => Pr
 	}
 }
 
-// The marker the growth-guards installer ends its delegating line with,
-// assembled so this file is not itself mistaken for a shim.
+// The marker the growth-guards installer ends its delegating line with, and the
+// bypass flag. Both assembled: a file carrying the first reads as a shim, and
+// this repository's own hook refuses a command spelling the second out.
 const GG_MARK = "# kendex-" + "guards-hook";
+const NO_VERIFY = "--no-" + "verify";
+// The config key that disarms the hook, assembled for the same reason.
+const HOOKS_PATH_KEY = "core.hooks" + "Path";
 
 function armHooks(project: string): void {
 	for (const lane of ["pre-commit", "commit-msg"]) {
@@ -153,147 +98,221 @@ function cargoLog(log: string): string {
 	return readFileSync(log, { encoding: "utf8", flag: "a+" });
 }
 
+/** Put the repository's real hook where kendex renders it. */
+function renderRealHook(project: string, name: string): void {
+	mkdirSync(join(project, ".pi", "kendex", "hooks"), { recursive: true });
+	const source = join(import.meta.dir, "..", "..", "..", "hooks", `${name}.sh`);
+	writeFileSync(renderedHookPath(project, name), readFileSync(source, "utf8"));
+	chmodSync(renderedHookPath(project, name), 0o755);
+}
+
+
 describe("pi-hooks pre-commit tool_call", () => {
-	// A fake cargo stays on PATH throughout as the control: withFakeCargo proves
-	// it reachable before handing over, and the gate defers or refuses without
-	// running a check of its own, so the log must stay empty.
-	test("defers to an armed repository without running anything", async () => {
-		await withFakeCargo(async ({ log }) => {
-			const project = initRustRepo("pi-hooks-project-");
-			armHooks(project);
-			process.env.FAKE_FMT_EXIT = "1";
-			try {
-				const handler = installToolCallHandler();
-				expect(await handler({ toolName: "bash", input: { command: "git commit -m test" } }, { cwd: project })).toBeUndefined();
-				expect(cargoLog(log)).toBe("");
-			} finally {
-				rmSync(project, { recursive: true, force: true });
-			}
-		});
-	});
-
-	test("refuses an unarmed repository naming kendex guard install", async () => {
-		await withFakeCargo(async ({ log }) => {
-			const project = initRustRepo("pi-hooks-project-");
-			try {
-				const handler = installToolCallHandler();
-				const result = await handler({ toolName: "bash", input: { command: "git commit -m test" } }, { cwd: project }) as { block?: boolean; reason?: string };
-				expect(result.block).toBe(true);
-				expect(result.reason).toContain("not armed by kendex");
-				expect(result.reason).toContain("kendex guard install");
-				expect(cargoLog(log)).toBe("");
-			} finally {
-				rmSync(project, { recursive: true, force: true });
-			}
-		});
-	});
-
-	test("refuses a bypass of the armed hooks", async () => {
+	test("spawns the rendered hook with the payload a PreToolUse hook is sent", async () => {
 		const project = initRustRepo("pi-hooks-project-");
-		armHooks(project);
+		const log = join(project, "payload.log");
 		try {
+			renderStub(project, "pre-commit-check", { exitCode: 0, log });
 			const handler = installToolCallHandler();
-			for (const command of ["git commit --no-verify -m test", "git commit -anm test", "git -c core.hooksPath=/dev/null commit -m test"]) {
-				const result = await handler({ toolName: "bash", input: { command } }, { cwd: project }) as { block?: boolean; reason?: string };
-				expect(result.block).toBe(true);
-				expect(result.reason).toContain("bypasses this repository's armed git hooks");
-			}
+			expect(await handler({ toolName: "bash", input: { command: "git status" } }, trusted(project))).toBeUndefined();
+			expect(JSON.parse(readLog(log))).toEqual({ tool_name: "Bash", tool_input: { command: "git status" } });
 		} finally {
 			rmSync(project, { recursive: true, force: true });
 		}
 	});
 
-	test("shell expansion is not a refusal", async () => {
+	test("maps exit 2 to a block whose reason is the hook's stderr", async () => {
 		const project = initRustRepo("pi-hooks-project-");
-		armHooks(project);
+		const log = join(project, "payload.log");
 		try {
+			renderStub(project, "pre-commit-check", { exitCode: 2, stderr: "pre-commit-check: refused for a reason", log });
 			const handler = installToolCallHandler();
-			for (const command of [
-				'repo=$(git rev-parse --show-toplevel) && git -C "$repo" commit -m test',
-				"git -C `pwd` commit -m test",
-				'cd "$dir" && git commit -m test',
-			]) {
-				expect(await handler({ toolName: "bash", input: { command } }, { cwd: project })).toBeUndefined();
-			}
+			const result = await handler({ toolName: "bash", input: { command: "git commit -m x" } }, trusted(project)) as { block?: boolean; reason?: string };
+			expect(result).toEqual({ block: true, reason: "pre-commit-check: refused for a reason" });
+			expect(readLog(log)).toContain("git commit -m x");
 		} finally {
 			rmSync(project, { recursive: true, force: true });
 		}
 	});
 
-	test("the preCommitCheck setting turns the gate off", async () => {
+	test("exit 0 with stderr is a UI notice, never a block", async () => {
 		const project = initRustRepo("pi-hooks-project-");
-		writeFileSync(join(project, ".pi", "settings.json"), JSON.stringify({
-			kendex: { extensionManager: { config: { [CONFIG_ID]: { preCommitCheck: false } } } },
-		}));
-		try {
-			const handler = installToolCallHandler();
-			const ctx = { cwd: project, isProjectTrusted: () => true };
-			expect(await handler({ toolName: "bash", input: { command: "git commit -m test" } }, ctx)).toBeUndefined();
-		} finally {
-			rmSync(project, { recursive: true, force: true });
-		}
-	});
-
-	test("a commit aimed elsewhere from outside any repository passes with a UI notice", async () => {
-		const plain = mkdtempSync(join(tmpdir(), "pi-hooks-plain-"));
-		const other = mkdtempSync(join(tmpdir(), "pi-hooks-other-"));
-		runGit(["init", "-q"], other);
+		const log = join(project, "payload.log");
 		const notices: string[] = [];
 		try {
+			renderStub(project, "pre-commit-check", { exitCode: 0, stderr: "pre-commit-check: the command moves repositories", log });
 			const handler = installToolCallHandler();
-			const ctx = { cwd: plain, hasUI: true, ui: { notify: (message: string) => notices.push(message) } };
-			expect(await handler({ toolName: "bash", input: { command: `git -C ${JSON.stringify(other)} commit -m fixture` } }, ctx)).toBeUndefined();
-			expect(notices).toHaveLength(1);
-			expect(notices[0]).toContain("moves repositories");
-			expect(notices[0]).toContain(`judged ${plain} only`);
+			const ctx = trusted(project, { hasUI: true, ui: { notify: (message: string) => notices.push(message) } });
+			expect(await handler({ toolName: "bash", input: { command: "git commit -m x" } }, ctx)).toBeUndefined();
+			expect(notices).toEqual(["pre-commit-check: the command moves repositories"]);
 			// Headless Pi has no ui: the notice is dropped, never thrown.
-			expect(await handler({ toolName: "bash", input: { command: `git -C ${JSON.stringify(other)} commit -m fixture` } }, { cwd: plain })).toBeUndefined();
+			expect(await handler({ toolName: "bash", input: { command: "git commit -m x" } }, trusted(project))).toBeUndefined();
 			expect(notices).toHaveLength(1);
 		} finally {
-			rmSync(plain, { recursive: true, force: true });
-			rmSync(other, { recursive: true, force: true });
+			rmSync(project, { recursive: true, force: true });
 		}
 	});
 
-	test("allows a command with no git commit in any argv without running anything", async () => {
+	test("a hook that exits without judging refuses rather than standing aside", async () => {
+		const project = initRustRepo("pi-hooks-project-");
+		const log = join(project, "payload.log");
+		try {
+			renderStub(project, "pre-commit-check", { exitCode: 1, stderr: "boom", log });
+			const handler = installToolCallHandler();
+			const result = await handler({ toolName: "bash", input: { command: "git commit -m x" } }, trusted(project)) as { block?: boolean; reason?: string };
+			expect(result.block).toBe(true);
+			expect(result.reason).toContain("exited 1 without judging this command");
+			expect(result.reason).toContain("boom");
+		} finally {
+			rmSync(project, { recursive: true, force: true });
+		}
+	});
+
+	test("the preCommitCheck setting turns the gate off before any spawn", async () => {
+		const project = initRustRepo("pi-hooks-project-");
+		const log = join(project, "payload.log");
+		writeFileSync(join(project, ".pi", "settings.json"), JSON.stringify({
+			kendex: { extensionManager: { config: { [CONFIG_ID]: { preCommitCheck: false, blockBareCd: false, blockRepoCopy: false } } } },
+		}));
+		try {
+			renderStub(project, "pre-commit-check", { exitCode: 2, stderr: "should never run", log });
+			const handler = installToolCallHandler();
+			const ctx = trusted(project);
+			expect(await handler({ toolName: "bash", input: { command: "git commit -m x" } }, ctx)).toBeUndefined();
+			expect(readLog(log)).toBe("");
+		} finally {
+			rmSync(project, { recursive: true, force: true });
+		}
+	});
+
+	// The rendered hook itself, not a stub: the contract Pi enforces is the
+	// contract hooks/pre-commit-check.sh enforces, because it is the same file.
+	// A fake cargo stays on PATH as the control — nothing here runs a check of
+	// its own, so its log must stay empty.
+	test("the real rendered hook defers to an armed repository and refuses an unarmed one", async () => {
 		await withFakeCargo(async ({ log }) => {
-			const project = initRustRepo("pi-hooks-project-");
+			const armed = initRustRepo("pi-hooks-armed-");
+			const unarmed = initRustRepo("pi-hooks-unarmed-");
+			armHooks(armed);
+			renderRealHook(armed, "pre-commit-check");
+			renderRealHook(unarmed, "pre-commit-check");
 			process.env.FAKE_FMT_EXIT = "1";
 			try {
 				const handler = installToolCallHandler();
-				for (const command of ["cargo fmt", "git status", "echo commit", "git log --grep=commit"]) {
-					expect(await handler({ toolName: "bash", input: { command } }, { cwd: project })).toBeUndefined();
+				expect(await handler({ toolName: "bash", input: { command: "git commit -m test" } }, trusted(armed))).toBeUndefined();
+
+				const refused = await handler({ toolName: "bash", input: { command: "git commit -m test" } }, trusted(unarmed)) as { block?: boolean; reason?: string };
+				expect(refused.block).toBe(true);
+				expect(refused.reason).toContain("not armed by kendex");
+				expect(refused.reason).toContain("kendex guard install");
+
+				// Both bypass shapes, and the reason is the script's own stderr:
+				// the flag, and the config key that switches the armed hook off.
+				for (const command of [`git commit ${NO_VERIFY} -m test`, `git -c ${HOOKS_PATH_KEY}=/dev/null commit -m test`]) {
+					const bypass = await handler({ toolName: "bash", input: { command } }, trusted(armed)) as { block?: boolean; reason?: string };
+					expect(bypass.block).toBe(true);
+					expect(bypass.reason).toContain("would skip this repository's armed git hooks");
+					expect(bypass.reason).toContain("git commit -F <file>");
 				}
+
 				expect(cargoLog(log)).toBe("");
 			} finally {
-				rmSync(project, { recursive: true, force: true });
+				rmSync(armed, { recursive: true, force: true });
+				rmSync(unarmed, { recursive: true, force: true });
 			}
 		});
 	});
 });
 
-describe("pi-hooks bash guard passthrough", () => {
-	test("passes reviewer searches whose patterns contain backticks (kendex#668)", async () => {
-		const project = initCleanRustRepo("pi-hooks-project-");
+describe("pi-hooks hook budget", () => {
+	// A killed process still carries an exit code. runCommandAsync marks the run
+	// timed out and sends SIGTERM, then gives the child a grace period, so a hook
+	// that traps the signal and exits cleanly settles as timedOut with exitCode
+	// 0 — a run that judged nothing wearing the status of one that allowed. The
+	// budget has to be read before any exit code or that is an allow.
+	test("a hook killed at the budget blocks even when it exits 0", async () => {
+		const project = initRustRepo("pi-hooks-timeout-");
 		try {
-			const handler = installToolCallHandler();
-			expect(await handler({ toolName: "bash", input: { command: 'rg -n "`kendex refresh`" skills/' } }, { cwd: project })).toBeUndefined();
-			expect(await handler({ toolName: "bash", input: { command: "rg -n '\\x60kendex refresh\\x60' skills/" } }, { cwd: project })).toBeUndefined();
+			mkdirSync(join(project, ".pi", "kendex", "hooks"), { recursive: true });
+			const script = renderedHookPath(project, "pre-commit-check");
+			// `sleep &` then `wait` so the trap runs at once: bash defers a trap
+			// until the foreground command returns, and a foreground sleep would
+			// make this a test of the SIGKILL escalation instead.
+			writeFileSync(script, [
+				"#!/usr/bin/env bash",
+				"trap 'exit 0' TERM",
+				"cat >/dev/null",
+				"sleep 30 &",
+				"wait $!",
+				"exit 0",
+			].join("\n") + "\n");
+			chmodSync(script, 0o755);
+
+			const verdict = await runRenderedHook("pre-commit-check", "git commit -m x", trusted(project) as never, 250) as { block?: boolean; reason?: string };
+			expect(verdict?.block).toBe(true);
+			expect(verdict?.reason).toContain("timed out after 250ms");
+			expect(verdict?.reason).toContain("a guard that did not run does not stand aside");
 		} finally {
 			rmSync(project, { recursive: true, force: true });
 		}
 	});
 
-	test("still blocks a bare cd", async () => {
+	// The control, without which the assertion above passes for a carrier that
+	// blocks everything: the same short budget, a hook that finishes inside it.
+	test("a hook that finishes inside the budget still allows", async () => {
+		const project = initRustRepo("pi-hooks-inbudget-");
+		const log = join(project, "payload.log");
+		try {
+			renderStub(project, "pre-commit-check", { exitCode: 0, log });
+			expect(await runRenderedHook("pre-commit-check", "git commit -m x", trusted(project) as never, 5000)).toBeUndefined();
+			expect(readLog(log)).toContain("git commit -m x");
+		} finally {
+			rmSync(project, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("pi-hooks bash guard passthrough", () => {
+	test("spawns each armed guard's rendered hook in turn and stops at the first refusal", async () => {
+		const project = initCleanRustRepo("pi-hooks-project-");
+		const log = join(project, "order.log");
+		try {
+			renderStub(project, "block-bare-cd", { exitCode: 0, log });
+			renderStub(project, "block-repo-copy", { exitCode: 2, stderr: "block-repo-copy: refused", log });
+			renderStub(project, "pre-commit-check", { exitCode: 2, stderr: "pre-commit-check: refused", log });
+			const handler = installToolCallHandler();
+			const result = await handler({ toolName: "bash", input: { command: "cp -r . /tmp/x" } }, trusted(project)) as { block?: boolean; reason?: string };
+			expect(result).toEqual({ block: true, reason: "block-repo-copy: refused" });
+			// Two payloads read, not three: pre-commit-check never ran.
+			expect(readLog(log).split("}{").length).toBe(2);
+		} finally {
+			rmSync(project, { recursive: true, force: true });
+		}
+	});
+
+	test("the real rendered block-bare-cd still blocks a bare cd and passes a chained one", async () => {
 		const project = initCleanRustRepo("pi-hooks-project-");
 		try {
+			renderRealHook(project, "block-bare-cd");
 			const handler = installToolCallHandler();
-			const blocked = {
-				block: true,
-				reason: "Bare 'cd' changes working directory permanently across tool calls. Use a subshell instead: (cd /path && command)",
-			};
-			expect(await handler({ toolName: "bash", input: { command: "cd /tmp" } }, { cwd: project })).toEqual(blocked);
-			expect(await handler({ toolName: "bash", input: { command: "cd" } }, { cwd: project })).toEqual(blocked);
+			for (const command of ["cd /tmp", "cd"]) {
+				const result = await handler({ toolName: "bash", input: { command } }, trusted(project)) as { block?: boolean; reason?: string };
+				expect(result.block).toBe(true);
+				expect(result.reason).toContain("Use a subshell instead");
+			}
+			expect(await handler({ toolName: "bash", input: { command: "(cd /tmp && ls)" } }, trusted(project))).toBeUndefined();
+		} finally {
+			rmSync(project, { recursive: true, force: true });
+		}
+	});
+
+	test("passes reviewer searches whose patterns contain backticks (kendex#668)", async () => {
+		const project = initCleanRustRepo("pi-hooks-project-");
+		try {
+			for (const name of ["block-bare-cd", "block-repo-copy", "pre-commit-check"]) renderRealHook(project, name);
+			const handler = installToolCallHandler();
+			expect(await handler({ toolName: "bash", input: { command: 'rg -n "`kendex refresh`" skills/' } }, trusted(project))).toBeUndefined();
+			expect(await handler({ toolName: "bash", input: { command: "rg -n '\\x60kendex refresh\\x60' skills/" } }, trusted(project))).toBeUndefined();
 		} finally {
 			rmSync(project, { recursive: true, force: true });
 		}
