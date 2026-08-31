@@ -2,8 +2,14 @@
 //! adversarial input: every read resolves against the canonical source
 //! root, refuses to look through symlinks (a hostile catalog must not pull
 //! host files into rendered artifacts or recurse forever), and carries
-//! depth, count, and byte budgets. Raw `fs` calls over catalog paths are
-//! banned by the guard — this module is the only door.
+//! depth, count, and byte budgets. This is the door for a catalog's bytes,
+//! and the guard bans raw `fs` reads over catalog paths to keep it so.
+//!
+//! One probe is asked outside it: `source::slot_free` reads a local-source
+//! path through `fs::entry`, which is the raw half, because a write-guard
+//! has to see a dangling link as an occupant where the containment check
+//! here refuses outright. That is a path no source contains yet, not a
+//! catalog's content.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -120,61 +126,30 @@ impl SealedSource {
         Ok(())
     }
 
-    /// What is at `path`: `Some` metadata when something is, `None` when
-    /// nothing is, and an error when the filesystem will not say. The one
-    /// place the three answers are kept apart, so that every question below
-    /// asks it once and none of them can invent a fourth.
-    ///
-    /// The reading for a caller deciding what a write would land on. A
-    /// directory can be listable without being traversable — mode 000 on a
-    /// child, or an ACL — so a probe into it fails while the item it holds
-    /// is on disk and about to be trashed. Absent and unanswerable are the
-    /// same word in a boolean, and that word is how a guard deletes what it
-    /// exists to protect.
-    pub fn entry_at(&self, path: &Path) -> Result<Option<fs::Metadata>> {
+    /// What is under this source at `path`, with the filesystem's refusal
+    /// to say kept apart from its saying nothing is there. Containment
+    /// first, so a read inside a source is a sealed read whether or not
+    /// its caller remembered to ask: [`crate::fs::entry`] answers about a
+    /// link itself, and this is where the reader refuses to look through
+    /// one. The raw probe stays for a caller outside any source.
+    pub(crate) fn entry(&self, path: &Path) -> Result<Option<fs::Metadata>> {
         self.contained(path)?;
-        match fs::metadata(path) {
-            Ok(meta) => Ok(Some(meta)),
-            // Nothing is there, said two ways: no such name, and a name
-            // built under a file, which is how a probe for `<item>/SKILL.md`
-            // reads when the entry beside it is an ordinary file. Neither is
-            // a read the filesystem refused to make.
-            Err(e)
-                if matches!(
-                    e.kind(),
-                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
-                ) =>
-            {
-                Ok(None)
-            }
-            Err(e) => Err(CoreError::io(path, e)),
-        }
-    }
-
-    /// Whether a file is at `path`, or an error when the filesystem will
-    /// not say. See [`SealedSource::entry_at`].
-    pub fn file_at(&self, path: &Path) -> Result<bool> {
-        Ok(self.entry_at(path)?.is_some_and(|meta| meta.is_file()))
-    }
-
-    /// Whether a directory is at `path`, or an error when the filesystem
-    /// will not say. See [`SealedSource::entry_at`].
-    pub fn dir_at(&self, path: &Path) -> Result<bool> {
-        Ok(self.entry_at(path)?.is_some_and(|meta| meta.is_dir()))
+        crate::fs::entry(path)
     }
 
     /// Whether a file is at `path`, reading a question the filesystem will
     /// not answer as a no. The reading for a caller drawing rows, which
-    /// cannot draw what it cannot read either way. It is the answer above
-    /// with the error collapsed, in one place, so the two never drift.
+    /// cannot draw what it cannot read either way. Anything deciding what a
+    /// write would land on asks [`SealedSource::entry`] instead, where the
+    /// third answer survives.
     pub fn is_file(&self, path: &Path) -> bool {
-        self.file_at(path).unwrap_or(false)
+        self.entry(path).ok().flatten().is_some_and(|m| m.is_file())
     }
 
     /// Whether a directory is at `path`, reading a question the filesystem
     /// will not answer as a no. See [`SealedSource::is_file`].
     pub fn is_dir(&self, path: &Path) -> bool {
-        self.dir_at(path).unwrap_or(false)
+        self.entry(path).ok().flatten().is_some_and(|m| m.is_dir())
     }
 
     pub fn read(&self, path: &Path) -> Result<Vec<u8>> {
@@ -215,36 +190,22 @@ impl SealedSource {
     /// Symlinked entries are listed too — reading through one is what
     /// fails, loudly.
     ///
-    /// The reading for a caller that is about to decide what a write would
-    /// land on top of, or which bytes install: a name the directory will
-    /// not hand over means the answer is unknown, and an unknown answer
-    /// read as an empty directory is how a guard deletes what it exists to
-    /// protect.
-    pub fn all_entries(&self, dir: &Path) -> Result<Vec<PathBuf>> {
-        self.entries(dir, true)
-    }
-
-    /// The entries of a directory that could be read, bounded and sorted.
-    ///
-    /// The reading for a caller that draws rows: a name the directory will
-    /// not hand over costs its own row and no other, so one unreadable
-    /// entry never takes a directory's readable items out of a listing.
-    /// The directory itself is a different matter and still errors — that
-    /// is not one row, it is the whole answer, and what an unreadable
-    /// directory costs the surface is the surface's to decide.
-    pub fn readable_entries(&self, dir: &Path) -> Result<Vec<PathBuf>> {
-        self.entries(dir, false)
-    }
-
-    fn entries(&self, dir: &Path, every: bool) -> Result<Vec<PathBuf>> {
+    /// A name the directory will not hand over is an error, never a
+    /// shorter listing: a caller about to decide what a write would land
+    /// on top of must not read an unknown answer as an empty directory.
+    /// Every caller takes that same answer and does one of three things
+    /// with it. A listing drops the rows of that directory and draws the
+    /// rest, which is what it already does when the directory itself
+    /// cannot be opened. A walk carries the refusal up, so one unhandable
+    /// name costs the discovery pass or the README lookup whole. And a
+    /// lookup for one name — `find_item`, the extension search over a
+    /// scoped directory — answers not-found, because it is asking whether
+    /// a name is there and a directory it cannot read is not offering it.
+    pub fn entries(&self, dir: &Path) -> Result<Vec<PathBuf>> {
         self.contained(dir)?;
         let mut entries: Vec<PathBuf> = Vec::new();
         for entry in fs::read_dir(dir).map_err(|e| CoreError::io(dir, e))? {
-            match entry {
-                Ok(entry) => entries.push(entry.path()),
-                Err(e) if every => return Err(CoreError::io(dir, e)),
-                Err(_) => continue,
-            }
+            entries.push(entry.map_err(|e| CoreError::io(dir, e))?.path());
             // The bound holds while collecting — a million-entry directory
             // must not get a million-entry allocation first. A directory of
             // exactly the limit is within it; the entry after that is not.
@@ -302,7 +263,7 @@ impl SealedSource {
                 reason: format!("catalog tree nests deeper than {MAX_TREE_DEPTH} levels"),
             });
         }
-        for path in self.all_entries(dir)? {
+        for path in self.entries(dir)? {
             let Some(name) = path.file_name() else {
                 continue;
             };

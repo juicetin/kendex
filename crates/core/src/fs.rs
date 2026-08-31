@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::ErrorKind::{AlreadyExists, NotFound, PermissionDenied};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -7,24 +8,11 @@ use crate::error::{CoreError, Result};
 
 mod links;
 mod lock;
+mod probe;
 pub(crate) use links::{points_at, resolved, spelling};
 pub(crate) use lock::{LockedFile, open_read_no_follow};
-
-/// Whether a path is something a shell would run: a regular file with an
-/// execute bit. Being present is a different question — a directory, or a
-/// data file, can carry the name of a command and answer yes to it.
-pub fn is_executable(path: &Path) -> bool {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::metadata(path)
-            .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
-    }
-    #[cfg(not(unix))]
-    {
-        path.is_file()
-    }
-}
+pub use probe::is_executable;
+pub(crate) use probe::{absent, entry};
 
 /// Give a file the execute bit. On Windows there is none to give, and the
 /// file being there is the whole of what a caller can arrange.
@@ -103,7 +91,7 @@ fn write_then_rename(
             .open(&candidate)
         {
             Ok(file) => break (candidate, file),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) if error.kind() == AlreadyExists => continue,
             Err(error) => return Err(CoreError::io(&candidate, error)),
         }
     };
@@ -144,8 +132,8 @@ fn follow_link(path: &Path) -> PathBuf {
 
 pub fn read_if_exists(path: &Path) -> Result<Option<String>> {
     match fs::read_to_string(path) {
-        Ok(s) => Ok(Some(s)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Ok(text) => Ok(Some(text)),
+        Err(e) if e.kind() == NotFound => Ok(None),
         Err(e) => Err(CoreError::io(path, e)),
     }
 }
@@ -192,7 +180,7 @@ fn sync_written_file(path: &Path) -> Result<()> {
     let write_handle = || fs::OpenOptions::new().write(true).open(path);
     let refused = match write_handle() {
         Ok(file) => return file.sync_all().map_err(|e| CoreError::io(path, e)),
-        Err(refused) if refused.kind() == std::io::ErrorKind::PermissionDenied => refused,
+        Err(refused) if refused.kind() == PermissionDenied => refused,
         Err(other) => return Err(CoreError::io(path, other)),
     };
     let Ok(mode) = fs::metadata(path).map(|meta| meta.permissions()) else {

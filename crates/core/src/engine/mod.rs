@@ -51,7 +51,7 @@ pub use settings_scan::settings_templates;
 mod scoring;
 mod set_change;
 mod stale;
-mod takeover;
+pub mod takeover;
 mod targets;
 mod tree_plan;
 mod unmanaged;
@@ -99,19 +99,6 @@ pub use report_types::{DriftCause, DriftRow, DriftState, EngineReport, ItemWarni
 /// Compute drift and the plan that would fix it — the Audit page and
 /// `apply` both consume this.
 pub fn plan_scope(
-    env: &Env,
-    scope: &Scope,
-    manifest: &Manifest,
-    lock: &Lock,
-    options: &PlanOptions,
-) -> Result<EngineReport> {
-    let report = plan_scope_once(env, scope, manifest, lock, options)?;
-    takeover::hold_back_sweep(options, report, |sweep| {
-        plan_scope_once(env, scope, manifest, lock, sweep)
-    })
-}
-
-fn plan_scope_once(
     env: &Env,
     scope: &Scope,
     manifest: &Manifest,
@@ -220,6 +207,7 @@ fn plan_scope_once(
     report.notes.extend(scope_notes);
     unmanaged_rows(env, scope, &manifest, lock, &state.items, &mut report.drift)?;
     takeover::refuse_unsettled_takeover(options, &report.drift)?;
+    takeover::refuse_unsettleable_sweep(options, &report.drift)?;
     Ok(report)
 }
 

@@ -2,7 +2,7 @@
 //! have to name the scope they were read in. Every offer here is checked
 //! against what a reader could actually run.
 
-use crate::test_util::source_path;
+use crate::test_util::{rooted, source_path};
 
 use std::fs;
 
@@ -135,14 +135,14 @@ fn a_folder_that_is_not_a_skill_is_not_offered_the_keep() {
     assert_eq!(offer(&planned), "move them somewhere else first");
 }
 
-/// The scope-wide flag replaces every item it can take over whole and
-/// holds back one it could only half settle, naming it in the notes — it
-/// refuses only when nothing settles. So one wholly replaceable item makes
-/// the command worth typing, and a held-back neighbour is no reason to
-/// withhold it.
+/// The scope-wide flag answers for every item it sweeps up or for none of
+/// them, so an item it takes and can only half settle refuses the whole
+/// run. Offering the command beside a wholly replaceable neighbour would
+/// name one that cannot succeed on the scope it is printed under, so it is
+/// withheld — while each item's own way out still stands.
 #[test]
 #[allow(clippy::unwrap_used)]
-fn one_wholly_replaceable_item_is_reason_enough_for_the_scope_exit() {
+fn an_item_the_sweep_would_refuse_on_withholds_the_scope_exit() {
     let tmp = tempfile::tempdir().unwrap();
     let home = tmp.path();
     let project = project_with(home, "[\"claude\", \"codex\"]", "copy");
@@ -175,9 +175,11 @@ fn one_wholly_replaceable_item_is_reason_enough_for_the_scope_exit() {
     let planned = plan(home, &project);
     assert!(planned.contains("conflict: skill lint"), "{planned}");
     assert!(
-        planned.contains("--replace-unmanaged"),
-        "the exit the sweep would follow through on was withheld: {planned}"
+        !planned.contains("--replace-unmanaged"),
+        "a command that would refuse on this scope was offered: {planned}"
     );
+    // The per-item ways out are untouched: only the scope-wide offer goes.
+    assert!(planned.contains("conflict: skill deploy"), "{planned}");
 }
 
 /// A hard conflict beside files in the way. Both exits act on the whole
@@ -365,4 +367,171 @@ fn a_directory_named_like_the_marker_is_not_offered_the_keep() {
         "move them somewhere else first",
         "{planned}"
     );
+}
+
+/// A person's own edit never takes the item's other exits away, which is
+/// the invariant `DriftCause::is_own_decision` exists to keep. The sweep
+/// settles a scope whose only unsettleable row is an edit, so withholding
+/// the offer there would leave the reader with no printed way to install
+/// what kendex.toml asks for: the per-item line offers only the keep.
+/// Held in the hardest shape the rows allow: one item carrying an edit at
+/// one tool and a stranger's files at another, beside an item wholly
+/// replaceable at two places. The fixture asserts both of lint's rows
+/// before it reads the offer, because a claude-only install leaves the
+/// shared tree Codex reads untouched and it is easy to write the stranger
+/// where no tool looks.
+#[test]
+#[allow(clippy::unwrap_used)]
+fn an_edit_beside_a_replaceable_item_does_not_withhold_the_scope_exit() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = rooted(&tmp);
+    let home = home.as_path();
+    let project = project_with(home, "[\"claude\"]", "copy");
+    fs::create_dir_all(home.join("catalog/skills/lint")).unwrap();
+    fs::write(
+        home.join("catalog/skills/lint/SKILL.md"),
+        "---\nname: lint\ndescription: lints it\n---\nUpstream.\n",
+    )
+    .unwrap();
+    let manifest = project.join("kendex.toml");
+    let text = fs::read_to_string(&manifest).unwrap();
+    fs::write(
+        &manifest,
+        text.replace(
+            "[skills.deploy]\nsource = \"cat\"\n",
+            "[skills.lint]\nsource = \"cat\"\n",
+        ),
+    )
+    .unwrap();
+    // lint installs for claude alone, and the person edits it.
+    assert!(kendex(home, &project, &["apply", "-y"]).status.success());
+    fs::write(
+        project.join(".claude/skills/lint/SKILL.md"),
+        "---\nname: lint\ndescription: lints it\n---\nEdited by hand.\n",
+    )
+    .unwrap();
+    // Codex joins, with a stranger's files already at lint's place there,
+    // and deploy is declared beside it and wholly replaceable.
+    let text = fs::read_to_string(&manifest).unwrap();
+    fs::write(
+        &manifest,
+        text.replace(
+            "harnesses = [\"claude\"]",
+            "harnesses = [\"claude\", \"codex\"]",
+        )
+        .replace(
+            "[skills.lint]\nsource = \"cat\"\n",
+            "[skills.lint]\nsource = \"cat\"\n\n[skills.deploy]\nsource = \"cat\"\n",
+        ),
+    )
+    .unwrap();
+    // Codex reads the shared tree, which a claude-only install never
+    // wrote, so a stranger there is unmanaged content for Codex alone.
+    fs::create_dir_all(project.join(".agents/skills/lint")).unwrap();
+    fs::write(
+        project.join(".agents/skills/lint/SKILL.md"),
+        "---\nname: lint\ndescription: lints it\n---\nSomebody else's.\n",
+    )
+    .unwrap();
+    // deploy is wholly replaceable at both tools' places, so the verdict
+    // has two replaceable dead stops of one item to weigh as well.
+    folder_at(&project.join(".claude/skills/deploy"), "By hand.");
+    folder_at(&project.join(".agents/skills/deploy"), "By hand.");
+
+    let planned = plan(home, &project);
+    // The fixture proves nothing unless lint carries both halves: the
+    // person's edit at one tool, and a stranger's files at another.
+    assert!(
+        planned.contains("conflict: skill lint for Claude Code: edited on disk"),
+        "the edit half is missing: {planned}"
+    );
+    assert!(
+        planned.contains("conflict: skill lint for Codex")
+            && planned.contains("already holds files kendex did not write"),
+        "the stranger half is missing: {planned}"
+    );
+    assert!(planned.contains("conflict: skill deploy"), "{planned}");
+    assert!(
+        planned.contains("--replace-unmanaged"),
+        "an edit is not a row the sweep refuses on: {planned}"
+    );
+}
+
+/// The offer and the engine, checked against each other on one scope
+/// rather than each against itself. A case that pins the CLI's rule
+/// against the CLI's rule passes whether or not that rule agrees with the
+/// run it advertises, which is how a divergence in either direction lives
+/// through a cycle. So each shape here is planned, then the advertised
+/// command is actually run: the offer is printed exactly where running it
+/// installs what kendex.toml asks for.
+///
+/// The shapes are the two directions plus the ordinary one. What this
+/// cannot reach is a conflict the unflagged pass stops at before looking
+/// past it — a stranger's tree in the canonical position with the harness
+/// link beside it never inspected — because the blocking row is absent
+/// from the plan the CLI reads.
+#[test]
+#[allow(clippy::unwrap_used)]
+fn the_offer_is_printed_exactly_where_the_run_it_names_settles_the_scope() {
+    for (shape, build) in [
+        ("wholly replaceable", 0),
+        ("an edit beside a replaceable item", 1),
+        ("a shared folder nothing can settle", 2),
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = rooted(&tmp);
+        let home = home.as_path();
+        let project = project_with(home, "[\"claude\", \"codex\"]", "copy");
+        folder_at(&project.join(".claude/skills/deploy"), "By hand.");
+        folder_at(&project.join(".agents/skills/deploy"), "By hand.");
+        if build == 1 {
+            assert!(kendex(home, &project, &["apply", "-y"]).status.success());
+            folder_at(&project.join(".claude/skills/deploy"), "Edited by hand.");
+        }
+        if build == 2 {
+            // A second item with one replaceable copy and one shared
+            // folder, which is never written over.
+            fs::create_dir_all(home.join("catalog/skills/lint")).unwrap();
+            fs::write(
+                home.join("catalog/skills/lint/SKILL.md"),
+                "---\nname: lint\ndescription: lints it\n---\nUpstream.\n",
+            )
+            .unwrap();
+            let manifest = project.join("kendex.toml");
+            let text = fs::read_to_string(&manifest).unwrap();
+            fs::write(
+                &manifest,
+                text.replace(
+                    "[skills.deploy]\nsource = \"cat\"\n",
+                    "[skills.deploy]\nsource = \"cat\"\n\n[skills.lint]\nsource = \"cat\"\n",
+                ),
+            )
+            .unwrap();
+            let elsewhere = home.join("shared/lint");
+            folder_at(&elsewhere, "Shared by hand.");
+            folder_at(&project.join(".claude/skills/lint"), "By hand.");
+            link_at(&project.join(".agents/skills/lint"), &elsewhere);
+        }
+
+        let offered = plan(home, &project).contains("--replace-unmanaged");
+        let swept = said(&kendex(
+            home,
+            &project,
+            &["apply", "--replace-unmanaged", "-y"],
+        ));
+        // What the offer promises, read off the scope afterwards rather
+        // than off the run's own words: nothing is in the way any more.
+        // A run that exits clean having changed nothing has not installed
+        // what kendex.toml asks for.
+        let after = plan(home, &project);
+        let settled = !after.contains("conflict: ");
+        assert_eq!(
+            offered,
+            settled,
+            "{shape}: the plan {} the flag, and running it left the scope {}\n\
+             --- the run said:\n{swept}\n--- and the scope now:\n{after}",
+            if offered { "offered" } else { "withheld" },
+            if settled { "settled" } else { "still blocked" },
+        );
+    }
 }

@@ -6,6 +6,7 @@ use std::fs;
 
 use super::{entry, find, seeded, selection, skill, target};
 use crate::author::import::{CandidateGroup, ImportSelection, apply, inventory};
+use crate::error::CoreError;
 use crate::model::{HarnessId, ItemKind, Scope};
 
 /// One name offered by two provenances with identical bytes is one origin
@@ -164,6 +165,144 @@ fn licence_evidence_files_travel_with_the_copy() {
     );
     let notice = fs::read_to_string(target.join("NOTICES/cat/LICENSE")).unwrap();
     assert_eq!(notice, "MIT text here\n");
+}
+
+/// A catalog whose root will not be listed carries no evidence this can
+/// see, and a copy made anyway would take somebody's bytes and leave their
+/// licence behind. Every other listing answers an unreadable directory by
+/// drawing no rows; this one refuses, because there is no surface for the
+/// person to notice the omission on.
+#[cfg(unix)]
+#[test]
+#[allow(clippy::unwrap_used)]
+fn a_catalog_that_will_not_be_listed_refuses_rather_than_copying_bare() {
+    use std::os::unix::fs::PermissionsExt;
+    let (tmp, env, scope) = seeded();
+    let catalog = tmp.path().join("catalog");
+    fs::write(catalog.join("LICENSE"), "MIT text here\n").unwrap();
+    let scopes = [scope];
+    let target = target(&env, &tmp, "mine-unreadable");
+    let candidates = inventory(&env, &scopes).unwrap();
+    let gh = find(&candidates, "gh");
+    let chosen = selection(gh, true);
+
+    fs::set_permissions(&catalog, fs::Permissions::from_mode(0o311)).unwrap();
+    // Root lists any directory whatever its mode, so there the denial under
+    // test does not exist and the evidence simply travels.
+    let denied = !rustix::process::geteuid().is_root();
+    let asked = apply(&env, &scopes, &target, &[chosen]);
+    fs::set_permissions(&catalog, fs::Permissions::from_mode(0o755)).unwrap();
+
+    match denied {
+        true => assert!(matches!(asked, Err(CoreError::Io { .. })), "{asked:?}"),
+        false => assert!(asked.is_ok(), "{asked:?}"),
+    }
+}
+
+/// A symlinked LICENSE is the same loss with no permissions in it. The
+/// sealed reader refuses to look through a link inside a source, and read
+/// as a boolean that refusal says "no file here" — so the entry is passed
+/// over and the package is copied with its notice left behind.
+#[cfg(unix)]
+#[test]
+#[allow(clippy::unwrap_used)]
+fn a_symlinked_licence_refuses_rather_than_copying_bare() {
+    let (tmp, env, scope) = seeded();
+    let elsewhere = tmp.path().join("LICENSE-real");
+    fs::write(&elsewhere, "MIT text here\n").unwrap();
+    std::os::unix::fs::symlink(&elsewhere, tmp.path().join("catalog/LICENSE")).unwrap();
+    let scopes = [scope];
+    let target = target(&env, &tmp, "mine-linked-licence");
+    let candidates = inventory(&env, &scopes).unwrap();
+    let gh = find(&candidates, "gh");
+
+    let asked = apply(&env, &scopes, &target, &[selection(gh, true)]);
+    assert!(
+        matches!(asked, Err(CoreError::SourceEscape { .. })),
+        "{asked:?}"
+    );
+    // The refusal is what stopped the copy, not something after it: read
+    // as a boolean the same probe lets this through, and the package lands
+    // with no NOTICES beside it.
+    assert!(
+        !target.join("skills/gh").exists(),
+        "the bytes were copied before the evidence was found missing"
+    );
+}
+
+/// A licence file whose name is bytes no UTF-8 spells. On Linux that is
+/// an ordinary filename, and both halves of the read meet it: the stem is
+/// matched on the lossy spelling, so `LICENSE.<invalid>` is seen as the
+/// evidence it is rather than passed over, and the name cannot be written
+/// at the destination, so the copy refuses rather than going out without
+/// it. Read either way round it is the same harm — a package published
+/// with somebody's licence left behind.
+///
+/// What this needs is a filesystem that will hold such a name, which is
+/// narrower than a platform: macOS enforces UTF-8 at the filesystem layer
+/// and refuses to create one at all, so the case cannot build its own
+/// precondition there. Compiled out where it cannot run rather than
+/// skipped inside a passing run, because a skip reported as a pass is how
+/// a case stops covering anything without saying so.
+#[cfg(target_os = "linux")]
+#[test]
+#[allow(clippy::unwrap_used)]
+fn a_licence_name_no_utf8_spells_refuses_rather_than_copying_bare() {
+    use std::os::unix::ffi::OsStrExt;
+    let (tmp, env, scope) = seeded();
+    let odd = std::ffi::OsStr::from_bytes(b"LICENSE.\xff");
+    // The precondition, said rather than unwrapped: a filesystem that
+    // will not hold the name is the one thing that makes this case
+    // meaningless, so it names itself rather than panicking on a line
+    // that reads like setup.
+    fs::write(tmp.path().join("catalog").join(odd), "MIT text here\n").unwrap_or_else(|error| {
+        panic!("this filesystem will not hold a non-UTF-8 name, which the case needs: {error}")
+    });
+    let scopes = [scope];
+    let target = target(&env, &tmp, "mine-odd-licence");
+    let candidates = inventory(&env, &scopes).unwrap();
+    let gh = find(&candidates, "gh");
+
+    let asked = apply(&env, &scopes, &target, &[selection(gh, true)]);
+    assert!(
+        matches!(asked, Err(CoreError::SourceEscape { .. })),
+        "{asked:?}"
+    );
+    assert!(
+        !target.join("skills/gh").exists(),
+        "the bytes were copied before the evidence was found unreadable"
+    );
+}
+
+/// And the same for one evidence file the catalog will not hand over. The
+/// directory lists, so the licence is known to be there and known not to
+/// have travelled — copying the bytes anyway is the harm this refusal
+/// exists to stop, said about one file rather than the whole root.
+#[cfg(unix)]
+#[test]
+#[allow(clippy::unwrap_used)]
+fn a_licence_file_that_cannot_be_read_refuses_rather_than_copying_bare() {
+    use std::os::unix::fs::PermissionsExt;
+    let (tmp, env, scope) = seeded();
+    let licence = tmp.path().join("catalog/LICENSE");
+    fs::write(&licence, "MIT text here\n").unwrap();
+    let scopes = [scope];
+    let target = target(&env, &tmp, "mine-unreadable-licence");
+    let candidates = inventory(&env, &scopes).unwrap();
+    let gh = find(&candidates, "gh");
+    let chosen = selection(gh, true);
+
+    fs::set_permissions(&licence, fs::Permissions::from_mode(0o000)).unwrap();
+    // Root reads any file whatever its mode, so there the denial under
+    // test does not exist and the evidence simply travels.
+    let denied = !rustix::process::geteuid().is_root();
+    let asked = apply(&env, &scopes, &target, &[chosen]);
+    fs::set_permissions(&licence, fs::Permissions::from_mode(0o644)).unwrap();
+
+    match denied {
+        true => assert!(matches!(asked, Err(CoreError::Io { .. })), "{asked:?}"),
+        false => assert!(asked.is_ok(), "{asked:?}"),
+    }
 }
 
 /// The target must not sit inside a tree the bytes come from.

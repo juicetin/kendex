@@ -26,7 +26,7 @@ mod stated;
 mod vacant;
 use agent::capture_agent;
 pub use beside::fork_beside;
-use forkable::{ambiguous_skill_tree, source_form};
+use forkable::{ambiguous_skill_tree, forkable_kind, source_form, unsupported_kind};
 pub use forkable::{forkable_harness, forkable_rendering};
 use provenance::{installed_commit, provenance};
 pub use rename::rename_fork;
@@ -50,6 +50,9 @@ pub fn fork(
     name: &str,
     harness: HarnessId,
 ) -> Result<Plan> {
+    // The same first question its two sibling verbs ask, so all three
+    // answer a kind they cannot fork with the same words.
+    forkable_kind(kind, name)?;
     let mut manifest = manifest_for_mutation(env, scope)?;
     let Some(decl) = manifest.declared(kind).get(name).cloned() else {
         return Err(CoreError::NotDeclared {
@@ -159,12 +162,7 @@ fn edited_rendering(
             };
             existing_or_disabled(dir.join(crate::render::agent::file_name(harness, name)))
         }
-        other => {
-            return Err(CoreError::ItemNotInSource {
-                name: name.to_owned(),
-                source_name: format!("fork does not support {} yet", other.name()),
-            });
-        }
+        other => return Err(unsupported_kind(other, name)),
     };
     if edited.is_symlink() || !edited.exists() {
         return Err(CoreError::ItemNotFound {
@@ -260,16 +258,12 @@ fn named_bytes(bytes: Vec<u8>, name: &str) -> Result<Vec<u8>> {
         std::str::from_utf8(&bytes).map_err(|_| refused("the file is not text".to_owned()))?;
     crate::render::skill::with_name(text, name)
         .map(String::into_bytes)
-        .map_err(|problem| refused(problem.to_string()))
+        .map_err(|problem| refused(problem.to_owned()))
 }
 
 /// The local source's path for an item of this kind under `name`.
 fn local_item(env: &Env, scope: &Scope, kind: ItemKind, name: &str) -> PathBuf {
-    let local_root = local_source_root(env, scope);
-    match kind {
-        ItemKind::Skill => local_root.join("skills").join(name),
-        _ => local_root.join("agents").join(format!("{name}.md")),
-    }
+    crate::source::local_slot(&local_source_root(env, scope), kind, name)
 }
 
 /// The ops that move the edited bytes into the local source: an earlier

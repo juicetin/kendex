@@ -2,11 +2,11 @@ use std::path::Path;
 
 use super::agent::merged_instructions;
 use crate::error::Result;
-use crate::frontmatter::NameProblem;
 use crate::manifest::Manifest;
 use crate::source_read::SealedSource;
 
 mod rendered;
+pub(crate) use rendered::with_name;
 pub use rendered::{Files, Rendered};
 
 const SKILL_FILE: &str = "SKILL.md";
@@ -71,47 +71,6 @@ fn with_instructions(
     Ok(Rendered::new(files))
 }
 
-/// The text with its frontmatter `name` replaced by `name`, emitted as a
-/// YAML scalar so a value that would read as something else (`[copy]`,
-/// `gh #edited`) comes back quoted. Only the value's own bytes change: the
-/// opener, the terminator, every other line, and each line's ending stay
-/// as they were. The problem names why the entry is not one scalar to
-/// replace.
-pub(crate) fn renamed(text: &str, name: &str) -> std::result::Result<String, NameProblem> {
-    let span = crate::frontmatter::name_value_span(text)?;
-    Ok(format!(
-        "{}{}{}",
-        &text[..span.start],
-        super::yaml_scalar(name),
-        &text[span.end..]
-    ))
-}
-
-/// [`renamed`], except a frontmatter without a `name` gets one as its
-/// first line, in the file's own line ending. The remaining problems —
-/// no frontmatter to carry a name, two names, a value no single scalar
-/// can replace — come back for the caller to refuse or ignore: the
-/// validators say those plainly, and writing around them here would hide
-/// them.
-pub(crate) fn with_name(text: &str, installed: &str) -> std::result::Result<String, NameProblem> {
-    match renamed(text, installed) {
-        Err(NameProblem::Missing { insert_at }) => {
-            let newline = if text.starts_with("---\r\n") {
-                "\r\n"
-            } else {
-                "\n"
-            };
-            Ok(format!(
-                "{}name: {}{newline}{}",
-                &text[..insert_at],
-                super::yaml_scalar(installed),
-                &text[insert_at..]
-            ))
-        }
-        other => other,
-    }
-}
-
 /// Inject (or refresh) the project-instructions block right after the
 /// frontmatter. The skill author's text is never touched: the block lives
 /// between markers, and strip + inject are exact inverses so re-rendering
@@ -166,70 +125,6 @@ fn frontmatter_end(text: &str) -> usize {
 mod tests {
     use super::*;
 
-    #[test]
-    fn renamed_quotes_what_would_read_as_something_else_and_keeps_every_other_byte() {
-        let cases = [
-            (
-                "---\nname: gh\n---\nBody.\n",
-                "[copy]",
-                "---\nname: \"[copy]\"\n---\nBody.\n",
-            ),
-            (
-                "---\nname: gh\n---\nBody.\n",
-                "gh #edited",
-                "---\nname: \"gh #edited\"\n---\nBody.\n",
-            ),
-            (
-                "---\nname : gh\ndescription: d\n---\n",
-                "mine",
-                "---\nname : mine\ndescription: d\n---\n",
-            ),
-            (
-                "---\r\nname: gh\r\n---\r\nBody.\r\n",
-                "mine",
-                "---\r\nname: mine\r\n---\r\nBody.\r\n",
-            ),
-            (
-                "---\nname: gh # old\n...\nBody.\n",
-                "mine",
-                "---\nname: mine\n...\nBody.\n",
-            ),
-            ("---\nname: \"gh\"\n---\n", "mine", "---\nname: mine\n---\n"),
-            (
-                "---\nname: \"gh\" # package\n---\n",
-                "mine",
-                "---\nname: mine # package\n---\n",
-            ),
-            (
-                "---\nname: gh\n  # note\ndescription: d\n---\n",
-                "mine",
-                "---\nname: mine\n  # note\ndescription: d\n---\n",
-            ),
-        ];
-        for (text, name, want) in cases {
-            assert_eq!(renamed(text, name).as_deref(), Ok(want), "{text:?}");
-        }
-        assert_eq!(
-            renamed("---\nname: [copy]\n---\n", "mine"),
-            Err(NameProblem::NotAScalar)
-        );
-    }
-
-    #[test]
-    fn with_name_adds_a_missing_name_in_the_files_own_line_ending() {
-        assert_eq!(
-            with_name("---\r\ndescription: d\r\n---\r\nBody.\r\n", "mine").as_deref(),
-            Ok("---\r\nname: mine\r\ndescription: d\r\n---\r\nBody.\r\n")
-        );
-        assert_eq!(
-            with_name("Body.\n", "mine"),
-            Err(NameProblem::NoFrontmatter)
-        );
-        assert_eq!(
-            with_name("---\nname: a\nname: b\n---\n", "mine"),
-            Err(NameProblem::Twice)
-        );
-    }
     use crate::manifest::MANIFEST_SCHEMA;
     use std::path::PathBuf;
 

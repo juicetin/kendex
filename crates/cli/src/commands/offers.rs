@@ -85,15 +85,16 @@ fn offer_for(env: &Env, item: &[&DriftRow]) -> Option<Offer> {
     })
 }
 
-/// Whether the scope-wide take-over settles this one item whole. The flag
-/// replaces each item it can settle whole and holds back the ones it could
-/// only half settle, so a single row it cannot take stops the item.
+/// Whether the flag can take this row's place.
+fn can_replace(row: &&DriftRow) -> bool {
+    row.cause.is_some_and(DriftCause::can_replace)
+}
+
+/// Whether the scope-wide take-over settles this one item whole. It
+/// answers for every item it sweeps up or for none of them, so a single
+/// row it cannot take stops the item.
 fn item_replaceable(item: &[&DriftRow]) -> bool {
-    item.iter()
-        .any(|row| row.cause.is_some_and(DriftCause::can_replace))
-        && item
-            .iter()
-            .all(|row| row.cause.is_some_and(DriftCause::can_replace))
+    item.iter().any(can_replace) && item.iter().all(can_replace)
 }
 
 /// Whether the offer belongs under this row: the last of the item's rows

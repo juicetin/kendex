@@ -662,6 +662,48 @@ fn deleting_one_of_several_hooks_still_takes_the_sections_before_them_off() {
     assert_eq!(banners(&text), 1, "{text}");
 }
 
+/// The other half of the same rule: a blank line inside a generated code
+/// block that the person did NOT touch is the wrapper's own line, so the
+/// section still comes off whole. Read as separation the walk would leave
+/// the block's blank line standing, take none of the section, and the
+/// next render would write the whole thing a second time.
+#[test]
+#[allow(clippy::unwrap_used)]
+fn a_generated_code_block_the_person_left_alone_still_comes_off() {
+    let w = agent_world(
+        "\"claude\"",
+        "---\nname: rev\ndescription: agent rev\n---\nUpstream body.\n",
+        "",
+        "[agent-additional-instructions]\nrev = \"\"\"\nRun each in turn:\n\n```sh\nfirst\n\nsecond\n```\"\"\"\n",
+    );
+    let file = rendered(&w, HarnessId::Claude, "rev");
+    let text = fs::read_to_string(&file).unwrap();
+    assert!(text.contains("```sh\nfirst\n\nsecond\n```"), "{text}");
+
+    // Only the body changes. The generated section, blank line and all,
+    // is exactly as the renderer wrote it.
+    fs::write(&file, text.replace("Upstream body.", "My body.")).unwrap();
+
+    let plan = fork::fork(&w.env, &w.scope, ItemKind::Agent, "rev", HarnessId::Claude).unwrap();
+    apply::execute(&w.env, &plan).unwrap();
+    resettle(&w);
+
+    let source = fs::read_to_string(captured(&w, "rev")).unwrap();
+    assert_eq!(times(&source, "My body."), 1, "{source}");
+    for line in ["## Additional Instructions", "Run each in turn:", "```sh"] {
+        assert_eq!(times(&source, line), 0, "{line} was kept: {source}");
+    }
+
+    // And the rendering carries the section once, not twice.
+    let text = fs::read_to_string(&file).unwrap();
+    assert_eq!(times(&text, "## Additional Instructions"), 1, "{text}");
+    assert!(
+        text.contains("```sh\nfirst\n\nsecond\n```"),
+        "the block came back from the manifest with its blank line: {text}"
+    );
+    assert_eq!(banners(&text), 1, "{text}");
+}
+
 /// A code block indented into the prose is a block like a fenced one, and
 /// a blank line inside it is the block's own. A walk that reads a block
 /// only where its markers are takes the section the person edited, and
@@ -713,4 +755,44 @@ fn whitespace_a_person_edits_inside_an_indented_block_is_their_edit() {
     assert!(text.contains("    first\n    second"), "{text}");
     assert!(text.contains("    first\n\n    second"), "{text}");
     assert_eq!(banners(&text), 1, "{text}");
+}
+
+/// The wrapper is read by rendering the agent around a stand-in body and
+/// taking what surrounds it, so a publisher who wrote no body at all is
+/// the end of the range where that reading could break. The fork still
+/// captures, and what it captures is the person's line and no wrapper.
+#[test]
+#[allow(clippy::unwrap_used)]
+fn a_publisher_body_with_nothing_in_it_still_forks() {
+    for published in [
+        "---\nname: rev\ndescription: agent rev\n---\n",
+        "---\nname: rev\ndescription: agent rev\n---\n\n",
+        "---\nname: rev\ndescription: agent rev\n---\n   \n",
+    ] {
+        let w = agent_world(
+            "\"claude\"",
+            published,
+            "",
+            "[agent-additional-instructions]\nrev = \"Say what you changed.\"\n",
+        );
+        let file = rendered(&w, HarnessId::Claude, "rev");
+        // Their line goes where the body goes: between the banner and the
+        // generated section, the region the publisher left empty.
+        let text = fs::read_to_string(&file).unwrap();
+        let edited = text.replacen(
+            "## Additional Instructions",
+            "Mine.\n\n## Additional Instructions",
+            1,
+        );
+        assert_ne!(edited, text, "{published:?}: {text}");
+        fs::write(&file, &edited).unwrap();
+
+        let plan = fork::fork(&w.env, &w.scope, ItemKind::Agent, "rev", HarnessId::Claude)
+            .unwrap_or_else(|e| panic!("{published:?}: {e}"));
+        apply::execute(&w.env, &plan).unwrap();
+        let source = fs::read_to_string(captured(&w, "rev")).unwrap();
+        assert_eq!(times(&source, "Mine."), 1, "{published:?}: {source}");
+        let kept = times(&source, "## Additional Instructions");
+        assert_eq!(kept, 0, "{published:?}: the wrapper was kept: {source}");
+    }
 }
