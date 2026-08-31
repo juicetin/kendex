@@ -13,15 +13,32 @@
 # which harness a pane runs. Both are reported as CONTEXT_USED_PCT: one
 # direction, and a rising number always means a fuller context.
 #
-# WHERE the status line sits is not a line count. Claude draws ONE ROW PER
-# RUNNING AGENT below it, so the footer grows with the fleet — and the
-# deepest footers belong to the orchestrating lanes, the ones this
-# measurement exists for. The whole captured screen is read and the
-# BOTTOM-MOST reading wins: anything above it is an earlier render of the
-# same lane, from before it compacted. Bottom-most is safe only because a
-# reading is a whole STATUS LINE and never a fragment prose can carry too:
-# otherwise the lowest sentence naming a model and a percentage beats the
-# real status line above it.
+# WHERE the status line sits differs by harness, and that is what decides
+# how each one is found.
+#
+# Codex draws its status line LAST. In every captured pane it is the final
+# non-empty row, with blank rows and nothing else below it, so the codex
+# reading is taken from that row and from no other row on the screen. A
+# final row that is not a status line is no reading at all, never a search
+# up the transcript for something shaped like one. POSITION carries that
+# refusal because shape cannot: codex's status items are user-configured
+# (`[tui].status_line` — model with reasoning, git branch, project name,
+# codex version, tokens used, working directory), and `gpt-5.6-sol default`
+# is a configured item while `compact now` is a sentence about compaction,
+# and the two are the same shape. A reader that refuses what it does not
+# recognise leaves the lane unmeasured, and an unmeasured lane is never
+# compacted — which is the outcome compaction exists to prevent. So what
+# follows the separator is taken as it comes.
+#
+# Claude draws ONE ROW PER RUNNING AGENT below its status line, so the
+# footer grows with the fleet — and the deepest footers belong to the
+# orchestrating lanes, the ones this measurement exists for. Its status line
+# is never the final row, so the claude reading is the BOTTOM-MOST whole-line
+# match instead: anything above it is an earlier render of the same lane,
+# from before it compacted. Bottom-most is safe only because a reading is a
+# whole STATUS LINE and never a fragment prose can carry too: otherwise the
+# lowest sentence naming a model and a percentage beats the real status line
+# above it.
 #
 # A screen that outlived its harness is refused rather than measured, and
 # that refusal takes positive evidence, never distance: the pane's
@@ -40,9 +57,10 @@ set -euo pipefail
 # running less, vim or git log still holds the old footer and passes any
 # not-a-shell test. `[a-z0-9]*claude` covers the per-account wrappers this
 # fleet launches through — nclaude, dclaude, 1claude — which exec the real
-# binary, and agent-confine is the launcher they exec through. Anything else
-# is refused BY NAME, so a harness missing from this list reads as a named
-# refusal in the report rather than as a lane that stopped being measured.
+# binary, and agent-confine is the launcher both harnesses exec through, so
+# it names neither. Anything else is refused BY NAME, so a harness missing
+# from this list reads as a named refusal in the report rather than as a lane
+# that stopped being measured.
 LANE_CONTEXT_HARNESSES='[a-z0-9]*claude|codex|pi|agent-confine'
 
 # Shells choose the refusal's wording and nothing else: a pane back at its
@@ -68,12 +86,38 @@ lane_context_emit() {
     }'
 }
 
-# Read one context figure from a captured screen on stdin. Prints
-# `<harness>\t<used percent>`; exits 1 when the screen carries neither shape.
+# The shape a pane's foreground process ($1) offers, decided here and in no
+# other place: `codex` the codex shape alone, a claude wrapper spelling the
+# claude shape alone, and anything else `both`, because a reader with no rule
+# for a harness has nothing better than the shapes themselves — `pi`, an empty
+# name for a pane that has left the enumeration, and `agent-confine`, which is
+# the launcher BOTH harnesses exec through and so names neither. Reading the
+# screen and refusing it both select on this answer, so a wrapper spelling
+# added to one list and not the other cannot read one harness's screen and
+# name the other's in its refusal.
+lane_context_shape() {
+  case "${1:-}" in
+    codex) printf 'codex\n' ;;
+    *claude) printf 'claude\n' ;;
+    *) printf 'both\n' ;;
+  esac
+}
+
+# Read one context figure from a captured screen on stdin. $1 is the pane's
+# foreground process, which `lane_context_shape` turns into the shape offered.
+# Prints `<harness>\t<used percent>`; exits 1 when the shape offered found
+# nothing.
 #
-# Every line is offered and the LAST match wins. No window is taken off the
-# bottom: the footer under the status line is one row per running agent and
-# has no bound, so any count would lose exactly the busiest lanes.
+# The codex shape is offered the FINAL NON-EMPTY line and no other. The
+# claude shape is offered every line and its LAST match wins; no window is
+# taken off the bottom, because the footer under a claude status line is one
+# row per running agent and has no bound, so any count would lose exactly the
+# busiest lanes. Where both are offered, a final line carrying the codex shape
+# settles the reading, out of range included: falling through to a claude
+# match higher up would be the search the position rule exists to refuse. On a
+# codex pane there is no falling through at all — the claude shape is never
+# offered, so a screen that does not end in a codex status line is
+# could-not-tell however much of this fleet's transcript sits above it.
 #
 # Matching is done on a lowercased copy of each line: a model name is a word,
 # and the harness spells it differently in different places. The claude
@@ -89,44 +133,52 @@ lane_context_emit() {
 # command (`/rc`) — never running text. The branch parenthetical is optional:
 # a lane outside a repository has none, and a session that has not rendered a
 # percentage yet matches nothing at all.
-# The codex reading is a WHOLE LINE at both ends for the same reason: the
-# context item OPENS its line — leading whitespace or box decoration only,
-# nothing alphanumeric — and what may follow it is another status item behind
-# a separator, never running text. `Documentation: Context 60% used means
-# compact now` fails the opening; `Context 60% used means compact now` fails
-# the end; and `Context 60% used · and that is an example` fails it too,
-# because a trailing item is capped at three tokens — the longest status item
-# this reader has seen (`Opus 5 41%`) — where a sentence is longer. Each is a
-# fragment a bottom-most rule would otherwise let take the verdict from the
-# real line above it.
-# The codex shape is tested first and consumes its line, so a screen carrying
-# both never takes the claude direction for a codex reading. Codex's status
-# item is user-configured and both directions ship, so both are matched and
-# only `left` is converted. A percentage over 100 is not a context figure and
-# is dropped rather than reported, whichever shape carried it.
+# The codex reading is a WHOLE LINE at its OPENING and takes what follows as
+# it comes. The context item opens the line — leading whitespace or box
+# decoration only, nothing alphanumeric — so `Documentation: Context 60% used
+# means compact now` is not one, and `Context 60% used means compact now`
+# needs the separator its configured items are drawn behind. Past that
+# separator the line is read no further. Every candidate for the job — a path
+# (`/var/tmp/…`), a model with its reasoning effort (`gpt-5.6-sol default`), a
+# git branch, a project name, a version, a token count — is one to three bare
+# words, and so is a sentence's opening; a shape that admits the ones this
+# reader has seen and refuses the rest refuses configured status lines it has
+# not seen, and leaves those lanes unmeasured. Position is what keeps prose
+# out, so the shape does not have to try.
+# Codex's status item is user-configured and both directions ship, so both
+# are matched and only `left` is converted. A percentage over 100 is not a
+# context figure and is dropped rather than reported, whichever shape carried
+# it.
 lane_context_parse() {
-  local out
-  out="$(awk '
+  local out shape
+  shape="$(lane_context_shape "${1:-}")"
+  out="$(awk -v shape="$shape" '
     {
+      if ($0 ~ /[^ \t]/) last = $0
+      if (shape == "codex") next
       low = tolower($0)
-      if (match(low, /^[^a-z0-9]*context:?[ \t]+[0-9]+%[ \t]+(left|used)([ \t]+(·|[|])[ \t]+[^ \t]+([ \t]+[^ \t]+){0,2})?[ \t]*$/)) {
+      if (match(low, /^[ \t]*[^ \t()]+([ \t]+\([^)]*\))?[ \t]+(opus|sonnet|haiku|fable)[ \t]+[0-9]+(\.[0-9]+)?([ \t]*\([^)]*\))?[ \t]+[0-9]+%[ \t]+\([^) \t]+\)([ \t]+\/[^ \t]*)*[ \t]*$/)) {
+        s = substr(low, RSTART, RLENGTH)
+        match(s, /[0-9]+%[ \t]+\([^) \t]+\)/)
+        s = substr(s, RSTART, RLENGTH)
+        sub(/%.*$/, "", s)
+        if (s != "" && s + 0 <= 100) { c_found = 1; c_used = s + 0 }
+      }
+    }
+    END {
+      low = (shape == "claude") ? "" : tolower(last)
+      if (match(low, /^[^a-z0-9]*context:?[ \t]+[0-9]+%[ \t]+(left|used)([ \t]+(·|[|])[ \t]+[^ \t].*)?[ \t]*$/)) {
+        codex_line = 1
         s = substr(low, RSTART, RLENGTH)
         match(s, /[0-9]+%[ \t]+(left|used)/)
         s = substr(s, RSTART, RLENGTH)
         remaining = (s ~ /left$/)
         gsub(/[^0-9]/, "", s)
         if (s + 0 <= 100) { harness = "codex"; used = remaining ? 100 - (s + 0) : s + 0 }
-        next
       }
-      if (match(low, /^[ \t]*[^ \t()]+([ \t]+\([^)]*\))?[ \t]+(opus|sonnet|haiku|fable)[ \t]+[0-9]+(\.[0-9]+)?([ \t]*\([^)]*\))?[ \t]+[0-9]+%[ \t]+\([^) \t]+\)([ \t]+\/[^ \t]*)*[ \t]*$/)) {
-        s = substr(low, RSTART, RLENGTH)
-        match(s, /[0-9]+%[ \t]+\([^) \t]+\)/)
-        s = substr(s, RSTART, RLENGTH)
-        sub(/%.*$/, "", s)
-        if (s != "" && s + 0 <= 100) { harness = "claude"; used = s + 0 }
-      }
+      if (!codex_line && c_found) { harness = "claude"; used = c_used }
+      if (harness != "") printf "%s\t%d\n", harness, used
     }
-    END { if (harness != "") printf "%s\t%d\n", harness, used }
   ')"
   [[ -n "$out" ]] || return 1
   printf '%s\n' "$out"
@@ -144,7 +196,9 @@ lane_context_parse() {
 # against an unrelated local pane and emitted as ok. So the claim's server is
 # compared against this one, enumerated once, before anything is captured.
 # The same enumeration carries each pane's foreground process, which is what
-# says whether a harness is still drawing the screen about to be read.
+# says whether a harness is still drawing the screen about to be read — and
+# WHICH harness, which is how the reader knows the shape to look for without
+# guessing it from a screen that quotes both all day.
 lane_context_collect() {
   local claims="$1" alias_fn="$2" cfg lane server pane screen parsed
   local this_server detail cmd pane_cmds p_pid p_pane p_cmd
@@ -188,9 +242,14 @@ lane_context_collect() {
           "unreadable" "the pane could not be captured; it is gone from this server"
         continue
       fi
-      if ! parsed="$(lane_context_parse <<<"$screen")"; then
+      if ! parsed="$(lane_context_parse "$cmd" <<<"$screen")"; then
+        case "$(lane_context_shape "$cmd")" in
+          codex) detail="the screen does not end in a valid codex context figure; the last non-empty row is the only row a codex reading is taken from" ;;
+          claude) detail="the screen carries no claude status line" ;;
+          *) detail="the screen carries neither harness's context figure" ;;
+        esac
         lane_context_emit "$lane" "$pane" "$cfg" "$("$alias_fn" "$cfg")" "" "" \
-          "no_status_line" "the screen carries neither harness's context figure"
+          "no_status_line" "$detail"
         continue
       fi
       lane_context_emit "$lane" "$pane" "$cfg" "$("$alias_fn" "$cfg")" \
