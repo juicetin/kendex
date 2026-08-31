@@ -1,11 +1,20 @@
 [env]
 
-# GROWTH GUARDS — repo growth checks (growth-guards skill).
-# Project-scope `kendex add` / `kendex refresh` merge these defaults into
-# <project>/kendex.settings.toml (never overwriting existing keys). The keys
-# below are the ones a project is expected to answer for itself; every other
-# GROWTH_GUARDS_* key ships a default that needs no attention, and the full
-# list is in the skill's SKILL.md.
+# GROWTH GUARDS — repo growth checks (growth-guards skill). Nothing below
+# is marked `# required`, so installing this skill writes nothing into
+# <project>/kendex.settings.toml. What an install writes, and when, is
+# kendex's docs/authoring/settings.md. Every GROWTH_GUARDS_* key, and the
+# default it ships, is in the skill's SKILL.md.
+
+# Which checks the batch runs, space separated. The full list and what each
+# one bans is in CHECKS.md; naming a subset is how a project takes the
+# family a lane at a time.
+GROWTH_GUARDS_CHECKS = "todo-ban byte-ceiling suppression-ban conflict-markers changelog-entries prose"
+
+# Kilobytes a single tracked file may reach before byte-ceiling refuses it.
+# Declared asset trees are exempted through GROWTH_GUARDS_BYTE_EXCLUDES
+# rather than by raising this.
+GROWTH_GUARDS_BYTE_CEILING_KB = "200"
 
 # The changelog-entries fragment tree: a space-separated list of shell globs
 # against the full repo-relative path (`*` crosses `/`). Each match must be

@@ -9,11 +9,11 @@
 //!
 //! Which assignments count is seeding's judgment, not a second opinion:
 //! the presence check is file-wide, so an assignment outside `[env]` is a
-//! site here as it is there. What the shell loaders would actually read is
-//! narrower, and the gap is the point — a key assigned twice, assigned
-//! outside `[env]`, or written with a value the loaders refuse has no
-//! current value to show and no span to write over, and saying so beats
-//! guessing which line was meant.
+//! site here as it is there. What the loaders read is narrower, and the
+//! gap is the point — a key assigned twice, assigned outside `[env]`, or
+//! written with a value they refuse has no value to show and no span to
+//! write over. [`current_of`] names that gap, so seeding's notes ask it
+//! too ([`crate::settings_seed::Answered`]) rather than guessing.
 
 use std::collections::BTreeMap;
 use std::ops::Range;
@@ -385,9 +385,9 @@ fn span_for(text: &str, key: &str, path: &Path) -> Refused<Range<usize>> {
             lines,
             problem,
         }),
-        // Seeding runs first and inserts every declared key the file does
-        // not already assign, so nothing readable is missing by the time
-        // an edit is written.
+        // Seeding runs first over the keys this save names — most of them
+        // are keys no install ever wrote — so nothing readable is missing
+        // by the time an edit reaches this.
         Current::Absent => Err(SettingsRefusal::Value {
             key: key.to_owned(),
             problem: "it is not assigned in this file and seeding did not insert it".to_owned(),

@@ -1,8 +1,8 @@
 //! One reader for the settings grammar, under every scan over it.
 //!
 //! Three readers walk these files — the strict template check
-//! ([`crate::settings_template`]), seeding and its comment refresh
-//! ([`crate::settings_seed`]), and the consumer-file view
+//! ([`crate::settings_template`]), seeding ([`crate::settings_seed`]),
+//! and the consumer-file view
 //! ([`crate::settings_file`]). Each asks a different question, and all
 //! three used to answer it a line at a time with no memory. A multiline
 //! value carries its content on the lines after the one that opens it, and
@@ -247,6 +247,21 @@ pub fn assignment_of(content: &str) -> Option<(&str, &str)> {
 /// the value a view shows can never be different characters.
 pub fn decoded(value: &str) -> Option<String> {
     quoted_span(value, 0).map(|inner| value[inner].to_owned())
+}
+
+/// What a readable value carries after itself, without the `#`, and where
+/// on the line it starts. `None` where the line ends at the closing quote,
+/// or where the value is not one [`quoted_span`] reads at all.
+///
+/// The offset comes back with the text because a caller that strips the
+/// comment has to cut the line, and re-finding the `#` would find the
+/// first one on the line — which, in `KEY = "a # b" # note`, sits inside
+/// the value.
+pub fn trailing_comment(value: &str) -> Option<(usize, &str)> {
+    let inner = quoted_span(value, 0)?;
+    let after = &value[inner.end + 1..];
+    let at = after.find('#')?;
+    Some((inner.end + 1 + at, after[at + 1..].trim()))
 }
 
 #[cfg(test)]

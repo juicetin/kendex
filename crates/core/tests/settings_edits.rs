@@ -22,7 +22,9 @@ use kendex_core::settings_file::{
 };
 use kendex_core::settings_view::{ScopeSettings, SkillTemplate, scope_settings};
 
-const TEMPLATE: &str = "[env]\n# Which reviewers run by default.\nREVIEWERS = \"arch,security\"\n\n# How deep.\nDEPTH = \"2\"\n";
+/// One key the consumer must decide, which an install writes, and one
+/// that ships a working default, which only a save ever puts in the file.
+const TEMPLATE: &str = "[env]\n# Which reviewers run by default.\nREVIEWERS = \"arch,security\" # required\n\n# How deep.\nDEPTH = \"2\"\n";
 
 struct Fixture {
     _tmp: tempfile::TempDir,
@@ -143,9 +145,29 @@ fn save(f: &Fixture, edits: Vec<SettingsEdit>, base: Base) -> Result<(), CoreErr
     Ok(())
 }
 
+/// Every pass after the arrival: a refresh, which applies no template.
+#[allow(clippy::unwrap_used)]
+fn refresh(f: &Fixture) {
+    let report = kendex_core::engine::audit(&f.env, &f.scope).unwrap();
+    apply::execute(&f.env, &report.plan).unwrap();
+}
+
+/// The pass the skill arrives on, which is the one that applies its
+/// template — the names `ops::add` would hand the plan, being the ones its
+/// manifest gained.
 #[allow(clippy::unwrap_used)]
 fn install(f: &Fixture) {
-    let report = kendex_core::engine::audit(&f.env, &f.scope).unwrap();
+    let manifest = kendex_core::manifest::load_for_mutation(&kendex_core::manifest::manifest_path(
+        &f.env, &f.scope,
+    ))
+    .unwrap()
+    .unwrap();
+    let lock = kendex_core::lock::load(&kendex_core::lock::lock_path(&f.env, &f.scope)).unwrap();
+    let options = PlanOptions {
+        arriving_skills: manifest.skills.keys().cloned().collect(),
+        ..PlanOptions::default()
+    };
+    let report = plan_scope(&f.env, &f.scope, &manifest, &lock, &options).unwrap();
     apply::execute(&f.env, &report.plan).unwrap();
 }
 
@@ -168,11 +190,18 @@ fn the_read_model_carries_the_explainer_the_default_and_the_current_value() {
     let f = fixture(TEMPLATE);
     install(&f);
     let text = fs::read_to_string(settings_path(&f)).unwrap();
-    fs::write(settings_path(&f), text.replace("\"2\"", "\"9\"")).unwrap();
+    fs::write(
+        settings_path(&f),
+        text.replace("\"arch,security\"", "\"mine\""),
+    )
+    .unwrap();
 
     let read = scope_settings(&f.env, &f.scope).unwrap();
     assert!(read.applies);
     assert_eq!(read.base, base_now(&f));
+    // Both states a declared key can be in: one the install wrote and the
+    // person then changed, and one no install writes, which the page
+    // shows against its default until somebody sets it.
     assert_eq!(
         rows_of(&read, "review"),
         vec![
@@ -180,18 +209,11 @@ fn the_read_model_carries_the_explainer_the_default_and_the_current_value() {
                 "REVIEWERS".to_owned(),
                 "arch,security".to_owned(),
                 Current::Value {
-                    value: "arch,security".to_owned(),
+                    value: "mine".to_owned(),
                     line: 7,
                 }
             ),
-            (
-                "DEPTH".to_owned(),
-                "2".to_owned(),
-                Current::Value {
-                    value: "9".to_owned(),
-                    line: 10,
-                }
-            ),
+            ("DEPTH".to_owned(), "2".to_owned(), Current::Absent),
         ]
     );
 }
@@ -215,8 +237,8 @@ fn an_edit_rewrites_only_its_value_span_leaving_comments_and_crlf_intact() {
 }
 
 /// One write, not two: the key is missing from the file, so the same plan
-/// seeds it and sets it, and the ledger records the seed so a later
-/// comment refresh still recognises the block as seeding's own.
+/// seeds it and sets it. Most keys reach a consumer's file only this way,
+/// since an arrival writes the marked ones alone.
 #[test]
 #[allow(clippy::unwrap_used)]
 fn a_save_that_seeds_a_missing_key_and_sets_it_is_one_write() {
@@ -243,23 +265,20 @@ fn a_save_that_seeds_a_missing_key_and_sets_it_is_one_write() {
         .map(|op| op.line())
         .collect();
     assert_eq!(writes.len(), 1, "{writes:?}");
-    assert!(writes[0].contains("seed REVIEWERS, DEPTH"), "{writes:?}");
+    // The edited key and nothing beside it: a save arrives no skill, so
+    // the marked key this template also ships is not written here.
+    assert!(writes[0].contains("seed DEPTH"), "{writes:?}");
     assert!(writes[0].contains("set DEPTH"), "{writes:?}");
+    assert!(!writes[0].contains("REVIEWERS"), "{writes:?}");
     apply::execute(&f.env, &report.plan).unwrap();
 
     let written = fs::read_to_string(settings_path(&f)).unwrap();
     assert!(written.contains("DEPTH = \"7\""), "{written}");
     assert!(written.contains("# How deep."), "{written}");
 
-    // The ledger holds the seed, so a later template revision may still
-    // rewrite the comment block over it.
-    let ledger = kendex_core::lock::load(&kendex_core::lock::lock_path(&f.env, &f.scope))
-        .unwrap()
-        .settings_seeds;
-    assert_eq!(
-        ledger.get("DEPTH").and_then(|seed| seed.owner.clone()),
-        Some("review".to_owned())
-    );
+    // What the consumer now carries is theirs. A template revision does
+    // not follow it in: nothing revisits a block already in the file, so
+    // a later pass plans no write at all.
     let revised = TEMPLATE.replace("# How deep.", "# How deep it goes.");
     fs::write(
         f.project
@@ -267,13 +286,10 @@ fn a_save_that_seeds_a_missing_key_and_sets_it_is_one_write() {
         &revised,
     )
     .unwrap();
-    install(&f);
-    let refreshed = fs::read_to_string(settings_path(&f)).unwrap();
-    // The first asserts the refresh acted; the second that it left the
-    // value alone. A survival assertion is satisfied by its own input, so
-    // it is only worth anything beside one that proves the code ran.
-    assert!(refreshed.contains("# How deep it goes."), "{refreshed}");
-    assert!(refreshed.contains("DEPTH = \"7\""), "{refreshed}");
+    refresh(&f);
+    let after = fs::read_to_string(settings_path(&f)).unwrap();
+    assert_eq!(after, written, "a later pass changes nothing here");
+    assert!(!after.contains("# How deep it goes."), "{after}");
 }
 
 /// The manifest and the settings go down together or not at all. The
@@ -334,7 +350,7 @@ fn a_settings_copy_that_went_stale_refuses_and_the_newer_file_stands() {
     // The writer in between.
     let newer = fs::read_to_string(settings_path(&f))
         .unwrap()
-        .replace("\"2\"", "\"someone else\"");
+        .replace("\"arch,security\"", "\"someone else\"");
     fs::write(settings_path(&f), &newer).unwrap();
 
     let refused = save(&f, vec![set("REVIEWERS", "arch")], held).unwrap_err();
@@ -447,7 +463,7 @@ fn a_reset_writes_the_template_default_back() {
 #[test]
 #[allow(clippy::unwrap_used)]
 fn an_invalid_template_still_reports_what_seeding_wrote() {
-    let f = fixture("[env]\nREVIEWERS = \"arch\"\n");
+    let f = fixture("[env]\nREVIEWERS = \"arch\" # required\n");
     install(&f);
     let read = scope_settings(&f.env, &f.scope).unwrap();
     let review = read.skills.iter().find(|s| s.skill == "review").unwrap();
@@ -574,7 +590,7 @@ fn a_refusal_names_the_file_the_same_way_through_a_link() {
     let held = base_now(&f);
     let newer = fs::read_to_string(settings_path(&f))
         .unwrap()
-        .replace("\"2\"", "\"someone else\"");
+        .replace("\"arch,security\"", "\"someone else\"");
     fs::write(settings_path(&f), &newer).unwrap();
 
     let refused = save(&f, vec![set("REVIEWERS", "arch")], held).unwrap_err();
@@ -616,6 +632,17 @@ fn an_env_declared_as_an_array_of_tables_stops_the_write_and_says_why() {
             .any(|op| op.line().contains("kendex.settings.toml")),
         "nothing may be written into a file with nowhere to write"
     );
+    // Nowhere to write is not a reason to say nothing: the marked key this
+    // file does not answer is still named, and the entries reach the notes
+    // to say it with.
+    assert!(
+        report
+            .notes
+            .iter()
+            .any(|note| note.contains("REVIEWERS") && note.contains("needs this key decided")),
+        "{:?}",
+        report.notes
+    );
     apply::execute(&f.env, &report.plan).unwrap();
     assert_eq!(fs::read_to_string(settings_path(&f)).unwrap(), file);
 
@@ -628,4 +655,75 @@ fn an_env_declared_as_an_array_of_tables_stops_the_write_and_says_why() {
         "{refused:?}"
     );
     assert_eq!(fs::read_to_string(settings_path(&f)).unwrap(), file);
+}
+
+/// The arrival is the one pass a marked key would ever have been written
+/// on, and a name the file has already taken stops that write however the
+/// line took it. What is left is the note, and it is what a person has to
+/// be given: the key, and the line that is not answering it.
+///
+/// Read off the file-wide presence check instead, the note goes quiet on
+/// exactly these files — the key is neither written nor reported, which is
+/// the silence `a pass that gives up still names the key` closed at the
+/// other door.
+#[test]
+#[allow(clippy::unwrap_used)]
+fn an_arrival_over_an_assignment_no_script_reads_still_names_the_key() {
+    for (file, expect) in [
+        (
+            "[other]\nREVIEWERS = \"a\"\n",
+            "it is assigned outside the [env] table, where no script reads it (line 2)",
+        ),
+        (
+            "[env]\n\"REVIEWERS\" = \"a\"\n",
+            "it is assigned as a quoted key, which is not a name a shell can export — spell it REVIEWERS (line 2)",
+        ),
+        (
+            "[env]\nREVIEWERS = \"a\"\nREVIEWERS = \"b\"\n",
+            "it is assigned more than once, and nothing here can say which one wins (lines 2, 3)",
+        ),
+    ] {
+        let f = fixture(TEMPLATE);
+        fs::write(settings_path(&f), file).unwrap();
+
+        let manifest = kendex_core::manifest::load_for_mutation(
+            &kendex_core::manifest::manifest_path(&f.env, &f.scope),
+        )
+        .unwrap()
+        .unwrap();
+        let lock =
+            kendex_core::lock::load(&kendex_core::lock::lock_path(&f.env, &f.scope)).unwrap();
+        let options = PlanOptions {
+            arriving_skills: manifest.skills.keys().cloned().collect(),
+            ..PlanOptions::default()
+        };
+        let report = plan_scope(&f.env, &f.scope, &manifest, &lock, &options).unwrap();
+
+        // The name is taken, so nothing is written over it.
+        assert!(
+            !report
+                .plan
+                .ops
+                .iter()
+                .any(|op| op.line().contains("kendex.settings.toml")),
+            "{file}: {:?}",
+            report
+                .plan
+                .ops
+                .iter()
+                .map(apply::PlannedOp::line)
+                .collect::<Vec<_>>()
+        );
+        // And the key is still named, with the line to go and fix.
+        assert!(
+            report.notes.iter().any(|note| note
+                == &format!(
+                    "kendex.settings.toml REVIEWERS: review needs this key decided and this file's assignment is not one — {expect} — so set it yourself"
+                )),
+            "{file}: {:?}",
+            report.notes
+        );
+        apply::execute(&f.env, &report.plan).unwrap();
+        assert_eq!(fs::read_to_string(settings_path(&f)).unwrap(), file);
+    }
 }

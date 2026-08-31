@@ -1,10 +1,21 @@
 //! `kendex.settings.toml` seeding — skills ship a
-//! `kendex.settings.toml.example` and their `[env]` entries merge into the
-//! project's settings file, write-if-absent per key: comment blocks travel
-//! with their key. The shell-side readers consume the `[env]` table only,
-//! but the presence check here stays file-wide, conservatively: seeding
-//! must never add a key that some assignment outside `[env]` already
-//! names.
+//! `kendex.settings.toml.example`, and the `[env]` entries [`Seeding`]
+//! admits merge into the project's settings file, write-if-absent per key:
+//! comment blocks travel with their key. What it admits is a narrow set. A
+//! template applies once, when its skill arrives, and writes then only the
+//! keys it marks `# required`; a save writes the keys it names. Nothing
+//! else here ever reaches a consumer's file, so a refresh leaves it
+//! byte-identical and a key deleted from it stays deleted. A key nobody
+//! answers is named by [`notes`] rather than written.
+//!
+//! The shell-side readers consume the `[env]` table only, but the presence
+//! check here stays file-wide, conservatively: seeding must never add a key
+//! that some assignment outside `[env]` already names. Whether a key is
+//! ANSWERED is the other question, and the notes take the readers' own
+//! narrow view of it ([`Answered`]): a line the loaders pass over occupies
+//! the name without answering the key. A key in that state is the one a
+//! person most needs telling about — nothing writes it, because the name
+//! is taken, and nothing reads it either.
 //!
 //! An entry is written whole or not at all. A value TOML lets span lines
 //! carries every one of them; a value nothing closes has no complete text
@@ -19,29 +30,51 @@
 //! spelled the destination's way, an LF template seeded into a CRLF file
 //! hands the consumer a different string from the one it declared.
 //!
-//! Seeded comments stay current ([`refresh`]): the lock keeps, per key, the
-//! FNV-1a hash of the comment block last written by seeding, and a key's
-//! comment is rewritten to the template's revision only while its on-disk
-//! text still hashes to that record — anything else is a hand edit,
-//! preserved forever. Value lines are never touched, and every write here
-//! is byte-faithful: comment-block bytes (and the inserted block on a
-//! merge) are the only bytes that change, so CRLF files and
-//! missing-terminator state survive untouched.
+//! Nothing here ever revisits a block it wrote. A comment a consumer
+//! carries is theirs from the moment it lands, whether an arrival or a
+//! save put it there, and a later template revision does not follow it in:
+//! that would be a write into a tracked file on a pass nobody asked to
+//! write. Every write is byte-faithful — the inserted block is the only
+//! change — so CRLF files and missing-terminator state survive untouched.
 
-use crate::lock::SettingsSeed;
 use crate::settings_toml::{Line, Row};
 
 mod env;
 mod notes;
-mod refresh;
 mod write;
 pub use env::{EnvBlocked, env_blocked};
-pub use notes::{conflict_notes, seed_notes, unterminated_notes};
-pub use refresh::refresh_comments;
-pub use write::{merge, record_seeds};
+pub use notes::{Answered, conflict_notes, seed_notes, unterminated_notes};
+pub use write::merge;
 
 pub const SETTINGS_FILE: &str = "kendex.settings.toml";
 pub const SETTINGS_TEMPLATE: &str = "kendex.settings.toml.example";
+/// What a template writes after a value to mark the key as one the
+/// consumer must answer: `LINEAR_TEAM = "" # required`. Cut off before the
+/// assignment is written, so the word never reaches a consumer's file.
+pub const REQUIRED_MARKER: &str = "required";
+
+/// Whether a comment written after a value IS that marker.
+///
+/// One predicate rather than a comparison at each site. Two readings ask
+/// it and they are exact complements: [`extract_env_entries`] writes a key
+/// because it is marked, and the template check's `marker_after_value`
+/// refuses a template that spells the marker any other way. The check
+/// exists precisely so a spelling the seeder does not honour cannot ship,
+/// which it can only do while the two agree on what the marker is. Held
+/// apart they drift in silence both ways: a widened check passes
+/// `# Required` the seeder still ignores, so the key is never written and
+/// never reported either; a widened seeder writes a key the check calls a
+/// mistake.
+///
+/// The comparison is exact, and deliberately so — after a value this
+/// spelling is what is HONOURED. A marker on a comment line of its own is
+/// the other question, and `marker_alone` folds presentation there because
+/// nothing is honoured at all: the only thing to decide is whether the
+/// line is the word.
+pub(crate) fn marks_required(said: &str) -> bool {
+    said == REQUIRED_MARKER
+}
+
 /// The settings file seeding targets in this project.
 pub fn settings_file_path(project_root: &std::path::Path) -> std::path::PathBuf {
     project_root.join(SETTINGS_FILE)
@@ -63,6 +96,12 @@ pub struct EnvEntry {
     /// apart from the comment because which lines are the value is the
     /// walk's answer, not a count off one end of a list of both.
     pub assignment: String,
+    /// Whether the template marks this key as one the consumer has to
+    /// decide, which is the only reason an install writes a key into
+    /// their file. Every other key ships a value its own code already
+    /// reads, so writing it would put a line in a tracked file that
+    /// changes nothing.
+    pub required: bool,
 }
 
 impl EnvEntry {
@@ -83,48 +122,12 @@ impl EnvEntry {
 }
 
 /// One entry as a scope plans it: the template's lines plus the skill that
-/// ships them — the owner every later comment refresh is gated on.
+/// ships them — the skill a note names when two disagree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SeededEnv {
     pub entry: EnvEntry,
     /// The declared skill whose template this came from.
     pub owner: String,
-}
-
-impl SeededEnv {
-    /// The comment block this entry would write, trimmed the way the
-    /// ledger hashes it.
-    fn comment(&self) -> &[String] {
-        trim_blank_edges(&self.entry.comment)
-    }
-
-    /// The ledger record seeding this entry writes.
-    pub fn seed_record(&self) -> SettingsSeed {
-        SettingsSeed {
-            owner: Some(self.owner.clone()),
-            hash: comment_hash(self.comment()),
-        }
-    }
-}
-
-/// The seeded comment block's hash: 64-bit FNV-1a over the block's lines
-/// joined with `\n`.
-pub fn comment_hash(lines: &[String]) -> String {
-    crate::hash::fnv1a_hex(lines.join("\n").as_bytes())
-}
-
-/// Blank separators around a comment block are layout, not content: trim
-/// them off both edges before comparing or hashing. Interior blanks stay.
-fn trim_blank_edges(lines: &[String]) -> &[String] {
-    let mut lo = 0;
-    let mut hi = lines.len();
-    while lo < hi && lines[lo].trim().is_empty() {
-        lo += 1;
-    }
-    while hi > lo && lines[hi - 1].trim().is_empty() {
-        hi -= 1;
-    }
-    &lines[lo..hi]
 }
 
 /// MEMBERSHIP — whether the shell loaders read the assignments under this
@@ -206,6 +209,15 @@ pub fn extract_env_entries(template: &str) -> Vec<EnvEntry> {
                     continue;
                 };
                 let comment = std::mem::take(&mut pending);
+                // The marker is the template's own word and never the
+                // consumer's: where it is there, the assignment is cut
+                // back to its closing quote before anything is written.
+                // Only a value that closes on this line can carry one, so
+                // a multiline value has none to find.
+                let marker = row.assignment().and_then(|(_, value, at)| {
+                    let (offset, said) = crate::settings_toml::trailing_comment(value)?;
+                    marks_required(said).then_some(at - row.at + offset)
+                });
                 // The assignment runs to wherever its value closes. Every
                 // line under an open value is one the walk called
                 // `InValue`, so the run is exactly this entry's.
@@ -235,10 +247,14 @@ pub fn extract_env_entries(template: &str) -> Vec<EnvEntry> {
                 if open || broken {
                     assignment.clear();
                 }
+                if let Some(cut) = marker.filter(|_| !assignment.is_empty()) {
+                    assignment.truncate(assignment[..cut].trim_end().len());
+                }
                 entries.push(EnvEntry {
                     key,
                     comment,
                     assignment,
+                    required: marker.is_some(),
                 });
             }
         }
@@ -260,14 +276,13 @@ pub fn assigned_keys(text: &str) -> Vec<String> {
 /// consumer filters entries itself, so none can be left behind when the
 /// rule changes.
 ///
-/// Four consumers must agree on which declarations count — the bytes
-/// `merge` writes, the owner [`record_seeds`] records, the template a
-/// later comment refresh is gated on, and the defaults
-/// [`conflict_notes`] compares. Derived separately, the rule was changed
-/// in one and missed in the rest: a broken template declaring a key
-/// before a valid one had the valid skill's bytes written under the
-/// broken skill's name, and the notes reported a conflict between a
-/// skill's real default and a broken one's empty one.
+/// Every consumer must agree on which declarations count — the bytes
+/// `merge` writes, the owner [`conflict_notes`] names, the defaults it
+/// compares. Derived separately, the rule was changed in one and missed
+/// in the rest: a broken template declaring a key before a valid one had
+/// the valid skill's bytes written under the broken skill's name, and the
+/// notes reported a conflict between a skill's real default and a broken
+/// one's empty one.
 pub fn writable_all<'a>(
     entries: &'a [SeededEnv],
     key: &str,
@@ -277,11 +292,69 @@ pub fn writable_all<'a>(
         .filter(move |seeded| seeded.entry.key == key && seeded.entry.complete())
 }
 
-/// The declaration that speaks for a key: the first one seeding can write
-/// whole. `None` where no installed template spells the key's value out in
-/// full, which is the case [`unterminated_notes`] owns.
-pub fn writable_for<'a>(entries: &'a [SeededEnv], key: &str) -> Option<&'a SeededEnv> {
-    writable_all(entries, key).next()
+/// Why this pass may put a key in the consumer's file, which is the whole
+/// of what an install writes there.
+///
+/// A template applies ONCE, when its skill arrives. What it writes then is
+/// the keys it marks `# required` — the ones the consumer has to decide,
+/// which have no answer a default could stand in for. Every later pass
+/// over the same scope writes none of it, so a refresh leaves the file as
+/// it found it and a key the consumer deleted stays deleted.
+///
+/// A save is the other reason. The app writes values for keys no seed ever
+/// wrote, and a value needs an assignment to land on, so the keys one save
+/// names are inserted by the same pass that then sets them.
+#[derive(Debug, Default, Clone)]
+pub struct Seeding {
+    /// Skills whose template this pass applies: the ones arriving now.
+    arriving: std::collections::BTreeSet<String>,
+    /// Keys this pass is about to set a value on.
+    edited: std::collections::BTreeSet<String>,
+}
+
+impl Seeding {
+    pub fn new(
+        arriving: impl IntoIterator<Item = String>,
+        edited: impl IntoIterator<Item = String>,
+    ) -> Self {
+        Seeding {
+            arriving: arriving.into_iter().collect(),
+            edited: edited.into_iter().collect(),
+        }
+    }
+
+    /// Whether this declaration is one the pass admits. The one statement
+    /// of the rule, asked through [`written_for`] by everyone: the bytes
+    /// `merge` puts in the file and the owner a note names cannot come to
+    /// different answers about which declaration spoke.
+    fn writes(&self, seeded: &SeededEnv) -> bool {
+        (seeded.entry.required && self.arriving.contains(&seeded.owner))
+            || self.edited.contains(&seeded.entry.key)
+    }
+}
+
+/// The declaration this pass writes for a key, or `None` where it writes
+/// none. [`writable_all`] still supplies the candidates and their order,
+/// so the choice stays the one chooser every consumer asks.
+///
+/// A name the file already takes ends it before the pass is consulted:
+/// `occupied` is the file-wide presence check [`assigned_keys`] gives, and
+/// seeding never adds a key some assignment anywhere already names. That
+/// belongs in this answer rather than at the writer alone, because "is
+/// this key about to be written" is also what a note asks before staying
+/// quiet about it. Asked without the file, an arrival counts itself as the
+/// pass that answers a key it is in fact about to skip, and a marked key
+/// goes neither into the file nor into a note.
+pub(crate) fn written_for<'a>(
+    entries: &'a [SeededEnv],
+    key: &str,
+    seeding: &Seeding,
+    occupied: &std::collections::BTreeSet<String>,
+) -> Option<&'a SeededEnv> {
+    if occupied.contains(key) {
+        return None;
+    }
+    writable_all(entries, key).find(|seeded| seeding.writes(seeded))
 }
 
 #[cfg(test)]

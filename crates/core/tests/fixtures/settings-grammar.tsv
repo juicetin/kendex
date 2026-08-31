@@ -6,6 +6,13 @@
 # loaders will not read as written, and none for a row they read cleanly.
 # Add a row here and both sides are held to it.
 #
+# So a rule only a TEMPLATE has cannot live here, however much it looks
+# like grammar. The loaders have no opinion on a comment block over every
+# key, on an assignment outside [env], or on where the `# required` marker
+# sits, and a row asserting one would say the reader and the loaders
+# disagree — which is the one thing this corpus exists to refuse. Those are
+# pinned in crates/core/src/settings_template/tests.rs.
+#
 # name<TAB>verdict<TAB>key<TAB>expect<TAB>body ('\n' spells a newline)
 #   loads    the loaders load the file and export KEY as EXPECT ("quoted";
 #            a tab-separated field is never left empty)
@@ -13,8 +20,8 @@
 #   unread   the loaders load the file and never export KEY
 plain	loads	WAIT	"900"	[env]\n# How long to wait.\nWAIT = "900"
 empty-value	loads	WAIT	""	[env]\n# How long to wait.\nWAIT = ""
-trailing-comment	loads	WAIT	"900"	[env]\n# How long to wait.\nWAIT = "900" # seconds
-trailing-comment-tight	loads	WAIT	"900"	[env]\n# How long to wait.\nWAIT = "900"#seconds
+trailing-comment	loads	WAIT	"900"	[env]\n# How long to wait.\nWAIT = "900" # required
+trailing-comment-tight	loads	WAIT	"900"	[env]\n# How long to wait.\nWAIT = "900"#required
 indented-key	loads	WAIT	"900"	[env]\n# How long to wait.\n  WAIT = "900"
 value-holds-equals	loads	WAIT	"a=b"	[env]\n# A pair.\nWAIT = "a=b"
 value-holds-hash	loads	WAIT	"a#b"	[env]\n# A hash.\nWAIT = "a#b"

@@ -1,15 +1,16 @@
 [env]
 
-# LINEAR — which Linear team this project writes to.
-# Project-scope `kendex add` / `kendex refresh` merge these defaults into
-# <project>/kendex.settings.toml (never overwriting existing keys). Full key
+# LINEAR — which Linear team this project writes to. LINEAR_TEAM below is
+# the one key marked `# required`, so installing this skill writes that key
+# into <project>/kendex.settings.toml and nothing else. What an install
+# writes, and when, is kendex's docs/authoring/settings.md. Full key
 # reference: linear README.md.
 
 # The team every Linear write targets. No default: an empty value refuses
 # writes instead of guessing inside whatever workspace the API key reaches
 # (the create actions still take `--team <name>` per call). Confirm with
 # `linear.sh auth-check --strict`.
-LINEAR_TEAM = ""
+LINEAR_TEAM = "" # required
 
 # Issue identifier prefix used in examples (e.g. PROJ-123).
 LINEAR_TEAM_PREFIX = "PROJ"

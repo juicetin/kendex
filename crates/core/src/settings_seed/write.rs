@@ -6,12 +6,11 @@
 //! file's terminator while a value's own newlines are copied as the
 //! template wrote them.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
-use crate::lock::SettingsSeed;
 use crate::settings_toml::Row;
 
-use super::{SeededEnv, assigned_keys, env_blocked, opens_env, table_row, writable_for};
+use super::{SeededEnv, Seeding, assigned_keys, env_blocked, opens_env, table_row, written_for};
 
 /// The terminator new lines are written with: whatever the file's first
 /// terminated line uses, `\n` where it has nothing to say.
@@ -28,9 +27,9 @@ pub(super) fn file_eol(rows: &[Row]) -> &'static str {
 
 /// The `[env]` section's line span: the header's index and the index of
 /// the first line after the section (the next table header, or the end
-/// of the file). `None` = no `[env]` header. Seeding and refresh both
-/// splice inside this span, so they cannot disagree about where it ends.
-pub(super) fn env_section(rows: &[Row]) -> Option<(usize, usize)> {
+/// of the file). `None` = no `[env]` header. The one splice there is
+/// takes its insertion point from the end this returns.
+fn env_section(rows: &[Row]) -> Option<(usize, usize)> {
     let start = rows.iter().position(opens_env)?;
     let end = rows
         .iter()
@@ -61,11 +60,20 @@ fn render_entries(entries: &[&SeededEnv], eol: &str) -> String {
     out
 }
 
-/// Merge missing entries into the settings text, byte-faithfully: the
-/// inserted block is the only change, spelled in the file's own line
-/// terminator. `None` = nothing to add. Returns the new text plus the keys
-/// that were added.
-pub fn merge(original: Option<&str>, entries: &[SeededEnv]) -> Option<(String, Vec<String>)> {
+/// Merge into the settings text the entries `seeding` admits, byte-
+/// faithfully: the inserted block is the only change, spelled in the
+/// file's own line terminator. `None` = nothing to add. Returns the new
+/// text plus the keys that were added.
+///
+/// What is written is [`Seeding`]'s answer, not "every key the file does
+/// not have". A template's other keys ship values their own code already
+/// reads, so writing them would put lines in a tracked file that change
+/// nothing and come back after every deletion.
+pub fn merge(
+    original: Option<&str>,
+    entries: &[SeededEnv],
+    seeding: &Seeding,
+) -> Option<(String, Vec<String>)> {
     // Nowhere to write: the plan reports the shape, and no byte moves.
     if original.is_some_and(|text| env_blocked(text).is_some()) {
         return None;
@@ -76,15 +84,16 @@ pub fn merge(original: Option<&str>, entries: &[SeededEnv]) -> Option<(String, V
         .into_iter()
         .collect();
     // Each distinct key once, in declaration order, taken from the one
-    // declaration that speaks for it. The winner comes from `writable_for`
-    // rather than being re-derived here, so the bytes written, the ledger
-    // and the notes cannot name three different skills.
+    // declaration that speaks for it. The winner comes from `written_for`
+    // rather than being re-derived here, so the bytes written and the skill
+    // a note names cannot be two different answers — and the file-wide
+    // presence check goes into that same answer, so a note cannot count a
+    // key as written that this filter was going to drop.
     let mut seen: BTreeSet<&str> = BTreeSet::new();
     let missing: Vec<&SeededEnv> = entries
         .iter()
         .filter(|seeded| seen.insert(seeded.entry.key.as_str()))
-        .filter(|seeded| !existing.contains(&seeded.entry.key))
-        .filter_map(|seeded| writable_for(entries, &seeded.entry.key))
+        .filter_map(|seeded| written_for(entries, &seeded.entry.key, seeding, &existing))
         .collect();
     if missing.is_empty() {
         return None;
@@ -139,20 +148,4 @@ pub fn merge(original: Option<&str>, entries: &[SeededEnv]) -> Option<(String, V
         out.push_str(row.raw);
     }
     Some((out, added))
-}
-
-/// The ledger records the added entries were seeded, each under the owner
-/// whose lines were written — asked of [`writable_for`], the same question
-/// `merge` asked, so the record names the skill that actually supplied the
-/// bytes.
-pub fn record_seeds(
-    seeds: &mut BTreeMap<String, SettingsSeed>,
-    entries: &[SeededEnv],
-    added: &[String],
-) {
-    for key in added {
-        if let Some(seeded) = writable_for(entries, key) {
-            seeds.insert(key.clone(), seeded.seed_record());
-        }
-    }
 }

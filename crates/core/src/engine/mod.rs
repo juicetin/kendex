@@ -31,6 +31,7 @@ mod file_plan;
 pub mod fork;
 mod gemini;
 mod holds;
+mod installed;
 mod item_plan;
 mod item_record;
 mod item_source;
@@ -45,6 +46,7 @@ mod scope_skills;
 pub use scope_skills::ScopeSkills;
 mod scope_writes;
 mod settings_scan;
+mod settings_write;
 pub use settings_scan::settings_templates;
 mod scoring;
 mod set_change;
@@ -80,11 +82,11 @@ pub fn installed_paths(
 use desired::desired_state;
 pub use scope_writes::persists_manifest;
 use scope_writes::{
-    bundle_revisions, plan_config_edits, plan_lock_write, plan_manifest_write, plan_settings_seed,
-    source_revisions,
+    bundle_revisions, plan_config_edits, plan_lock_write, plan_manifest_write, source_revisions,
 };
 pub use set_change::{KeptInstall, SetChange, SetDirection};
 use set_change::{kept_members, set_changes};
+use settings_write::plan_settings_seed;
 pub(crate) use unmanaged::declared_over_existing_files;
 use unmanaged::unmanaged_rows;
 
@@ -153,9 +155,10 @@ fn plan_scope_once(
     )?;
 
     // Notes about the scope rather than about any one item: what the
-    // settings seed found, what the git posture changed.
-    let mut scope_notes =
-        plan_settings_seed(scope, &state, options, &mut new_lock, &mut ops, &mut drift)?;
+    // settings seed found, what the reserved-name move did, what the git
+    // posture changed.
+    let (mut scope_notes, settings_drift) = plan_settings_seed(scope, &state, options, &mut ops)?;
+    drift.extend(settings_drift);
 
     // Trash ops all pass one guard: writes for this pass are already
     // planned, so anything still wanted is known, and no path goes to the
@@ -260,8 +263,9 @@ fn desired_pass<'a>(
 }
 
 /// The record this pass will write, before any of it is filled in: the
-/// per-source and per-set resolutions it just made, and the seeding
-/// evidence carried forward — only seeding and refresh may move that.
+/// per-source and per-set resolutions it just made. Nothing about seeding
+/// is recorded here — a template applies once, on the arrival, and what
+/// says an arrival happened is the manifest gaining the declaration.
 fn fresh_lock(manifest: &Manifest, lock: &Lock, state: &desired::DesiredState) -> Lock {
     Lock {
         version: crate::lock::LOCK_VERSION,
@@ -269,7 +273,6 @@ fn fresh_lock(manifest: &Manifest, lock: &Lock, state: &desired::DesiredState) -
         entries: BTreeMap::new(),
         sources: source_revisions(manifest, lock, state),
         bundles: bundle_revisions(manifest, lock, state),
-        settings_seeds: lock.settings_seeds.clone(),
     }
 }
 

@@ -125,10 +125,162 @@ fn decoded_value_reads_only_plain_one_line_strings() {
 }
 
 #[test]
-fn a_trailing_comment_rides_with_the_value() {
-    let read = read("[env]\n# How long to wait.\nWAIT = \"900\" # seconds\n");
-    assert!(read.findings.is_empty(), "{:?}", read.findings);
-    assert_eq!(read.entries[0].value, "900");
+fn the_required_marker_rides_with_the_value_and_nothing_else_may() {
+    let marked = read("[env]\n# How long to wait.\nWAIT = \"900\" # required\n");
+    assert!(marked.findings.is_empty(), "{:?}", marked.findings);
+    assert_eq!(marked.entries[0].value, "900");
+
+    // A misspelled marker loads exactly as a correct one does, so the
+    // loaders never see it and the key silently stops being written.
+    let typo = read("[env]\n# How long to wait.\nWAIT = \"900\" # requried\n");
+    assert_eq!(
+        typo.findings
+            .iter()
+            .map(|finding| finding.line)
+            .collect::<Vec<_>>(),
+        [3]
+    );
+    assert!(
+        typo.findings[0].problem.contains("#requried"),
+        "{:?}",
+        typo.findings
+    );
+
+    let plain = read("[env]\n# How long to wait.\nWAIT = \"900\"\n");
+    assert!(plain.findings.is_empty(), "{:?}", plain.findings);
+
+    // Presentation is not folded on this side. After a value the exact
+    // word is what the seeder honours, so every other presentation of it
+    // is a template refused — and the seeder is asked in the same loop,
+    // because the check exists to keep the two from parting. Fold one and
+    // not the other and `# Required` passes review while the seeder still
+    // ignores it: the key is never written AND never reported unanswered.
+    for said in ["Required", "REQUIRED", "required.", "required:"] {
+        let template = format!("[env]\n# How long to wait.\nWAIT = \"900\" # {said}\n");
+        assert_eq!(
+            located(&template),
+            [(
+                3,
+                format!(
+                    "WAIT carries `#{said}` after its value, and the only marker a template writes there is `# required`"
+                )
+            )],
+            "{said:?}"
+        );
+        let entries = crate::settings_seed::extract_env_entries(&template);
+        assert!(
+            !entries[0].required,
+            "{said:?}: the seeder honours the exact word only: {entries:?}"
+        );
+    }
+}
+
+/// The marker on a line of its own marks nothing, and it is the mistake an
+/// author is invited to make: every template header names `# required`
+/// inside a sentence before they ever see one after a value. Unflagged it
+/// is silent twice over — the key is never written, and it is never
+/// reported as unanswered either, because nothing knows it was marked.
+///
+/// Pinned here rather than as a corpus row, like every other rule only a
+/// template has. The loaders read a comment line cleanly whatever it says,
+/// so a row for this would assert the reader and the loaders disagree,
+/// which is what the corpus is for refusing. Adding one fails
+/// `the_reader_flags_exactly_what_the_loaders_cannot_read`.
+#[test]
+fn a_marker_on_its_own_comment_line_is_located() {
+    // However the word is presented. Case and everything at either end
+    // that is not a letter or a digit: a closed list of trailing ASCII
+    // marks left an ellipsis, a bracket, wrapping quotes and an invisible
+    // character each one keystroke from the same silence.
+    for said in [
+        "required",
+        "Required",
+        "REQUIRED",
+        "  required  ",
+        "required.",
+        "Required:",
+        "required!",
+        "required\u{2026}",
+        "Required)",
+        " (required)",
+        " \"required\"",
+        " *required*",
+        "required\u{200b}",
+    ] {
+        assert_eq!(
+            located(&format!(
+                "[env]\n# How long to wait.\n#{said}\nWAIT = \"900\"\n"
+            )),
+            [(
+                3,
+                format!(
+                    "this comment line is just `{}`, which marks nothing",
+                    said.trim()
+                )
+            )],
+            "{said:?}"
+        );
+    }
+    // `##` opens a comment as plainly as `#` does.
+    assert_eq!(
+        located("[env]\n# How long to wait.\n## Required\nWAIT = \"900\"\n")
+            .iter()
+            .map(|(line, _)| *line)
+            .collect::<Vec<u32>>(),
+        [3]
+    );
+    // A misspelling gets no finding, and deliberately. Telling `# requried`
+    // from an ordinary comment line means guessing at what the author
+    // meant, and a line of free prose is what it would guess against;
+    // presentation is a closed set and misspelling is not. After a value,
+    // where the exact spelling is what gets honoured, these are all caught.
+    for said in ["requried", "requireds", "require", "requires"] {
+        assert!(
+            located(&format!(
+                "[env]\n# How long to wait.\n# {said}\nWAIT = \"900\"\n"
+            ))
+            .is_empty(),
+            "{said:?}"
+        );
+    }
+    // Inside a multiline value the line is the value and not a comment, so
+    // the widened word does not reach in: one finding, and it is the
+    // value's.
+    assert_eq!(
+        located("[env]\n# What it holds.\nBLOB = \"\"\"\n# required\n\"\"\"\n"),
+        [(
+            3,
+            "BLOB's default is not a one-line double-quoted string free of \" and \\".to_owned()
+        )]
+    );
+    // Outside `[env]` too: a marker nothing reads is a marker nothing
+    // reads, whichever table it sits over.
+    assert_eq!(
+        located("# required\n[env]\n# How long to wait.\nWAIT = \"900\"\n")
+            .iter()
+            .map(|(line, _)| *line)
+            .collect::<Vec<u32>>(),
+        [1]
+    );
+    // The word inside a sentence is what every shipped template writes,
+    // and it is not a marker. Only the ends of the line are folded, so a
+    // comment that merely contains the word keeps a letter at both ends
+    // and stays an ordinary comment however short it is.
+    for said in [
+        "Keys marked `# required` land on arrival.",
+        "required for CI",
+        "The team is required.",
+        "(required for a Linear write)",
+        "required1",
+    ] {
+        assert!(
+            located(&format!(
+                "[env]\n# How long to wait.\n# {said}\nWAIT = \"900\"\n"
+            ))
+            .is_empty(),
+            "{said:?}"
+        );
+    }
 }
 
 #[test]
