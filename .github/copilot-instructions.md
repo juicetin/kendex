@@ -37,7 +37,10 @@ every push. Rounds are the scarce resource. Calibrate:
 Authors answer findings with exactly one of: `Fixed in <sha>`,
 `Declined: <reason>`, or `Tracked: KEN-<n>`/`#<n>`. A tracking claim
 without an issue id fails this repo's merge gate, so absence of "tracked"
-wording in a decline is deliberate, not evasive.
+wording in a decline is deliberate, not evasive. A decline names the
+mechanism it disproves, the passing state or the false premise; a label is
+not a reason, and one that is nothing but a label the gate knows fails it
+the same way.
 
 ## Severity honesty
 Mark a finding blocking only if you would stop a human colleague's merge

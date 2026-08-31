@@ -1,0 +1,140 @@
+# Replies that MUST fail the review gate: a decline naming no mechanism.
+#
+# THIS FILE IS THE CONTRACT. The subtraction in review-predicate.sh is a word
+# list, and a word list maintained by review rounds is always one label
+# behind. So a label is added HERE first: write the reply the way a person
+# actually types it, watch unreasoned-decline.test.sh go red, then widen the
+# list until it passes. Never the other way round.
+#
+# Write each label in the spellings people really use, punctuation included.
+# The subtraction normalizes punctuation to spaces BEFORE it reads the list,
+# so "won't fix" arrives as "won t fix" and an entry spelled `wont ?fix`
+# never meets it. That defect shipped once. Every apostrophized label below
+# is here to keep it from shipping twice.
+#
+# Lines starting with # are comments. Blank lines are skipped.
+
+# --- the replies that shipped KEN-884 through KEN-889 --------------------
+# Quoted from #1860. This is the reply the whole issue was filed over.
+Declined under this PR's freeze, flagged separately
+Declined under this PR's freeze.
+# #1851: a disposition and a test count.
+Declined: frozen at a1fa74dca; 104/104 pass
+# #1847: the freeze restated as procedure. Who ordered it and which push was
+# the last says nothing about whether the finding reproduces.
+Declined: frozen at 39db56854, per the owner's instruction.
+Declined: frozen at 39db56854 — the owner set the previous push as this PR's last.
+
+# --- empty reasons -------------------------------------------------------
+Declined:
+Declined:
+Declined.
+Declined
+
+# --- the freeze, in every inflection people write --------------------------
+Declined: frozen
+Declined: freeze
+Declined: freezing this PR
+Declined, frozen.
+
+# --- the round cap -------------------------------------------------------
+Declined: at the cap
+Declined: capped
+Declined: round 4
+Declined: this round
+
+# --- a test count is not a reason ----------------------------------------
+Declined: tests pass
+Declined: the tests passed
+Declined: the suite is green
+Declined — tests pass
+Declined: 104/104
+
+# --- scope and age -------------------------------------------------------
+Declined: out of scope
+Declined: out of scope for this PR
+Declined, out of scope.
+Declined: pre-existing
+Declined: preexisting
+Declined: pre existing
+
+# --- a disposition standing in for a filing -------------------------------
+Declined: flagged separately
+Declined: tracked separately
+Declined: tracking separately
+Declined: filed separately
+Declined: logged separately
+Declined: tracked
+
+# --- labels that answer without disproving --------------------------------
+Declined: by design
+Declined: as discussed
+Declined: noted
+Declined: works as intended
+Declined: as intended
+Declined: intentional
+Declined: deliberate
+Declined: known
+Declined: later
+Declined: no change
+Declined: nothing to do
+Declined: not applicable
+Declined: n/a
+# The not-actionable label, in both punctuations. It says no more about
+# whether the finding reproduces than the labels above it, and a reply table
+# that hands an agent this string on its own hands out a red gate.
+Declined: not actionable
+Declined, not actionable.
+# The apostrophized forms. Punctuation normalization runs first, so these
+# reach the list as "won t fix" — the spelling the entry has to match.
+Declined: won't fix
+Declined: won’t fix
+Declined: wont fix
+Declined: wontfix
+Declined: won't-fix
+# A verdict label, no more disproving than the rest of this section.
+Declined: false positive
+Declined: false-positive
+Declined: this is a false positive
+
+# --- a bare identifier is not a reason ------------------------------------
+Declined: a1fa74dca
+Declined: at this head
+Declined: fixed
+# A tracker id is an identifier too. Naming the issue you filed says nothing
+# about whether the finding reproduces, and a reply that is only the id is
+# not `Tracked: KEN-n` either.
+Declined: KEN-881
+Declined: see KEN-881
+Declined: tracked in KEN-123
+Declined: #1801
+
+# --- a passing-checks claim is a test count in other clothes --------------
+# Same content-free assertion as "tests pass" above: it says a suite ran, not
+# that the finding is wrong. The list read "tests" and "suites" and nothing
+# else, so every spelling below cleared the gate. Residue like "checks" or
+# "ci" is ordinary filler, not the suite NAME that draws the known limit.
+Declined: all checks pass
+Declined: the checks pass
+Declined: checks pass
+Declined: all checks are green
+Declined: all checks passing
+Declined: all checks pass on this head
+Declined: CI is green
+Declined: CI passes
+Declined: ci is passing
+Declined: CI is green at this head
+Declined: the build passes
+Declined: build is green
+Declined: it builds fine
+Declined: it compiles
+Declined: the pipeline is green
+Declined: the pipeline passes
+Declined: lint passes
+Declined: lint is clean
+Declined: the workflow passes
+Declined: the job is green
+Declined: typecheck passes
+Declined: validation passes
+Declined: coverage is fine
+Declined: everything passes

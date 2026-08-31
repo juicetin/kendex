@@ -24,7 +24,8 @@ Env (required): GH_TOKEN (or ambient gh auth), GH_REPO, PR_NUMBER, HEAD_SHA
 Env (optional): PR_AUTHOR — resolved from the PR when empty.
 
 Output: one machine-readable line on stdout:
-  verdict=approved|awaiting|threads-open|changes-requested detail=<human text>
+  verdict=approved|awaiting|threads-open|changes-requested|untracked-claim|
+          unreasoned-decline detail=<human text>
 (diagnostic detail also echoed for logs).
 
 Exit codes:
@@ -65,6 +66,33 @@ re-approval or dismissal, so that reduction is not scoped to the head;
 positive evidence stays exact-head) AND zero unresolved review threads.
 Changes-requested and unresolved threads always fail closed, even with
 evidence present.
+
+TWO THREAD-CONTENT TERMS ride the same read, both failing closed. A thread's
+disposition is its newest non-bot reply that is a reply form or carries a
+track-word. `untracked-claim` is that reply claiming tracking and naming no
+issue. `unreasoned-decline` is that reply declining and naming no mechanism:
+the reason is empty, or is nothing but non-reason tokens and filler. The
+tokens are the labels and the freeze procedure that answer a finding without
+disproving it, plus bare shas, numbers and tracker ids. A token INSIDE a real
+reason is untouched, because the test is subtraction: only a reply that was
+nothing else reduces to empty. Being vocabulary, it ends where the residue
+becomes NAMES — the suite a bare count belongs to, or a label spelled as a
+sentence.
+
+THE CORPUS IS THE CONTRACT, NOT THIS LIST. tests/corpus/ holds what the gate
+must catch, what it must pass, and that KNOWN LIMIT. Add a label by writing
+the reply THERE first, as a person types it, then widen `reason_left` until
+the suite is green. Write the punctuated spelling: normalization turns it to
+spaces first, so "won't fix" arrives as "won t fix" and an entry spelled
+`wont ?fix` never meets it. That shipped.
+
+A DECLINE IS READ BY ITS SHAPE, NOT BY THE COLON. A reply opening with the
+word declines, so "Declined, out of scope" fails exactly as the punctuated
+form does. Only `unreasoned-decline` reads it that wide. The untracked-claim
+term keeps the narrow `Declined:` form, because widening it there would let
+"Declined under the cap, tracked separately" clear a tracking claim naming
+no issue, which loosens a merge gate. What a decline must say lives in
+orch's references/finding-disposition.md.
 
 APPROVAL IS NEVER SUPERSEDED BY A LATER COMMENT. The evidence reduction is
 "an accepted review row exists at head" — never "the latest review per
@@ -1334,6 +1362,7 @@ fi
 # fail closed exactly as before.
 unresolved=0
 untracked=0
+unreasoned=0
 if [ "$THREADS_MODE" = "enforce" ]; then
 # A thread's disposition is its newest non-bot comment that is a Fixed in
 # <sha>/Declined: reply or carries a track-word; other comments never move
@@ -1342,7 +1371,44 @@ if [ "$THREADS_MODE" = "enforce" ]; then
 # claimant is also the resolver. Bot comments are exempt (they quote each
 # other); a missing comments field reads as none. A thread past 50 comments
 # cannot be fully read in this page shape, so it fails closed as malformed.
+#
+# The reply forms are spelled once, above both reductions, so a change to
+# what a decline is reaches both. They read different sets on purpose.
+# `disposition` is the canonical colon form, and the untracked-claim term is
+# the only thing it may mean: widening it there would let "Declined under the
+# cap, tracked separately" clear a tracking claim naming no issue, which
+# loosens a merge gate. `declined` is wider, matching any reply opening with
+# the word, because the replies the second term exists to catch had no colon.
+#
+# A decline is a disposition only when it says what it disproves, so the
+# second reduction subtracts. `reason_left` strips the reply form, the
+# non-reason tokens and the words carrying no content alone; a reply whose
+# reason strips to nothing is counted, which is what leaves a token INSIDE a
+# real reason harmless. Widen this list from tests/corpus/, never alone.
+# Punctuation normalization keeps every letter and number, not only ASCII:
+# the word lists are ASCII, so a reason written in another script survives
+# whole, and surviving text is residue, which is a stated reason.
+#
+# Tracker ids go first, while each is still one token and still uppercase:
+# punctuation normalization would otherwise leave the letters behind, and
+# `Declined: KEN-881` would read as a stated reason of "ken". The shape is
+# the untracked-claim term's, so the two cannot disagree about what an id is.
 t_threads_page_jq='def disposition: test("^\\s*(fixed in [0-9a-f]{7,40}\\b|declined:)"; "i");
+  def declined: test("^\\s*declined\\b"; "i");
+  def tracking: test("(?i)\\btrack(ed|ing|s)?\\b");
+  def replies: [(.comments.nodes // [])[] | select((.author.__typename // "User") != "Bot") | (.body // "")];
+  def standing: [replies[] | select(disposition or tracking)] | last // empty;
+  def standing_decline: [replies[] | select(disposition or declined or tracking)] | last // empty;
+  def reason_left:
+    sub("(?i)^\\s*declined\\b"; "")
+    | gsub("[A-Z][A-Z0-9]+-[0-9]+|#[0-9]+"; " ")
+    | ascii_downcase
+    | gsub("[^\\p{L}\\p{N}]+"; " ")
+    | gsub("\\b(frozen|freezes?|freezing|cap|capped|round [0-9]+|round|rounds|tests?|suites?|pass|passes|passed|passing|green|count|checks?|checking|ci|builds?|building|built|compiles?|compiled|pipelines?|lints?|linter|linting|workflows?|jobs?|typechecks?|validation|coverage|everything|fine|clean|out of scope|scope|pre existing|preexisting|existing|flagged separately|flagged|separately|as discussed|discussed|noted|won ?t ?fix|false positives?|by design|design|not applicable|n a|actionable|no change|nothing to do|later|known|intentional|deliberate|works as intended|as intended|intended|owners?|instruction(s|ed)?|previous|pushe[sd]?|push|last|head|disposition(ed|s)?|findings?|fix(es|ed)?|track(s|ed|ing|er)?|filed|filing|logged)\\b"; " ")
+    | gsub("\\b[0-9a-f]{7,40}\\b"; " ")
+    | gsub("\\b[0-9]+\\b"; " ")
+    | gsub("\\b(a|an|the|this|that|these|those|it|its|is|are|was|were|be|been|for|in|on|at|to|of|and|or|but|so|we|i|you|your|pr|prs|here|now|all|full|whole|entire|complete|still|already|yes|no|not|do|does|did|has|have|had|under|per|within|as|after|rather|than|see|every|set|s|t)\\b"; " ")
+    | gsub("^ +| +$"; "");
   if ((.data.repository.pullRequest.reviewThreads.pageInfo.hasNextPage | type) != "boolean")
     or ([.data.repository.pullRequest.reviewThreads.nodes[] | select((.isResolved | type) != "boolean")] | length) > 0
   then "malformed"
@@ -1350,10 +1416,13 @@ t_threads_page_jq='def disposition: test("^\\s*(fixed in [0-9a-f]{7,40}\\b|decli
   then "malformed"
   else ([.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false)] | length | tostring)
     + " " + ([.data.repository.pullRequest.reviewThreads.nodes[]
-        | ([(.comments.nodes // [])[] | select((.author.__typename // "User") != "Bot") | (.body // "")
-            | select(disposition or test("(?i)\\btrack(ed|ing|s)?\\b"))] | last // empty)
+        | standing
         | select(disposition | not)
         | select(test("([A-Z][A-Z0-9]+-[0-9]+|#[0-9]+)\\b") | not)] | length | tostring)
+    + " " + ([.data.repository.pullRequest.reviewThreads.nodes[]
+        | standing_decline
+        | select(declined)
+        | select(reason_left == "")] | length | tostring)
     + " " + (.data.repository.pullRequest.reviewThreads.pageInfo.hasNextPage | tostring)
     + " " + (.data.repository.pullRequest.reviewThreads.pageInfo.endCursor // "END")
   end'
@@ -1397,9 +1466,11 @@ while :; do
   t_rest="${t_page#* }"
   t_claim="${t_rest%% *}"
   t_rest="${t_rest#* }"
+  t_bare="${t_rest%% *}"
+  t_rest="${t_rest#* }"
   t_next="${t_rest%% *}"
   t_cursor_next="${t_rest#* }"
-  case "$t_count$t_claim" in
+  case "$t_count$t_claim$t_bare" in
     '' | *[!0-9]*)
       unresolved="malformed"
       break
@@ -1407,6 +1478,7 @@ while :; do
   esac
   unresolved=$((unresolved + t_count))
   untracked=$((untracked + t_claim))
+  unreasoned=$((unreasoned + t_bare))
   [ "$t_next" = "true" ] || break
   if [ "$t_cursor_next" = "END" ] || [ -z "$t_cursor_next" ] || [ "$t_cursor_next" = "$t_cursor" ]; then
     # hasNextPage with no ADVANCING cursor (missing, or identical to the
@@ -1474,12 +1546,14 @@ awaiting_sources() { # -> one eligible source per line, duplicates collapsed
   } | awk '!seen[$0]++'
 }
 
-echo "PR #$PR_NUMBER head $HEAD_SHA: reviews=$got clean-analysis=$check comment-form=$comment_hits outage-marker=$outageok carried=$carried changes-requested=$cr unresolved-threads=$unresolved untracked-claims=$untracked (threads=$THREADS_MODE)" >&2
+echo "PR #$PR_NUMBER head $HEAD_SHA: reviews=$got clean-analysis=$check comment-form=$comment_hits outage-marker=$outageok carried=$carried changes-requested=$cr unresolved-threads=$unresolved untracked-claims=$untracked unreasoned-declines=$unreasoned (threads=$THREADS_MODE)" >&2
 
 if [ "$cr" != "0" ]; then
   echo "verdict=changes-requested detail=standing review changes requested (persists across pushes until re-approval or dismissal)"
 elif [ "$untracked" != "0" ]; then
   echo "verdict=untracked-claim detail=$untracked tracking claim(s) name no issue — write Declined: <reason>, or add the tracker/#id"
+elif [ "$unreasoned" != "0" ]; then
+  echo "verdict=unreasoned-decline detail=$unreasoned decline(s) name no mechanism — state the passing state or the false premise the finding is wrong about"
 elif [ "$got" = "0" ] && [ "$check" = "0" ] && [ "$comment_hits" = "0" ] && [ "$outageok" = "0" ] && [ "$carried" = "0" ]; then
   # Captured, never interpolated straight into the echo: a composer that
   # failed would otherwise leave an empty description on a verdict that still
