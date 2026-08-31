@@ -12,7 +12,6 @@ import {
   EDITED_TAG_HELP,
   FOLLOW_SOURCE_HELP,
   INSTALL_AS_NEW_LABEL,
-  NO_PER_PACKAGE_UPDATE_NOTE,
   OWN_COPY_NAME_LABEL,
   SHOW_VERSION_LABEL,
   TABLE_OPTIONS_LABEL,
@@ -369,16 +368,27 @@ describe("the explanations on the header and the tag", () => {
   });
 });
 
-// Every Update surface reads one rule from core's own list. This is the
-// per-row one; the package page and both Update-all buttons ask the same
-// question through canUpdatePackage and updatablePlaces.
-describe("a row of a kind the planner never brings current", () => {
-  it("offers no Update, and says where the update does live", async () => {
+// A kind the planner never brings current one package at a time is core's
+// call, and the words are core's too: the row arrives carrying the
+// refusal, and the UI shows that and nothing of its own. Every Update
+// surface reads it through updateWithheld.
+//
+// Pass-through is the whole property, so the fixture is a string core
+// would never send. Core's real wording here would read as a
+// cross-boundary pin and be none: the equality asserted is fixture against
+// rendered title, which any string satisfies, and a reworded constant
+// would leave it green.
+describe("a row of a kind core refuses", () => {
+  it("offers no Update, and shows the refusal core sent", async () => {
+    const refusal = "REFUSED-BY-CORE: this kind moves another way";
     vi.mocked(commands.updatesOverview).mockResolvedValue({
       status: "ok",
       data: {
         rows: [
-          row("pi-hooks", null, { kind: "pi-extension" }),
+          row("pi-hooks", null, {
+            kind: "pi-extension",
+            noPerPackageUpdate: refusal,
+          }),
           row("gh", null),
         ],
         warnings: [],
@@ -394,8 +404,8 @@ describe("a row of a kind the planner never brings current", () => {
     expect(updates).toHaveLength(2);
     const [pi, skill] = updates;
     expect(pi?.disabled).toBe(true);
-    expect(pi?.getAttribute("title")).toBe(NO_PER_PACKAGE_UPDATE_NOTE);
-    // The control: a kind the planner does handle is still offered.
+    expect(pi?.getAttribute("title")).toBe(refusal);
+    // The control: a row core sends no refusal for is still offered.
     expect(skill?.disabled).toBe(false);
   });
 });

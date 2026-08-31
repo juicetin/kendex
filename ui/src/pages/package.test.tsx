@@ -154,6 +154,7 @@ const updateRow = (scope: Project): UpdateRow => ({
   forked: false,
   mixed: false,
   removedUpstream: false,
+  noPerPackageUpdate: null,
 });
 
 beforeEach(() => {
@@ -197,7 +198,14 @@ beforeEach(() => {
     dirty: false,
     manifestDirty: false,
   });
-  useUpdatesStore.setState({ rows: [], loaded: true });
+  useUpdatesStore.setState({
+    rows: [],
+    loaded: true,
+    error: null,
+    checking: false,
+    overviewInFlight: false,
+    pendingFollows: [],
+  });
   useAuditStore.setState({
     views: [],
     auditedAt: null,

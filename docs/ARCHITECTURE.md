@@ -346,9 +346,12 @@ lives in one capability table read by core and UI.
   cannot be split.
 - **Every atomic write gets its own temp file.** `write_then_rename` names
   its temp file per write, not per process.
-- GUI + CLI are equal thin shells over `crates/core`; core operations are
-  reachable from the CLI, with one exception: install-beside
-  (`fork_beside`) is app-only — no CLI verb exists. The guard chain gates commits; the review gate and the merge queue's suites gate PRs.
+- GUI + CLI are equal thin shells over `crates/core`; most core ops are
+  reachable from the CLI, two are app-only — install-beside
+  (`fork_beside`) and per-package update (`package::update_one`). The CLI
+  reaches neither; `refresh` and `updates --apply` bring a whole place
+  current through `engine::plan_apply`. The guard chain gates commits; the
+  review gate and the merge queue's suites gate PRs.
 - Every capability ships cross-harness through the capability table; a
   harness without native support for a kind is marked unsupported — never
   shimmed. Where a vendor stores one surface as another (Codex: prompts as

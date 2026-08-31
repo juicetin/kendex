@@ -14,15 +14,14 @@ import {
   usePackageData,
   usePackageDiff,
 } from "@/components/package/use-package-data";
-import { NO_PER_PACKAGE_UPDATE_NOTE } from "@/lib/copy-updates";
 import { groupItems, groupScopes, installationAt } from "@/lib/derive";
 import { packageDisplayName } from "@/lib/labels";
 import { usePackageMark } from "@/lib/package-mark";
 import { vendorAt } from "@/lib/package-places";
 import { sameScope } from "@/lib/scope";
+import { pageUpdateWithheld } from "@/lib/update-groups";
 import {
   canUpdatePackage,
-  hasPerPackageUpdate,
   installedRow,
   latestRow,
   versionRowLabel,
@@ -87,15 +86,20 @@ export function PackagePage() {
     view,
     diffHarness(view, installationAt(group, ref?.scope)?.harness ?? null),
   );
-  const updatesLoaded = useUpdatesStore((s) => s.loaded);
-  const edited = useUpdatesStore((s) =>
-    s.rows.some(
-      (row) =>
-        ref != null &&
-        row.kind === ref.kind &&
-        row.name === ref.name &&
-        sameScope(row.scope, ref.scope) &&
-        row.blockedByLocalEdit,
+  // Why this place has no Update, or null when nothing withholds one —
+  // the read behind the rows and then the row itself, in one reading off
+  // the live store. A string, so this selector answers the same value on
+  // every render that changes nothing.
+  const withheld = useUpdatesStore((s) =>
+    pageUpdateWithheld(
+      s.rows.find(
+        (row) =>
+          ref != null &&
+          row.kind === ref.kind &&
+          row.name === ref.name &&
+          sameScope(row.scope, ref.scope),
+      ) ?? null,
+      s,
     ),
   );
 
@@ -123,23 +127,21 @@ export function PackagePage() {
   const displayName = packageDisplayName(ref);
   const installed = installedRow(versions);
   const latest = latestRow(versions);
-  // Update waits for meta (held vs following) and the updates store
-  // (edited), is off while edits are held, and is never offered for a kind
-  // the planner does not bring current one package at a time.
+  // The button and the note beside it come from the one string above, so
+  // wherever there is a newer version to move to, a reason the update read
+  // carries — its own state, or the row's — is always said where the
+  // button would have been. Update also waits for meta (held vs
+  // following), and takes its newness from this page's own version rows.
   const canUpdate = canUpdatePackage({
-    kind: group.kind,
     latest,
     installed,
     metaLoaded: meta != null,
-    updatesLoaded,
-    edited,
+    withheld,
   });
-  // Said where the button would be, so a page with news but no way to act
-  // on it here names the way that does.
-  const updateWithheld =
-    latest != null && !latest.installed && !hasPerPackageUpdate(group.kind)
-      ? NO_PER_PACKAGE_UPDATE_NOTE
-      : null;
+  // A newer version to move to and an installed one to move from: what
+  // the read-only diff needs, and what the note below has to explain.
+  const newer = latest != null && !latest.installed;
+  const updateWithheld = newer ? withheld : null;
 
   // Every scope this package sits in, one at a time — each apply takes
   // that scope's writer lock — and stopping at the first that fails.
@@ -207,6 +209,7 @@ export function PackagePage() {
             name={group.name}
             primaryPath={primary.path}
             updateAvailable={canUpdate}
+            previewAvailable={newer && installed != null}
             withheldNote={updateWithheld}
             busy={mutating}
             onUpdate={() => latest && updateToLatest(latest)}

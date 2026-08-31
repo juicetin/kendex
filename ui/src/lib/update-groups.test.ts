@@ -1,11 +1,20 @@
 import { describe, expect, it } from "vitest";
 import type { UpdateRow } from "@/bindings";
 import {
+  EDITED_CANT_UPDATE_NOTE,
+  HELD_BY_OWNER_NOTE,
+  NO_UPDATE_STANDING_NOTE,
+  UPDATE_NEEDS_CHECK_HERE,
+  UPDATES_CHECKING,
+} from "@/lib/copy-updates";
+import {
   groupUpdates,
   packageCount,
+  pageUpdateWithheld,
   placeName,
   skippedPlaces,
   updatablePlaces,
+  updateWithheld,
 } from "./update-groups";
 
 const row = (
@@ -31,6 +40,7 @@ const row = (
   holdOwner: null,
   derived: false,
   removedUpstream: false,
+  noPerPackageUpdate: null,
   mixed: false,
   forked: false,
   ignored: false,
@@ -148,20 +158,22 @@ describe("update groups", () => {
   });
 
   // The plan refuses a kind it never derives, so an Update offered for one
-  // could only fail. The rule comes from core's own list, not a second one
-  // kept here, and a place it rejects still has news — it belongs to the
-  // skipped side rather than to neither.
-  it("leaves a kind the planner never brings current out of a bulk update", () => {
+  // could only fail. The refusal arrives on the row in core's own words —
+  // nothing here works the kind out for itself — and a place it rejects
+  // still has news, so it belongs to the skipped side rather than to
+  // neither. A Pi extension is the case core actually emits: no update row
+  // is ever built for a plugin, so a plugin row here would assert over a
+  // state nothing produces.
+  it("leaves a kind core refuses out of a bulk update", () => {
     const rows = [
       row("gh", "/a"),
-      row("pi-hooks", "/b", { kind: "pi-extension" }),
-      row("pack", "/c", { kind: "plugin" }),
+      row("pi-hooks", "/b", {
+        kind: "pi-extension",
+        noPerPackageUpdate: "core will not update this one",
+      }),
     ];
     expect(updatablePlaces(rows).map((p) => p.name)).toEqual(["gh"]);
-    expect(skippedPlaces(rows).map((p) => p.name)).toEqual([
-      "pi-hooks",
-      "pack",
-    ]);
+    expect(skippedPlaces(rows).map((p) => p.name)).toEqual(["pi-hooks"]);
   });
 
   it("leaves edited places out of a bulk update", () => {
@@ -175,5 +187,200 @@ describe("update groups", () => {
       row("gh", "/b", { updateAvailable: false, removedUpstream: true }),
     ]);
     expect(places.map((p) => placeName(p.scope))).toEqual(["User level"]);
+  });
+});
+
+// Every surface that offers Update reads this one function. It answers
+// with the reason and nothing else: a gate derived from it can never hide
+// a button it has no words for, which a verdict beside the note would
+// let it do the first time a reason arrives without one.
+describe("updateWithheld", () => {
+  it("says nothing stands in the way of a plain following place", () => {
+    expect(updateWithheld(row("gh", "/a"))).toBeNull();
+  });
+
+  // Having nothing newer is not a refusal — that place is current, and
+  // each surface reads newness its own way.
+  it("withholds nothing from a place that is already current", () => {
+    expect(
+      updateWithheld(row("gh", "/a", { updateAvailable: false })),
+    ).toBeNull();
+  });
+
+  it("hands back core's own words for a kind core refuses", () => {
+    const refusal = "REFUSED-BY-CORE: this kind moves another way";
+    expect(
+      updateWithheld(
+        row("pi-hooks", "/a", {
+          kind: "pi-extension",
+          noPerPackageUpdate: refusal,
+        }),
+      ),
+    ).toBe(refusal);
+  });
+
+  it("names the edit, and the owner's hold", () => {
+    expect(updateWithheld(row("gh", "/a", { blockedByLocalEdit: true }))).toBe(
+      EDITED_CANT_UPDATE_NOTE,
+    );
+    expect(
+      updateWithheld(row("gh", "/a", { pinned: true, derived: true })),
+    ).toBe(HELD_BY_OWNER_NOTE);
+  });
+
+  // The kind comes first: the others are reasons a row cannot be updated
+  // right now, and that one is why it never can be here.
+  it("leads with the kind when more than one applies", () => {
+    const refusal = "REFUSED-BY-CORE";
+    expect(
+      updateWithheld(
+        row("pi-hooks", "/a", {
+          kind: "pi-extension",
+          noPerPackageUpdate: refusal,
+          blockedByLocalEdit: true,
+        }),
+      ),
+    ).toBe(refusal);
+  });
+});
+
+// The read behind the rows answers before the row does. Every state of it
+// has a note, because the page's only update gate is whether this returns
+// one — a state that cannot say why would hide the button in silence.
+describe("pageUpdateWithheld", () => {
+  /** A store standing: a landed read with nothing running, unless said
+   *  otherwise. `checking` and `overviewInFlight` bar no row that exists —
+   *  they decide only whether a place with no row has been ruled out or
+   *  merely not reached yet. */
+  const standing = (
+    over: Partial<Parameters<typeof pageUpdateWithheld>[1]> = {},
+  ) => ({
+    loaded: true,
+    error: null,
+    checking: false,
+    overviewInFlight: false,
+    pendingFollows: [],
+    ...over,
+  });
+
+  it("says the check is running before the first read lands", () => {
+    expect(pageUpdateWithheld(null, standing({ loaded: false }))).toBe(
+      UPDATES_CHECKING,
+    );
+  });
+
+  // A first read that failed leaves no rows and `loaded` false, exactly
+  // like one in flight. Only the error tells them apart, and saying
+  // "checking" over a read that already failed names a wrong cause.
+  it("does not call a failed first read a check in progress", () => {
+    expect(
+      pageUpdateWithheld(
+        null,
+        standing({ loaded: false, error: "no network" }),
+      ),
+    ).toBe(UPDATE_NEEDS_CHECK_HERE);
+  });
+
+  // The shape a row-first reading gets wrong: a row is present, so it
+  // answers off the row and never looks at the read under it.
+  it("holds a row the first read has not answered for yet", () => {
+    expect(
+      pageUpdateWithheld(row("gh", "/a"), standing({ loaded: false })),
+    ).toBe(UPDATES_CHECKING);
+  });
+
+  // A failed re-read keeps the rows it had and drops `loaded`. The row is
+  // there and withholds nothing of its own, so only the read state stands
+  // between the reader and an Update over rows nobody could confirm.
+  it("holds a retained row under a failed re-read", () => {
+    expect(
+      pageUpdateWithheld(
+        row("gh", "/a"),
+        standing({ loaded: false, error: "no network" }),
+      ),
+    ).toBe(UPDATE_NEEDS_CHECK_HERE);
+  });
+
+  // A write is already running in this very place, so a second one would
+  // contend for the same writer lock. Another place's flip does not.
+  it("holds a row whose own place has a follow flip settling", () => {
+    const here = row("gh", "/a");
+    expect(
+      pageUpdateWithheld(
+        here,
+        standing({ pendingFollows: [{ scope: here.scope }] }),
+      ),
+    ).toBe(UPDATE_NEEDS_CHECK_HERE);
+    expect(
+      pageUpdateWithheld(
+        here,
+        standing({ pendingFollows: [{ scope: { scope: "global" } }] }),
+      ),
+    ).toBeNull();
+  });
+
+  // The kind is derived from the kind, not from anything a read refreshes,
+  // so no check can ever clear it and none may appear to. The Updates
+  // table shows the refusal here too; the two surfaces must agree.
+  it("gives the kind's refusal ahead of any state of the read", () => {
+    const refused = row("pi-hooks", "/a", {
+      kind: "pi-extension",
+      noPerPackageUpdate: "core will not update this one",
+    });
+    for (const over of [
+      {},
+      { loaded: false },
+      { loaded: false, error: "no network" },
+      { checking: true },
+      { overviewInFlight: true },
+      { pendingFollows: [{ scope: refused.scope }] },
+    ]) {
+      expect(pageUpdateWithheld(refused, standing(over))).toBe(
+        "core will not update this one",
+      );
+    }
+  });
+
+  // The control on the whole ordering: a structural fix that over-refuses
+  // is as wrong as one that under-explains. A landed read with nothing
+  // running withholds nothing from a plain following place.
+  it("withholds nothing from a plain row under a landed read", () => {
+    expect(pageUpdateWithheld(row("gh", "/a"), standing())).toBeNull();
+  });
+
+  it("says so for a place a settled read never spoke for", () => {
+    expect(pageUpdateWithheld(null, standing())).toBe(NO_UPDATE_STANDING_NOTE);
+  });
+
+  // The mirror of the wrong cause this round closed: ruling a place out
+  // while the read that would cover it is still running claims a verdict
+  // the check has not reached. The button is hidden either way; the
+  // difference is whether the reason is true.
+  it("does not rule a place out while a read is still running", () => {
+    expect(pageUpdateWithheld(null, standing({ checking: true }))).toBe(
+      UPDATES_CHECKING,
+    );
+    expect(pageUpdateWithheld(null, standing({ overviewInFlight: true }))).toBe(
+      UPDATES_CHECKING,
+    );
+  });
+
+  // And the counterpart: a row that exists is not barred by either flag.
+  it("still offers a row that exists while a read is running", () => {
+    expect(
+      pageUpdateWithheld(row("gh", "/a"), standing({ checking: true })),
+    ).toBeNull();
+    expect(
+      pageUpdateWithheld(row("gh", "/a"), standing({ overviewInFlight: true })),
+    ).toBeNull();
+  });
+
+  it("hands a settled place to the shared reading", () => {
+    expect(
+      pageUpdateWithheld(
+        row("gh", "/a", { blockedByLocalEdit: true }),
+        standing(),
+      ),
+    ).toBe(EDITED_CANT_UPDATE_NOTE);
   });
 });

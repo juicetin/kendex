@@ -30,6 +30,7 @@ export function PackageActions({
   name,
   primaryPath,
   updateAvailable,
+  previewAvailable,
   withheldNote,
   busy,
   onUpdate,
@@ -41,8 +42,21 @@ export function PackageActions({
   name: string;
   primaryPath: string;
   updateAvailable: boolean;
-  /** Why there is no Update here, when the page has news but this kind is
-   *  not brought current one package at a time. */
+  /** Whether there are two versions to diff: a newest that is not the
+   *  installed one, and an installed one to compare it against. A package
+   *  already at its newest has one version, and a diff of a commit with
+   *  itself is an empty comparison to close rather than something to read.
+   *  Read-only otherwise, so no state of the update read bears on it — a
+   *  check in flight or a refusal to write does not stop anyone looking at
+   *  what changed. */
+  previewAvailable: boolean;
+  /** Why there is no Update here, when the reason is one the update read
+   *  carries: a kind core never brings current one package at a time, a
+   *  read still pending or failed, a place the read never covered, an
+   *  edit of the reader's own. Rendered whenever `updateAvailable` is
+   *  false and this is set. The page has other reasons to offer nothing,
+   *  an unmappable installed commit among them, and those it does not
+   *  word. */
   withheldNote?: string | null;
   busy: boolean;
   onUpdate: () => void;
@@ -74,14 +88,14 @@ export function PackageActions({
   return (
     <div className="flex flex-wrap items-center gap-2">
       {updateAvailable ? (
-        <>
-          <Button size="sm" disabled={busy} onClick={onUpdate}>
-            {UPDATE_LABEL}
-          </Button>
-          <Button size="sm" variant="outline" onClick={onPreview}>
-            {PREVIEW_CHANGES_LABEL}
-          </Button>
-        </>
+        <Button size="sm" disabled={busy} onClick={onUpdate}>
+          {UPDATE_LABEL}
+        </Button>
+      ) : null}
+      {previewAvailable ? (
+        <Button size="sm" variant="outline" onClick={onPreview}>
+          {PREVIEW_CHANGES_LABEL}
+        </Button>
       ) : null}
       {!updateAvailable && withheldNote ? (
         <p className="text-sm text-muted-foreground">{withheldNote}</p>

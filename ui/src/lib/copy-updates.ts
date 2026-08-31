@@ -39,10 +39,14 @@ export const updatesSubtitle = (packages: number, places: number): string =>
 export const UPDATE_PACKAGE_EVERYWHERE_LABEL = "Update all";
 export const heldBySourceNote = (source: string): string =>
   `Held by the source "${source}" as a whole — release it where that source is declared`;
-export const NO_PER_PACKAGE_UPDATE_NOTE =
-  "Not updated one package at a time — Pi extensions come current with the update-pi command, plugins with their place's own apply";
 export const HELD_BY_OWNER_NOTE =
   "Held by the bundle or package it came with — update or release it from there";
+// The update read covers declared packages with a repository source. A
+// package page opened on anything else has news from its own timeline and
+// no standing to act on it, and saying so beats a page with no button and
+// no reason on it.
+export const NO_UPDATE_STANDING_NOTE =
+  "The update check has not spoken for this package here";
 
 // An edited copy is the user's work: no update touches it. The newest
 // version can only land beside it, under the name it always had, with the
@@ -130,5 +134,11 @@ export const nothingToUpdateToastLabel = (skipped: number): string =>
 export const UPDATES_CHECKING = "Checking for updates…";
 export const UPDATES_UNCONFIRMED_TITLE =
   "These are the last versions kendex could check";
-export const UPDATE_NEEDS_CHECK_NOTE =
-  "Updating needs a check that succeeds first — these versions may be stale";
+// The Updates table's rows are the update read's own answer, so a read
+// that did not land leaves the versions beside the button stale. The
+// package page draws its timeline from its own read, which landed, so it
+// says the first half and stops: only the standing behind Update is
+// unconfirmed there, not the versions on screen.
+const NEEDS_A_CHECK = "Updating needs a check that succeeds first";
+export const UPDATE_NEEDS_CHECK_NOTE = `${NEEDS_A_CHECK} — these versions may be stale`;
+export const UPDATE_NEEDS_CHECK_HERE = NEEDS_A_CHECK;
