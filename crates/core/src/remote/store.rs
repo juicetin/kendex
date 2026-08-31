@@ -12,12 +12,15 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use sha2::{Digest, Sha256};
-
 use crate::env::Env;
 use crate::error::{CoreError, Result};
 use crate::fs::atomic_write;
 use crate::process::Hardened;
+
+mod attribute_source;
+mod signature;
+
+pub use signature::tree_signature;
 
 /// Where the fetched objects live: one bare mirror per repository.
 const MIRRORS: &str = "mirrors";
@@ -151,6 +154,17 @@ fn stdout(git: Hardened) -> Option<String> {
 
 /// Clone the mirror if it is missing. A mirror holds objects and refs only,
 /// so nothing here can write outside the cache.
+///
+/// An empty `--template` is the third attribute source, and the last one
+/// the host still had. A template directory — the host's `init.templateDir`
+/// or `GIT_TEMPLATE_DIR` — is copied into every repository git creates,
+/// and one holding `info/attributes` lands it inside the mirror, where no
+/// setting on the checkout reaches it: `core.attributesFile=` is the
+/// global file, `GIT_ATTR_NOSYSTEM` the system one, and an attribute
+/// source names a tree, not a file beside the object store. Measured: with
+/// `* text eol=crlf` in a template, a mirror cloned without this converts
+/// the checkout even with the attribute source pinned. Emptied, git copies
+/// no template at all and the mirror carries no `info` directory.
 pub fn ensure_mirror(mirror: &Path, url: &str) -> Result<()> {
     if mirror.join("HEAD").is_file() {
         return Ok(());
@@ -169,6 +183,7 @@ pub fn ensure_mirror(mirror: &Path, url: &str) -> Result<()> {
             "clone",
             "--quiet",
             "--mirror",
+            "--template=",
             url,
             &mirror.display().to_string(),
         ],
@@ -245,7 +260,7 @@ pub fn has_commit(mirror: &Path, commit: &str) -> bool {
 /// A signature alone says the bytes are the ones that were written, never
 /// that they are the ones `check_out` writes now. The number rises
 /// whenever `check_out` changes what it writes for a commit.
-const RECEIPT_RULES: &str = "kendex-checkout 1";
+const RECEIPT_RULES: &str = "kendex-checkout 2";
 
 /// A published checkout, if the cache holds this commit unmodified under
 /// today's materialization rules. A mismatch is not an error, an
@@ -317,76 +332,21 @@ pub fn publish(env: &Env, key: &str, mirror: &Path, commit: &str) -> Result<Path
 /// — the only file in the mirror this touches. `git worktree` is
 /// deliberately unused: it would leave admin state in the mirror and a
 /// `.git` pointer inside a directory that is meant to be plain content.
+///
+/// The catalog's own `.gitattributes` decides nothing about what lands
+/// either: the write reads its attributes out of the tree
+/// [`attribute_source`] names instead of out of the commit, so no rule the
+/// source committed is in force for any path. `process::MATERIALISING`
+/// says why the host half is settled where it is and this half is an
+/// argument.
 fn check_out(into: &Path, mirror: &Path, commit: &str) -> Result<()> {
+    let attributes = attribute_source::for_commit(commit)?;
     fs::create_dir_all(into).map_err(|e| CoreError::io(into, e))?;
     run(Hardened::git_bare(mirror, &["read-tree", commit]))?;
     run(Hardened::git_into(
         mirror,
         into,
+        attributes,
         &["checkout-index", "--all", "--force"],
     ))
-}
-
-/// SHA-256 over a tree as sorted path + kind + content. Symlinks hash their
-/// target text, never what it points at: a catalog may ship a link that
-/// dangles here, and reading through it would either fail or pull in bytes
-/// from the host.
-pub fn tree_signature(root: &Path) -> Result<String> {
-    let mut hasher = Sha256::new();
-    hash_entry(&mut hasher, root, Path::new(""))?;
-    let mut out = String::new();
-    for byte in hasher.finalize() {
-        use std::fmt::Write as _;
-        let _ = write!(out, "{byte:02x}");
-    }
-    Ok(out)
-}
-
-fn hash_entry(hasher: &mut Sha256, path: &Path, rel: &Path) -> Result<()> {
-    let meta = fs::symlink_metadata(path).map_err(|e| CoreError::io(path, e))?;
-    let name = rel.to_string_lossy();
-    if meta.is_symlink() {
-        let target = fs::read_link(path).map_err(|e| CoreError::io(path, e))?;
-        hasher.update(b"l\0");
-        hasher.update(name.as_bytes());
-        hasher.update([0]);
-        hasher.update(target.to_string_lossy().as_bytes());
-        hasher.update([0]);
-    } else if meta.is_dir() {
-        hasher.update(b"d\0");
-        hasher.update(name.as_bytes());
-        hasher.update([0]);
-        let mut entries: Vec<PathBuf> = fs::read_dir(path)
-            .map_err(|e| CoreError::io(path, e))?
-            .flatten()
-            .map(|entry| entry.path())
-            .collect();
-        entries.sort();
-        for entry in entries {
-            let Some(file_name) = entry.file_name() else {
-                continue;
-            };
-            hash_entry(hasher, &entry, &rel.join(file_name))?;
-        }
-    } else {
-        hasher.update(b"f\0");
-        hasher.update(name.as_bytes());
-        hasher.update([0]);
-        hasher.update([executable(&meta)]);
-        hasher.update(&fs::read(path).map_err(|e| CoreError::io(path, e))?);
-        hasher.update([0]);
-    }
-    Ok(())
-}
-
-/// The one permission bit git records, and the one a hook script needs.
-#[cfg(unix)]
-fn executable(meta: &fs::Metadata) -> u8 {
-    use std::os::unix::fs::PermissionsExt;
-    u8::from(meta.permissions().mode() & 0o100 != 0)
-}
-
-#[cfg(not(unix))]
-fn executable(_meta: &fs::Metadata) -> u8 {
-    0
 }

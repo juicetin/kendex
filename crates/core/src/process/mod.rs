@@ -83,7 +83,7 @@ const PINNED: &[&str] = &["protocol.ext.allow=never"];
 /// writes one is what needs this and nothing else does. `git_into` is
 /// where the only such operation kendex runs lives, `checkout-index` out
 /// of the mirror. A later call that writes a working tree owes them too,
-/// wherever it is built.
+/// wherever it is built — and owes the attribute source below with them.
 ///
 /// What the host's git is configured to do to line endings must not decide
 /// what a catalog checks out. Both settings tell git to rewrite them as it
@@ -102,15 +102,16 @@ const PINNED: &[&str] = &["protocol.ext.allow=never"];
 /// `core.attributesFile` is emptied here, which is git's documented unset,
 /// and `GIT_ATTR_NOSYSTEM` in the environment takes the system file out.
 ///
-/// That is the boundary, and it is the line worth holding rather than
-/// narrowing the claim again: what the *host* says is silenced, what the
-/// *catalog* says is not. A repository's own committed `.gitattributes`
-/// still decides — `* text eol=crlf` still gets CRLF, and an attribute
-/// selecting `filter=<driver>` still reaches for a `smudge` command that
-/// lives in configuration, so one commit can land differently on a host
-/// defining that driver. Neither is bypassed, because whose intent wins
-/// between a catalog author and the machine reading them is a product
-/// question rather than this module's. KEN-850 owns it.
+/// What the *catalog* says is silenced too, and by a setting these three
+/// cannot carry: `git_into`'s `--attr-source` argument, which names the
+/// tree git reads `.gitattributes` from instead of the commit it is
+/// writing. Pointed at the empty tree it leaves no rule in force for any
+/// path — neither the `text eol=crlf` a repository commits nor the
+/// `filter=<driver>` that would reach for a `smudge` command living in
+/// somebody's configuration. It is an argument rather than an entry here
+/// because its value is that repository's empty tree and so differs by
+/// object format. Between the two, a catalog checks out the bytes it
+/// committed on every machine.
 ///
 /// It goes nowhere else, and the reach is the point rather than an
 /// oversight. A call that only *inspects* a repository is asking what that

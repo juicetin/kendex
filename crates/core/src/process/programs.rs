@@ -59,12 +59,33 @@ impl Hardened {
     /// an inspection or has no working tree to write: `git_bare` attaches
     /// none, and the only clone kendex makes is `--mirror`, which is bare
     /// for the same reason. Conversion happens where git writes files.
-    pub fn git_into(git_dir: &Path, work_tree: &Path, args: &[&str]) -> Hardened {
+    ///
+    /// `attr_source` is the tree git reads `.gitattributes` from, in place
+    /// of the commit being written and of the working tree it is written
+    /// into. Named here rather than settled in `MATERIALISING` because its
+    /// value belongs to the repository — the empty tree of that mirror's
+    /// object format — and because a caller that has to name it cannot
+    /// forget to; `remote::store::attribute_source` is where the value
+    /// comes from, and a git too old for the option is refused there,
+    /// before this call is spawned, so the reader gets a sentence naming
+    /// the version they have rather than git's usage wall. It goes on the
+    /// command line as the global option and not as `attr.tree` or
+    /// `GIT_ATTR_SOURCE`, which do the same thing on a git that knows
+    /// them: an option a git is too old to know is refused by name, where
+    /// an unknown config key or environment variable is ignored without a
+    /// word and the checkout converts in silence.
+    pub fn git_into(
+        git_dir: &Path,
+        work_tree: &Path,
+        attr_source: &str,
+        args: &[&str],
+    ) -> Hardened {
         let mut pinned = vec![
             OsString::from("--git-dir"),
             git_dir.as_os_str().to_owned(),
             OsString::from("--work-tree"),
             work_tree.as_os_str().to_owned(),
+            OsString::from(format!("--attr-source={attr_source}")),
         ];
         pinned.extend(owned(args));
         let mut hardened = Hardened::git_materialising_command(pinned, Some(work_tree));
