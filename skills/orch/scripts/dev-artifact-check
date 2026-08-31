@@ -49,6 +49,14 @@ PROG="dev-artifact-check"
 ID_GRAMMAR='^[A-Za-z0-9._-]+$'
 # --expect-items is a comma-separated list of item numbers.
 EXPECT_GRAMMAR='^[0-9]+(,[0-9]+)*$'
+scratch_files=()
+
+cleanup_scratch() {
+  if (( ${#scratch_files[@]} > 0 )); then
+    rm -f -- "${scratch_files[@]}"
+  fi
+}
+trap cleanup_scratch EXIT
 
 # The per-harness backgrounding paragraph under --wait is an intentional twin
 # of review-artifact-check's: each --help is self-contained, so edit both.
@@ -56,7 +64,7 @@ usage() {
   cat << 'EOF'
 Usage:
   dev-artifact-check --worktree WT --issue ISSUE --round-id RID \
-    [--expect-items N,N,... | --expect-items-from-round] [--wait SECS] [--interval SECS]
+    [--expect-items-from-round] [--wait SECS] [--interval SECS]
   dev-artifact-check --file <json_path> [--round-id RID] [--expect-items N,N,...] \
     [--wait SECS] [--interval SECS]
 
@@ -72,35 +80,43 @@ back to the per-wake check alone.
 
 Round mode (the production path): resolves WT/tmp/dev-return-ISSUE-RID.json,
 requires it exists, its internal .round_id == RID, then the scalar/kind, commit
-object (against WT's git repo, kendex#994), and items gates.
+object (against WT's git repo, kendex#994), and items gates. A kind fix receipt
+automatically resolves --expect-items-from-round authorization even when the
+caller supplied no expected-set flag. Implement and analysis remain flagless.
 File mode: validates one explicit JSON file (round_id checked only when --round-id
 is supplied). It is a test/parity affordance — round-trip checks and known-path
 artifacts — with no production caller; the orch workflows always use round mode.
 There is one identity model (round id); the mtime freshness gate and the old
 legacy positional mode are gone (kendex#776).
 
---expect-items (fix rounds): the delegated review-item NUMBERS as a comma-
+--expect-items (--file mode only): the delegated review-item NUMBERS as a comma-
 separated set (e.g. 1,2,3,4,5,6) — never a count. items[] must cover
 EXACTLY that set — each expected n present once, no unknown/duplicate n, every
 decision ∈ {Applied,Skipped,Blocked}, every reasoning non-empty. Without it, a
 fix/bundled artifact only needs a non-empty, well-formed items[].
 
 --expect-items-from-round (round mode only; excludes --expect-items): derive
-the expected set from the round record WT/tmp/dev-round-ISSUE-RID.json that
-dev-round-write persisted at delegation — the on-disk source of truth for the
-delegated item set, instead of a number list typed from the orchestrator's
-context. The record's internal .round_id must equal RID and its items[] must
-be a non-empty array of numeric .n; a missing, mismatched, or malformed record
-means the expected set cannot be established, so the check refuses to run
-(exit 2) rather than silently degrading to the weaker fallback gate.
+the expected set from immutable delegation fields in authorization under the
+repository's git common directory, outside the delegated worktree. The worktree
+recovery copy must
+match that authorization exactly. Missing, mismatched, symlinked, or malformed
+records refuse with exit 2. Never recreate authorization after delegation and
+never downgrade to --expect-items; mint a fresh round.
+Protected-addition scope: skills/orch/schemas/dev-round.md § Protected additions.
+An accepted fix round atomically marks its external authorization retired;
+repeat checks remain valid, while worktree-push ignores the retired round.
 
 Prints JSON: {ok: bool, verdict: "accept"|"wait"|"retry", path: string|null,
-              reason: "valid"|"missing"|"invalid"|"commit_unresolvable"|"incomplete",
+              reason: "valid"|"missing"|"invalid"|"commit_unresolvable"|
+                      "comparison_failed"|"classifier_failed"|
+                      "unapproved_additions"|"incomplete",
               warning: "commit_unreachable"|null,
-              hint: usage diagnosis (count-vs-set --expect-items misuse)|null}
+              hint: usage diagnosis (count-vs-set --expect-items misuse)|null,
+              files: [repo-relative paths]}
 
 Gates ordered: missing → (round_id mismatch → invalid) → scalars → invalid →
-commit object → commit_unresolvable → items → incomplete → valid.
+commit object → commit_unresolvable → additions probe → comparison_failed or
+classifier_failed or unapproved_additions → items → incomplete → valid.
 
 Exit status reflects artifact validity only: a valid artifact whose recorded
 validation is failing exits 0 with verdict "retry". Acceptance keys on the
@@ -121,6 +137,15 @@ reason meanings when ok=false:
               (kendex#994) — e.g. a hand-reconstructed SHA with a fabricated
               tail. Round mode only, and only when the worktree is a git repo;
               --file mode has no repo to check against and skips this gate.
+  unapproved_additions
+              a fix round added a protected file since its authorized base_sha
+              without naming that exact file in adds. The files field names
+              every refused path. Renames and moves do not count.
+  comparison_failed
+              Git could not compare the authorized base_sha to HEAD. No file
+              classification is inferred from a failed comparison.
+  classifier_failed
+              the protected-addition classifier produced no valid JSON array.
   incomplete  items[] fails the applicable rule — exact-set (with --expect-items)
               or non-empty-well-formed (kind fix OR bundled==true). kind implement
               without bundled keeps allowing items: []. kind analysis is
@@ -161,7 +186,7 @@ check_id_token() {
 # one that was never recorded (kendex#884). Both are null when the artifact is
 # missing or unparseable.
 emit() {
-  local ok="$1" path="$2" reason="$3" warning="${4:-}" hint="${5:-}" validate=null validate_note=null
+  local ok="$1" path="$2" reason="$3" warning="${4:-}" hint="${5:-}" files="${6:-[]}" validate=null validate_note=null
   if [[ -n "$path" && -f "$path" ]]; then
     validate="$(jq -c 'if (.validate? | type) == "string" then .validate else null end' "$path" 2>/dev/null || printf 'null')"
     validate_note="$(jq -c 'if (.validate_note? | type) == "string" then .validate_note else null end' "$path" 2>/dev/null || printf 'null')"
@@ -183,11 +208,26 @@ emit() {
   fi
   jq -n --argjson ok "$ok" --arg path "$path" --arg reason "$reason" --arg warning "$warning" \
     --arg hint "$hint" --arg verdict "$verdict" \
-    --argjson validate "${validate:-null}" --argjson validate_note "${validate_note:-null}" \
+    --argjson files "$files" --argjson validate "${validate:-null}" --argjson validate_note "${validate_note:-null}" \
     '{ok: $ok, verdict: $verdict, path: (if $path == "" then null else $path end), reason: $reason,
       warning: (if $warning == "" then null else $warning end),
       hint: (if $hint == "" then null else $hint end),
+      files: $files,
       validate: $validate, validate_note: $validate_note}'
+}
+
+retire_authorization() {
+  local auth="$1" live tmp auth_dir
+  [[ -n "$auth" ]] || return 0
+  live="$(jq -er 'if has("live") then select((.live | type) == "boolean") | (.live | tostring) else "true" end' "$auth")" \
+    || return 1
+  [[ "$live" == "true" ]] || return 0
+  auth_dir="${auth%/*}"
+  tmp="$(mktemp "$auth_dir/.dev-round-retire.XXXXXX")" || return 1
+  if ! jq '.live = false' "$auth" > "$tmp" || ! mv -f "$tmp" "$auth"; then
+    rm -f "$tmp"
+    return 1
+  fi
 }
 
 # The artifact's internal round_id must equal the expected token. Guards against
@@ -274,6 +314,79 @@ analysis_incomplete() {
   ' "$1" >/dev/null 2>&1
 }
 
+is_protected_addition() {
+  local path="$1" basename stem remaining component in_test_path=false
+  case "$path" in
+    *test-helper*|*test_helper*|*test-util*|*test_util*) return 0 ;;
+  esac
+  case "$path" in
+    crates/*|tools/*|skills/*/scripts/*|.agents/skills/*/scripts/*|\
+    src/test/*|*/src/test/*|\
+    helper/*|helpers/*|*/helper/*|*/helpers/*|\
+    test-helper/*|test-helpers/*|test_helper/*|test_helpers/*|\
+    test-util/*|test-utils/*|test_util/*|test_utils/*|\
+    */test-helper/*|*/test-helpers/*|*/test_helper/*|*/test_helpers/*|\
+    */test-util/*|*/test-utils/*|*/test_util/*|*/test_utils/*)
+      return 0
+      ;;
+  esac
+  remaining="$path"
+  while [[ "$remaining" == */* ]]; do
+    component="${remaining%%/*}"
+    remaining="${remaining#*/}"
+    if [[ "$in_test_path" == "true" ]]; then
+      case "$component" in
+        helper|helpers|support|lib|util|utils) return 0 ;;
+      esac
+    fi
+    case "$component" in
+      test|tests|__tests__) in_test_path=true ;;
+    esac
+  done
+  basename="${path##*/}"
+  while [[ "$basename" == .* ]]; do basename="${basename#.}"; done
+  stem="${basename%%.*}"
+  if [[ "$in_test_path" == "true" ]]; then
+    case "$stem" in
+      *helper*|*test-util*|*test_util*) return 0 ;;
+    esac
+  fi
+  return 1
+}
+
+collect_unapproved_additions() {
+  local repo="$1" authorization="$2" result="$3" base_sha path probe
+  local additions=()
+  base_sha="$(jq -r '.base_sha' "$authorization")"
+  probe="$(mktemp "$repo/tmp/.dev-artifact-additions.XXXXXX")" \
+    || return 3
+  scratch_files+=("$probe")
+  if ! git -C "$repo" diff --find-renames --diff-filter=A --name-only -z "$base_sha" HEAD > "$probe"; then
+    rm -f -- "$probe"
+    return 2
+  fi
+  while IFS= read -r -d '' path; do
+    if is_protected_addition "$path" \
+      && ! jq -e --arg path "$path" '.adds | index($path) != null' "$authorization" >/dev/null; then
+      additions+=("$path")
+    fi
+  done < "$probe"
+  if (( ${#additions[@]} > 0 )); then
+    if ! jq -n '$ARGS.positional' --args "${additions[@]}" > "$result"; then
+      rm -f -- "$probe"
+      return 3
+    fi
+  else
+    if ! printf '[]\n' > "$result"; then
+      rm -f -- "$probe"
+      return 3
+    fi
+  fi
+  rm -f -- "$probe"
+  [[ -s "$result" ]] \
+    && jq -e '(type == "array") and all(.[]; type == "string")' "$result" >/dev/null 2>&1
+}
+
 # Shared gate: existence → (round_id match, when expected) → required scalars
 # (invalid) → commit object (commit_unresolvable, kendex#994) → items/summary
 # (incomplete) → valid. Emits {ok, path, reason, warning}, returns 0 iff valid.
@@ -283,7 +396,7 @@ analysis_incomplete() {
 # a git repo — production worktrees always are, and a check that cannot run
 # proves nothing either way.
 validate_artifact() {
-  local file="$1" want_round="$2" expect_items="$3" repo="${4:-}" warning=""
+  local file="$1" want_round="$2" expect_items="$3" repo="${4:-}" authorization="${5:-}" warning=""
   if [[ ! -f "$file" ]]; then
     emit false "" "missing"
     return 1
@@ -314,6 +427,40 @@ validate_artifact() {
     if ! git -C "$repo" merge-base --is-ancestor "$commit" HEAD >/dev/null 2>&1; then
       warning="commit_unreachable"
       printf '%s: artifact commit %s resolves but is not an ancestor of HEAD in %s (orphaned by a rebase?)\n' "$PROG" "$commit" "$repo" >&2
+    fi
+  fi
+  if [[ -n "$authorization" ]]; then
+    local refused_additions refused_file additions_rc=0
+    refused_file="$(mktemp "$repo/tmp/.dev-artifact-refused.XXXXXX")" \
+      || additions_rc=3
+    if (( additions_rc == 0 )); then
+      scratch_files+=("$refused_file")
+      collect_unapproved_additions "$repo" "$authorization" "$refused_file" \
+        || additions_rc=$?
+    fi
+    if (( additions_rc == 2 )); then
+      [[ -n "$refused_file" ]] && rm -f -- "$refused_file"
+      printf '%s: could not compare fix-round base to HEAD in %s\n' "$PROG" "$repo" >&2
+      emit false "$file" "comparison_failed"
+      return 1
+    fi
+    if (( additions_rc != 0 )); then
+      [[ -n "$refused_file" ]] && rm -f -- "$refused_file"
+      printf '%s: protected-addition classifier produced no valid result in %s\n' "$PROG" "$repo" >&2
+      emit false "$file" "classifier_failed"
+      return 1
+    fi
+    if ! refused_additions="$(jq -c '.' "$refused_file")"; then
+      rm -f -- "$refused_file"
+      emit false "$file" "classifier_failed"
+      return 1
+    fi
+    rm -f -- "$refused_file"
+    if [[ "$refused_additions" != "[]" ]]; then
+      printf '%s: fix round added files absent from its Adds line: %s\n' \
+        "$PROG" "$(jq -r 'join(", ")' <<<"$refused_additions")" >&2
+      emit false "$file" "unapproved_additions" "" "" "$refused_additions"
+      return 1
     fi
   fi
   if [[ -n "$expect_items" ]]; then
@@ -367,7 +514,10 @@ file=""
 want_round=""
 expect_items=""
 expect_from_round=false
+round_record=""
+authorization=""
 repo=""
+round_mode=false
 wait_secs=0
 interval=5
 
@@ -388,6 +538,7 @@ if [[ "${1:-}" == "--file" ]]; then
     esac
   done
 elif [[ "${1:-}" == --* ]]; then
+  round_mode=true
   worktree=""
   issue=""
   round_id=""
@@ -405,6 +556,8 @@ elif [[ "${1:-}" == --* ]]; then
   done
   [[ -n "$worktree" ]] || die "--worktree is required"
   [[ -d "$worktree" ]] || die "--worktree path '$worktree' is not a directory"
+  [[ -z "$expect_items" ]] \
+    || die "--expect-items is only allowed with --file; round mode requires --expect-items-from-round so authorization and protected additions cannot be bypassed"
   check_id_token --issue "$issue"
   check_id_token --round-id "$round_id"
   want_round="$round_id"
@@ -419,7 +572,7 @@ elif [[ "${1:-}" == --* ]]; then
     [[ -z "$expect_items" ]] \
       || die "--expect-items and --expect-items-from-round are mutually exclusive: one expected-set source"
     round_record="$worktree/tmp/dev-round-$issue-$round_id.json"
-    [[ -f "$round_record" ]] \
+    [[ -f "$round_record" && ! -L "$round_record" ]] \
       || die "round record $round_record not found — was dev-round-write run when the round was stamped?"
     jq empty "$round_record" >/dev/null 2>&1 \
       || die "round record $round_record is not parseable JSON"
@@ -431,8 +584,15 @@ elif [[ "${1:-}" == --* ]]; then
     # not have written (wrong issue, missing schema_version, ill-typed or
     # empty items/text) is no source of truth for the expected set.
     jq -e --arg issue "$issue" '
-      ((.schema_version? | type) == "number")
+      (.schema_version? == 2)
       and ((.issue? | type) == "string") and (.issue == $issue)
+      and ((.base_sha? | type) == "string") and (.base_sha != "")
+      and ((.adds? | type) == "array")
+      and all(.adds[];
+            (type == "string") and (. != "") and (startswith("/") | not)
+            and (contains("\n") | not) and (contains("\r") | not)
+            and (split("/") | all(. != "" and . != "." and . != "..")))
+      and ((.adds | length) == (.adds | unique | length))
       and ((.items? | type) == "array") and ((.items | length) > 0)
       and all(.items[];
             (type == "object")
@@ -441,8 +601,43 @@ elif [[ "${1:-}" == --* ]]; then
             and ((.text | gsub("[[:space:]]"; "")) != ""))
       and (([.items[].n] | length) == ([.items[].n] | unique | length))
     ' "$round_record" >/dev/null 2>&1 \
-      || die "round record $round_record fails the dev-round schema (schema_version number, issue '$issue', non-empty items[] of unique integer n + non-empty text) — see skills/orch/schemas/dev-round.md"
-    expect_items="$(jq -r '[.items[].n | tostring] | join(",")' "$round_record")"
+      || die "round record $round_record fails the dev-round schema (schema_version 2, issue '$issue', base_sha, unique repository-relative adds[], non-empty items[] of unique integer n + non-empty text) — see skills/orch/schemas/dev-round.md"
+    worktree_root="$(git -C "$worktree" rev-parse --show-toplevel 2>/dev/null)" \
+      || die "worktree '$worktree' has no repository root"
+    git_common_dir="$(git -C "$worktree" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" \
+      || die "worktree '$worktree' has no resolvable git common directory"
+    authorization="$git_common_dir/kendex/dev-round-authorizations/$issue-$round_id.json"
+    [[ -f "$authorization" && ! -L "$authorization" ]] \
+      || die "external authorization $authorization is missing or not a regular file — mint a NEW round; authorization is never recreated after delegation"
+    jq -e --arg issue "$issue" --arg round "$round_id" --arg worktree "$worktree_root" '
+      (.schema_version? == 1)
+      and (.issue? == $issue) and (.round_id? == $round) and (.worktree? == $worktree)
+      and ((.base_sha? | type) == "string") and (.base_sha != "")
+      and ((has("live") | not) or ((.live? | type) == "boolean"))
+      and ((.adds? | type) == "array")
+      and all(.adds[];
+            (type == "string") and (. != "") and (startswith("/") | not)
+            and (contains("\n") | not) and (contains("\r") | not)
+            and (split("/") | all(. != "" and . != "." and . != "..")))
+      and ((.adds | length) == (.adds | unique | length))
+      and ((.items? | type) == "array") and ((.items | length) > 0)
+      and all(.items[];
+            (type == "object")
+            and ((.n? | type) == "number") and (.n == (.n | floor)) and (.n >= 0)
+            and ((.text? | type) == "string")
+            and ((.text | gsub("[[:space:]]"; "")) != ""))
+      and (([.items[].n] | length) == ([.items[].n] | unique | length))
+    ' "$authorization" >/dev/null 2>&1 \
+      || die "external authorization $authorization fails its schema — mint a NEW round"
+    jq -e --slurpfile auth "$authorization" '
+      $auth[0] as $a
+      | .issue == $a.issue and .round_id == $a.round_id
+        and .base_sha == $a.base_sha and .adds == $a.adds and .items == $a.items
+    ' "$round_record" >/dev/null 2>&1 \
+      || die "round record $round_record does not exactly match external authorization $authorization — mint a NEW round"
+    [[ "$(git -C "$worktree" cat-file -t "$(jq -r '.base_sha' "$authorization")" 2>/dev/null)" == "commit" ]] \
+      || die "external authorization $authorization base_sha does not name a commit in $worktree"
+    expect_items="$(jq -r '[.items[].n | tostring] | join(",")' "$authorization")"
   fi
 else
   # Neither --file nor round mode → usage error. One identity model (round id);
@@ -450,6 +645,33 @@ else
   usage >&2
   exit 2
 fi
+
+reroute_flagless_fix() {
+  if [[ "$round_mode" == "true" && "$expect_from_round" != "true" && -f "$file" ]] \
+    && jq -e '(.kind? // "") == "fix"' "$file" >/dev/null 2>&1; then
+    local rc=0
+    "$0" --worktree "$worktree" --issue "$issue" --round-id "$round_id" --expect-items-from-round \
+      || rc=$?
+    exit "$rc"
+  fi
+}
+
+check_once() {
+  local out rc=0 verdict
+  out="$(validate_artifact "$file" "$want_round" "$expect_items" "$repo" "$authorization")" || rc=$?
+  if (( rc == 0 )); then
+    verdict="$(jq -r '.verdict' <<<"$out")" || {
+      printf '%s: could not read the emitted artifact verdict\n' "$PROG" >&2
+      return 2
+    }
+    if [[ "$verdict" == "accept" ]] && ! retire_authorization "$authorization"; then
+      printf '%s: could not retire accepted round authorization %s\n' "$PROG" "$authorization" >&2
+      return 2
+    fi
+  fi
+  printf '%s\n' "$out"
+  return "$rc"
+}
 
 # Shared tail: --expect-items grammar (both modes), then validate — once, or,
 # with --wait, repeatedly until the verdict leaves "wait" or the deadline lands.
@@ -465,8 +687,10 @@ if (( wait_secs > 0 )); then
   # deadline — and never depends on the agent's return message being delivered.
   deadline=$(( $(date +%s) + wait_secs ))
   while :; do
+    reroute_flagless_fix
     rc=0
-    out="$(validate_artifact "$file" "$want_round" "$expect_items" "$repo")" || rc=$?
+    out="$(check_once)" || rc=$?
+    (( rc != 2 )) || exit 2
     verdict="$(jq -r '.verdict // "wait"' <<<"$out" 2>/dev/null || printf 'wait')"
     if [[ "$verdict" != "wait" ]] || (( $(date +%s) >= deadline )); then
       printf '%s\n' "$out"
@@ -479,4 +703,7 @@ if (( wait_secs > 0 )); then
     sleep "$sleep_for"
   done
 fi
-if validate_artifact "$file" "$want_round" "$expect_items" "$repo"; then exit 0; else exit 1; fi
+reroute_flagless_fix
+rc=0
+check_once || rc=$?
+exit "$rc"

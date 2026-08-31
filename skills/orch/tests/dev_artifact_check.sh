@@ -94,11 +94,15 @@ rc=$?
 assert_eq "$rc" "0" "valid implement receipt exits 0"
 assert_eq "$(jq -r '.ok' <<<"$out")" "true" "valid implement receipt reports ok=true"
 assert_eq "$(jq -r '.path' <<<"$out")" "$artifact" "valid implement receipt reports its path"
-assert_eq "$(jq -r '.reason' <<<"$out")" "valid" "valid implement receipt reports reason=valid"
+assert_eq "$(jq -r '.reason' <<<"$out")" "valid" "flagless implement receipt reports reason=valid"
 
-# --- valid: fix receipt (fallback items rule, no --expect-items) ---
+# A flagless round fix automatically requires authorization; this plain
+# non-repository fixture has none and cannot fall through to the item fallback.
 printf '%s' "$valid_fix" > "$artifact"
-assert_eq "$(reason --worktree "$worktree" --issue "$issue" --round-id "$R")" "valid" "valid fix receipt reports reason=valid"
+set +e
+"$CHECK" --worktree "$worktree" --issue "$issue" --round-id "$R" >/dev/null 2>&1
+assert_eq "$?" "2" "flagless fix receipt cannot bypass round authorization"
+set -e
 
 # --- round-id identity: a DIFFERENT requested round resolves a different path → missing ---
 assert_eq "$(reason --worktree "$worktree" --issue "$issue" --round-id 9999-0)" "missing" "wrong round id resolves a different path → missing"
@@ -138,19 +142,19 @@ assert_eq "$(reason --worktree "$worktree" --issue "$issue" --round-id "$R")" "i
 
 # --- incomplete: kind fix OR bundled requires a non-empty, well-formed items[] ---
 printf '%s' "$valid_fix" | jq -c 'del(.items)' > "$artifact"
-assert_eq "$(reason --worktree "$worktree" --issue "$issue" --round-id "$R")" "incomplete" "fix with items missing reports reason=incomplete"
+assert_eq "$(reason --file "$artifact")" "incomplete" "file-mode fix with items missing reports reason=incomplete"
 printf '%s' "$valid_fix" | jq -c '.items=[]' > "$artifact"
-assert_eq "$(reason --worktree "$worktree" --issue "$issue" --round-id "$R")" "incomplete" "fix with empty items reports reason=incomplete"
+assert_eq "$(reason --file "$artifact")" "incomplete" "file-mode fix with empty items reports reason=incomplete"
 printf '%s' "$valid_fix" | jq -c '.items="nope"' > "$artifact"
-assert_eq "$(reason --worktree "$worktree" --issue "$issue" --round-id "$R")" "incomplete" "fix with non-array items reports reason=incomplete"
+assert_eq "$(reason --file "$artifact")" "incomplete" "file-mode fix with non-array items reports reason=incomplete"
 printf '%s' "$valid_fix" | jq -c '.items=[{"n":1,"decision":"Applied"}]' > "$artifact"
-assert_eq "$(reason --worktree "$worktree" --issue "$issue" --round-id "$R")" "incomplete" "fix with item missing reasoning reports reason=incomplete"
+assert_eq "$(reason --file "$artifact")" "incomplete" "file-mode fix with item missing reasoning reports reason=incomplete"
 printf '%s' "$valid_fix" | jq -c '.items=[{"n":1,"decision":"Applied","reasoning":""}]' > "$artifact"
-assert_eq "$(reason --worktree "$worktree" --issue "$issue" --round-id "$R")" "incomplete" "fix with empty reasoning reports reason=incomplete"
+assert_eq "$(reason --file "$artifact")" "incomplete" "file-mode fix with empty reasoning reports reason=incomplete"
 printf '%s' "$valid_fix" | jq -c '.items=[{"n":1,"decision":"Nope","reasoning":"x"}]' > "$artifact"
-assert_eq "$(reason --worktree "$worktree" --issue "$issue" --round-id "$R")" "incomplete" "fix with out-of-enum decision reports reason=incomplete"
+assert_eq "$(reason --file "$artifact")" "incomplete" "file-mode fix with out-of-enum decision reports reason=incomplete"
 printf '%s' "$valid_fix" | jq -c '.items=[{"n":"1","decision":"Applied","reasoning":"x"}]' > "$artifact"
-assert_eq "$(reason --worktree "$worktree" --issue "$issue" --round-id "$R")" "incomplete" "fix with non-numeric item .n reports reason=incomplete"
+assert_eq "$(reason --file "$artifact")" "incomplete" "file-mode fix with non-numeric item .n reports reason=incomplete"
 
 # bundled implement with empty items → incomplete
 printf '%s' "$valid_impl" | jq -c '.bundled=true' > "$artifact"
@@ -164,8 +168,8 @@ assert_eq "$(reason --worktree "$worktree" --issue "$issue" --round-id "$R")" "v
 printf '%s' "$valid_analysis" > "$artifact"
 out="$("$CHECK" --worktree "$worktree" --issue "$issue" --round-id "$R")"
 rc=$?
-assert_eq "$rc" "0" "valid analysis receipt exits 0"
-assert_eq "$(jq -r '.reason' <<<"$out")" "valid" "valid analysis receipt reports reason=valid"
+assert_eq "$rc" "0" "flagless analysis receipt exits 0"
+assert_eq "$(jq -r '.reason' <<<"$out")" "valid" "flagless analysis receipt reports reason=valid"
 assert_eq "$(jq -r '.validate' <<<"$out")" "null" "analysis receipt echoes validate=null (no validation ran)"
 # The inverse rule: a commit/validate/validate_note key PRESENT on an analysis
 # artifact is a fabricated claim about a round that ran none → invalid, even
@@ -191,26 +195,26 @@ printf '%s' "$valid_analysis" | jq -c '.round_id="OTHER-1"' > "$artifact"
 assert_eq "$(reason --worktree "$worktree" --issue "$issue" --round-id "$R")" "invalid" "analysis with internal round_id mismatch reports reason=invalid"
 # An analysis artifact can never satisfy a delegated item set.
 printf '%s' "$valid_analysis" > "$artifact"
-assert_eq "$(reason --worktree "$worktree" --issue "$issue" --round-id "$R" --expect-items 1,2)" "incomplete" "analysis cannot satisfy --expect-items → incomplete"
+assert_eq "$(reason --file "$artifact" --expect-items 1,2)" "incomplete" "analysis cannot satisfy file-mode --expect-items → incomplete"
 
 # --- gate ordering: invalid (scalars/round) beats incomplete (items) ---
 printf '%s' "$valid_fix" | jq -c 'del(.commit) | .items=[]' > "$artifact"
-assert_eq "$(reason --worktree "$worktree" --issue "$issue" --round-id "$R")" "invalid" "invalid scalar beats incomplete (fix missing .commit + empty items)"
+assert_eq "$(reason --file "$artifact")" "invalid" "file-mode invalid scalar beats incomplete"
 
 # --- --expect-items: exact set coverage for fix rounds ---
 printf '%s' "$valid_fix" > "$artifact"   # items n = [1,2]
-assert_eq "$(reason --worktree "$worktree" --issue "$issue" --round-id "$R" --expect-items 1,2)" "valid" "expect 1,2 exact match → valid"
-assert_eq "$(reason --worktree "$worktree" --issue "$issue" --round-id "$R" --expect-items 2,1)" "valid" "expect 2,1 order-independent → valid"
-assert_eq "$(reason --worktree "$worktree" --issue "$issue" --round-id "$R" --expect-items 1,2,3)" "incomplete" "expect 1,2,3 with 3 missing → incomplete"
-assert_eq "$(reason --worktree "$worktree" --issue "$issue" --round-id "$R" --expect-items 1)" "incomplete" "expect 1 with extra 2 present → incomplete"
+assert_eq "$(reason --file "$artifact" --expect-items 1,2)" "valid" "file-mode expect 1,2 exact match → valid"
+assert_eq "$(reason --file "$artifact" --expect-items 2,1)" "valid" "file-mode expect 2,1 order-independent → valid"
+assert_eq "$(reason --file "$artifact" --expect-items 1,2,3)" "incomplete" "file-mode expect 1,2,3 with 3 missing → incomplete"
+assert_eq "$(reason --file "$artifact" --expect-items 1)" "incomplete" "file-mode expect 1 with extra 2 present → incomplete"
 # duplicate item number in the artifact must not satisfy a distinct expected set
 printf '%s' "$valid_fix" | jq -c '.items=[{"n":1,"decision":"Applied","reasoning":"a"},{"n":1,"decision":"Skipped","reasoning":"b"}]' > "$artifact"
-assert_eq "$(reason --worktree "$worktree" --issue "$issue" --round-id "$R" --expect-items 1,2)" "incomplete" "duplicate item n=1 does not cover {1,2} → incomplete"
+assert_eq "$(reason --file "$artifact" --expect-items 1,2)" "incomplete" "file-mode duplicate item n=1 does not cover {1,2} → incomplete"
 # expect-items applies its own enum/reasoning rules even when the item set matches exactly
 printf '%s' "$valid_fix" | jq -c '.items=[{"n":1,"decision":"Applied","reasoning":""},{"n":2,"decision":"Skipped","reasoning":"b"}]' > "$artifact"
-assert_eq "$(reason --worktree "$worktree" --issue "$issue" --round-id "$R" --expect-items 1,2)" "incomplete" "expect-items rejects empty reasoning → incomplete"
+assert_eq "$(reason --file "$artifact" --expect-items 1,2)" "incomplete" "file-mode expect-items rejects empty reasoning → incomplete"
 printf '%s' "$valid_fix" | jq -c '.items=[{"n":1,"decision":"Nope","reasoning":"a"},{"n":2,"decision":"Skipped","reasoning":"b"}]' > "$artifact"
-assert_eq "$(reason --worktree "$worktree" --issue "$issue" --round-id "$R" --expect-items 1,2)" "incomplete" "expect-items rejects out-of-enum decision (set matches) → incomplete"
+assert_eq "$(reason --file "$artifact" --expect-items 1,2)" "incomplete" "file-mode expect-items rejects out-of-enum decision → incomplete"
 printf '%s' "$valid_fix" > "$artifact"   # restore
 
 # --- --file mode: explicit path validation ---
@@ -255,8 +259,8 @@ assert_eq "$?" "2" "round mode with path-unsafe --issue (slash) exits 2"
 assert_eq "$?" "2" "round mode with path-traversal --issue (..) exits 2"
 "$CHECK" --worktree "$worktree" --issue "$issue" --round-id ".." >/dev/null 2>&1
 assert_eq "$?" "2" "round mode with path-traversal --round-id (..) exits 2"
-"$CHECK" --worktree "$worktree" --issue "$issue" --round-id "$R" --expect-items "1,x" >/dev/null 2>&1
-assert_eq "$?" "2" "round mode with malformed --expect-items exits 2"
+"$CHECK" --file "$artifact" --expect-items "1,x" >/dev/null 2>&1
+assert_eq "$?" "2" "file mode with malformed --expect-items exits 2"
 "$CHECK" --worktree "$TMP_ROOT/does-not-exist" --issue "$issue" --round-id "$R" >/dev/null 2>&1
 assert_eq "$?" "2" "round mode with nonexistent worktree exits 2"
 "$CHECK" --file >/dev/null 2>&1
@@ -279,7 +283,7 @@ rt_impl="$("$WRITE" --worktree "$rt_wt" --kind implement --issue issue-9 --round
 assert_eq "$([[ -f "$rt_impl" ]] && echo yes)" "yes" "writer produced the round-scoped implement artifact"
 assert_eq "$(reason --worktree "$rt_wt" --issue issue-9 --round-id 5-6)" "valid" "writer implement output round-trips as valid"
 "$WRITE" --worktree "$rt_wt" --kind fix --issue issue-9 --round-id 7-8 --branch b --commit c --validate pass --item 1 Applied a --item 2 Skipped b >/dev/null
-assert_eq "$(reason --worktree "$rt_wt" --issue issue-9 --round-id 7-8 --expect-items 1,2)" "valid" "writer fix output round-trips with matching --expect-items"
+assert_eq "$(reason --file "$rt_wt/tmp/dev-return-issue-9-7-8.json" --expect-items 1,2)" "valid" "writer fix output round-trips through file-mode --expect-items"
 printf 'Recommend: re-scope; seam moved in refactor.\n' > "$rt_wt/analysis.md"
 "$WRITE" --worktree "$rt_wt" --kind analysis --issue issue-9 --round-id 9-10 --branch b --summary-file "$rt_wt/analysis.md" --no-summary >/dev/null
 assert_eq "$(reason --worktree "$rt_wt" --issue issue-9 --round-id 9-10)" "valid" "writer analysis output round-trips as valid (kendex#952)"
@@ -291,14 +295,25 @@ assert_eq "$(reason --worktree "$rt_wt" --issue issue-9 --round-id 9-10)" "valid
 ROUND_WRITE="$REPO_ROOT/skills/orch/scripts/dev-round-write"
 rr_wt="$TMP_ROOT/rr"
 mkdir -p "$rr_wt"
+git -C "$rr_wt" init -q -b main
+git -C "$rr_wt" config user.email test@example.com
+git -C "$rr_wt" config user.name Test
+git -C "$rr_wt" config commit.gpgsign false
+git -C "$rr_wt" commit -q --allow-empty -m base
+rr_head="$(git -C "$rr_wt" rev-parse HEAD)"
 "$ROUND_WRITE" --worktree "$rr_wt" --issue issue-9 --round-id 7-8 \
   --item 1 "fix nil deref" --item 2 "cover expiry" >/dev/null
-"$WRITE" --worktree "$rr_wt" --kind fix --issue issue-9 --round-id 7-8 --branch b --commit c \
+"$WRITE" --worktree "$rr_wt" --kind fix --issue issue-9 --round-id 7-8 --branch b --commit "$rr_head" \
   --validate pass --item 1 Applied a --item 2 Skipped b >/dev/null
 assert_eq "$(reason --worktree "$rr_wt" --issue issue-9 --round-id 7-8 --expect-items-from-round)" "valid" \
   "artifact covering the persisted round set → valid (writers round-trip)"
+rr_auth="$rr_wt/.git/kendex/dev-round-authorizations/issue-9-7-8.json"
+assert_eq "$(jq -r '.live' "$rr_auth")" "false" "acceptance retires the external authorization"
+assert_eq "$(reason --worktree "$rr_wt" --issue issue-9 --round-id 7-8)" "valid" \
+  "flagless fix automatically resolves bound round authorization"
+assert_eq "$(jq -r '.live' "$rr_auth")" "false" "repeat acceptance keeps the authorization retired"
 # an artifact missing a delegated item must fail exactly as with explicit numbers
-"$WRITE" --worktree "$rr_wt" --kind fix --issue issue-9 --round-id 8-9 --branch b --commit c \
+"$WRITE" --worktree "$rr_wt" --kind fix --issue issue-9 --round-id 8-9 --branch b --commit "$rr_head" \
   --validate pass --item 1 Applied a >/dev/null
 "$ROUND_WRITE" --worktree "$rr_wt" --issue issue-9 --round-id 8-9 \
   --item 1 "fix nil deref" --item 2 "cover expiry" >/dev/null
@@ -310,12 +325,12 @@ set +e
 "$CHECK" --worktree "$rr_wt" --issue issue-9 --round-id 9-9 --expect-items-from-round >/dev/null 2>&1
 assert_eq "$?" "2" "--expect-items-from-round with no round record exits 2"
 # a round record whose internal token differs is not THIS round's record
-jq -n '{schema_version:1,round_id:"OTHER-1",issue:"issue-9",items:[{n:1,text:"t"}]}' \
+jq -n --arg base "$rr_head" '{schema_version:2,round_id:"OTHER-1",issue:"issue-9",base_sha:$base,adds:[],items:[{n:1,text:"t"}]}' \
   > "$rr_wt/tmp/dev-round-issue-9-10-10.json"
 "$CHECK" --worktree "$rr_wt" --issue issue-9 --round-id 10-10 --expect-items-from-round >/dev/null 2>&1
 assert_eq "$?" "2" "--expect-items-from-round with mismatched internal round_id exits 2"
 # a malformed round record (empty/ill-typed items) proves nothing about the set
-jq -n '{schema_version:1,round_id:"11-11",issue:"issue-9",items:[]}' \
+jq -n --arg base "$rr_head" '{schema_version:2,round_id:"11-11",issue:"issue-9",base_sha:$base,adds:[],items:[]}' \
   > "$rr_wt/tmp/dev-round-issue-9-11-11.json"
 "$CHECK" --worktree "$rr_wt" --issue issue-9 --round-id 11-11 --expect-items-from-round >/dev/null 2>&1
 assert_eq "$?" "2" "--expect-items-from-round with an empty round-record item set exits 2"
@@ -323,15 +338,15 @@ assert_eq "$?" "2" "--expect-items-from-round with an empty round-record item se
 printf 'not json' > "$rr_wt/tmp/dev-round-issue-9-12-12.json"
 "$CHECK" --worktree "$rr_wt" --issue issue-9 --round-id 12-12 --expect-items-from-round >/dev/null 2>&1
 assert_eq "$?" "2" "--expect-items-from-round with an unparseable round record exits 2"
-jq -n '{schema_version:1,round_id:"13-13",issue:"issue-OTHER",items:[{n:1,text:"t"}]}' \
+jq -n --arg base "$rr_head" '{schema_version:2,round_id:"13-13",issue:"issue-OTHER",base_sha:$base,adds:[],items:[{n:1,text:"t"}]}' \
   > "$rr_wt/tmp/dev-round-issue-9-13-13.json"
 "$CHECK" --worktree "$rr_wt" --issue issue-9 --round-id 13-13 --expect-items-from-round >/dev/null 2>&1
 assert_eq "$?" "2" "--expect-items-from-round with a mismatched internal issue exits 2"
-jq -n '{round_id:"14-14",issue:"issue-9",items:[{n:1,text:"t"}]}' \
+jq -n --arg base "$rr_head" '{round_id:"14-14",issue:"issue-9",base_sha:$base,adds:[],items:[{n:1,text:"t"}]}' \
   > "$rr_wt/tmp/dev-round-issue-9-14-14.json"
 "$CHECK" --worktree "$rr_wt" --issue issue-9 --round-id 14-14 --expect-items-from-round >/dev/null 2>&1
 assert_eq "$?" "2" "--expect-items-from-round with a record missing schema_version exits 2"
-jq -n '{schema_version:1,round_id:"15-15",issue:"issue-9",items:[{n:1,text:""}]}' \
+jq -n --arg base "$rr_head" '{schema_version:2,round_id:"15-15",issue:"issue-9",base_sha:$base,adds:[],items:[{n:1,text:""}]}' \
   > "$rr_wt/tmp/dev-round-issue-9-15-15.json"
 "$CHECK" --worktree "$rr_wt" --issue issue-9 --round-id 15-15 --expect-items-from-round >/dev/null 2>&1
 assert_eq "$?" "2" "--expect-items-from-round with an empty item text exits 2"
@@ -339,34 +354,148 @@ set -e
 # the count-vs-set hint diagnoses a TYPED --expect-items count; a set read from
 # the round record cannot be that misuse, so from-round must not emit the hint
 # even when the shapes coincide (control first: the inline form still fires it).
-"$WRITE" --worktree "$rr_wt" --kind fix --issue issue-9 --round-id 16-16 --branch b --commit c \
+"$WRITE" --worktree "$rr_wt" --kind fix --issue issue-9 --round-id 16-16 --branch b --commit "$rr_head" \
   --validate pass --item 1 Applied a --item 2 Applied b --item 3 Applied c >/dev/null
-hint_inline="$("$CHECK" --worktree "$rr_wt" --issue issue-9 --round-id 16-16 --expect-items 3 2>/dev/null | jq -r '.hint' || true)"
+hint_inline="$("$CHECK" --file "$rr_wt/tmp/dev-return-issue-9-16-16.json" --expect-items 3 2>/dev/null | jq -r '.hint' || true)"
 assert_eq "$([[ "$hint_inline" != "null" ]] && echo fires)" "fires" \
-  "control: inline --expect-items 3 against items 1..3 fires the count-vs-set hint"
+  "control: file-mode --expect-items 3 against items 1..3 fires the count-vs-set hint"
 "$ROUND_WRITE" --worktree "$rr_wt" --issue issue-9 --round-id 16-16 --item 3 "only item three" >/dev/null
 hint_round="$("$CHECK" --worktree "$rr_wt" --issue issue-9 --round-id 16-16 --expect-items-from-round 2>/dev/null | jq -r '.hint' || true)"
 assert_eq "$hint_round" "null" "--expect-items-from-round never emits the count-vs-set hint (reason stays incomplete)"
 reason_round="$("$CHECK" --worktree "$rr_wt" --issue issue-9 --round-id 16-16 --expect-items-from-round 2>/dev/null | jq -r '.reason' || true)"
 assert_eq "$reason_round" "incomplete" "from-round set mismatch still reports incomplete"
 set +e
-# one expected-set source only
-"$CHECK" --worktree "$rr_wt" --issue issue-9 --round-id 7-8 --expect-items 1,2 --expect-items-from-round >/dev/null 2>&1
-assert_eq "$?" "2" "--expect-items and --expect-items-from-round together exit 2"
+# The weaker item-list flag cannot accept a round-mode artifact that the bound
+# authorization path accepts.
+"$CHECK" --worktree "$rr_wt" --issue issue-9 --round-id 7-8 --expect-items 1,2 >/dev/null 2>&1
+assert_eq "$?" "2" "round mode rejects --expect-items authorization bypass"
 # --file mode has no worktree/issue/round to resolve a record from
 "$CHECK" --file "$rr_wt/tmp/dev-return-issue-9-7-8.json" --expect-items-from-round >/dev/null 2>&1
 assert_eq "$?" "2" "--file mode rejects --expect-items-from-round"
 set -e
 
+# --- KEN-826: a fix round cannot add unlisted machinery ---
+adds_wt="$TMP_ROOT/adds"
+mkdir -p "$adds_wt"
+git -C "$adds_wt" init -q -b main
+git -C "$adds_wt" config user.email test@example.com
+git -C "$adds_wt" config user.name Test
+git -C "$adds_wt" config commit.gpgsign false
+git -C "$adds_wt" commit -q --allow-empty -m base
+
+"$ROUND_WRITE" --worktree "$adds_wt" --issue issue-826 --round-id 1-1 --item 1 "fix finding" >/dev/null
+mkdir -p "$adds_wt/.agents/skills/orch/scripts" "$adds_wt/crates/new-parser" "$adds_wt/helpers" \
+  "$adds_wt/pkg/test_helpers" "$adds_wt/skills/orch/scripts" "$adds_wt/src" \
+  "$adds_wt/test/support" "$adds_wt/tools" "$adds_wt/ui/src/test"
+printf 'installed\n' > "$adds_wt/.agents/skills/orch/scripts/installed-check"
+printf 'crate\n' > "$adds_wt/crates/new-parser/lib.rs"
+printf 'root helper\n' > "$adds_wt/helpers/root-helper.ts"
+printf 'nested helper\n' > "$adds_wt/pkg/test_helpers/nested.ts"
+printf 'script\n' > "$adds_wt/skills/orch/scripts/new-check"
+printf 'basename helper\n' > "$adds_wt/src/test_utils.rs"
+printf 'root test support\n' > "$adds_wt/test/support/root-support.sh"
+printf 'tool\n' > "$adds_wt/tools/new-tool"
+newline_path=$'tools/new\nline'
+printf 'odd path\n' > "$adds_wt/$newline_path"
+printf 'helper\n' > "$adds_wt/ui/src/test/round-helper.ts"
+git -C "$adds_wt" add .agents/skills/orch/scripts/installed-check crates/new-parser/lib.rs \
+  helpers/root-helper.ts pkg/test_helpers/nested.ts skills/orch/scripts/new-check \
+  src/test_utils.rs test/support/root-support.sh tools/new-tool "$newline_path" ui/src/test/round-helper.ts
+git -C "$adds_wt" commit -q -m additions
+adds_head="$(git -C "$adds_wt" rev-parse HEAD)"
+"$WRITE" --worktree "$adds_wt" --kind fix --issue issue-826 --round-id 1-1 --branch b --commit "$adds_head" \
+  --validate pass --item 1 Applied done >/dev/null
+set +e
+adds_out="$("$CHECK" --worktree "$adds_wt" --issue issue-826 --round-id 1-1 --expect-items-from-round 2>/dev/null)"
+adds_rc=$?
+set -e
+assert_eq "$adds_rc" "1" "an unlisted sensitive addition refuses acceptance"
+assert_eq "$(jq -r '.ok' <<<"$adds_out")" "false" "the refusal reports ok false"
+assert_eq "$(jq -r '.verdict' <<<"$adds_out")" "retry" "the refusal routes to retry"
+assert_eq "$(jq -r '.path' <<<"$adds_out")" "$adds_wt/tmp/dev-return-issue-826-1-1.json" "the refusal binds the artifact path"
+assert_eq "$(jq -r '.reason' <<<"$adds_out")" "unapproved_additions" "the refusal has a distinct reason"
+assert_eq "$(jq -c '.files' <<<"$adds_out")" \
+  '[".agents/skills/orch/scripts/installed-check","crates/new-parser/lib.rs","helpers/root-helper.ts","pkg/test_helpers/nested.ts","skills/orch/scripts/new-check","src/test_utils.rs","test/support/root-support.sh","tools/new\nline","tools/new-tool","ui/src/test/round-helper.ts"]' \
+  "the refusal names every unlisted addition"
+
+allowed_adds="$TMP_ROOT/allowed-adds.json"
+printf '%s' '["crates/allowed/lib.rs","skills/orch/scripts/allowed-check","tools/allowed tool;still-data","ui/src/test/allowed-helper.ts"]' > "$allowed_adds"
+"$ROUND_WRITE" --worktree "$adds_wt" --issue issue-826 --round-id 2-2 --item 1 "fix finding" \
+  --adds-file "$allowed_adds" >/dev/null
+mkdir -p "$adds_wt/crates/allowed"
+printf 'crate\n' > "$adds_wt/crates/allowed/lib.rs"
+printf 'script\n' > "$adds_wt/skills/orch/scripts/allowed-check"
+printf 'tool\n' > "$adds_wt/tools/allowed tool;still-data"
+printf 'helper\n' > "$adds_wt/ui/src/test/allowed-helper.ts"
+git -C "$adds_wt" add crates/allowed/lib.rs skills/orch/scripts/allowed-check \
+  "tools/allowed tool;still-data" ui/src/test/allowed-helper.ts
+git -C "$adds_wt" commit -q -m allowed-additions
+allowed_head="$(git -C "$adds_wt" rev-parse HEAD)"
+"$WRITE" --worktree "$adds_wt" --kind fix --issue issue-826 --round-id 2-2 --branch b --commit "$allowed_head" \
+  --validate pass --item 1 Applied done >/dev/null
+assert_eq "$(reason --worktree "$adds_wt" --issue issue-826 --round-id 2-2 --expect-items-from-round)" "valid" \
+  "each addition named by the round is accepted"
+
+printf 'move me\n' > "$adds_wt/ordinary.txt"
+git -C "$adds_wt" add ordinary.txt
+git -C "$adds_wt" commit -q -m pre-move
+"$ROUND_WRITE" --worktree "$adds_wt" --issue issue-826 --round-id 3-3 --item 1 "move existing file" >/dev/null
+git -C "$adds_wt" mv ordinary.txt tools/moved.txt
+git -C "$adds_wt" commit -q -m move
+move_head="$(git -C "$adds_wt" rev-parse HEAD)"
+"$WRITE" --worktree "$adds_wt" --kind fix --issue issue-826 --round-id 3-3 --branch b --commit "$move_head" \
+  --validate pass --item 1 Applied done >/dev/null
+assert_eq "$(reason --worktree "$adds_wt" --issue issue-826 --round-id 3-3 --expect-items-from-round)" "valid" \
+  "a moved file is not treated as an addition"
+diverge_wt="$TMP_ROOT/diverge"
+mkdir -p "$diverge_wt"
+git -C "$diverge_wt" init -q -b main
+git -C "$diverge_wt" config user.email test@example.com
+git -C "$diverge_wt" config user.name Test
+git -C "$diverge_wt" config commit.gpgsign false
+git -C "$diverge_wt" commit -q --allow-empty -m base
+"$ROUND_WRITE" --worktree "$diverge_wt" --issue issue-826 --round-id 4-4 --item 1 compare >/dev/null
+git -C "$diverge_wt" checkout -q --orphan divergent
+git -C "$diverge_wt" commit -q --allow-empty -m divergent
+diverge_head="$(git -C "$diverge_wt" rev-parse HEAD)"
+"$WRITE" --worktree "$diverge_wt" --kind fix --issue issue-826 --round-id 4-4 --branch divergent \
+  --commit "$diverge_head" --validate pass --item 1 Applied done >/dev/null
+diverge_out="$("$CHECK" --worktree "$diverge_wt" --issue issue-826 --round-id 4-4)"
+assert_eq "$(jq -r '.reason' <<<"$diverge_out")" "valid" \
+  "direct snapshot comparison accepts histories with no merge base"
+git_shim_dir="$TMP_ROOT/git-shim"
+mkdir -p "$git_shim_dir"
+cat > "$git_shim_dir/git" <<'EOF'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  [[ "$arg" == "diff" ]] && exit 42
+done
+exec "$REAL_GIT" "$@"
+EOF
+chmod +x "$git_shim_dir/git"
+real_git="$(command -v git)"
+set +e
+comparison_out="$(REAL_GIT="$real_git" PATH="$git_shim_dir:$PATH" "$CHECK" \
+  --worktree "$diverge_wt" --issue issue-826 --round-id 4-4 2>/dev/null)"
+comparison_rc=$?
+set -e
+assert_eq "$comparison_rc" "1" "a failed direct snapshot probe refuses acceptance"
+assert_eq "$(jq -r '.reason' <<<"$comparison_out")" "comparison_failed" \
+  "failed direct snapshot probe keeps the distinct reason"
+routing_mutant="$TMP_ROOT/routing-mutant"
+cp "$CHECK" "$routing_mutant"
+sed -i.bak 's/emit false "$file" "comparison_failed"/emit false "$file" "unapproved_additions"/' "$routing_mutant"
+chmod +x "$routing_mutant"
+set +e
+routing_mutant_out="$(REAL_GIT="$real_git" PATH="$git_shim_dir:$PATH" "$routing_mutant" \
+  --worktree "$diverge_wt" --issue issue-826 --round-id 4-4 2>/dev/null)"
+set -e
+if [[ "$(jq -r '.reason' <<<"$routing_mutant_out")" == "comparison_failed" ]]; then
+  FAIL=$((FAIL + 1)); printf '  FAIL  %s\n' "routing control detects a comparison-failure misroute"
+else
+  PASS=$((PASS + 1)); printf '  ok    %s\n' "routing control detects a comparison-failure misroute"
+fi
 # --- kendex#994: the recorded commit must name a real object in the worktree's repo ---
-# Case 1 (hyprtrade CC-1006): a dev agent hand-reconstructed a full SHA from the
-# short form — same 8-char prefix as HEAD, fabricated tail — and the receipt
-# passed every schema gate while naming no object. That must now fail with the
-# distinct fatal reason commit_unresolvable. Case 2: a commit orphaned by a
-# later rebase still resolves as an object but is no ancestor of HEAD; per the
-# issue that is a distinct NON-FATAL signal (warning=commit_unreachable, ok
-# stays true) because a legitimate rebase produces it. All the non-git-repo
-# worktrees above (plain mktemp dirs) skip these gates entirely.
 gitwt="$TMP_ROOT/gitwt"
 mkdir -p "$gitwt/tmp"
 git -C "$gitwt" init -q -b main
@@ -419,8 +548,8 @@ assert_eq "$(jq -r '.warning' <<<"$out")" "null" "commit-less analysis artifact 
 # gate ordering: scalar invalid beats the commit gates; commit_unresolvable beats incomplete
 printf '%s' "$valid_impl" | jq -c 'del(.commit)' > "$gartifact"
 assert_eq "$(reason --worktree "$gitwt" --issue "$issue" --round-id "$R")" "invalid" "missing .commit in a git worktree stays reason=invalid (scalar gate first)"
-printf '%s' "$valid_fix" | jq -c --arg c "$fake_sha" '.commit=$c | .items=[]' > "$gartifact"
-assert_eq "$(reason --worktree "$gitwt" --issue "$issue" --round-id "$R")" "commit_unresolvable" "commit_unresolvable beats incomplete (fake sha + empty items)"
+printf '%s' "$valid_impl" | jq -c --arg c "$fake_sha" '.commit=$c | .bundled=true | .items=[]' > "$gartifact"
+assert_eq "$(reason --worktree "$gitwt" --issue "$issue" --round-id "$R")" "commit_unresolvable" "commit_unresolvable beats bundled-item incompleteness"
 
 # non-repo worktree keeps today's behavior: commit gates skipped, still valid
 printf '%s' "$valid_impl" > "$artifact"
@@ -473,6 +602,8 @@ assert_file_contains "$orch_dev_fix" "$WATCHDOG_STAMP" "orch dev-fix still stamp
 assert_file_contains "$orch_dev_fix" "$ROUND_STAMP" "orch dev-fix mints dev_round_id before delegation"
 assert_file_contains "$orch_dev_fix" "$ROUND_CHECK_EXPECT" "orch dev-fix accepts via round-mode dev-artifact-check WITH --expect-items-from-round in one command"
 assert_file_contains "$orch_dev_fix" "$ROUND_ITEMS_PERSIST" "orch dev-fix persists the delegated item set at stamp time (kendex#1230)"
+assert_file_not_contains "$orch_dev_fix" "write the record now" "orch dev-fix never recreates missing round state after delegation"
+assert_file_not_contains "$orch_dev_fix" "only if that context is also gone, fall back" "orch dev-fix never bypasses authorization with a typed item set"
 assert_file_contains "$orch_dev_fix" "Round ID: [DEV_ROUND_ID]" "orch dev-fix delegation carries the Round ID line"
 assert_file_contains "$orch_dev_fix" "$ARTIFACT_KEY_LINE" "orch dev-fix delegation carries the Artifact Key line"
 
@@ -563,6 +694,10 @@ assert_contains_str() {
 }
 assert_contains_str "$check_help" "Gates ordered:" "--help documents the gate ordering"
 assert_contains_str "$check_help" "commit_unresolvable" "--help documents the commit gate"
+assert_contains_str "$check_help" "unapproved_additions" "--help documents the additions gate"
+assert_contains_str "$check_help" "comparison_failed" "--help documents Git comparison failures"
+assert_contains_str "$check_help" "classifier_failed" "--help documents classifier failures"
+assert_contains_str "$check_help" "--expect-items (--file mode only)" "--help confines the weaker item-list flag to file mode"
 assert_contains_str "$check_help" "incomplete" "--help documents the incomplete reason"
 artifact_checks_ref="$REPO_ROOT/skills/orch/references/artifact-checks.md"
 assert_file_contains "$artifact_checks_ref" "--help" "artifact-checks reference routes to the help contracts"
@@ -577,6 +712,10 @@ assert_file_contains "$state_schema" "dev_round_id" "workflow-state schema docum
 dev_round_schema="$REPO_ROOT/skills/orch/schemas/dev-round.md"
 assert_file_contains "$dev_round_schema" "dev-round-write" "dev-round schema references the writer"
 assert_file_contains "$dev_round_schema" "round_id" "dev-round schema documents round_id identity"
+assert_file_contains "$dev_round_schema" "base_sha" "dev-round schema documents the fix round base"
+assert_file_contains "$dev_round_schema" "adds" "dev-round schema documents allowed additions"
+assert_file_contains "$dev_round_schema" "git-common-dir" "dev-round schema documents external authorization storage"
+assert_file_contains "$dev_round_schema" "never fall back" "dev-round schema forbids post-delegation recovery bypass"
 assert_file_contains "$dev_round_schema" "--expect-items-from-round" "dev-round schema documents the check-side reader"
 
 # --- kendex#884: the note has to reach the orchestrator, not just the file ---

@@ -13,6 +13,9 @@ TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$TEST_DIR/../../.." && pwd)"
 PUSH="$REPO_ROOT/skills/orch/scripts/worktree-push"
 STATE="$REPO_ROOT/skills/orch/scripts/workflow-state"
+ROUND_WRITE="$REPO_ROOT/skills/orch/scripts/dev-round-write"
+RETURN_WRITE="$REPO_ROOT/skills/orch/scripts/dev-return-write"
+ARTIFACT_CHECK="$REPO_ROOT/skills/orch/scripts/dev-artifact-check"
 
 TMP_ROOT="$(mktemp -d)"
 trap 'rm -rf "$TMP_ROOT"' EXIT
@@ -178,6 +181,79 @@ assert_eq "$(state_json "$work" | jq -r '.fixed_items[0].commit')" "${NEW_A2:0:7
 assert_eq "$(state_json "$work" | jq -r '.pr_comment_review.fixes[0].commit')" "dropped:${OLD_B:0:8}" "a dropped-marked commit stays marked across pushes"
 
 echo
+echo "=== restack remaps the exact fix-round snapshot ==="
+
+restack_wt="$TMP_ROOT/restack-wt"
+mkdir -p "$restack_wt"
+git -C "$restack_wt" init -q -b main
+git -C "$restack_wt" config user.email test@example.com
+git -C "$restack_wt" config user.name Test
+git -C "$restack_wt" config commit.gpgsign false
+git -C "$restack_wt" commit -q --allow-empty -m delegation-base
+restack_old="$(git -C "$restack_wt" rev-parse HEAD)"
+"$ROUND_WRITE" --worktree "$restack_wt" --issue KEN-RESTACK --round-id 1-1 --item 1 restack >/dev/null
+mkdir -p "$restack_wt/tools"
+printf 'upstream\n' > "$restack_wt/tools/upstream-tool"
+git -C "$restack_wt" add tools/upstream-tool
+git -C "$restack_wt" commit -q -m upstream-protected-addition
+restack_base="$(git -C "$restack_wt" rev-parse HEAD)"
+printf 'round fix\n' > "$restack_wt/README.md"
+git -C "$restack_wt" add README.md
+git -C "$restack_wt" commit -q -m round-fix
+restack_head="$(git -C "$restack_wt" rev-parse HEAD)"
+"$RETURN_WRITE" --worktree "$restack_wt" --kind fix --issue KEN-RESTACK --round-id 1-1 \
+  --branch main --commit "$restack_head" --validate pass --item 1 Applied done >/dev/null
+before_restack="$($ARTIFACT_CHECK --worktree "$restack_wt" --issue KEN-RESTACK --round-id 1-1 2>/dev/null || true)"
+assert_eq "$(jq -r '.reason' <<<"$before_restack")" "unapproved_additions" \
+  "old delegation snapshot sees the upstream protected addition"
+
+restack_state="$TMP_ROOT/restack-state"
+mkdir -p "$restack_state"
+(cd "$restack_state" && "$STATE" init KEN-RESTACK --agent generalist \
+  --worktree "$restack_wt" --branch main >/dev/null \
+  && "$STATE" set KEN-RESTACK dev_round_id 1-1)
+STUB_PUSH_STDOUT="rebase-map: $restack_old $restack_base" \
+  run_push "$restack_state" --worktree "$restack_wt" --issue KEN-RESTACK
+assert_eq "$RUN_RC" "0" "restack map and authorization reconciliation succeed together"
+restack_auth="$restack_wt/.git/kendex/dev-round-authorizations/KEN-RESTACK-1-1.json"
+restack_recovery="$restack_wt/tmp/dev-round-KEN-RESTACK-1-1.json"
+assert_eq "$(jq -r '.base_sha' "$restack_auth")" "$restack_base" "external authorization moves to the restacked base snapshot"
+assert_eq "$(jq -r '.base_sha' "$restack_recovery")" "$restack_base" "recovery copy moves to the same restacked base snapshot"
+after_restack="$($ARTIFACT_CHECK --worktree "$restack_wt" --issue KEN-RESTACK --round-id 1-1)"
+assert_eq "$(jq -r '.reason' <<<"$after_restack")" "valid" \
+  "upstream protected addition is outside the remapped round snapshot"
+assert_eq "$(jq -r '.live' "$restack_auth")" "false" "accepted round authorization is retired"
+
+rm -f "$restack_recovery"
+STUB_PUSH_STDOUT="rebase-map: $restack_base $restack_head" \
+  run_push "$restack_state" --worktree "$restack_wt" --issue KEN-RESTACK
+assert_eq "$RUN_RC" "0" "accepted historical round missing recovery does not block a later map"
+assert_eq "$(jq -r '.base_sha' "$restack_auth")" "$restack_base" \
+  "retired authorization is not remapped"
+
+"$ROUND_WRITE" --worktree "$restack_wt" --issue KEN-RESTACK --round-id 3-3 --item 1 active >/dev/null
+rm -f "$restack_wt/tmp/dev-round-KEN-RESTACK-3-3.json"
+(cd "$restack_state" && "$STATE" set KEN-RESTACK dev_round_id 3-3)
+STUB_PUSH_STDOUT="rebase-map: $restack_head $restack_base" \
+  run_push "$restack_state" --worktree "$restack_wt" --issue KEN-RESTACK
+assert_eq "$RUN_RC" "1" "active authorization missing recovery fails reconciliation closed"
+assert_contains "$(cat "$run_err")" "recovery copy missing or not regular" \
+  "active missing-recovery refusal names the required copy"
+rm -f "$restack_wt/.git/kendex/dev-round-authorizations/KEN-RESTACK-3-3.json" \
+  "$restack_wt/.git/worktree-push-pending-map-KEN-RESTACK.json"
+
+"$ROUND_WRITE" --worktree "$restack_wt" --issue KEN-RESTACK --round-id 4-4 --item 1 divergent >/dev/null
+divergent_recovery="$restack_wt/tmp/dev-round-KEN-RESTACK-4-4.json"
+jq '.adds = ["tools/not-authorized"]' "$divergent_recovery" > "$TMP_ROOT/divergent-recovery.json"
+mv "$TMP_ROOT/divergent-recovery.json" "$divergent_recovery"
+(cd "$restack_state" && "$STATE" set KEN-RESTACK dev_round_id 4-4)
+STUB_PUSH_STDOUT="rebase-map: $restack_head $restack_base" \
+  run_push "$restack_state" --worktree "$restack_wt" --issue KEN-RESTACK
+assert_eq "$RUN_RC" "1" "divergent authorization copies fail reconciliation closed"
+assert_contains "$(cat "$run_err")" "authorization and recovery copy diverge" \
+  "divergence refusal names the violated round invariant"
+
+echo
 echo "=== a failed push still applies its map (rebase precedes the push) ==="
 
 work="$TMP_ROOT/work-failed"
@@ -340,19 +416,32 @@ echo
 echo "=== the bare-numeric alias binds, not refuses ==="
 
 # Issue N stored under issue-N is the one accepted spelling difference: the
-# aliased state is this issue's record, and the push must reconcile it.
+# aliased state and authorization are this issue's records, and the push must
+# reconcile both through the resolved key.
 work="$TMP_ROOT/work-alias"
 rm -rf "$work" && mkdir -p "$work"
 # The sidecar is named by the RESOLVED key, so the alias and its issue-N
 # state share one recovery file in the worktree's git dir.
 alias_sidecar="$wt/.git/worktree-push-pending-map-issue-7.json"
 rm -f "$alias_sidecar"
+git -C "$wt" config user.email test@example.com
+git -C "$wt" config user.name Test
+git -C "$wt" commit -q --allow-empty -m alias-base
+alias_old="$(git -C "$wt" rev-parse HEAD)"
+"$ROUND_WRITE" --worktree "$wt" --issue issue-7 --round-id 5-5 --item 1 alias >/dev/null
+git -C "$wt" commit -q --allow-empty -m alias-restack
+alias_new="$(git -C "$wt" rev-parse HEAD)"
 (cd "$work" \
   && "$STATE" init issue-7 --agent generalist --worktree "$wt" --branch issue-7 >/dev/null \
-  && "$STATE" append issue-7 fixed_items "{\"description\":\"fix\",\"commit\":\"${OLD_A:0:7}\",\"source\":\"pr-review\"}")
-STUB_PUSH_STDOUT="rebase-map: $OLD_A $NEW_A" run_push "$work" --worktree "$wt" --issue 7
+  && "$STATE" set issue-7 dev_round_id 5-5 \
+  && "$STATE" append issue-7 fixed_items "{\"description\":\"fix\",\"commit\":\"${alias_old:0:7}\",\"source\":\"pr-review\"}")
+STUB_PUSH_STDOUT="rebase-map: $alias_old $alias_new" run_push "$work" --worktree "$wt" --issue 7
 assert_eq "$RUN_RC" "0" "a bare-numeric issue binds to its issue-N state instead of refusing"
-assert_eq "$(jq -r '.fixed_items[0].commit' "$work/tmp/workflow-state-issue-7.json")" "${NEW_A:0:7}" "the aliased record's fix SHA is rewritten"
+assert_eq "$(jq -r '.fixed_items[0].commit' "$work/tmp/workflow-state-issue-7.json")" "${alias_new:0:7}" "the aliased record's fix SHA is rewritten"
+alias_auth="$wt/.git/kendex/dev-round-authorizations/issue-7-5-5.json"
+alias_recovery="$wt/tmp/dev-round-issue-7-5-5.json"
+assert_eq "$(jq -r '.base_sha' "$alias_auth")" "$alias_new" "the aliased authorization follows the resolved state key"
+assert_eq "$(jq -r '.base_sha' "$alias_recovery")" "$alias_new" "the aliased recovery copy follows the resolved state key"
 [[ ! -f "$alias_sidecar" ]] && pass "the resolved-key sidecar is consumed after the write" || fail "the resolved-key sidecar is consumed after the write"
 
 # Spelling must not strand a map: a bare-numeric push with NO state yet
@@ -427,6 +516,54 @@ assert_eq "$RUN_RC" "1" "an ambiguous state key fails the call"
 assert_contains "$(cat "$run_err")" "ambiguous" "the refusal names the ambiguity"
 assert_eq "$(wc -l <"$ambig_args_log")" "0" "the push never runs against an ambiguous state"
 [[ ! -f "$alias_sidecar" ]] && pass "no sidecar is written when the push never ran" || fail "no sidecar is written when the push never ran"
+
+echo
+echo "=== duplicate subjects cannot advance an authorization base ==="
+
+duplicate_wt="$TMP_ROOT/duplicate-subject-wt"
+mkdir -p "$duplicate_wt"
+git -C "$duplicate_wt" init -q -b main
+git -C "$duplicate_wt" config user.email test@example.com
+git -C "$duplicate_wt" config user.name Test
+printf 'first\n' >"$duplicate_wt/first.txt"
+git -C "$duplicate_wt" add first.txt
+git -C "$duplicate_wt" commit -q -m 'same subject'
+duplicate_first="$(git -C "$duplicate_wt" rev-parse HEAD)"
+"$ROUND_WRITE" --worktree "$duplicate_wt" --issue KEN-DUPLICATE --round-id 1-1 --item 1 duplicate >/dev/null
+printf 'second\n' >"$duplicate_wt/second.txt"
+git -C "$duplicate_wt" add second.txt
+git -C "$duplicate_wt" commit -q -m 'same subject'
+duplicate_second="$(git -C "$duplicate_wt" rev-parse HEAD)"
+duplicate_state="$TMP_ROOT/duplicate-subject-state"
+mkdir -p "$duplicate_state"
+(cd "$duplicate_state" && "$STATE" init KEN-DUPLICATE --agent generalist \
+  --worktree "$duplicate_wt" --branch main >/dev/null \
+  && "$STATE" set KEN-DUPLICATE dev_round_id 1-1)
+STUB_PUSH_STDOUT="rebase-map: $duplicate_first $duplicate_second
+rebase-map: $duplicate_second dropped" \
+  run_push "$duplicate_state" --worktree "$duplicate_wt" --issue KEN-DUPLICATE
+assert_eq "$RUN_RC" "1" "same-subject drop and survive mapping fails closed"
+assert_contains "$(cat "$run_err")" "ambiguous authorization base" \
+  "the refusal names the authorization mapping ambiguity"
+duplicate_auth="$duplicate_wt/.git/kendex/dev-round-authorizations/KEN-DUPLICATE-1-1.json"
+assert_eq "$(jq -r '.base_sha' "$duplicate_auth")" "$duplicate_first" \
+  "an ambiguous mapping does not advance the authorization base"
+
+rm -f "$duplicate_wt/.git/worktree-push-pending-map-KEN-DUPLICATE.json"
+"$ROUND_WRITE" --worktree "$duplicate_wt" --issue KEN-DUPLICATE --round-id 2-2 --item 1 positional >/dev/null
+duplicate_equal_old="$(git -C "$duplicate_wt" rev-parse HEAD)"
+git -C "$duplicate_wt" commit -q --allow-empty -m 'same subject'
+duplicate_equal_new_first="$(git -C "$duplicate_wt" rev-parse HEAD)"
+git -C "$duplicate_wt" commit -q --allow-empty -m 'same subject'
+duplicate_equal_new_second="$(git -C "$duplicate_wt" rev-parse HEAD)"
+(cd "$duplicate_state" && "$STATE" set KEN-DUPLICATE dev_round_id 2-2)
+STUB_PUSH_STDOUT="rebase-map: $duplicate_first $duplicate_equal_new_first
+rebase-map: $duplicate_equal_old $duplicate_equal_new_second" \
+  run_push "$duplicate_state" --worktree "$duplicate_wt" --issue KEN-DUPLICATE
+assert_eq "$RUN_RC" "0" "equal-count duplicate subjects keep positional authorization mapping"
+duplicate_equal_auth="$duplicate_wt/.git/kendex/dev-round-authorizations/KEN-DUPLICATE-2-2.json"
+assert_eq "$(jq -r '.base_sha' "$duplicate_equal_auth")" "$duplicate_equal_new_second" \
+  "equal-count mapping advances the authorization base by position"
 
 echo
 printf 'pass: %d   fail: %d\n' "$PASS" "$FAIL"

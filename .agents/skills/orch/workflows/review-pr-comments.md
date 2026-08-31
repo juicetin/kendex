@@ -221,10 +221,14 @@ Read the round budget first. The cap governs what may be pushed, so it decides b
 
 `worktree-claim` exit 75 aborts the delegation — another session holds this worktree, and its stderr names the holder; exit 1 is an unverifiable guard, which stops the workflow and is reported. Its printed token is the delegation's `Worktree Lease:` line.
 
-Persist this group's slice of the `fix set`: write `[WORKTREE_PATH]/tmp/dev-round-items-[DEV_ROUND_ID].json` with the harness file-write tool — a JSON array of `{"n": [N], "text": "[ITEM_TEXT]"}`, `[ITEM_TEXT]` being that item's formatted block from the delegation verbatim — then:
+Persist this group's slice of the `fix set`: write `[WORKTREE_PATH]/tmp/dev-round-items-[DEV_ROUND_ID].json` with the harness file-write tool as a JSON array of `{"n": [N], "text": "[ITEM_TEXT]"}`. `[ITEM_TEXT]` is that item's formatted block from the delegation verbatim.
+
+Decide whether this fix round may add protected files. [`../schemas/dev-round.md` § Protected additions](../schemas/dev-round.md#protected-additions) is the sole scope definition. The default is none.
+
+When the list is non-empty, write `[WORKTREE_PATH]/tmp/dev-round-adds-[DEV_ROUND_ID].json` with the harness file-write tool as a JSON array of exact repository-relative paths. Render the same array after `Adds:` in the delegation, preserving JSON string boundaries, including `Adds: ["tools/one path.sh"]` and `Adds: ["tools/one path.sh","skills/x/scripts/check;safe"]`. Pass only the data-file path to the writer:
 
 ```bash
-.agents/skills/orch/scripts/dev-round-write --worktree [WORKTREE_PATH] --issue [ISSUE_ID] --round-id [DEV_ROUND_ID] --items-file [WORKTREE_PATH]/tmp/dev-round-items-[DEV_ROUND_ID].json
+.agents/skills/orch/scripts/dev-round-write --worktree [WORKTREE_PATH] --issue [ISSUE_ID] --round-id [DEV_ROUND_ID] --items-file [WORKTREE_PATH]/tmp/dev-round-items-[DEV_ROUND_ID].json [--adds-file [WORKTREE_PATH]/tmp/dev-round-adds-[DEV_ROUND_ID].json]
 ```
 
 ⚠ Fill placeholders only ([Format Tags Are Literal](../SKILL.md#format-tags-are-literal)). `Recommendation:` is the technical fix; the agent owns its own process.
@@ -239,6 +243,7 @@ Worktree: [WORKTREE_PATH]
 Worktree Lease: [WORKTREE_LEASE]
 Round ID: [DEV_ROUND_ID]
 Artifact Key: [ISSUE_ID]
+[If the round may add files: "Adds: [REPO_RELATIVE_PATHS_JSON_ARRAY]"]
 
 Review items:
 [For each item in the fix set:]
