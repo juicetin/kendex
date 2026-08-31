@@ -13,63 +13,86 @@
 //! There was a second engine here — a native reader of hook files with its
 //! own grammar for what "armed" means, kept in step with the package's by
 //! hand. It never was in step. Every fix landed on one side, and the review
-//! round after found the other. So there is one engine, and it is the one
-//! that runs on a machine which never installed kendex.
+//! round after found the other. So the package owns every verdict about
+//! what the shims ARE, on every surface, `kendex check` included. What
+//! kendex may still say for itself is only what it can reach from local
+//! state without running anything — whether this repository holds a helper
+//! at all, whether the declared package is rendered.
 //!
 //! Exit taxonomy, the family contract the package defines and this module
 //! relays unchanged: 0 clean, 1 violations, 2 the check could not run. Both
 //! nonzero verdicts block a commit.
 
 use std::ffi::OsString;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
 
 use crate::error::{CoreError, Result};
-use crate::process::Hardened;
+use crate::process::{DEFAULT_TIMEOUT, Hardened};
 
 mod repo;
 mod resolve;
-use crate::fs::is_executable;
 pub use repo::Repo;
 pub use resolve::Installed;
-/// The tool directories the verbs search, in order — the installer's own
-/// list, pinned against it by `guard_hooks::the_search_roots_match…`.
+/// The tool directories the verbs search, in order — the same roots the
+/// package's own helper searches at commit time. `guard_skill_roots` holds
+/// this list to the package's, order included, and holds BOTH to the
+/// harness adapters that write the directories: two lists agreeing is no
+/// evidence either is right.
 pub use resolve::SKILL_ROOTS as SEARCH_ROOTS;
-use resolve::bind;
+use resolve::{bind, installed_or_err};
 
 /// The package that owns the checks and the git shims.
 pub const SKILL: &str = "growth-guards";
 
-/// The marker every delegating line the installer writes ends with.
-///
-/// The one thing kendex reads out of a hook file, and only to answer "did
-/// this package arm this repository". Present means armed; anything else —
-/// a foreign hook, no file at all, a `core.hooksPath` pointing elsewhere —
-/// means not armed, which is the safe answer for all of them and needs no
-/// taxonomy to reach.
-///
-/// Where it has to be is the installer's rule, not this module's: see
-/// [`hook_is_ours`].
-pub const MARKER: &str = "# kendex-guards-hook";
-
-/// The whole line the installer writes into a hook file it CREATED, which
-/// is how removal tells one from a consumer's own shebang-only hook. It
-/// mentions the marker without ending in it, so it is owned by name.
-pub const CREATED_MARKER: &str = "# kendex-guards-hook created this file";
-
-/// The marker inside the helper the installer writes.
-///
-/// The name is not the identity: the installer refuses to overwrite a file
-/// of the helper's name that does not carry this, and the uninstaller
-/// refuses to remove one, so a report that named such a file by its name
-/// alone would tell a reader to delete what the package itself leaves.
-pub const HELPER_MARKER: &str = "kendex growth-guards git hooks";
-
-/// The helper the installer writes beside the hooks.
-const HELPER: &str = "kendex-guards";
-
 /// The installer the package ships, relative to its own directory.
 const INSTALLER: &str = "scripts/install-git-hooks";
+
+/// The helper the installer writes into the hooks directory, and the one
+/// file [`locally_armed`] reads for. Public because a report that says a
+/// repository holds no helper has to name the file it looked for.
+pub const HELPER: &str = "kendex-guards";
+
+/// What the session-start `--check` gets, and why it is not the default.
+///
+/// [`check_repo`] is the fold's call, and the fold runs inside a harness
+/// budget of 20 seconds (`drift::hook`'s `HOOK_SCRIPT` frontmatter). The
+/// default 120 would be spent inside that budget and lose the whole drift
+/// report to the harness's own kill; this gives up first, and the fold
+/// classes the refusal as a verdict it could not take. Ten seconds is far
+/// longer than a read of two files and a `cmp`, so only a wedged script
+/// reaches it. The two numbers are held together by
+/// `guard_timeout_budget::the_guard_check_timeout_fits_inside_the_hooks_budget`,
+/// which reads the frontmatter, rather than by this comment citing it.
+///
+/// [`check`], [`install`] and [`uninstall`] are verbs somebody typed, under
+/// no budget but the person's patience, so they name
+/// [`DEFAULT_TIMEOUT`] instead: a cold or networked filesystem is slow,
+/// not wedged. Naming it rather than omitting it is the point — this is
+/// the one call in the tree that needs a smaller bound, and a lane that
+/// said nothing would be indistinguishable from one that lost it.
+pub const CHECK_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How much the session-start `--check` may write before the run is
+/// refused, and why that bound exists at all.
+///
+/// [`CHECK_TIMEOUT`]'s argument for the other unbounded resource. That call
+/// runs a script the checkout supplies, unattended, and the reader holds
+/// what the script writes in memory until it exits — so a bound on the wall
+/// clock alone still lets one that loops on `echo` grow this process for ten
+/// seconds.
+///
+/// Sixty-four kibibytes because the report declines to carry a relayed line
+/// past `drift::report::RELAYED_CHARS`, which is 2000 characters, so a real
+/// verdict — the summary line the package contracts to write, plus whatever
+/// its shell put on stderr behind it — sits far below this.
+///
+/// Past the bound the process layer refuses rather than truncates, so
+/// [`run_installer`] returns the error and the fold in `commands::check`
+/// classes it the way it already classes an installer that exited with no
+/// verdict: a check that could not be taken. Output that was cut off is not
+/// a repository anybody measured.
+const CHECK_OUTPUT_CAP: usize = 64 * 1024;
 
 /// Room for the whole chain, which ends in whatever the repository pointed
 /// `GROWTH_GUARDS_PRE_COMMIT_LOCAL` at — a cold clippy build, in this repo,
@@ -167,7 +190,7 @@ pub(crate) fn relay(output: &std::process::Output) -> GuardReport {
 
 /// Arm the shims: the package's own installer, in this repository.
 pub fn install(dir: &Path) -> Result<GuardReport> {
-    installer(dir, &[])
+    installer(dir, &[], DEFAULT_TIMEOUT)
 }
 
 /// Disarm: the package removes its helper and its own marked line, and
@@ -178,24 +201,127 @@ pub fn install(dir: &Path) -> Result<GuardReport> {
 /// could not run is exit 2 with the reason, never a quiet success about a
 /// repository nobody can commit to.
 pub fn uninstall(dir: &Path) -> Result<GuardReport> {
-    installer(dir, &["--uninstall"])
+    installer(dir, &["--uninstall"], DEFAULT_TIMEOUT)
+}
+
+/// Whether somebody standing at this repository ran the installer.
+///
+/// The license to run the package's scripts, and the whole of it. git
+/// clones no hook files and no helper, so anything the installer left in
+/// the hooks directory got there from a local act by whoever owns this
+/// machine — while every byte under the work tree arrived with a fetch and
+/// is whatever the branch's author wrote. That asymmetry is the only
+/// durable line between the two, and it is the line [`check`]'s callers
+/// draw before executing anything.
+///
+/// The helper's PATH, not its contents. Reading the file to decide whether
+/// this package wrote it is the second grammar this module deleted, and it
+/// would be answering a question already asked: a foreign file of that name
+/// in a directory git never clones is still local state. What the file
+/// actually is remains the package's `--check` to say, and it does.
+///
+/// `symlink_metadata`, so a dangling link still counts: something local
+/// made it, and the package's checker is the one that grades it.
+///
+/// Three states, not two. `NotFound` is an answer — nothing of this
+/// package's is there. Every other error is the absence of one, and it is
+/// returned rather than folded into `false`: an unreadable hooks directory
+/// answered `false` alongside a plain absence, and the caller turned that
+/// into a positive verdict about a repository whose commits were gated
+/// perfectly well.
+pub fn locally_armed(repo: &Repo) -> Result<bool> {
+    let helper = repo.common_dir.join("hooks").join(HELPER);
+    match std::fs::symlink_metadata(&helper) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(CoreError::io(&helper, error)),
+    }
+}
+
+/// Whether any copy of the package's installer is where this repository
+/// would look for it.
+///
+/// For a caller that already knows the project DECLARED the package: a
+/// declaration with nothing at all to run is a missing render, whose remedy
+/// is an apply, and not the absent install [`bind`] would name.
+///
+/// Three states for the same reason [`locally_armed`] has three. Every
+/// candidate answering `NotFound` is the only evidence that there is
+/// nothing here; a directory that would not open is a search that did not
+/// happen, and reporting it as "nothing rendered" would name a remedy for
+/// a state nobody looked at.
+///
+/// Presence, not executability. This is reached only after [`bind`] has
+/// already refused, and bind's own two sentences separate a copy that
+/// cannot run from no copy at all — so what is left to establish here is
+/// whether anything is there.
+pub fn installer_present(repo: &Repo) -> Result<bool> {
+    resolve::any_candidate(repo, INSTALLER)
 }
 
 /// Ask the package whether this repository is armed, and relay its answer.
 ///
 /// Its `--check` is read-only and speaks the whole vocabulary — armed,
-/// drifted, unverifiable — which is exactly what a person running this verb
-/// asked for. Invoking a guard verb is the consent to run the
-/// package's scripts; `kendex check`, which nobody invoked for that, reads
-/// the marker instead and executes nothing.
+/// drifted, unverifiable. The only reader of a hook file anywhere in this
+/// product is the script that wrote it, so every claim about what the shims
+/// ARE comes from here, and `kendex guard check` and the commit-hook line
+/// of `kendex check` are both this call. A caller that cannot reach this —
+/// nothing local armed the repository, the render is gone, the directory
+/// would not open — says what it read, never what the shims are.
+///
+/// It runs a script out of the checkout, so a caller reaching it without
+/// somebody asking for it needs a license first. An install record is not
+/// one: `.kendex-lock.json` sits under the work tree and arrives with the
+/// fetch like everything else there. [`locally_armed`] is, and the
+/// session-start fold in `commands::check` asks it before this. A guard
+/// verb somebody typed is its own license and asks nothing.
 pub fn check(dir: &Path) -> Result<GuardReport> {
-    installer(dir, &["--check"])
+    installer(dir, &["--check"], DEFAULT_TIMEOUT)
+}
+
+/// The same `--check` over a repository the caller already resolved, under
+/// the session-start bound.
+///
+/// Resolving a repository and finding the package costs seven git children
+/// where the path is taken from a directory, and five here, because the
+/// `Repo` the caller already probed is not resolved a second time. The
+/// fold pays those five once per project scope.
+pub fn check_repo(repo: &Repo) -> Result<GuardReport> {
+    let installed = installed_or_err(repo, INSTALLER)?;
+    run_installer(
+        repo,
+        &installed,
+        &["--check"],
+        CHECK_TIMEOUT,
+        Some(CHECK_OUTPUT_CAP),
+    )
 }
 
 /// The installer, run from the repository it was pointed at, with its
 /// verdict relayed unchanged.
-fn installer(dir: &Path, args: &[&str]) -> Result<GuardReport> {
+///
+/// The bound is a `Duration` and not an `Option<Duration>`, so no lane can
+/// reach the process layer's default by saying nothing. It was optional
+/// once, and mutating the session-start `Some(CHECK_TIMEOUT)` to `None`
+/// left the whole guard suite green while the session-start `--check` ran
+/// under 120 seconds inside a hook the harness gives 20. Now that call
+/// does not compile.
+fn installer(dir: &Path, args: &[&str], timeout: Duration) -> Result<GuardReport> {
     let (repo, installed) = bind(dir, INSTALLER)?;
+    // Uncapped, named rather than omitted for the same reason the timeout
+    // is: what a verb somebody typed prints is that person's to read, and a
+    // script running away in front of them is theirs to stop.
+    // [`CHECK_OUTPUT_CAP`] is for the call nobody is watching.
+    run_installer(&repo, &installed, args, timeout, None)
+}
+
+fn run_installer(
+    repo: &Repo,
+    installed: &Installed,
+    args: &[&str],
+    timeout: Duration,
+    max_output: Option<usize>,
+) -> Result<GuardReport> {
     // `--repo` is a path, so it travels as one: a work tree whose name is
     // not UTF-8 would otherwise reach the installer as replacement
     // characters and be reported as a repository that does not exist.
@@ -204,148 +330,13 @@ fn installer(dir: &Path, args: &[&str]) -> Result<GuardReport> {
         repo.worktree.as_os_str().to_owned(),
     ];
     argv.extend(args.iter().map(OsString::from));
-    let output = Hardened::guard_script(&installed.script, argv, &repo.worktree)
+    let mut script =
+        Hardened::guard_script(&installed.script, argv, &repo.worktree).timeout(timeout);
+    if let Some(cap) = max_output {
+        script = script.max_output(cap);
+    }
+    let output = script
         .run()
         .map_err(|error| guard_err("hooks", error.to_string()))?;
     Ok(relay(&output))
-}
-
-/// Whether a hook file carries a line this package wrote.
-///
-/// The installer's own `gg_owned_lines_re`, which is the predicate its
-/// removal deletes by and its `--check` reads by: a line the marker CLOSES,
-/// or a line that is exactly the created marker. Matching the marker
-/// anywhere is wider than that on purpose — it would claim a consumer's own
-/// comment that quotes the marker mid-sentence, and both readers here would
-/// then describe a gate nothing installed. Pinned to the script by
-/// `guard_hooks::the_ownership_markers_match_the_installers_own`.
-///
-/// Split on `\n` and not [`str::lines`], which also eats a `\r`: grep does
-/// not, so a CRLF hook whose line ends in `marker\r` is not owned there and
-/// must not be owned here.
-fn hook_is_ours(text: &str) -> bool {
-    text.split('\n')
-        .any(|line| line.ends_with(MARKER) || line == CREATED_MARKER)
-}
-
-/// Whether the file at the helper's path is the helper this package wrote.
-///
-/// The uninstaller's own predicate: a regular file, not a symlink, whose
-/// bytes carry [`HELPER_MARKER`]. It deliberately preserves anything else
-/// of that name, so naming one here would advise a deletion the package
-/// refuses to make. A path that cannot be stat'ed is not ours either — a
-/// helper left beside no lane hook of ours execs on no commit, so the
-/// unsure answer costs a stray file and never a lost one.
-fn helper_is_ours(path: &Path) -> Result<bool> {
-    if !std::fs::symlink_metadata(path).is_ok_and(|meta| meta.is_file()) {
-        return Ok(false);
-    }
-    Ok(crate::fs::read_if_exists(path)?.is_some_and(|text| text.contains(HELPER_MARKER)))
-}
-
-/// Whether this package armed this repository's commit hooks, read off the
-/// hook files and nothing else.
-///
-/// `kendex check` is a read, and a checkout is other people's data: running
-/// a script out of one would mean that cloning a repository and asking after
-/// its status ran code its author chose. So this executes nothing, and it
-/// asks the smallest question that is safe to answer from bytes alone.
-///
-/// The marker and the execute bit. Both lanes have to carry a line the
-/// installer owns ([`hook_is_ours`]), in the directory git reads with no
-/// redirect in the way, and both have to be files git will actually run —
-/// git skips a hook without `+x` in silence, so an owned line in a file it
-/// ignores describes a gate that is not there.
-/// Executability is git's own rule about hook files rather than anything
-/// this package puts in them, which is why reading it is not the grammar
-/// this module deliberately no longer has.
-///
-/// A `core.hooksPath` set to anything at all means the answer is no — not
-/// because such a repository is necessarily ungated, but because deciding
-/// whether it is takes a grammar nothing here has, the package's own
-/// `--check` included: it stands down on that value rather than grade it.
-/// Every uncertainty inside a repository lands on "not armed", whose remedy
-/// is a command that is safe to run twice.
-///
-/// Over a repository the caller already probed: whether there is one here
-/// at all is the caller's question, and probing it again for every read
-/// spends three git processes per answer.
-///
-/// A person who wants the full vocabulary runs `kendex guard check`, which
-/// asks the package. That is an invocation, and an invocation is consent.
-pub fn armed(repo: &Repo) -> Result<bool> {
-    if repo.hooks_redirected()? {
-        return Ok(false);
-    }
-    let hooks = repo.default_hooks_dir();
-    for lane in LANES {
-        let path = hooks.join(lane);
-        let Some(text) = crate::fs::read_if_exists(&path)? else {
-            return Ok(false);
-        };
-        if !hook_is_ours(&text) || !is_executable(&path) {
-            return Ok(false);
-        }
-    }
-    Ok(true)
-}
-
-/// The hook files this package left behind in a repository that no longer
-/// carries the package anywhere.
-///
-/// The same read as [`armed`] — an owned line, in the directory git reads —
-/// with the opposite precondition: no copy of the package anywhere the
-/// shared hooks gate, which is every work tree attached to this common git
-/// dir. A shim that survives its package execs a script that is not there,
-/// so every commit in the repository fails closed, and nothing else reports
-/// it: the lock no longer names the package, so the drift report has
-/// nothing to compare, and `guard check` cannot run an installer that is
-/// gone.
-///
-/// Cheapest question first. The hook files are read before anything is
-/// spawned, because a repository with no owned line in them is the ordinary
-/// case and this runs at every session start; only an owned line earns the
-/// git process behind `hooks_redirected` and the search behind
-/// `Installed::anywhere`.
-///
-/// Hooks-directory-wide, not project-wide and not work-tree-wide. Every
-/// project in a work tree shares one hooks directory, and so does every
-/// work tree attached to the same common git dir — so a project or a work
-/// tree without the package beside one that armed it is a gated
-/// repository, not a stranded one, and the advice here, followed, would
-/// have disarmed the gate that other copy asked for.
-///
-/// A domain that could not be read in full yields the error rather than an
-/// empty list: the caller reports "could not check" instead of telling a
-/// reader to delete hook files that may be gating a copy nobody could see.
-///
-/// Each lane carrying a line the installer owns, and the helper beside
-/// them when it carries the installer's helper marker, so the report can
-/// say which files to clean up. Both predicates are the installer's own
-/// ([`hook_is_ours`], [`helper_is_ours`]) rather than an approximation of
-/// them, because the advice here is a deletion: a lane hook the installer
-/// would not strip and a helper it would not remove are somebody else's
-/// files. A helper with no owned lane beside it runs on no commit, so it
-/// is named only where one is.
-/// Empty where `core.hooksPath` is set: git reads no hook here, so nothing
-/// fails, and what a redirected directory means is a grammar this module
-/// does not have. The execute bit is not consulted: a leftover git happens
-/// to skip is still a leftover.
-pub fn stranded(repo: &Repo) -> Result<Vec<PathBuf>> {
-    let hooks = repo.default_hooks_dir();
-    let mut files = Vec::new();
-    for lane in LANES {
-        let path = hooks.join(lane);
-        if crate::fs::read_if_exists(&path)?.is_some_and(|text| hook_is_ours(&text)) {
-            files.push(path);
-        }
-    }
-    if files.is_empty() || repo.hooks_redirected()? || Installed::anywhere(repo)? {
-        return Ok(Vec::new());
-    }
-    let helper = hooks.join(HELPER);
-    if helper_is_ours(&helper)? {
-        files.push(helper);
-    }
-    Ok(files)
 }

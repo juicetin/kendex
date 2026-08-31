@@ -27,7 +27,11 @@ use super::{SKILL, guard_err};
 /// The package searches the same list, from a single definition in
 /// `lib/skill-roots.sh` that the installer bakes into the helper it writes.
 /// A repository where the shim finds a script and kendex finds a different
-/// one would gate commits one way and report them another.
+/// one would gate commits one way and report them another, so
+/// `guard_skill_roots::the_packages_own_list_is_the_same_roots_in_the_same_
+/// order` holds the two to the same roots in the same order — and
+/// `…covers_every_harness_skills_surface` holds the package's list to the
+/// adapters as well, so neither is ever only compared to its twin.
 pub const SKILL_ROOTS: [&str; 7] = [
     ".agents/skills",
     ".claude/skills",
@@ -84,61 +88,6 @@ impl Installed {
             }
         }
         None
-    }
-
-    /// Whether anything gated by this repository's hooks carries the
-    /// package.
-    ///
-    /// The question `stranded` asks, and a wider one than [`present`]: that
-    /// searches from where the caller stands, which is the right copy to
-    /// RUN. A hooks directory is not that narrow. It lives in the common
-    /// git dir, so it is shared by every project in a work tree AND by
-    /// every work tree attached to that dir — and the domain of "is this
-    /// package installed for these hooks" is that whole set, which
-    /// [`Repo::worktrees`] enumerates exactly. A copy in a sibling work
-    /// tree is what the shared shims run, and a search that never looked
-    /// there reports it as a leftover to delete.
-    ///
-    /// Every directory the project walk's pruning leaves in every one of
-    /// those trees, not every discovered project: a repository whose root
-    /// carries a harness marker IS a project to the discovery walk, which
-    /// stops there and never sees the nested project that armed the hooks.
-    ///
-    /// The cheap probe comes first, because the roots `present` searches
-    /// are where the copy nearly always is and answering from them skips
-    /// every walk. The trees are deduplicated for the same reason
-    /// [`search_roots`] deduplicates its roots: walking one twice is the
-    /// whole exhaustive walk paid again for the same answer.
-    ///
-    /// A domain that could not be read in full is an error, not a no: the
-    /// caller turns a no into advice to delete the hook files.
-    ///
-    /// [`present`]: Installed::present
-    /// [`Repo::worktrees`]: super::Repo::worktrees
-    pub fn anywhere(repo: &super::Repo) -> Result<bool> {
-        let mut carries = |dir: &Path| {
-            SKILL_ROOTS
-                .iter()
-                .map(|base| dir.join(base).join(SKILL))
-                .any(|dir| dir.exists() || dir.is_symlink())
-        };
-        if search_roots(repo).iter().any(|root| carries(root)) {
-            return Ok(true);
-        }
-        let mut trees = repo.worktrees()?;
-        // The tree the caller is standing in is in the domain whatever git
-        // listed: it is attached to this common dir by definition, and an
-        // answer of "no copy anywhere" that never looked here would be the
-        // worst one to be wrong about.
-        if !trees.contains(&repo.worktree) {
-            trees.push(repo.worktree.clone());
-        }
-        for tree in &trees {
-            if crate::discover::any_dir(tree, &mut carries)? {
-                return Ok(true);
-            }
-        }
-        Ok(false)
     }
 
     /// Whether any copy of the package is here at all, for a message that
@@ -258,10 +207,40 @@ fn project_root(repo: &super::Repo) -> Option<PathBuf> {
 /// commit hook as often as from a terminal.
 pub(super) fn bind(dir: &Path, relative: &str) -> Result<(super::Repo, Installed)> {
     let repo = super::Repo::at(dir)?;
-    let Some(installed) = Installed::resolve(&repo, relative) else {
+    let installed = installed_or_err(&repo, relative)?;
+    Ok((repo, installed))
+}
+
+/// Whether any root this repository searches holds the named script at
+/// all, and only where every root could actually be looked at.
+///
+/// `Ok(false)` means every candidate answered `NotFound`, which is the one
+/// reading that supports telling somebody nothing is rendered here. An
+/// error is a search that did not happen and is returned as one.
+///
+/// Stat, not [`is_executable`], which cannot say why it said no. What a
+/// copy that is there but will not run means is [`bind`]'s sentence, and
+/// this is only ever asked after that sentence has been written.
+pub(super) fn any_candidate(repo: &super::Repo, relative: &str) -> Result<bool> {
+    for root in search_roots(repo) {
+        for base in SKILL_ROOTS {
+            let script = root.join(base).join(SKILL).join(relative);
+            match std::fs::symlink_metadata(&script) {
+                Ok(_) => return Ok(true),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(crate::error::CoreError::io(&script, error)),
+            }
+        }
+    }
+    Ok(false)
+}
+
+/// The package's script in a repository already resolved.
+pub(super) fn installed_or_err(repo: &super::Repo, relative: &str) -> Result<Installed> {
+    let Some(installed) = Installed::resolve(repo, relative) else {
         // A package that is here but cannot run is a broken install, and
         // says so; one that is not here at all is a different sentence.
-        return Err(match Installed::present(&repo) {
+        return Err(match Installed::present(repo) {
             Some(dir) => guard_err(
                 "hooks",
                 format!(
@@ -279,5 +258,5 @@ pub(super) fn bind(dir: &Path, relative: &str) -> Result<(super::Repo, Installed
             ),
         });
     };
-    Ok((repo, installed))
+    Ok(installed)
 }

@@ -114,8 +114,9 @@ it away, `marketplace unsubscribe --remove-packages` — runs `--uninstall`
 while the scripts are still on disk, because shims whose scripts are gone
 block every commit.
 `kendex guard install`, `kendex guard uninstall` and `kendex guard check`
-invoke it directly. `kendex check` runs none of this package's scripts: it
-reads the hook files and names shims a deleted package left behind.
+invoke it directly. So does `kendex check`, but only where
+`.git/hooks/kendex-guards` is already there: git clones no hooks, so that
+file is a local act, and without it nothing here is run.
 
 `--check` is the read-only counterpart: it writes nothing — not even the
 hooks directory — and answers whether the shims are armed. `0`: the helper
@@ -125,7 +126,8 @@ some shim is drifted or absent, or `core.hooksPath` is set and empty, which
 switches git hooks off outright. `2`: the question could not be answered (an
 unreadable hooks directory, a hook file that cannot be read); failure to
 measure is never a pass, and definitive drift outranks an unmeasured
-component. The one stdout line carries every component finding, and `kendex check` reads the hook files natively instead of running this.
+component. The one stdout line carries every component finding, and it is what `kendex check` relays
+where there is something to report; a clean result folds into kendex's own all-clear instead.
 
 The helper is compared BYTE FOR BYTE against what this installer generates.
 The marker inside it is only a comment, and `--check` writes nothing, so it

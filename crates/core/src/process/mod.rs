@@ -24,7 +24,12 @@ use crate::error::{CoreError, Result};
 
 /// Long enough for a cold clone over a slow link, short enough that a wedged
 /// call surfaces as an error instead of a frozen window.
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
+///
+/// Public so a caller under no tighter budget can NAME it rather than take
+/// it by omission. A builder default is invisible at the call site, which
+/// is how a lane that needed a smaller bound could lose it and read as a
+/// lane that never wanted one.
+pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// What a person waiting on a button will sit through. A refresh they asked
 /// for and are watching is a different promise from a clone running behind
@@ -178,11 +183,21 @@ impl Hardened {
         let reading_err = std::thread::spawn(move || read(&mut stderr, cap));
 
         let deadline = Instant::now() + self.timeout;
+        // The deadline covers the READ, not only the wait: breaking on the
+        // direct child's exit handed the pipes to `collect` with nothing
+        // timing them, and a descendant that inherited them holds
+        // `read_to_end` open — `sleep 60 & exit 0` returned at once and then
+        // held collection for a minute, past every bound asked for. Reaped
+        // last because `try_wait` reaps, and `end_tree` signals the group by
+        // the leader's pid: a number held only while the group still has a
+        // member, so a kill after the reap can land on a stranger.
         let status = loop {
-            match child.try_wait() {
-                Ok(Some(status)) => break status,
-                Ok(None) => {}
-                Err(error) => return Err(CoreError::io(&self.label, error)),
+            if reading_out.is_finished() && reading_err.is_finished() {
+                match child.try_wait() {
+                    Ok(Some(status)) => break status,
+                    Ok(None) => {}
+                    Err(error) => return Err(CoreError::io(&self.label, error)),
+                }
             }
             if Instant::now() >= deadline {
                 end_tree(&mut child);
