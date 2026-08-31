@@ -9,16 +9,21 @@
 import userEvent from "@testing-library/user-event";
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { commands } from "@/bindings";
+import {
+  type AuditView_Serialize,
+  commands,
+  type DriftRow_Serialize,
+  type PackageUpdate_Serialize,
+} from "@/bindings";
 import { ADOPTABLE } from "@/lib/adoptable";
 import { UPDATE_ALL_LABEL } from "@/lib/copy";
 import {
   followSourceLabel,
   placesLabel,
-  UPDATE_NEEDS_CHECK_NOTE,
   UPDATE_PACKAGE_EVERYWHERE_LABEL,
   USER_LEVEL_PLACE,
 } from "@/lib/copy-updates";
+import { READ_LANDED } from "@/lib/read-state";
 import { UpdatesPage } from "@/pages/updates";
 import { useProblemsStore } from "@/stores/problems";
 import { useUpdatesStore } from "@/stores/updates";
@@ -51,22 +56,43 @@ const APP = "/home/me/app";
 // landing's row matching do any work: name alone would identify every row.
 const rows = [row("gh", null), row("gh", APP), row("orch", APP)];
 
-/** What the two held commands answer with: the flip's own apply, and the
- *  read of the standing that reconciles it. */
-const ok = {
-  status: "ok" as const,
-  data: {
-    scope: { scope: "global" as const },
-    drift: [],
-    plan: [],
-    notes: [],
-    warnings: [],
-    safety: [],
-    adoptable: ADOPTABLE,
-    exits: [],
-  },
+const view: AuditView_Serialize = {
+  scope: { scope: "global" },
+  drift: [],
+  plan: [],
+  notes: [],
+  warnings: [],
+  safety: [],
+  adoptable: ADOPTABLE,
+  exits: [],
 };
-const landed = { status: "ok" as const, data: { rows, warnings: [] as [] } };
+
+/** One rendering an apply wrote, for a report that says it moved
+ *  something. `stale` is what a rendering the plan rewrites is: it is on
+ *  disk and no longer matches the declaration, which is one of the two
+ *  states `package::outcome::moving` counts. */
+const wrote: DriftRow_Serialize = {
+  kind: "skill",
+  name: "gh",
+  harness: "claude",
+  state: "stale",
+  detail: "",
+  scope: { scope: "global" },
+};
+
+/** What the flip's own apply answers with: the scope's view afterwards,
+ *  and what became of the package. Switching Follow off records a hold and
+ *  writes nothing, which is `moved` empty. */
+const ok: { status: "ok"; data: PackageUpdate_Serialize } = {
+  status: "ok",
+  data: { view, heldBack: [], removed: [], moved: [] },
+};
+
+/** The same, for a flip that resolved the package at its source's tip. */
+const okMoved: { status: "ok"; data: PackageUpdate_Serialize } = {
+  status: "ok",
+  data: { view, heldBack: [], removed: [], moved: [wrote] },
+};
 
 /** The table drawn from the store, the way the page draws it: a flip that
  *  only reaches `rows` is a flip nobody sees. */
@@ -154,17 +180,21 @@ beforeEach(() => {
   useUpdatesStore.setState({
     rows,
     busy: false,
-    loaded: true,
+    read: READ_LANDED,
     checking: false,
-    overviewInFlight: false,
     pendingFollows: [],
-    error: null,
   });
   useUpdatesView.setState({ showVersion: false });
   vi.clearAllMocks();
   vi.mocked(commands.updatesOverview).mockResolvedValue({
     status: "ok",
     data: { rows, warnings: [], lastFetched: null },
+  });
+  // The page asks for an audit on mount; nothing here reads it.
+  vi.mocked(commands.auditAll).mockResolvedValue({ status: "ok", data: [] });
+  vi.mocked(commands.scanMachine).mockResolvedValue({
+    status: "ok",
+    data: { harnesses: [], items: [], missingProjects: [], warnings: [] },
   });
 });
 
@@ -214,11 +244,11 @@ describe("the Follow source switch", () => {
       followSwitch("gh", USER_LEVEL_PLACE).click();
     });
 
-    // The window regaining focus rescans, and that read can reach the
-    // manifest before the write does — it carries the switch's old
-    // position, and landing it raw would bounce the switch back.
+    // The window regaining focus rescans, and that read carries the
+    // switch's old position — landing it raw would bounce the switch back
+    // under the hand that moved it.
     await act(async () => {
-      await useUpdatesStore.getState().load();
+      await useUpdatesStore.getState().reload();
     });
 
     expect(following(followSwitch("gh", USER_LEVEL_PLACE))).toBe(false);
@@ -229,18 +259,29 @@ describe("the Follow source switch", () => {
     await settle();
   });
 
-  // The engine wrote nothing, but the rows already wear the flip. Until the
-  // read that puts them back lands, the place goes on holding: a row that
-  // said it was settled here would hand updateOne a pin that never landed.
-  it("goes on holding a refused flip until the read behind it lands", async () => {
+  // A refused write is not a write that changed nothing. `package_set_rev`
+  // persists the revision through `set_rev_with` and only then runs the
+  // apply, so an apply that fails answers with an error over a manifest
+  // that already moved. Restoring the switch from the row the click read
+  // would show that as settled and re-open every action against it — so
+  // the standing is read again, and the engine's own answer decides where
+  // the switch sits.
+  it("reads the standing back when the write is refused", async () => {
     vi.mocked(commands.packageSetRev).mockResolvedValue({
       status: "error",
       error: "manifest busy",
     });
-    const reread = pending<typeof landed>(landed);
-    vi.mocked(commands.updatesOverview).mockReturnValue(
-      reread.promise as never,
-    );
+    // What the engine turns out to hold: the revision the failed apply
+    // had already persisted.
+    const persisted = [
+      { ...rows[0], pinned: true, holdOwner: { kind: "package" as const } },
+      rows[1],
+      rows[2],
+    ];
+    vi.mocked(commands.updatesOverview).mockResolvedValue({
+      status: "ok",
+      data: { rows: persisted, warnings: [], lastFetched: null },
+    });
     mount(<Live />);
     await openPlaces();
 
@@ -249,28 +290,13 @@ describe("the Follow source switch", () => {
     });
     await settle();
 
-    expect(commands.updatesOverview).toHaveBeenCalledTimes(1);
-    expect(holding(followSwitch("gh", USER_LEVEL_PLACE))).toBe(true);
-
-    // The refusal is news now, not when the read finishes.
-    expect(showError).toHaveBeenCalledTimes(1);
-    expect(showError.mock.calls[0][0].message).toBe("manifest busy");
-
-    // The reverting flip keeps this scope's commit-applying actions out.
-    const store = useUpdatesStore.getState();
-    await act(async () => {
-      void store.updateOne(store.rows[0]);
-    });
-    expect(showError).toHaveBeenLastCalledWith(
-      expect.objectContaining({ message: UPDATE_NEEDS_CHECK_NOTE }),
-    );
-
-    reread.answer(landed);
-    await settle();
-    expect(following(followSwitch("gh", USER_LEVEL_PLACE))).toBe(true);
+    expect(commands.updatesOverview).toHaveBeenCalled();
+    // The flip is retired before that read, so the rows come back as the
+    // engine has them rather than wearing a position it never took.
     expect(useUpdatesStore.getState().pendingFollows).toEqual([]);
-    // And said once. The second announcement arrived when the read
-    // finished, re-opening a dialog the person had already dismissed.
+    expect(following(followSwitch("gh", USER_LEVEL_PLACE))).toBe(false);
+    // And said once. A second announcement re-opened a dialog the person
+    // had already dismissed.
     expect(
       showError.mock.calls.filter(
         (call) => call[0].message === "manifest busy",
@@ -278,19 +304,14 @@ describe("the Follow source switch", () => {
     ).toHaveLength(1);
   });
 
-  // Every read behind a refused write failed, so nothing is coming to
-  // replace the rows the flip painted. The page is held under its own
-  // "couldn't confirm" banner, but the switch must still not sit in a
-  // position the engine never took.
-  it("puts the switch back when nothing lands to replace the flip", async () => {
-    vi.mocked(commands.packageSetRev).mockResolvedValue({
-      status: "error",
-      error: "manifest busy",
-    });
-    vi.mocked(commands.updatesOverview).mockResolvedValue({
-      status: "error",
-      error: "standing unreadable",
-    });
+  // What a landed flip refreshes, and what it leaves. The apply resolves
+  // the package at its source's tip and moves installed bytes, so the scan
+  // that lists them and the audit that scored them are both out of date
+  // afterwards — and neither is re-asked. That is how the flip has always
+  // behaved; this holds it as it is, so a change to it is a decision
+  // somebody makes rather than a thing that drifts.
+  it("reads the standing back and leaves the scan and the audit dated", async () => {
+    vi.mocked(commands.packageSetRev).mockResolvedValue(okMoved as never);
     mount(<Live />);
     await openPlaces();
 
@@ -299,9 +320,10 @@ describe("the Follow source switch", () => {
     });
     await settle();
 
-    expect(useUpdatesStore.getState().loaded).toBe(false);
-    expect(following(followSwitch("gh", USER_LEVEL_PLACE))).toBe(true);
-    expect(useUpdatesStore.getState().pendingFollows).toEqual([]);
+    expect(commands.packageSetRev).toHaveBeenCalled();
+    expect(commands.updatesOverview).toHaveBeenCalled();
+    expect(commands.scanMachine).not.toHaveBeenCalled();
+    expect(commands.auditAll).not.toHaveBeenCalled();
   });
 
   it("refuses a second place in the settling scope, and takes another", async () => {

@@ -1,15 +1,17 @@
 // The cache vocabulary the marketplaces store and its readers share: the
 // collision-free subscription key, and the invalidation every catalog-moving
 // mutation runs.
-import type {
-  Catalog,
-  CatalogSummary,
-  MarketplaceRow,
-  Scope,
-} from "@/bindings";
-import { useAuditStore } from "./audit";
+import type { Catalog, MarketplaceRow, Scope } from "@/bindings";
+import { invalidations, type ReadState } from "@/lib/read-state";
 import { resetPreinstallSafety } from "./preinstall-safety";
-import { useScanStore } from "./scan";
+
+/** Bumped once by [dropCatalogCaches], the one place a drop is declared. A
+ * read that began before one describes a checkout that may no longer be the
+ * one installed from, and every derived cache keys on presence rather than
+ * freshness — a stale answer landing in the emptied slot would pin the
+ * commit before the change for the session, with nothing left to ask
+ * again. Shared with the pre-install scores, which the same drop clears. */
+export const catalogDrops = invalidations();
 
 /** One subscription's cache key: where it lives plus its alias, encoded so
  * a root or alias containing the delimiter can never collide with another
@@ -58,20 +60,6 @@ export const rowSubscribed = (
 export const isRepoKey = (key: string): boolean =>
   (JSON.parse(key) as unknown[])[0] === "repo";
 
-/** Every repository catalog with a cached summary — the pages to re-ask
- * after a refresh may have made a holder readable. The key is the way
- * back to the catalog, read in place so the old summary stands until the
- * new one lands. */
-export const cachedRepoCatalogs = (
-  summaries: Record<string, unknown>,
-): Catalog[] =>
-  Object.keys(summaries)
-    .filter(isRepoKey)
-    .map((key) => ({
-      by: "repo",
-      repo: (JSON.parse(key) as [string, string])[1],
-    }));
-
 /** One curated set's cache and error key, in its own namespace so a set
  * named like a read ("packages") can never land on that read's key. */
 export const bundleKey = (catalog: Catalog, name: string): string =>
@@ -91,17 +79,6 @@ export const catalogLabel = (catalog: Catalog | undefined): string | null =>
       ? catalog.source
       : catalog.repo;
 
-/** What lands after any mutation: the tables everywhere else stay current.
- *
- * The audit is forced. An install writes the very bytes a score answers
- * for, so the freshness window would hold a reading taken before the
- * package existed — and a package with no row of its own shows no safety
- * block at all. */
-export async function refreshDownstream() {
-  await useScanStore.getState().refresh();
-  await useAuditStore.getState().refresh({ force: true });
-}
-
 export function without<T>(
   map: Record<string, T>,
   key: string,
@@ -112,13 +89,22 @@ export function without<T>(
 
 /** A mutation that can change what any catalog offers empties every derived
  * cache — the pages re-read, and pre-install scores are re-asked, so nothing
- * keeps describing the commit before the change. A repository's summary is
- * kept: it only says which subscription the page carries on as, and
- * dropping it would blank an open page behind a second fetch. */
+ * keeps describing the commit before the change. Summaries go with them: a
+ * summary says which subscription a page carries on as, and a mutation is
+ * exactly what changes that answer. */
 export function dropCatalogCaches(set: (partial: object) => void) {
-  generation += 1;
-  set({ packages: {}, bundles: {}, about: {}, readErrors: {} });
+  // Before anything is emptied, and once for the whole drop: this is where
+  // the invalidation is declared, so it cannot be stubbed out from under
+  // the caches it guards.
+  catalogDrops.moved();
   resetPreinstallSafety();
+  set({
+    packages: {},
+    bundles: {},
+    about: {},
+    summaries: {},
+    readErrors: {},
+  });
 }
 
 /** The error key one cached read fails under, kept apart from the other
@@ -137,61 +123,29 @@ export async function openLead(scope: Scope, source: string, lead: string) {
   });
 }
 
-/** Every summary about one subscription's repository — matched by the
- * canonical key, however the declaration spells the repository, or by the
- * subscription itself — so a toggled holder is re-asked in both
- * directions: turned off, the page falls back to the bare repository;
- * turned on, it carries on again. */
-export function dropSummariesHeldBy(
-  set: (
-    fn: (state: { summaries: Record<string, CatalogSummary> }) => object,
-  ) => void,
-  rows: MarketplaceRow[],
-  scope: Scope,
-  source: string,
-) {
-  const held = marketKey(scope, source);
-  const repoKey =
-    rows.find((row) => marketKey(row.scope, row.name) === held)?.repoKey ??
-    null;
-  set((state) => ({
-    summaries: Object.fromEntries(
-      Object.entries(state.summaries).filter(([key, summary]) => {
-        if (!isRepoKey(key)) return true;
-        const sameRepo = repoKey !== null && summary.repoKey === repoKey;
-        const carried =
-          summary.subscription !== null &&
-          marketKey(summary.subscription.scope, summary.subscription.source) ===
-            held;
-        return !sameRepo && !carried;
-      }),
-    ),
-  }));
-}
-
 /** What a page browsing a bare repository offers, decided from the live
- * subscription list and the repository's canonical key. Until an overview
- * has succeeded the list is not to be trusted, and until the key is known
- * — from the directory's row or the summary, never the requested spelling,
- * which may differ in case — nothing can be matched: either way Subscribe,
- * which a declared repository would refuse, is not offered on a guess. */
+ * subscription list and the repository's canonical key.
+ *
+ * Two things have to be known first, or Subscribe is offered on a guess and
+ * a declared repository refuses it. The key, which comes from the
+ * directory's row or the summary and never from the requested spelling,
+ * which may differ in case. And rows some read actually produced: with none,
+ * every repository looks undeclared, and a read that has not landed is no
+ * reason to believe that. Rows kept from a read that later failed are what
+ * this machine last knew and go on being acted on — the engine refuses
+ * whatever they were wrong about — so it is the emptiness that holds the
+ * page neutral, not the failure. */
 export type RepoActionKind = "checking" | "subscribe" | "turn-on" | "refresh";
 
 export function repoAction(
   rows: MarketplaceRow[],
-  rowsCurrent: boolean,
+  read: ReadState,
   repoKey: string | null,
 ): { kind: RepoActionKind; holder: MarketplaceRow | null } {
-  if (!rowsCurrent || repoKey === null) {
+  if (repoKey === null || (read.status !== "landed" && rows.length === 0)) {
     return { kind: "checking", holder: null };
   }
   const holder = declaredHolder(rows, repoKey);
   if (!holder) return { kind: "subscribe", holder: null };
   return { kind: holder.enabled ? "refresh" : "turn-on", holder };
 }
-
-/** Bumped by every cache drop. A read that began under an older generation
- * describes a checkout that may no longer be the one installed from, and
- * its answer is discarded rather than stored. */
-let generation = 0;
-export const readGeneration = (): number => generation;

@@ -7,8 +7,6 @@ import {
   BOB,
   fresh,
   load,
-  OTHER_SIGN_IN,
-  SIGN_IN,
   serves,
 } from "@/test/account-store";
 import { hasCredential, useAccountStore } from "./account";
@@ -35,7 +33,6 @@ beforeEach(() => {
     data: [],
   } as Awaited<ReturnType<typeof commands.mineSubmissions>>);
 });
-
 // A command made under the sign-in is the second way the credential is
 // found to have ended; the read is the first. What the two leave behind
 // has to be the same thing, or the sidebar and Settings > Account answer
@@ -51,96 +48,29 @@ describe("a call refused because the sign-in expired", () => {
 
   it("goes to expired and drops the rows with it", () => {
     useAccountStore.setState({
-      account: { kind: "signed-in", identity: ADA, signIn: SIGN_IN },
+      account: { kind: "signed-in", identity: ADA },
       submissions: [],
     });
     met();
-    expect(account()).toEqual({ kind: "expired", signIn: SIGN_IN });
+    expect(account()).toEqual({ kind: "expired" });
     expect(useAccountStore.getState().submissions).toBeNull();
   });
 
   it("keeps the explanation through the read that follows it", async () => {
     useAccountStore.setState({
-      account: { kind: "signed-in", identity: ADA, signIn: SIGN_IN },
+      account: { kind: "signed-in", identity: ADA },
     });
     met();
     // The refusal cleared the credential, so this read finds none and
     // says signed out. What the command learned has to outlive it.
     answers({ state: "signed-out" });
     await load();
-    expect(account()).toEqual({ kind: "expired", signIn: SIGN_IN });
-  });
-
-  // KEN-742 leaves the credential, and its cached identity, where the
-  // removal fails. An outage then answers `offline` for a sign-in the
-  // server has already refused, and offline holds a credential: without
-  // the same rule the signed-out answer gets, the dead sign-in comes
-  // back usable and the Submit it cannot carry is offered again.
-  it("keeps expired through a read that could not reach the server", async () => {
-    useAccountStore.setState({
-      account: { kind: "signed-in", identity: ADA, signIn: SIGN_IN },
-    });
-    met();
-    expect(account()).toEqual({ kind: "expired", signIn: SIGN_IN });
-
-    serves({ kind: "offline", identity: ADA, signIn: SIGN_IN });
-    await load();
-
-    expect(account()).toEqual({ kind: "expired", signIn: SIGN_IN });
-    // What the submit dialog gates its Submit button on.
-    expect(hasCredential(account())).toBe(false);
-  });
-
-  // The verdict was about the sign-in it named. A credential another
-  // process installed is not that one, and holding the expiry over it
-  // leaves a live sign-in reading as dead with Submit withheld.
-  it("lets go of it for a credential known to be a different one", async () => {
-    useAccountStore.setState({
-      account: { kind: "signed-in", identity: ADA, signIn: SIGN_IN },
-    });
-    met();
-
-    serves({ kind: "offline", identity: BOB, signIn: OTHER_SIGN_IN });
-    await load();
-
-    expect(account()).toEqual({
-      kind: "offline",
-      identity: BOB,
-      signIn: OTHER_SIGN_IN,
-    });
-    expect(hasCredential(account())).toBe(true);
-  });
-
-  // An unnamed credential is not known to be a different one, and an
-  // answer that cannot see the server does not get to overturn one that
-  // could on a difference nobody established.
-  it("keeps it when the offline answer names no sign-in", async () => {
-    useAccountStore.setState({
-      account: { kind: "signed-in", identity: ADA, signIn: SIGN_IN },
-    });
-    met();
-
-    serves({ kind: "offline", identity: ADA, signIn: "" });
-    await load();
-
-    expect(account()).toEqual({ kind: "expired", signIn: SIGN_IN });
-  });
-
-  it("keeps it when neither side names one", async () => {
-    useAccountStore.setState({
-      account: { kind: "signed-in", identity: ADA, signIn: "" },
-    });
-    met();
-
-    serves({ kind: "offline", identity: ADA, signIn: "" });
-    await load();
-
-    expect(account()).toEqual({ kind: "expired", signIn: "" });
+    expect(account()).toEqual({ kind: "expired" });
   });
 
   it("drops rows already out for the credential it ended", async () => {
     useAccountStore.setState({
-      account: { kind: "signed-in", identity: ADA, signIn: SIGN_IN },
+      account: { kind: "signed-in", identity: ADA },
       submissions: null,
     });
     vi.mocked(commands.mineSubmissions).mockImplementation(async () => {
@@ -151,6 +81,41 @@ describe("a call refused because the sign-in expired", () => {
     });
     await useAccountStore.getState().loadSubmissions();
     expect(useAccountStore.getState().submissions).toBeNull();
+  });
+
+  // KEN-742 leaves the credential, and its cached identity, where the
+  // removal fails. An outage then answers `offline` off that warm cache
+  // for a sign-in the server has already refused, and offline holds a
+  // credential: without the same rule the signed-out answer gets, the dead
+  // sign-in comes back usable and the Submit it cannot carry is offered
+  // again.
+  it("keeps expired through a read that could not reach the server", async () => {
+    useAccountStore.setState({
+      account: { kind: "signed-in", identity: ADA },
+    });
+    met();
+    expect(account()).toEqual({ kind: "expired" });
+
+    serves({ kind: "offline", identity: ADA });
+    await load();
+
+    expect(account()).toEqual({ kind: "expired" });
+    // What the submit dialog gates its Submit button on.
+    expect(hasCredential(account())).toBe(false);
+  });
+
+  // The control: a read that reached the server is news that outranks the
+  // verdict, or an expiry could never be cleared at all.
+  it("lets a signed-in read take the expiry back", async () => {
+    useAccountStore.setState({
+      account: { kind: "signed-in", identity: ADA },
+    });
+    met();
+
+    serves({ kind: "signed-in", identity: BOB });
+    await load();
+
+    expect(account()).toEqual({ kind: "signed-in", identity: BOB });
   });
 
   it("changes nothing once the account has already moved on", () => {
@@ -184,7 +149,7 @@ describe("a call refused because the sign-in expired", () => {
      *  what a refusal about a credential nobody holds must leave. */
     const refusedAfter = async (replace: () => Promise<void>) => {
       useAccountStore.setState({
-        account: { kind: "signed-in", identity: ADA, signIn: SIGN_IN },
+        account: { kind: "signed-in", identity: ADA },
         submissions: [ROW],
       });
       const since = useAccountStore.getState().handovers();
@@ -232,13 +197,13 @@ describe("a call refused because the sign-in expired", () => {
       } as Awaited<ReturnType<typeof commands.accountLoginStart>>);
       vi.mocked(commands.accountLoginPoll).mockResolvedValue({
         status: "ok",
-        data: { kind: "signed", sign_in: SIGN_IN },
+        data: { kind: "signed" },
       } as Awaited<ReturnType<typeof commands.accountLoginPoll>>);
       vi.mocked(commands.openUrl).mockResolvedValue({
         status: "ok",
         data: null,
       } as Awaited<ReturnType<typeof commands.openUrl>>);
-      serves({ kind: "signed-in", identity: BOB, signIn: SIGN_IN });
+      serves({ kind: "signed-in", identity: BOB });
 
       const settled = await refusedAfter(async () => {
         vi.useFakeTimers();
@@ -252,27 +217,7 @@ describe("a call refused because the sign-in expired", () => {
       expect(account()).toEqual({
         kind: "signed-in",
         identity: BOB,
-        signIn: SIGN_IN,
       });
-    });
-
-    // The route a terminal `kendex login` takes: nothing in the app signs
-    // in, and the replacement arrives as a read that finds a credential
-    // where there was already one.
-    it("leaves a credential a terminal login put there in its place", async () => {
-      serves({ kind: "signed-in", identity: BOB, signIn: "sign-in-next" });
-      const settled = await refusedAfter(load);
-
-      unchangedFrom(settled);
-      expect(account()).toEqual({
-        kind: "signed-in",
-        identity: BOB,
-        signIn: "sign-in-next",
-      });
-      // The rows went with the account that owned them, at the read that
-      // saw the change of hands, not at the refusal that landed after,
-      // and that read asked for the new account's in their place.
-      expect(useAccountStore.getState().submissions).toEqual([]);
     });
   });
 
@@ -280,7 +225,6 @@ describe("a call refused because the sign-in expired", () => {
     const signedIn = {
       kind: "signed-in" as const,
       identity: ADA,
-      signIn: SIGN_IN,
     };
     useAccountStore.setState({ account: signedIn, submissions: [] });
     useAccountStore
@@ -295,7 +239,7 @@ describe("a call refused because the sign-in expired", () => {
 
   it("is what a submissions poll does with the refusal it gets", async () => {
     useAccountStore.setState({
-      account: { kind: "signed-in", identity: ADA, signIn: SIGN_IN },
+      account: { kind: "signed-in", identity: ADA },
       submissions: [],
     });
     vi.mocked(commands.mineSubmissions).mockResolvedValue({
@@ -303,7 +247,7 @@ describe("a call refused because the sign-in expired", () => {
       error: expired,
     } as Awaited<ReturnType<typeof commands.mineSubmissions>>);
     await useAccountStore.getState().loadSubmissions();
-    expect(account()).toEqual({ kind: "expired", signIn: SIGN_IN });
+    expect(account()).toEqual({ kind: "expired" });
     expect(useAccountStore.getState().submissions).toBeNull();
   });
 });
@@ -325,7 +269,6 @@ describe("a submissions read the server could not answer", () => {
   const signedIn = {
     kind: "signed-in" as const,
     identity: ADA,
-    signIn: SIGN_IN,
   };
 
   const fails = () =>
@@ -361,9 +304,30 @@ describe("a submissions read the server could not answer", () => {
 
     await useAccountStore.getState().loadSubmissions();
 
-    expect(account()).toEqual({ kind: "expired", signIn: SIGN_IN });
+    expect(account()).toEqual({ kind: "expired" });
     expect(useAccountStore.getState().submissions).toBeNull();
     expect(useAccountStore.getState().submissionsError).toBeNull();
+  });
+
+  // A rejected call is a read that failed, not an exception for the poll's
+  // `void` caller to drop on the floor. It says nothing about the
+  // credential, so the account stays where it is and the rows say why they
+  // are not current.
+  it("lands a rejected poll as a failed read, not a thrown one", async () => {
+    useAccountStore.setState({ account: signedIn, submissions: [ROW] });
+    vi.mocked(commands.mineSubmissions).mockRejectedValue(
+      new Error("the bridge is gone"),
+    );
+
+    await expect(
+      useAccountStore.getState().loadSubmissions(),
+    ).resolves.toBeUndefined();
+
+    expect(useAccountStore.getState().submissionsError).toBe(
+      "the bridge is gone",
+    );
+    expect(useAccountStore.getState().submissions).toEqual([ROW]);
+    expect(account()).toEqual(signedIn);
   });
 
   it("goes with the credential when the person signs out", async () => {
@@ -386,7 +350,6 @@ describe("a submissions read the server could not answer", () => {
     expect(useAccountStore.getState().submissionsError).toBeNull();
     expect(useAccountStore.getState().submissions).toEqual([]);
   });
-
   // The tab's timer and a submit that just landed both ask, so two reads
   // are routinely out at once. Whichever was asked for last is the later
   // word on the same credential, and it is the one that has to stand
@@ -468,32 +431,5 @@ describe("a submissions read the server could not answer", () => {
 
     expect(account()).toEqual({ kind: "signed-out" });
     expect(useAccountStore.getState().submissions).toBeNull();
-  });
-
-  // A failure about a credential nobody holds any more explains rows
-  // nobody is looking at, and would sit over the account that replaced it.
-  // The read has to still be out when the account moves, so its answer is
-  // held back until the sign-out has landed.
-  it("says nothing about an account that changed hands under it", async () => {
-    useAccountStore.setState({ account: signedIn });
-    vi.mocked(commands.accountLogout).mockResolvedValue({
-      status: "ok",
-      data: null,
-    } as Awaited<ReturnType<typeof commands.accountLogout>>);
-    type Answer = Awaited<ReturnType<typeof commands.mineSubmissions>>;
-    let land: (answer: Answer) => void = () => {};
-    vi.mocked(commands.mineSubmissions).mockReturnValue(
-      new Promise<Answer>((resolve) => {
-        land = resolve;
-      }),
-    );
-
-    const polling = useAccountStore.getState().loadSubmissions();
-    await useAccountStore.getState().signOut();
-    land({ status: "error", error: { kind: "failed", message: WHY } });
-    await polling;
-
-    expect(useAccountStore.getState().submissionsError).toBeNull();
-    expect(account()).toEqual({ kind: "signed-out" });
   });
 });

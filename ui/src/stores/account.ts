@@ -5,14 +5,13 @@
 // here rather than asking again.
 import { create } from "zustand";
 import { type AccountCallRefused, commands } from "@/bindings";
+import { invalidations, readOrder } from "@/lib/read-state";
 import { readAccount } from "./account-read";
 import {
   type AccountState,
-  asksForRows,
   asOffline,
   hasCredential,
   keepsExpiry,
-  sameCredential,
 } from "./account-state";
 import {
   noSubmissions,
@@ -73,21 +72,22 @@ interface AccountStore extends Submissions {
 let generation = 0;
 
 /** Bumped where the account changes hands: a credential stored, a
- *  credential dropped. A read still out when that happens is stale, and
- *  the bump is at the change itself, not at the action that begins it. */
-let handover = 0;
+ *  credential dropped. A read still out when that happens is about nobody
+ *  on screen, and the bump is at the change itself, not at the action that
+ *  begins it. */
+const handover = invalidations();
 
-/** Reads in the order they were asked for. Only the newest may land: two
- *  can be out at once, and the slower one is not the truer one. */
-let reads = 0;
+/** Reads of the account in the order they were asked for. Startup, the
+ *  focus rescan and a failure surface's retry all ask, so two are routinely
+ *  out at once, and the slower one is not the truer one. */
+const order = readOrder();
 
 /** What the end of a credential leaves behind, wherever it ends: the rows
  *  were its, and a read that failed under it explains an account nobody
- *  holds any more. The `handover` bump is the change of hands itself, so
- *  a read still out for the old credential is abandoned. Callers keep
- *  their own guards; only the write is shared. */
+ *  holds any more. The `handover` bump is the change of hands itself, so a
+ *  read still out for the old credential is abandoned. */
 const credentialEnded = (account: AccountState) => {
-  handover += 1;
+  handover.moved();
   return { account, readError: null, ...noSubmissions };
 };
 
@@ -105,18 +105,18 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
   ...noSubmissions,
 
   load: async () => {
-    reads += 1;
-    const mine = reads;
-    const before = handover;
+    const ticket = order.begin();
+    const before = handover.since();
     set({ reading: true });
     const answer = await readAccount();
     // A read a newer one overtook says nothing and clears nothing: the
     // newer read is still out, and the flag is its to lower.
-    if (mine !== reads) return;
+    if (!order.lands(ticket)) return;
     set({ reading: false });
     // A read overtaken by a sign-in or sign-out is news about an account
-    // that has already moved on.
-    if (before !== handover) return;
+    // that has already moved on, and writing it would show a credential
+    // this machine no longer holds.
+    if (handover.stale(before)) return;
     if ("error" in answer) {
       // A read that failed knows nothing new, so it never takes anything
       // away. With an identity already in hand the failure is exactly
@@ -128,23 +128,20 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
       return;
     }
     const held = get().account;
+    // Only a read that reached the server may take the verdict back. One
+    // that found nothing, or that served a cached identity because it
+    // could not ask, knows no more than whatever raised it.
     if (keepsExpiry(held, answer.ok)) {
-      set(credentialEnded(held));
-    } else if (sameCredential(held, answer.ok)) {
-      // The same sign-in: named at last, or confirmed again.
-      set({ account: answer.ok, readError: null });
-    } else {
-      // Either the credential is gone, or a read has found one the app
-      // did not put there: `kendex login` in a terminal is how that
-      // happens. Both are the account changing hands, and submissions
-      // belong to the credential, so nobody's rows outlive them.
-      set(credentialEnded(answer.ok));
-      // Clearing is only the floor. The tab asks for rows when it becomes
-      // signed in, which never stopped being true across a swap, so
-      // nothing else would ask again for a minute and the new sign-in
-      // would sit in front of an empty tab.
-      if (asksForRows(held, answer.ok)) await get().loadSubmissions();
+      set({ readError: null });
+      return;
     }
+    // A credential that is gone takes the rows with it: submissions belong
+    // to the credential that made them.
+    set(
+      hasCredential(answer.ok)
+        ? { account: answer.ok, readError: null }
+        : credentialEnded(answer.ok),
+    );
   },
 
   signIn: async () => {
@@ -174,19 +171,14 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
       if (polled.data.kind === "signed") {
         // The approval is proof a credential was stored, so it is recorded
         // before anything else is asked: a read that fails after this must
-        // not leave the person looking at a sign-in button. The poll
-        // answers with the sign-in core minted, so the credential is named
-        // from the moment it exists and the read that follows only puts a
-        // person's name to it.
-        handover += 1;
+        // not leave the person looking at a sign-in button. One sign-in is
+        // one change of hands — the read that follows only names it — so
+        // the bump is here and not there.
+        handover.moved();
         set({
           signingIn: false,
           userCode: null,
-          account: {
-            kind: "signed-in",
-            identity: null,
-            signIn: polled.data.sign_in,
-          },
+          account: { kind: "signed-in", identity: null },
         });
         await get().load();
         return;
@@ -214,23 +206,20 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
     await readSubmissions(get().handovers, get().refused, set);
   },
 
-  handovers: () => handover,
+  handovers: () => handover.since(),
 
   refused: (refusal, since) => {
     if (refusal.kind !== "expired") return;
     // The expiry belongs to the credential the call went out under. One
-    // that landed after the account changed hands — a sign-out taken
-    // while the call was out, a sign-in finishing behind it — is about a
+    // that landed after the account changed hands — a sign-out taken while
+    // the call was out, a sign-in finishing behind it — is about a
     // credential nobody holds any more, and ending the account over it
     // would end the one that replaced it.
-    if (since !== handover) return;
+    if (handover.stale(since)) return;
     // Expiry is a credential ending, so there has to be one to end.
-    const held = get().account;
-    if (!hasCredential(held)) return;
+    if (!hasCredential(get().account)) return;
     // The next read says signed out where the refusal cleared the
-    // credential, and meets the same dead sign-in and says expired where
-    // it could not. `load` keeps this state through either answer, and
-    // the name says which sign-in the verdict was about.
-    set(credentialEnded({ kind: "expired", signIn: held.signIn }));
+    // credential; `load` keeps this state through that answer.
+    set(credentialEnded({ kind: "expired" }));
   },
 }));

@@ -8,7 +8,7 @@ import {
 } from "@/bindings";
 import { adoptedToastLabel } from "@/lib/copy";
 import { replacedToastLabel } from "@/lib/copy-in-the-way";
-import { keepUnreadable, replaceView } from "./audit-fold";
+import { replaceView } from "./audit-fold";
 import { type ErrorAction, useProblemsStore } from "./problems";
 import { useScanStore } from "./scan";
 
@@ -96,9 +96,8 @@ export function auditRunner(
       attempted();
     }
     if (response.status === "ok") {
-      const views = get().views;
       set({
-        views: keepUnreadable(views, replaceView(views, response.data)),
+        views: replaceView(get().views, response.data),
         error: null,
       });
       if (opts.successMessage) toast.success(opts.successMessage);

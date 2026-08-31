@@ -5,7 +5,7 @@ import {
   type ItemKind,
   type PackageSafety,
 } from "@/bindings";
-import { catalogKey } from "./marketplaces-shared";
+import { catalogDrops, catalogKey } from "./marketplaces-shared";
 
 /** One offered package's identity across every marketplace query. */
 export const safetyKey = (
@@ -34,14 +34,13 @@ interface QueueItem {
 const queue: QueueItem[] = [];
 const queued = new Set<string>();
 let draining = false;
-// Bumped by a reset: an in-flight answer from before the bump is stale (the
-// catalog may have moved) and is dropped instead of stored.
-let generation = 0;
 
-/** Empty the cache and the queue — called when any mutation can have moved
- * a catalog, so no score describes the commit before the change. */
+/** Empty the cache and the queue — half of [dropCatalogCaches], which is
+ * where a drop is declared and where the one [catalogDrops] bump is taken.
+ * Call that rather than this: a scan already in flight would otherwise land
+ * in the slot this just emptied, and `want` short-circuits on a stored
+ * score, so nothing would ever ask again. */
 export function resetPreinstallSafety() {
-  generation += 1;
   queue.length = 0;
   queued.clear();
   usePreinstallSafety.setState({ scores: {} });
@@ -62,15 +61,18 @@ export const usePreinstallSafety = create<PreinstallSafetyState>(
           while (queue.length > 0) {
             const item = queue.shift();
             if (!item) break;
-            const before = generation;
+            const began = catalogDrops.since();
             try {
               const response = await commands.marketplacePackagePreview(
                 item.catalog,
                 item.kind,
                 item.name,
               );
-              // A reset while this was in flight makes the answer stale.
-              if (before !== generation) continue;
+              // A drop while this was in flight emptied the slot it would
+              // fill, and cleared `queued` with it: storing the old score
+              // would pin the commit before the change, and dropping it
+              // costs nothing because the next mount of the row asks again.
+              if (catalogDrops.stale(began)) continue;
               if (response.status === "ok") {
                 set((state) => ({
                   scores: {

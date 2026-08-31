@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { commands, type MarketplaceRow } from "@/bindings";
+import { READ_LANDED } from "@/lib/read-state";
 import { useMarketplacesStore } from "./marketplaces";
 
 vi.mock("@/bindings", () => ({
@@ -27,16 +28,14 @@ const kept: MarketplaceRow = {
 };
 
 // A failed overview read keeps the rows it had — the page does not blank —
-// but `rowsCurrent` comes down and `loaded` comes up: the read answered
-// that it couldn't, which is not the same news as one still on its way.
+// and the read state says `failed`: the read answered that it couldn't,
+// which is not the same news as one still on its way.
 describe("the marketplaces overview read failing", () => {
   beforeEach(() => {
     useMarketplacesStore.setState({
       rows: [kept],
-      loaded: true,
-      rowsCurrent: true,
+      read: READ_LANDED,
       error: null,
-      checkError: null,
     });
     vi.clearAllMocks();
   });
@@ -51,10 +50,9 @@ describe("the marketplaces overview read failing", () => {
 
     const state = useMarketplacesStore.getState();
     expect(state.rows).toEqual([kept]);
-    expect(state.rowsCurrent).toBe(false);
-    expect(state.loaded).toBe(true);
+    expect(state.read.status).toBe("failed");
     expect(state.error).toBe("offline");
-    expect(state.checkError).toBe("offline");
+    expect(state.read.error).toBe("offline");
   });
 
   // Actions write the shared error field too; only load() may write the
@@ -77,8 +75,8 @@ describe("the marketplaces overview read failing", () => {
 
     const state = useMarketplacesStore.getState();
     expect(state.error).toBe("bad repo");
-    expect(state.checkError).toBe("offline");
-    expect(state.rowsCurrent).toBe(false);
+    expect(state.read.error).toBe("offline");
+    expect(state.read.status).toBe("failed");
   });
 
   it("clears the stale-read reason once a read answers again", async () => {
@@ -87,18 +85,18 @@ describe("the marketplaces overview read failing", () => {
       error: "offline",
     });
     await useMarketplacesStore.getState().load();
-    expect(useMarketplacesStore.getState().checkError).toBe("offline");
+    expect(useMarketplacesStore.getState().read.error).toBe("offline");
 
     vi.mocked(commands.marketplacesOverview).mockResolvedValueOnce({
       status: "ok",
       data: [kept],
     });
     await useMarketplacesStore.getState().load();
-    expect(useMarketplacesStore.getState().checkError).toBeNull();
+    expect(useMarketplacesStore.getState().read.error).toBeNull();
   });
 
-  // A rejected call used to escape the store entirely: rowsCurrent stayed
-  // true and the tile kept counting rows nobody could confirm.
+  // A rejected call used to escape the store entirely: the read stayed
+  // landed and the tile kept counting rows nobody could confirm.
   it("lands a rejected call the same as a returned refusal", async () => {
     vi.mocked(commands.marketplacesOverview).mockRejectedValue(
       new Error("ipc down"),
@@ -108,13 +106,14 @@ describe("the marketplaces overview read failing", () => {
 
     const state = useMarketplacesStore.getState();
     expect(state.rows).toEqual([kept]);
-    expect(state.rowsCurrent).toBe(false);
-    expect(state.loaded).toBe(true);
+    expect(state.read.status).toBe("failed");
     expect(state.error).toBe("ipc down");
   });
 
-  // Home's mount-time load overlaps the page's own reads; without ordering
-  // a slow early one landing last would stamp its stale rows current.
+  // Home's mount-time load overlaps the page's own, a retry button against
+  // either, and every mutation re-reading behind them. Without ordering a
+  // slow early one landing last stamps its stale rows current and clears
+  // the notice saying they are not.
   it("discards a slow load that lands after a fresher one", async () => {
     let resolveFirst!: (
       value: Awaited<ReturnType<typeof commands.marketplacesOverview>>,
@@ -138,9 +137,11 @@ describe("the marketplaces overview read failing", () => {
 
     const state = useMarketplacesStore.getState();
     expect(state.rows).toEqual(fresh);
-    expect(state.rowsCurrent).toBe(true);
+    expect(state.read.status).toBe("landed");
   });
 
+  // The read state rides on the ordering too: an older landing that
+  // cleared a newer failure takes the unconfirmed notice off the page.
   it("discards a slow failed load landing after a fresher answer", async () => {
     let rejectFirst!: (reason: Error) => void;
     vi.mocked(commands.marketplacesOverview).mockReturnValueOnce(
@@ -160,7 +161,7 @@ describe("the marketplaces overview read failing", () => {
     await first;
 
     const state = useMarketplacesStore.getState();
-    expect(state.rowsCurrent).toBe(true);
-    expect(state.error).toBeNull();
+    expect(state.read.status).toBe("landed");
+    expect(state.read.error).toBeNull();
   });
 });

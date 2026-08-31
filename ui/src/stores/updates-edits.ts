@@ -1,5 +1,5 @@
 import { toast } from "sonner";
-import { commands, type HarnessId, type UpdateRow } from "@/bindings";
+import type { HarnessId, UpdateRow } from "@/bindings";
 import { FORK_ERROR_TITLE, forkedToastLabel } from "@/lib/copy";
 import {
   installedAsNewToastLabel,
@@ -7,11 +7,16 @@ import {
   UPDATE_NEEDS_CHECK_NOTE,
 } from "@/lib/copy-updates";
 import { packageDisplayName } from "@/lib/labels";
+import { rescanEverything } from "@/lib/rescan";
+import { caught } from "@/lib/settled";
 import { rowUnsettled } from "@/lib/updates-read-state";
-import { useAuditStore } from "./audit";
 import { useProblemsStore } from "./problems";
-import { useScanStore } from "./scan";
 import { useUpdatesStore } from "./updates";
+import {
+  writeDiscardEdits,
+  writeFork,
+  writeForkBeside,
+} from "./updates-writes";
 
 /** The ways out of an edited place, run under the updates store's busy
  *  flag so every control on the page waits on the same one — a fork, a
@@ -24,19 +29,16 @@ type Outcome<T> = { error: string } | { ok: T };
 const run = async <T>(work: () => Promise<Outcome<T>>): Promise<Outcome<T>> => {
   useUpdatesStore.setState({ busy: true });
   try {
-    // The commit and the overview that follows ride the updates store's
-    // side-effect chain, in commit order with every other operation.
-    let answer: Outcome<T> | null = null;
-    const error = await useUpdatesStore.getState().mutate(async () => {
-      const outcome = await work();
-      answer = outcome;
-      return "error" in outcome ? outcome.error : null;
-    });
-    if (error !== null) return { error };
-    if (answer === null) return { error: "the operation never answered" };
-    await useScanStore.getState().refresh();
-    await useAuditStore.getState().refresh({ force: true });
-    return answer;
+    // A transport failure rejects rather than refusing; caught here it is
+    // presented as the refusal shape, which claims nothing happened.
+    const answer = await caught(work());
+    // Whatever the work answered, the standing is read again: it may have
+    // committed and then failed, and the rows on screen must be what
+    // actually landed.
+    await useUpdatesStore.getState().reload();
+    if (answer.status === "error") return { error: answer.error };
+    if (!("error" in answer.data)) await rescanEverything();
+    return answer.data;
   } finally {
     useUpdatesStore.setState({ busy: false });
   }
@@ -64,12 +66,7 @@ export const keepAsOwn = async (row: UpdateRow): Promise<void> => {
   if (!harness) return;
   report(
     await run(async () => {
-      const response = await commands.packageFork(
-        row.scope,
-        row.kind,
-        row.name,
-        harness,
-      );
+      const response = await writeFork(row.scope, row.kind, row.name, harness);
       if (response.status === "error") return { error: response.error };
       toast.success(forkedToastLabel(packageDisplayName(row)));
       return { ok: null };
@@ -86,7 +83,7 @@ export const takeNewVersion = async (row: UpdateRow): Promise<void> => {
   }
   report(
     await run(async () => {
-      const response = await commands.applyDiscardEdits(
+      const response = await writeDiscardEdits(
         row.scope,
         row.kind,
         row.name,
@@ -120,7 +117,7 @@ export const installAsNew = async (
   if (stale(row)) return UPDATE_NEEDS_CHECK_NOTE;
   const name = packageDisplayName(row);
   const outcome = await run<string | null>(async () => {
-    const response = await commands.packageForkBeside(
+    const response = await writeForkBeside(
       row.scope,
       row.kind,
       row.name,

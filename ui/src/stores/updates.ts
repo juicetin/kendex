@@ -6,6 +6,9 @@ import {
   nothingToUpdateToastLabel,
   UPDATE_NEEDS_CHECK_NOTE,
 } from "@/lib/copy-updates";
+import { READ_PENDING, type ReadState } from "@/lib/read-state";
+import { rescanEverything } from "@/lib/rescan";
+import { caught, settled } from "@/lib/settled";
 import {
   skippedPlaces,
   updatablePlaces,
@@ -16,13 +19,11 @@ import {
   showUpdateOutcome,
   startBulk,
 } from "@/lib/update-outcome";
-import { rowUnsettled, unsettled } from "@/lib/updates-read-state";
-import { useAuditStore } from "./audit";
+import { rowUnsettled } from "@/lib/updates-read-state";
 import { useProblemsStore } from "./problems";
-import { useScanStore } from "./scan";
-import { applyRow, applyRows } from "./updates-apply";
 import { followSwitch, type PendingFollow } from "./updates-follow";
-import { overviewApplier } from "./updates-overview";
+import { standingReads } from "./updates-standing";
+import { writeIgnored, writeRow, writeRows } from "./updates-writes";
 
 interface UpdatesState {
   rows: UpdateRow[];
@@ -37,33 +38,25 @@ interface UpdatesState {
   busy: boolean;
   /** True while a mirror fetch is running — the explicit "check". */
   checking: boolean;
-  /** True while a plain load, a check, or a mutation is in flight: those
-   *  replace every row on screen, so no commit-applying action anywhere
-   *  may trust them. A settling follow flip is overview-producing too and
-   *  deliberately leaves this down — the apply behind it reaches only its
-   *  own scope, so `pendingFollows` holds that scope's rows and the rest
-   *  of the page stays live. Read `rowUnsettled`, not this field, to ask
-   *  whether one row may be acted on. */
-  overviewInFlight: boolean;
+  /** True while a read of the standing is on its way. Read off the same
+   *  ticket that orders the landings, so the page-wide rule and the
+   *  ordering rule cannot disagree: a mount or a return to the window
+   *  reloads over rows that landed perfectly well, and every value a
+   *  commit-applying action captured is about to be replaced. */
+  reading: boolean;
   /** Follow switches already moved on screen whose write has not answered.
    *  Their scopes hold; every other row stays live. */
   pendingFollows: PendingFollow[];
-  loaded: boolean;
-  /** Why the last read of the standing failed, or null. A load runs on its
-   *  own at startup, so a failure here is a state for Home and the badge to
-   *  show — silence would read as "nothing to update". */
-  error: string | null;
-  load: () => Promise<void>;
+  /** How the last read of the standing went. A failure keeps the rows it
+   *  had and says why: the package page gates the Update button on this,
+   *  and acting on rows we could not refresh is exactly the fail-open it
+   *  closes. */
+  read: ReadState;
+  /** Read the standing again and land whatever it answers. Every operation
+   *  that commits a change calls it once its own work is done, so the rows
+   *  on screen are what actually committed. */
+  reload: () => Promise<void>;
   check: () => Promise<void>;
-  /** Run backend-mutating work on the same chain as every other side
-   *  effect, landing a fresh overview after it — so operations land in
-   *  commit order and none of their answers can shadow a newer one.
-   *  Returns the work's own error, or null; the overview that follows
-   *  reflects whatever actually committed either way. */
-  mutate: (
-    work: () => Promise<string | null>,
-    kind?: "mutation" | "settle",
-  ) => Promise<string | null>;
   updateOne: (row: UpdateRow) => Promise<void>;
   /** Bring every updatable place among `rows` current — the page-level
    *  button passes every visible row, a package's button its own places. */
@@ -78,25 +71,13 @@ export const useUpdatesStore = create<UpdatesState>((set, get) => {
 
   const reportUpdate = (error: string) => showError(UPDATE_ERROR_TITLE, error);
 
-  const applyOverview = overviewApplier(set, () => get().pendingFollows);
+  const { beginOwn, reload } = standingReads(set, get);
 
-  // One predicate for every commit-applying action: the captured row
-  // arguments are trustworthy only when the rows are a confirmed current
-  // answer and nothing that could replace them is in flight — a failed
-  // read, a running check, and a focus-triggered load are all the same
-  // reason to wait, and so is a follow switch still settling in the scope
-  // the action would apply. Returns whether it was refused, reporting it.
-  const refuseUnsettled = (rows: UpdateRow[]): boolean => {
-    const state = get();
-    if (!unsettled(state) && !rows.some((row) => rowUnsettled(state, row)))
-      return false;
+  /** What a commit-applying action says instead of running. Each captures
+   *  values off the rows it was handed, so it may run only against rows a
+   *  read confirmed and outside a scope a follow switch is settling in. */
+  const needsCheck = () =>
     showError(UPDATE_ERROR_TITLE, UPDATE_NEEDS_CHECK_NOTE);
-    return true;
-  };
-
-  const reload = async () => {
-    await applyOverview(() => commands.updatesOverview());
-  };
 
   return {
     rows: [],
@@ -104,86 +85,63 @@ export const useUpdatesStore = create<UpdatesState>((set, get) => {
     lastFetched: null,
     busy: false,
     checking: false,
-    overviewInFlight: false,
+    reading: false,
     pendingFollows: [],
-    loaded: false,
-    error: null,
+    read: READ_PENDING,
 
-    load: async () => {
-      await reload();
-    },
-
-    mutate: async (work, kind = "mutation") => {
-      // The work's failure and the applier's are different news. work()
-      // rejecting in transport never assigns failure and only the applier
-      // saw it — but once work has answered, the applier's error is the
-      // follow-up read's, already told through the store (stale marking,
-      // or cleared by a landed reconcile), and returning it would report
-      // a committed change as failed — suppressing the caller's success
-      // toast and its scan/audit refreshes.
-      let failure: string | null = null;
-      let answered = false;
-      const applierError = await applyOverview(async () => {
-        failure = await work();
-        answered = true;
-        return commands.updatesOverview();
-      }, kind);
-      if (failure !== null) return failure;
-      return answered ? null : applierError;
-    },
+    reload,
 
     check: async () => {
-      // A check already running answers this click too; a second in flight
-      // would land last-write-wins and could overwrite the fresh answer
-      // with a staler one.
+      // A check already running answers this click too; a second fetch would
+      // cost the network twice for one answer.
       if (get().checking) return;
       set({ checking: true });
+      const landOwn = beginOwn();
       try {
-        const error = await applyOverview(
-          () => commands.updatesRefresh(),
-          "refresh",
-        );
-        if (error !== null) showError(UPDATE_ERROR_TITLE, error);
+        const response = await settled(commands.updatesRefresh());
+        // The fetch reads the standing after fetching every mirror, so it
+        // ranks by when it lands — unless something committed while it was
+        // out, which its report would not carry. The mirrors are fetched
+        // either way, so an ordinary read picks them up ranked behind
+        // whatever committed.
+        if (!landOwn(response)) await reload();
+        if (response.status === "error")
+          showError(UPDATE_ERROR_TITLE, response.error);
       } finally {
         set({ checking: false });
       }
     },
 
     updateOne: async (row) => {
-      // Anything overview-producing in flight is about to replace these
-      // rows: an update accepted now would apply the latest captured
-      // before it — refuse rather than commit stale arguments after
-      // fresher rows land.
-      if (refuseUnsettled([row])) return;
+      if (rowUnsettled(get(), row)) return needsCheck();
       set({ busy: true });
       try {
-        // The commit and its follow-up overview ride the side-effect
-        // chain, so nothing older can land on top of them.
-        let landed = false;
-        const error = await get().mutate(async () => {
-          const outcome = await applyRow(row, reportUpdate);
+        const answer = await caught(writeRow(row, reportUpdate));
+        let applied = false;
+        if (answer.status === "error") {
+          // A transport failure rejects rather than refusing, and only
+          // this catch sees it: unreported it would read as an update
+          // that landed.
+          reportUpdate(answer.error);
+        } else if (answer.data.ok) {
           // Either command can come back held: the plan refuses to write
           // over a copy somebody changed, and saying "Updated" over that
           // is the whole point of asking the command what it did.
-          if (outcome.ok) showUpdateOutcome(row.name, outcome.update);
-          landed = outcome.ok;
-          return null;
-        });
-        if (error !== null) {
-          showError(UPDATE_ERROR_TITLE, error);
-        } else if (landed) {
-          await useScanStore.getState().refresh();
-          await useAuditStore.getState().refresh({ force: true });
+          showUpdateOutcome(row.name, answer.data.update);
+          applied = true;
         }
+        // Whatever it answered, the standing is read again: the work can
+        // commit and then fail, and the rows must be what landed.
+        await reload();
+        if (applied) await rescanEverything();
       } finally {
         set({ busy: false });
       }
     },
 
     updateRows: async (wanted) => {
-      // Same refusal as updateOne: the holds among these rows would move
-      // to captured commits.
-      if (refuseUnsettled(wanted)) return;
+      const state = get();
+      if (wanted.some((row) => rowUnsettled(state, row))) return needsCheck();
       set({ busy: true });
       try {
         // Edited packages are held by the engine and cannot be updated
@@ -197,19 +155,15 @@ export const useUpdatesStore = create<UpdatesState>((set, get) => {
           toast.info(nothingToUpdateToastLabel(skipped));
           return;
         }
-        // The whole sequence and its follow-up overview ride the
-        // side-effect chain, so nothing older can land on top of them.
         const outcome = startBulk(skipped);
-        const error = await get().mutate(async () => {
-          await applyRows(rows, reportUpdate, outcome);
-          return null;
-        });
+        const answer = await caught(writeRows(rows, reportUpdate, outcome));
         // A rejection escapes the sequence without touching the outcome —
-        // only the applier saw it, and success must not be claimed over it.
-        if (error !== null) {
-          showError(UPDATE_ERROR_TITLE, error);
+        // only this catch saw it, and success must not be claimed over it.
+        if (answer.status === "error") {
+          reportUpdate(answer.error);
           outcome.ok = false;
         }
+        await reload();
         // Counted off what the applies reported, never off the rows the
         // click covered: a place the plan held back needs attention on its
         // own row, it is not one more updated.
@@ -217,8 +171,7 @@ export const useUpdatesStore = create<UpdatesState>((set, get) => {
         // and what the rest of the run did to the person's packages is not
         // the error's to swallow.
         showBulkOutcome(outcome, visibleUpdates(get().rows));
-        await useScanStore.getState().refresh();
-        await useAuditStore.getState().refresh({ force: true });
+        await rescanEverything();
       } finally {
         set({ busy: false });
       }
@@ -227,23 +180,21 @@ export const useUpdatesStore = create<UpdatesState>((set, get) => {
     setAutoUpdate: followSwitch({
       set,
       get,
-      refuse: (row) => refuseUnsettled([row]),
       report: (error) => showError(UPDATE_ERROR_TITLE, error),
     }),
 
     setIgnored: async (row, ignored) => {
-      const error = await applyOverview(
-        () =>
-          commands.updateSetIgnored(
-            row.scope,
-            row.kind,
-            row.name,
-            row.repo,
-            ignored,
-          ),
-        "mutation",
-      );
-      if (error !== null) showError(UPDATE_ERROR_TITLE, error);
+      const response = await settled(writeIgnored(row, ignored));
+      if (response.status === "error")
+        showError(UPDATE_ERROR_TITLE, response.error);
+      // The command answers with the overview it rebuilt, and this reads
+      // it again anyway. That report carries this write but not one that
+      // landed beside it, and a single count cannot tell an operation's
+      // own commit from another's — so rather than reason about whose bump
+      // was whose, the ordinary read takes it, ranked behind whatever
+      // committed. The command can also persist the preference and then
+      // fail building the overview, which the same read answers.
+      await reload();
     },
   };
 });

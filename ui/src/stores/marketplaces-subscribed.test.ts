@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { commands, type DirectoryRow, type MarketplaceRow } from "@/bindings";
-import { MARKETPLACES_NEEDS_CHECK_NOTE } from "@/lib/copy-marketplaces";
+import { READ_LANDED, READ_PENDING } from "@/lib/read-state";
 import { useMarketplacesStore } from "./marketplaces";
 import { rowSubscribed, subscribedKeys } from "./marketplaces-shared";
 
@@ -53,9 +53,10 @@ const row = (repo: string, repoKey: string | null): MarketplaceRow => ({
 
 describe("a Community row's Subscribed marker", () => {
   beforeEach(() => {
+    vi.clearAllMocks();
     useMarketplacesStore.setState({
       rows: [],
-      rowsCurrent: false,
+      read: READ_PENDING,
       summaries: {},
     });
   });
@@ -92,14 +93,21 @@ describe("a Community row's Subscribed marker", () => {
     expect(subscribedKeys([row("", null)]).size).toBe(0);
   });
 
-  // The action boundary owns the guarantee: a dialog opened while rows
-  // were current can still confirm after a failed re-read — the store
-  // refuses the stale source however the confirm got clicked.
-  it("refuses to unsubscribe from rows a failed read left behind", async () => {
+  // The client-side "these rows are not current" refusal is gone: the
+  // action goes out and the engine is the judge. That trade only holds if
+  // the refusal is honoured here — an unsubscribe that reported failure
+  // and then dropped the caches, reloaded and toasted success would tell
+  // the person a subscription went that is still there.
+  it("honours a refused unsubscribe rather than claiming it landed", async () => {
+    const { toast } = await import("sonner");
     useMarketplacesStore.setState({
       rows: [row("Acme/Kit", "acme/kit")],
-      loaded: true,
-      rowsCurrent: false,
+      read: READ_LANDED,
+      summaries: { kept: { provenance: "acme/kit" } as never },
+    });
+    vi.mocked(commands.marketplaceUnsubscribe).mockResolvedValue({
+      status: "error",
+      error: "an edited package is in the way",
     });
 
     const ok = await useMarketplacesStore
@@ -107,17 +115,20 @@ describe("a Community row's Subscribed marker", () => {
       .unsubscribe({ scope: "global" }, "kit", false, false);
 
     expect(ok).toBe(false);
-    expect(commands.marketplaceUnsubscribe).not.toHaveBeenCalled();
     expect(useMarketplacesStore.getState().error).toBe(
-      MARKETPLACES_NEEDS_CHECK_NOTE,
+      "an edited package is in the way",
     );
+    expect(toast.success).not.toHaveBeenCalled();
+    // Nothing committed, so the rows and the caches stand.
+    expect(commands.marketplacesOverview).not.toHaveBeenCalled();
+    expect(useMarketplacesStore.getState().summaries.kept).toBeDefined();
+    expect(useMarketplacesStore.getState().rows).toHaveLength(1);
   });
 
   it("clears once an unsubscribe lands, whatever the directory snapshot said", async () => {
     useMarketplacesStore.setState({
       rows: [row("Acme/Kit", "acme/kit")],
-      loaded: true,
-      rowsCurrent: true,
+      read: READ_LANDED,
     });
     vi.mocked(commands.marketplaceUnsubscribe).mockResolvedValue({
       status: "ok",
@@ -143,7 +154,7 @@ describe("a Community row's Subscribed marker", () => {
   });
 
   it("keeps the directory snapshot when the live overview cannot be read", async () => {
-    useMarketplacesStore.setState({ rows: [], rowsCurrent: true });
+    useMarketplacesStore.setState({ rows: [], read: READ_LANDED });
     vi.mocked(commands.marketplacesOverview).mockResolvedValue({
       status: "error",
       error: "settings file is malformed",
@@ -152,8 +163,9 @@ describe("a Community row's Subscribed marker", () => {
     await useMarketplacesStore.getState().load();
 
     const state = useMarketplacesStore.getState();
-    expect(state.rowsCurrent).toBe(false);
-    const live = state.rowsCurrent ? subscribedKeys(state.rows) : null;
+    expect(state.read.status).toBe("failed");
+    const live =
+      state.read.status === "landed" ? subscribedKeys(state.rows) : null;
     expect(rowSubscribed({ ...listed, subscribed: true }, live)).toBe(true);
   });
 });
