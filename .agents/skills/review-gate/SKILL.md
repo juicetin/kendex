@@ -39,19 +39,15 @@ the gate; and merge-group statuses never read the mode, posting green as
 | `unreasoned-decline` | `failure` | A thread's disposition reply declines and its reason strips to nothing against the predicate's label vocabulary: an empty reason, or only labels such as `frozen`, `out of scope`, `pre-existing`, a bare test count. Read by shape, so a decline written without the colon counts too; a label beside a real reason is fine. The vocabulary's reach, and the label shapes past it, are pinned in `tests/corpus/declines-known-limit.txt`. |
 | (exit 2, no verdict) | *unchanged* | A read failed or config is invalid. Take NO action; retry next pass. |
 
-**Reading the gate's own pending text.** `no review evidence at <sha> yet;
-expected from <names>` is the `awaiting` verdict. The names are the sources
-that could still open the gate at that head, resolved from the repo's own
-settings and filtered the way the evidence read filters them — the PR author
-never appears, and an empty trust list reads as `any non-author review` (or
-`approval` under `REVIEW_GATE_REVIEW_OBJECT_MIN_STATE = "approved"`). Past
-140 characters the sha shortens to 12 and the names that do not fit are
-counted (`and N more`). A configured operator override is a source too, and
-is named with the rest. `no configured source is eligible here` means every
-configured login is the author and no override is set.
+**Reading the gate's own pending text.** `no review evidence at <sha> yet` is
+the whole of the `awaiting` verdict. It names the head and nothing else: which
+sources can open the gate is the repo's own settings, not a status description
+GitHub keeps 140 characters of — read them in
+[references/settings.md](references/settings.md).
 
-Act on the names, not on the pending state: where they are bots and one has
-already reviewed this head, dispatch the writer instead of waiting.
+Act on those settings, not on the pending state: where the configured sources
+are bots and one has already reviewed this head, dispatch the writer instead
+of waiting.
 
 # Working in a consumer repo
 
@@ -282,7 +278,6 @@ ENGINE's proofs and run in the kendex repo, not in a consumer's CI:
 For re-vendor PRs, suppress duplicate findings with the remedy-locus reviewer
 instruction, never a reviewer path exclusion:
 [references/vendored-paths.md](references/vendored-paths.md). A committed
-`kendex refresh` tree is the same problem with no pin over it and a blast
-radius of every consuming repo; it routes every finding over the render
-upstream, with no carve-out:
-[references/rendered-paths.md](references/rendered-paths.md).
+`kendex refresh` tree is the same problem with no pin over it, and its § The
+harness-render variant routes every finding over the render upstream with no
+carve-out.
