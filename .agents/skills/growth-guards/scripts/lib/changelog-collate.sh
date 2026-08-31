@@ -32,7 +32,9 @@
 #
 # Needs lib/common.sh and lib/changelog-grammar.sh sourced first, and runs on
 # the state the walk and the record scope filled in: GG_TMP/frags.z, RECORD,
-# RECORD_SHA, RECORD_NOTE and the GG_RECORD_* bounds.
+# RECORD_SHA, RECORD_NOTE and the GG_RECORD_* bounds. gg_install_file comes
+# from lib/atomic-install.sh, and resolution is at call time, so that one has
+# only to be sourced before gg_changelog_collate runs.
 #
 # Sourced, never executed.
 
