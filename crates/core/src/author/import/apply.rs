@@ -1,9 +1,6 @@
 //! The copy itself: previewed selections into an authored catalog, with
-//! every refusal decided before the first byte is written, the whole
-//! output staged inside the target, and each package moved into place by
-//! one rename after the last stage write succeeded.
+//! every refusal decided before the first byte is written.
 
-use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use crate::env::Env;
@@ -12,11 +9,14 @@ use crate::model::{ItemKind, Scope};
 
 use super::{Bytes, CandidateGroup, ImportOutcome, ImportSelection, ResolvedSelection};
 
+mod write;
+use write::write_all;
+
 /// Apply the wizard's selections to `target` — a folder registered under
 /// Mine, canonicalized, never a symlink. The inventory is re-resolved so
-/// every hash is revalidated; all refusals are found before anything is
-/// written, the files are staged under the target, and each package
-/// arrives by rename. A refused apply writes nothing.
+/// every hash is revalidated, and every refusal — an unusable name, a
+/// destination already holding other bytes, a licence with no basis — is
+/// found before the first byte is written.
 pub fn apply(
     env: &Env,
     scopes: &[Scope],
@@ -25,7 +25,6 @@ pub fn apply(
 ) -> Result<ImportOutcome> {
     let target = registered_target(env, target)?;
     let mut resolved: Vec<(usize, ResolvedSelection, PathBuf)> = Vec::new();
-    let mut taken: BTreeSet<(ItemKind, String)> = BTreeSet::new();
     for (at, selection) in selections.iter().enumerate() {
         if let Some(problem) = crate::names::item_problem(&selection.destination) {
             return Err(CoreError::Authoring {
@@ -51,21 +50,10 @@ pub fn apply(
                 ),
             });
         }
-        // Two selections folding to one destination would silently
-        // overwrite each other during the copy — refused up front.
-        let key = (selection.kind, crate::names::fold(&selection.destination));
-        if !taken.insert(key) {
-            return Err(CoreError::Authoring {
-                message: format!(
-                    "two selections both land at {} '{}' — give one a different destination name",
-                    selection.kind.name(),
-                    selection.destination
-                ),
-            });
-        }
         let answer = super::resolve_selection(env, scopes, selection)?;
         license_gate(selection, &answer.group)?;
         let dest = destination(&target, selection.kind, &selection.destination);
+        occupies(&resolved, selections, &dest, &answer, selection)?;
         origin_overlap(&target, &answer)?;
         resolved.push((at, answer, dest));
     }
@@ -74,15 +62,96 @@ pub fn apply(
         written: Vec::new(),
         already_present: Vec::new(),
     };
-    let staging = target.join(".kendex-import-staging");
-    if staging.exists() {
-        std::fs::remove_dir_all(&staging).map_err(|e| CoreError::io(&staging, e))?;
-    }
-    let staged = stage(&target, &staging, &resolved, selections, &mut outcome);
-    let landed = staged.and_then(|staged| land(&target, staged, &mut outcome));
-    let _ = std::fs::remove_dir_all(&staging);
-    landed?;
+    write_all(&target, &resolved, selections, &mut outcome)?;
     Ok(outcome)
+}
+
+/// Whether a selection already taken occupies the place this one wants.
+///
+/// One question, asked once per selection, because the collision is per
+/// selection rather than per file. Neither of the keys this replaced could
+/// answer it: `<kind, name>` sees `Foo` against `foo` and nothing else,
+/// and comparing written paths sees an overlap only where two trees
+/// happen to write one path, which two trees sharing a directory need not
+/// do.
+///
+/// The destinations are compared component by component under
+/// [`crate::names::fold`], the spelling a folding filesystem hands both
+/// names to. Equal is a collision outright.
+///
+/// A strict prefix is only the shape of one. A nested name is ordinary
+/// kendex vocabulary — `source::layout::nested_names` lists items as
+/// `<parent>/<leaf>`, and a person may give any selection a destination
+/// spelled that way — so `p` beside `p/sub` says nothing on its own about
+/// where the bytes go. What decides it is whether the outer selection
+/// really puts something at or under the inner's place.
+fn occupies(
+    resolved: &[(usize, ResolvedSelection, PathBuf)],
+    selections: &[ImportSelection],
+    dest: &Path,
+    answer: &ResolvedSelection,
+    selection: &ImportSelection,
+) -> Result<()> {
+    let wanted = folded(dest);
+    for (at, held_answer, taken) in resolved {
+        let held = folded(taken);
+        let clashes = if held == wanted {
+            true
+        } else if held.starts_with(&wanted) {
+            writes_into(answer, dest, &held)
+        } else if wanted.starts_with(&held) {
+            writes_into(held_answer, taken, &wanted)
+        } else {
+            continue;
+        };
+        if !clashes {
+            continue;
+        }
+        return Err(CoreError::Authoring {
+            message: format!(
+                "'{}' and '{}' both land at {} — give one of them a different destination name",
+                selections[*at].destination,
+                selection.destination,
+                shorter(taken, dest).display()
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Whether the outer of a nested pair really puts something at or under
+/// the inner's place.
+///
+/// A lone file always does: it occupies the outer position itself, and
+/// nothing can sit inside a file. A tree does only where one of the paths
+/// it writes lands there — the rest of it is somewhere else entirely, and
+/// refusing on the strength of the name alone would refuse a pair one
+/// catalog offers as two items.
+fn writes_into(outer: &ResolvedSelection, outer_dest: &Path, inner: &[String]) -> bool {
+    match &outer.bytes {
+        Bytes::File(_) => true,
+        Bytes::Tree(files) => files
+            .iter()
+            .any(|(rel, _)| folded(&outer_dest.join(rel)).starts_with(inner)),
+    }
+}
+
+/// A path's components in the spelling a folding filesystem stores them
+/// under, so a prefix comparison answers for `Foo/Bar` and `foo/bar` the
+/// way the disk will.
+fn folded(path: &Path) -> Vec<String> {
+    path.components()
+        .map(|part| crate::names::fold(&part.as_os_str().to_string_lossy()))
+        .collect()
+}
+
+/// The place the two selections meet: the outer of the pair, which is the
+/// one that holds the other.
+fn shorter<'a>(one: &'a Path, other: &'a Path) -> &'a Path {
+    match one.components().count() <= other.components().count() {
+        true => one,
+        false => other,
+    }
 }
 
 /// Imports write only into a folder the person registered — and into its
@@ -192,193 +261,4 @@ fn destination(target: &Path, kind: ItemKind, name: &str) -> PathBuf {
         ItemKind::McpServer => target.join("mcp").join(format!("{name}.toml")),
         ItemKind::Plugin | ItemKind::PiExtension => target.join(name),
     }
-}
-
-/// One staged package ready to land: where it is now, where it goes.
-struct StagedWrite {
-    from: PathBuf,
-    to: PathBuf,
-    label: String,
-}
-
-/// Write every selection under the staging dir. Already-present exact
-/// bytes are noted and skipped; a destination holding different bytes, or
-/// a case-folding sibling, refuses here — before anything lands.
-fn stage(
-    target: &Path,
-    staging: &Path,
-    resolved: &[(usize, ResolvedSelection, PathBuf)],
-    selections: &[ImportSelection],
-    outcome: &mut ImportOutcome,
-) -> Result<Vec<StagedWrite>> {
-    let mut staged = Vec::new();
-    for (at, answer, dest) in resolved {
-        let selection = &selections[*at];
-        let label = rel_name(target, dest);
-        fold_collision(dest, &selection.destination)?;
-        if dest.symlink_metadata().is_ok() {
-            let same = match &answer.bytes {
-                Bytes::File(bytes) => std::fs::read(dest)
-                    .map(|existing| existing == *bytes)
-                    .unwrap_or(false),
-                Bytes::Tree(files) => {
-                    crate::hash::hash_tree(dest).unwrap_or_default()
-                        == crate::hash::hash_files(files)
-                }
-            };
-            match same {
-                true => outcome.already_present.push(label),
-                false => return Err(occupied(dest, &selection.name)),
-            }
-            continue;
-        }
-        let from = staging.join(format!("{at}")).join(
-            dest.file_name()
-                .map(|leaf| leaf.to_os_string())
-                .unwrap_or_default(),
-        );
-        match &answer.bytes {
-            Bytes::File(bytes) => {
-                if let Some(parent) = from.parent() {
-                    std::fs::create_dir_all(parent).map_err(|e| CoreError::io(parent, e))?;
-                }
-                std::fs::write(&from, bytes).map_err(|e| CoreError::io(&from, e))?;
-                executable_if_script(&from, bytes)?;
-            }
-            Bytes::Tree(files) => {
-                for (rel, bytes) in files {
-                    let file = from.join(rel);
-                    if let Some(parent) = file.parent() {
-                        std::fs::create_dir_all(parent).map_err(|e| CoreError::io(parent, e))?;
-                    }
-                    std::fs::write(&file, bytes).map_err(|e| CoreError::io(&file, e))?;
-                    executable_if_script(&file, bytes)?;
-                }
-            }
-        }
-        staged.push(StagedWrite {
-            from,
-            to: dest.clone(),
-            label,
-        });
-        stage_notices(target, staging, answer, outcome, &mut staged)?;
-    }
-    Ok(staged)
-}
-
-/// Licence and attribution files of a licensed origin land under
-/// `NOTICES/<source>/`, written once; existing identical bytes are left
-/// alone, different bytes refuse.
-fn stage_notices(
-    target: &Path,
-    staging: &Path,
-    answer: &ResolvedSelection,
-    outcome: &mut ImportOutcome,
-    staged: &mut Vec<StagedWrite>,
-) -> Result<()> {
-    let Some((source, _, _)) = answer.group.licensed_source() else {
-        return Ok(());
-    };
-    for (name, bytes) in &answer.notices {
-        let dest = target.join("NOTICES").join(source).join(name);
-        let label = rel_name(target, &dest);
-        if staged.iter().any(|write| write.to == dest) {
-            continue;
-        }
-        if dest.symlink_metadata().is_ok() {
-            let same = std::fs::read(&dest)
-                .map(|existing| existing == *bytes)
-                .unwrap_or(false);
-            if !same {
-                return Err(occupied(&dest, name));
-            }
-            continue;
-        }
-        let from = staging.join("notices").join(source).join(name);
-        if let Some(parent) = from.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| CoreError::io(parent, e))?;
-        }
-        std::fs::write(&from, bytes).map_err(|e| CoreError::io(&from, e))?;
-        outcome.written.push(label.clone());
-        staged.push(StagedWrite {
-            from,
-            to: dest,
-            label,
-        });
-    }
-    Ok(())
-}
-
-/// Move every staged package into place. Each destination is re-verified
-/// as still absent right before its rename, so bytes that appeared during
-/// staging refuse instead of being replaced.
-fn land(target: &Path, staged: Vec<StagedWrite>, outcome: &mut ImportOutcome) -> Result<()> {
-    let _ = target;
-    for write in staged {
-        if write.to.symlink_metadata().is_ok() {
-            return Err(CoreError::Authoring {
-                message: format!(
-                    "{} appeared while the import was being prepared — nothing more was written",
-                    write.to.display()
-                ),
-            });
-        }
-        if let Some(parent) = write.to.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| CoreError::io(parent, e))?;
-        }
-        std::fs::rename(&write.from, &write.to).map_err(|e| CoreError::io(&write.to, e))?;
-        if !outcome.written.contains(&write.label) {
-            outcome.written.push(write.label);
-        }
-    }
-    Ok(())
-}
-
-/// A sibling whose name folds to the destination's spelling occupies it on
-/// a case-insensitive filesystem — refused before the copy, naming both.
-fn fold_collision(dest: &Path, name: &str) -> Result<()> {
-    let Some(sibling) = crate::names::folding_sibling(dest) else {
-        return Ok(());
-    };
-    let sibling = sibling
-        .file_name()
-        .map(|leaf| leaf.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    Err(CoreError::Authoring {
-        message: format!(
-            "'{name}' would collide with existing '{sibling}' on a case-insensitive filesystem — pick another destination name"
-        ),
-    })
-}
-
-fn occupied(dest: &Path, name: &str) -> CoreError {
-    CoreError::Authoring {
-        message: format!(
-            "{} already holds different bytes than '{name}' — rename the import destination or remove the existing file first",
-            dest.display()
-        ),
-    }
-}
-
-/// A file whose bytes open with a shebang was written to be run — the
-/// copy keeps that runnable.
-fn executable_if_script(path: &Path, bytes: &[u8]) -> Result<()> {
-    if !bytes.starts_with(b"#!") {
-        return Ok(());
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
-            .map_err(|e| CoreError::io(path, e))?;
-    }
-    Ok(())
-}
-
-/// What the outcome calls one written file: its path under the import
-/// target, in the one spelling kendex publishes a path in. Callers read
-/// these back against catalog paths, which are `/`-spelled wherever they
-/// are written down.
-fn rel_name(target: &Path, dest: &Path) -> String {
-    crate::paths::slashed(dest.strip_prefix(target).unwrap_or(dest))
 }

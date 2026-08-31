@@ -27,13 +27,17 @@ fn plan(scope: Scope, ops: Vec<PlannedOp>) -> Plan {
     Plan::landed(scope, ops).expect("a plan whose targets stay in their scope")
 }
 
+/// A refusal part-way through takes the ops before it back with it: the
+/// first op's bytes are restored, and the bytes the refusal protected are
+/// left exactly as the outside writer left them.
 #[test]
-fn fault_at_every_boundary_leaves_disk_untouched() {
+fn a_refusal_part_way_through_rolls_back_what_ran_before_it() {
     let tmp = tempfile::tempdir().unwrap();
     let env = env_in(tmp.path());
     let target = tmp.path().join("a/file.md");
     fs::create_dir_all(target.parent().unwrap()).unwrap();
     fs::write(&target, "before").unwrap();
+    let second = tmp.path().join("b/new.md");
 
     let plan = plan(
         Scope::Global,
@@ -49,7 +53,7 @@ fn fault_at_every_boundary_leaves_disk_untouched() {
             PlannedOp {
                 description: "second".into(),
                 op: Op::WriteFile {
-                    path: tmp.path().join("b/new.md"),
+                    path: second.clone(),
                     bytes: b"new".to_vec(),
                     pre: Pre::Absent,
                 },
@@ -57,16 +61,97 @@ fn fault_at_every_boundary_leaves_disk_untouched() {
         ],
     );
 
-    for boundary in 0..=1 {
-        let error = execute(&env, &plan, Some(boundary)).unwrap_err();
-        assert!(matches!(error, CoreError::RolledBack { .. }));
-        assert_eq!(fs::read_to_string(&target).unwrap(), "before");
-        assert!(!tmp.path().join("b/new.md").exists());
-    }
+    // Somebody else's file arrives at the second op's path between the
+    // plan and the apply, so its precondition refuses.
+    fs::create_dir_all(second.parent().unwrap()).unwrap();
+    fs::write(&second, "not kendex's").unwrap();
 
-    let outcome = execute(&env, &plan, None).unwrap();
+    let error = execute(&env, &plan).unwrap_err();
+    assert!(matches!(error, CoreError::RolledBack { .. }));
+    assert_eq!(fs::read_to_string(&target).unwrap(), "before");
+    assert_eq!(fs::read_to_string(&second).unwrap(), "not kendex's");
+
+    // With the way clear the same plan applies whole.
+    fs::remove_dir_all(second.parent().unwrap()).unwrap();
+    let outcome = execute(&env, &plan).unwrap();
     assert_eq!(outcome.applied, 2);
     assert_eq!(fs::read_to_string(&target).unwrap(), "after");
+    assert_eq!(fs::read_to_string(&second).unwrap(), "new");
+}
+
+/// An edit reads its file strictly, so bytes that are not UTF-8 refuse
+/// rather than being decoded lossily and written back. A lossy read puts
+/// U+FFFD where somebody's bytes were and then saves the replacement over
+/// them, which is not an edit failing — it is an edit succeeding at
+/// destroying the file.
+#[test]
+fn an_edit_over_bytes_that_are_not_utf8_refuses_and_leaves_them() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = env_in(tmp.path());
+    let path = tmp.path().join("settings.json");
+    let held = [b'a', 0xff, b'b'];
+    fs::write(&path, held).unwrap();
+
+    let op = Op::EditFile {
+        path: path.clone(),
+        edits: vec![crate::configedit::ConfigEdit::UpsertHook {
+            event: "PreToolUse".to_owned(),
+            matcher: None,
+            command: "kendex hook".to_owned(),
+            timeout: None,
+        }],
+        pre: Pre::Any,
+    };
+    let refused = op.run(&env).unwrap_err();
+    assert!(
+        matches!(&refused, CoreError::Io { source, .. }
+            if source.kind() == std::io::ErrorKind::InvalidData),
+        "{refused:?}"
+    );
+    assert_eq!(fs::read(&path).unwrap(), held, "the bytes are as they were");
+}
+
+/// A refused write makes nothing on its way to refusing.
+///
+/// The order is load-bearing, not tidy: `mutated_before_failure` reads a
+/// `PlanStale` as proof the op ran nothing, so a directory chain the op
+/// created before refusing is journaled absent, left out of the restore
+/// set, and survives the rollback. What is left is the empty `.claude/`
+/// that harness and project detection read as an installation.
+#[test]
+fn a_refused_write_makes_no_directory_and_a_passing_one_does() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = env_in(tmp.path());
+    let root = tmp.path().join(".claude");
+    let target = root.join("skills/ship/SKILL.md");
+
+    // Nothing is at the path, so a precondition binding to bytes refuses.
+    let refused = execute(
+        &env,
+        &write_plan(
+            Scope::Global,
+            target.clone(),
+            "body",
+            Pre::HashIs {
+                hash: "not the bytes at that path".to_owned(),
+            },
+        ),
+    )
+    .unwrap_err();
+    assert!(matches!(refused, CoreError::RolledBack { .. }));
+    assert!(
+        !root.exists(),
+        "a refused write left the chain it would have needed"
+    );
+
+    // The same write with a precondition that holds does make it.
+    let outcome = execute(
+        &env,
+        &write_plan(Scope::Global, target.clone(), "body", Pre::Absent),
+    )
+    .unwrap();
+    assert_eq!(outcome.applied, 1);
+    assert_eq!(fs::read_to_string(&target).unwrap(), "body");
 }
 
 #[test]
@@ -77,7 +162,7 @@ fn stale_precondition_aborts_and_rolls_back() {
     fs::write(&target, "changed since plan").unwrap();
 
     let plan = write_plan(Scope::Global, target.clone(), "overwrite", Pre::Absent);
-    let error = execute(&env, &plan, None).unwrap_err();
+    let error = execute(&env, &plan).unwrap_err();
     assert!(matches!(error, CoreError::RolledBack { .. }));
     assert_eq!(fs::read_to_string(&target).unwrap(), "changed since plan");
 }
@@ -170,7 +255,7 @@ fn trash_receives_removals() {
             },
         }],
     );
-    execute(&env, &plan, None).unwrap();
+    execute(&env, &plan).unwrap();
     assert!(!victim.exists());
     let trashed: Vec<_> = fs::read_dir(env.trash_dir()).unwrap().flatten().collect();
     assert_eq!(trashed.len(), 1);
@@ -214,7 +299,7 @@ fn a_copy_already_gone_does_not_take_the_removal_with_it() {
         ],
     );
 
-    assert_eq!(execute(&env, &plan, None).unwrap().applied, 2);
+    assert_eq!(execute(&env, &plan).unwrap().applied, 2);
     assert!(!present.exists());
 }
 
@@ -245,7 +330,7 @@ fn a_link_whose_target_is_gone_still_goes_to_the_trash() {
         }],
     );
 
-    execute(&env, &plan, None).unwrap();
+    execute(&env, &plan).unwrap();
     assert!(!link.is_symlink());
     let held = fs::read_dir(env.trash_dir()).unwrap().flatten().next();
     assert_eq!(fs::read_link(held.unwrap().path()).unwrap(), gone);
@@ -291,7 +376,7 @@ fn a_link_crosses_a_filesystem_boundary_into_the_trash() {
         }],
     );
 
-    execute(&env, &plan, None).unwrap();
+    execute(&env, &plan).unwrap();
     assert!(!link.is_symlink());
     let held = fs::read_dir(env.trash_dir()).unwrap().flatten().next();
     assert_eq!(fs::read_link(held.unwrap().path()).unwrap(), gone);
@@ -333,7 +418,7 @@ fn a_copy_that_cannot_be_read_stops_the_removal() {
 
     // Unlocked before anything can panic: a sealed directory outlives the
     // TempDir that cannot remove it.
-    let outcome = execute(&env, &plan, None);
+    let outcome = execute(&env, &plan);
     unlock();
     assert!(matches!(outcome.unwrap_err(), CoreError::RolledBack { .. }));
     assert_eq!(fs::read_to_string(&victim).unwrap(), "content");
@@ -362,7 +447,7 @@ fn a_copy_that_changed_still_stops_the_removal() {
         }],
     );
 
-    let error = execute(&env, &plan, None).unwrap_err();
+    let error = execute(&env, &plan).unwrap_err();
     assert!(matches!(error, CoreError::RolledBack { .. }));
     assert_eq!(
         fs::read_to_string(&edited).unwrap(),

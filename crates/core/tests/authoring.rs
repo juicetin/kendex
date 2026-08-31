@@ -158,6 +158,204 @@ fn create_writes_the_plan_registers_and_checks_clean() {
     assert!(again.to_string().contains("already exists"), "{again}");
 }
 
+/// `nope/..` names no folder of its own. Left unrefused it is a create
+/// into the directory the command was run in, and the failure path's
+/// removal then takes that directory with it.
+#[test]
+#[allow(clippy::unwrap_used)]
+fn a_path_whose_last_component_is_not_a_name_refuses_and_writes_nothing() {
+    let (tmp, env) = fake();
+    let work = tmp.path().join("work");
+    fs::create_dir_all(work.join("sub")).unwrap();
+    fs::write(work.join("keep.txt"), "somebody's file").unwrap();
+    fs::write(work.join("sub/also.txt"), "and another").unwrap();
+
+    let refused = author::create(&env, &request(&work.join("nope/.."), License::Mit)).unwrap_err();
+    assert!(
+        refused.to_string().contains("not a creatable folder path"),
+        "{refused}"
+    );
+    assert_eq!(
+        fs::read_to_string(work.join("keep.txt")).unwrap(),
+        "somebody's file"
+    );
+    assert_eq!(
+        fs::read_to_string(work.join("sub/also.txt")).unwrap(),
+        "and another"
+    );
+    assert!(!work.join("kendex.toml").exists(), "nothing was scaffolded");
+    assert!(
+        author::list(&env).unwrap().is_empty(),
+        "nothing was registered"
+    );
+}
+
+/// A folder is made inside one that is already there, and a containing
+/// folder that is not gets a refusal naming it rather than being brought
+/// into being. `CreateRequest.dir` has said "its parent must exist" all
+/// along; before this the create made the whole chain instead.
+#[test]
+#[allow(clippy::unwrap_used)]
+fn a_containing_folder_that_does_not_exist_refuses_and_makes_nothing() {
+    let (tmp, env) = fake();
+    let work = tmp.path().join("work");
+    fs::create_dir_all(&work).unwrap();
+
+    let refused = author::create(&env, &request(&work.join("absent/made"), License::Mit))
+        .unwrap_err()
+        .to_string();
+
+    assert!(refused.contains("is not a folder that exists"), "{refused}");
+    assert!(
+        refused.contains(&work.join("absent").display().to_string()),
+        "the refusal names the folder that is missing: {refused}"
+    );
+    assert!(
+        !work.join("absent").exists(),
+        "no part of the chain was brought into being"
+    );
+    assert!(
+        author::list(&env).unwrap().is_empty(),
+        "nothing was registered"
+    );
+}
+
+/// A parent that exists and cannot be traversed is not an absent one.
+/// Told it must make the folder first, a person would find it already
+/// there; the failure the path actually met is what they can act on.
+#[cfg(unix)]
+#[test]
+#[allow(clippy::unwrap_used)]
+fn a_parent_that_cannot_be_reached_is_not_reported_as_missing() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let (tmp, env) = fake();
+    let locked = tmp.path().join("locked");
+    fs::create_dir_all(locked.join("inner")).unwrap();
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o600)).unwrap();
+    let unlock = || fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
+    if locked.join("inner").metadata().is_ok() {
+        // Permissions do not bind this user (root): the traversal cannot
+        // be made to fail here.
+        unlock();
+        return;
+    }
+
+    let outcome = author::create(&env, &request(&locked.join("inner/made"), License::Mit));
+    unlock();
+    let refused = outcome.unwrap_err().to_string();
+
+    assert!(
+        !refused.contains("is not a folder that exists"),
+        "an unreachable parent is not an absent one: {refused}"
+    );
+    assert!(
+        refused.contains(&locked.join("inner").display().to_string()),
+        "the refusal names the parent it could not reach: {refused}"
+    );
+}
+
+/// A link whose target is gone answers `exists` with false, and the
+/// failure path's `remove_dir_all` deletes the link itself.
+///
+/// Asked of the three spellings that reach one place, because they do not
+/// all resolve alike: `made` stops at the link, while `made/` and
+/// `made/.` send the kernel through it and answer NotFound. A guard on
+/// the caller's spelling passes for the last two while the build and the
+/// removal work on the place all three name.
+#[cfg(unix)]
+#[test]
+#[allow(clippy::unwrap_used)]
+fn a_dangling_link_at_the_destination_refuses_in_every_spelling() {
+    for spelling in ["made", "made/", "made/."] {
+        let (tmp, env) = fake();
+        let link = tmp.path().join("made");
+        std::os::unix::fs::symlink(tmp.path().join("nowhere-at-all"), &link).unwrap();
+
+        let asked = tmp.path().join(spelling);
+        let refused = author::create(&env, &request(&asked, License::Mit)).unwrap_err();
+        assert!(
+            refused.to_string().contains("already exists"),
+            "{spelling}: {refused}"
+        );
+        assert!(
+            link.is_symlink(),
+            "{spelling}: the link somebody made is still there"
+        );
+        assert!(
+            author::list(&env).unwrap().is_empty(),
+            "{spelling}: nothing was registered"
+        );
+    }
+}
+
+/// A registry that refuses after the build takes the folder back, and
+/// takes nothing else.
+///
+/// The refusal has to land after `build_in`, or the removal this pins
+/// never runs: `can_register` only reads the registry, so the fixture
+/// makes the write fail instead, by taking write permission off the
+/// directory `authored.toml` sits in once the read has been satisfied.
+#[cfg(unix)]
+#[test]
+#[allow(clippy::unwrap_used)]
+fn a_registry_refusal_after_the_build_removes_only_the_folder_it_made() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let (tmp, env) = fake();
+    let work = tmp.path().join("work");
+    fs::create_dir_all(work.join("sub")).unwrap();
+    fs::write(work.join("keep.txt"), "somebody's file").unwrap();
+
+    // One registration, so the registry file and its directory exist.
+    let other = tmp.path().join("other");
+    fs::create_dir_all(&other).unwrap();
+    author::register(&env, &other).unwrap();
+
+    let registry = env.settings_file().parent().unwrap().to_path_buf();
+    fs::set_permissions(&registry, fs::Permissions::from_mode(0o500)).unwrap();
+    let unlock = || fs::set_permissions(&registry, fs::Permissions::from_mode(0o700)).unwrap();
+    if fs::write(registry.join("probe"), "").is_ok() {
+        // Permissions do not bind this user (root): the write cannot be
+        // made to fail here.
+        unlock();
+        return;
+    }
+
+    let made = work.join("made");
+    let outcome = author::create(&env, &request(&made, License::Mit));
+    unlock();
+    let refused = outcome.unwrap_err();
+
+    // The refusal has to be the registry's own write, because only that
+    // one lands after `build_in` and reaches the removal this fixture
+    // exists to pin. Said positively, naming the file the write failed
+    // on: `atomic_write` reports its sibling temp name, so the assertion
+    // is on the stem both spellings share, and a refusal arriving from
+    // anywhere else reds this rather than passing quietly. The negative
+    // stands beside it because `can_register` and `register` word a
+    // duplicate row identically, so that string alone says nothing about
+    // which of them fired.
+    let said = refused.to_string();
+    assert!(
+        said.contains(&registry.join("authored").display().to_string()),
+        "the refusal has to be the registry's own write: {said}"
+    );
+    assert!(
+        !said.contains("already under Mine"),
+        "and not its duplicate check, which refuses before the build: {said}"
+    );
+    assert!(
+        !said.contains("left behind"),
+        "and the folder came back, so the error is the registry's own: {said}"
+    );
+    assert!(!made.exists(), "the folder this call made is gone");
+    assert_eq!(
+        fs::read_to_string(work.join("keep.txt")).unwrap(),
+        "somebody's file"
+    );
+    assert!(work.join("sub").is_dir(), "nothing else was removed");
+    assert!(other.is_dir(), "and nothing of anybody else's");
+}
+
 #[test]
 #[allow(clippy::unwrap_used)]
 fn a_name_no_harness_accepts_refuses_before_any_write() {

@@ -18,21 +18,6 @@ pub struct Journal {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Entry {
     pub path: PathBuf,
-    /// Where `path` reached when this pre-image was taken.
-    ///
-    /// A restore puts bytes back where they came from, and where they came
-    /// from is not a spelling: a directory on the way to them can be
-    /// somebody's link, and can become one afterwards. The journal's paths
-    /// are its caller's own and need not be landings — under a temp root
-    /// reached through a link none of them is — so the place is written
-    /// down rather than inferred from how the path reads.
-    ///
-    /// `None` is a journal from a build that did not write it down. It
-    /// parses so that the restore can refuse it by name; nothing here
-    /// supplies a landing for it, because supplying one would be guessing
-    /// where somebody's bytes came from.
-    #[serde(default)]
-    pub landed: Option<PathBuf>,
     pub state: PreState,
 }
 
@@ -49,19 +34,6 @@ pub enum PreState {
     Symlink {
         target: PathBuf,
         store: Option<String>,
-        /// The file those bytes were copied from: this link followed the
-        /// whole way, leaf included.
-        ///
-        /// Not the entry's own landing, which stops at the leaf because
-        /// the write path has its own answers for a link sitting at a
-        /// position. These bytes came from the far end of it, and
-        /// redirecting a directory on the way to that end leaves the same
-        /// link reaching a different file — one the pre-image would then
-        /// be written into. `None` where nothing was copied, and where a
-        /// journal was written before the far end was recorded, which the
-        /// restore refuses rather than guesses at.
-        #[serde(default)]
-        reached: Option<PathBuf>,
     },
     /// Tree copied under `store/<index>/` in the journal dir.
     Dir {
@@ -85,19 +57,13 @@ pub fn write(dir: &Path, paths: &[PathBuf]) -> Result<()> {
     for (index, path) in paths.iter().enumerate() {
         let state = if path.is_symlink() {
             let slot_name = index.to_string();
-            let slot = store.join(&slot_name);
             let resolved_file = path.exists() && path.is_file();
-            let mut reached = None;
             if resolved_file {
-                copy_file_durable(path, &slot)?;
-                // Read after the copy, so what is recorded is the file the
-                // bytes in the slot actually came from.
-                reached = Some(path.canonicalize().map_err(|e| CoreError::io(path, e))?);
+                copy_file_durable(path, &store.join(&slot_name))?;
             }
             PreState::Symlink {
                 target: fs::read_link(path).map_err(|e| CoreError::io(path, e))?,
                 store: resolved_file.then_some(slot_name),
-                reached,
             }
         } else if path.is_dir() {
             let slot = store.join(index.to_string());
@@ -115,7 +81,6 @@ pub fn write(dir: &Path, paths: &[PathBuf]) -> Result<()> {
             PreState::Absent
         };
         entries.push(Entry {
-            landed: Some(super::landing::landing(path)),
             path: path.clone(),
             state,
         });
@@ -131,34 +96,10 @@ pub fn write(dir: &Path, paths: &[PathBuf]) -> Result<()> {
     Ok(())
 }
 
-/// Where a filtered restore persists its filter before touching anything.
-/// Crash recovery must re-run the same filter, not widen to every
-/// snapshot: the paths the filter excludes hold bytes a writer outside
-/// the transaction landed, the very bytes whose refusal triggered the
-/// restore.
-fn restore_set_path(dir: &Path) -> PathBuf {
-    dir.join("restore.json")
-}
-
-/// Crash recovery: restore pre-images for a journal an interrupted apply
-/// left behind. An interrupted filtered restore persisted its restore set
-/// first, so recovery re-runs exactly that filter; with no persisted set,
-/// nothing can know which ops ran and every pre-image is restored.
+/// Crash recovery: restore every pre-image a journal an interrupted apply
+/// left behind. Nothing on disk says which ops ran, so all of them go
+/// back.
 pub fn rollback(dir: &Path) -> Result<()> {
-    if let Some(text) = crate::fs::read_if_exists(&restore_set_path(dir))? {
-        // The file's presence proves a filtered restore was in flight, so
-        // some journaled paths hold bytes the filter protects. It is
-        // written atomically — complete or absent, never torn — so content
-        // that does not parse is outside interference, and widening to the
-        // full restore would destroy exactly those protected bytes. Refuse
-        // instead, leaving the journal pending for inspection.
-        let mutated: Vec<PathBuf> =
-            serde_json::from_str(&text).map_err(|e| CoreError::JsonParse {
-                path: restore_set_path(dir),
-                message: e.to_string(),
-            })?;
-        return rollback_filtered(dir, &mutated);
-    }
     rollback_where(dir, |_| true)
 }
 
@@ -168,10 +109,7 @@ pub fn rollback(dir: &Path) -> Result<()> {
 /// which ops ran; restoring the rest would put the journal's snapshot over
 /// bytes a writer outside the transaction landed after the journal was
 /// taken — the precondition that stopped the apply refused to overwrite
-/// those bytes, so the rollback must not either. The restore set is made
-/// durable before the first path is touched, so a crash mid-restore
-/// recovers with the same filter instead of falling back to a full
-/// restore that would destroy those protected bytes after all.
+/// those bytes, so the rollback must not either.
 ///
 /// One exception the filter does not cover: a journaled directory root
 /// the transaction created (`PreState::Absent`, above a mutated path) is
@@ -181,44 +119,6 @@ pub fn rollback(dir: &Path) -> Result<()> {
 /// The restore does not yet verify a root's post-image before removing
 /// it.
 pub fn rollback_mutated(dir: &Path, mutated: &[PathBuf]) -> Result<()> {
-    // The persisted set is a crash guard for the restore below, never a
-    // gate in front of it. When this write fails (ENOSPC can fail the op
-    // and then fail this write to the same volume), the restore must still
-    // run: completed, it clears the journal and needs no filter afterwards,
-    // while skipping it would leave the journal pending for a recovery
-    // that, finding no set, restores every snapshot — the loss the filter
-    // exists to prevent. Only a crash between a failed persist and the end
-    // of the restore still reaches that full recovery.
-    let persisted = persist_restore_set(dir, mutated);
-    match (rollback_filtered(dir, mutated), persisted) {
-        (Ok(()), _) => Ok(()),
-        (Err(restore), Ok(())) => Err(restore),
-        // Both failed: the journal is pending with no filter on disk, so
-        // the recovery that clears it will restore every snapshot. Named
-        // together — the restore error alone reads as a retry of the same
-        // filtered restore, which is not what recovery will run.
-        (Err(restore), Err(persist)) => Err(CoreError::RestoreSetLost {
-            restore: Box::new(restore),
-            persist: Box::new(persist),
-        }),
-    }
-}
-
-fn persist_restore_set(dir: &Path, mutated: &[PathBuf]) -> Result<()> {
-    let path = restore_set_path(dir);
-    let json = serde_json::to_string_pretty(mutated).map_err(|e| CoreError::JsonParse {
-        path: path.clone(),
-        message: e.to_string(),
-    })?;
-    crate::fs::atomic_write_durable(&path, &json)?;
-    // The atomic write syncs the file and only tries the directory: the
-    // set is a crash guard, so its name must be on disk before the first
-    // restore touches anything, and a directory sync that fails is a
-    // persist that failed.
-    sync_dir_durable(dir)
-}
-
-fn rollback_filtered(dir: &Path, mutated: &[PathBuf]) -> Result<()> {
     rollback_where(dir, |path| {
         mutated.iter().any(|m| m == path || m.starts_with(path))
     })
@@ -234,9 +134,9 @@ fn rollback_where(dir: &Path, restore: impl Fn(&Path) -> bool) -> Result<()> {
         Ok(journal) => journal,
         // A meta that will not parse is a torn one. It is written whole
         // and durably before any mutation starts, so a partial one proves
-        // the world untouched and the journal safe to discard. A journal
-        // that parses but cannot be acted on is a different thing, whose
-        // mutations did start: that one is refused below, never cleared.
+        // the world untouched and the journal safe to discard. One that
+        // parses is acted on, and a failure part-way through the restore
+        // returns before the `clear` below, leaving it pending.
         Err(_) => return clear(dir),
     };
     let store = dir.join("store");
@@ -244,20 +144,6 @@ fn rollback_where(dir: &Path, restore: impl Fn(&Path) -> bool) -> Result<()> {
         if !restore(&entry.path) {
             continue;
         }
-        // A pre-image goes back where it came from, and the journal says
-        // where that was. A path reaching somewhere else now is reached
-        // through a directory somebody has changed since, and restoring
-        // there would put these bytes where they never came from. So is a
-        // journal that never wrote the place down: the apply it belongs to
-        // did mutate, and nothing here can say whether these bytes still
-        // have a way back. Both refuse, leaving the journal pending for
-        // inspection, the way a restore set that will not parse does.
-        let Some(landed) = &entry.landed else {
-            return Err(CoreError::UnrecordedLanding {
-                path: entry.path.clone(),
-            });
-        };
-        super::landing::still_reaches(landed, &entry.path)?;
         remove_any(&entry.path)?;
         match &entry.state {
             PreState::Absent => {}
@@ -270,33 +156,15 @@ fn rollback_where(dir: &Path, restore: impl Fn(&Path) -> bool) -> Result<()> {
             PreState::Symlink {
                 target,
                 store: slot,
-                reached,
             } => {
                 if let Some(parent) = entry.path.parent() {
                     fs::create_dir_all(parent).map_err(|e| CoreError::io(parent, e))?;
                 }
                 make_symlink(target, &entry.path)?;
-                // A write may have gone through the link: restore the
-                // linked-to file's bytes too, and only into the file they
-                // came from. The link is back where it was, so the far end
-                // is knowable again — and it is a different question from
-                // the entry's own landing, which stops at this link.
+                // A write may have gone through the link, so the
+                // linked-to file's bytes go back too — through the link,
+                // which is back where it was.
                 if let Some(slot) = slot {
-                    let Some(reached) = reached else {
-                        return Err(CoreError::UnrecordedLanding {
-                            path: entry.path.clone(),
-                        });
-                    };
-                    let now = entry
-                        .path
-                        .canonicalize()
-                        .map_err(|e| CoreError::io(&entry.path, e))?;
-                    if now != *reached {
-                        return Err(CoreError::TargetMoved {
-                            path: entry.path.clone(),
-                            now,
-                        });
-                    }
                     copy_file_durable(&store.join(slot), &entry.path)?;
                 }
             }
@@ -308,16 +176,19 @@ fn rollback_where(dir: &Path, restore: impl Fn(&Path) -> bool) -> Result<()> {
     clear(dir)
 }
 
+/// Spend a journal: meta.json first, on its own and made durable, then
+/// the sweep.
+///
+/// meta.json is the whole of what makes a journal pending, and this runs
+/// on the success path of every apply. `remove_dir_all` is neither atomic
+/// nor ordered, and it can simply fail — an unlinkable child, a handle
+/// somebody holds — so a sweep that went first could leave meta standing
+/// over a half-taken store. The next recovery pass would read that as an
+/// interrupted apply and roll back a completed one, deleting each path
+/// before it found the pre-image gone. With meta down first, what is left
+/// is a leftover directory the next pass sweeps. A sync that fails stops
+/// here: the sweep may not run while meta's removal is only in memory.
 pub fn clear(dir: &Path) -> Result<()> {
-    // meta.json is what makes a journal pending, and it goes first, on
-    // its own, made durable before the sweep: `remove_dir_all` deletes
-    // in no promised order, and a crash that had taken restore.json but
-    // not meta.json would leave a pending journal with no restore set,
-    // for a recovery that restores every snapshot — over the paths the
-    // filter left alone. With meta gone the dir is a leftover the next
-    // recovery pass sweeps, never a journal it replays. A sync that fails
-    // stops here: the sweep may not run while meta's removal is still
-    // only in memory.
     let meta = dir.join("meta.json");
     match fs::remove_file(&meta) {
         Ok(()) => sync_dir_durable(dir)?,

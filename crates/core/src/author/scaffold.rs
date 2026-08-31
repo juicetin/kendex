@@ -12,7 +12,6 @@ use std::path::{Path, PathBuf};
 
 use crate::env::Env;
 use crate::error::{CoreError, Result};
-use crate::process::Hardened;
 
 use super::status::MineRow;
 
@@ -84,68 +83,6 @@ pub fn plan(request: &CreateRequest) -> Result<Vec<(String, String)>> {
         License::NoneYet => {}
     }
     Ok(files)
-}
-
-/// Create the folder, write the plan, initialise git, register under Mine.
-/// A folder kendex just made is kendex's to initialise; nothing is
-/// committed. Refuses a folder that already exists — creating never merges.
-///
-/// Everything that can refuse is asked first (the plan, the destination,
-/// the registry file), then the tree is built in a sibling staging
-/// directory and renamed into place — a failure part-way leaves the
-/// destination absent, never half a marketplace.
-pub fn create(env: &Env, request: &CreateRequest) -> Result<MineRow> {
-    let files = plan(request)?;
-    if request.dir.exists() {
-        return Err(CoreError::Authoring {
-            message: format!(
-                "{} already exists — use \"an existing folder\" to register it instead",
-                request.dir.display()
-            ),
-        });
-    }
-    super::registry::can_register(env, &request.dir)?;
-    let (Some(parent), Some(leaf)) = (request.dir.parent(), request.dir.file_name()) else {
-        return Err(CoreError::Authoring {
-            message: format!("{} is not a creatable folder path", request.dir.display()),
-        });
-    };
-    let staging = parent.join(format!(".{}.kendex-new", leaf.to_string_lossy()));
-    if staging.exists() {
-        // A previous crashed create; wholly ours to clear.
-        std::fs::remove_dir_all(&staging).map_err(|e| CoreError::io(&staging, e))?;
-    }
-    let built = build_in(&staging, &files).and_then(|()| {
-        std::fs::rename(&staging, &request.dir).map_err(|e| CoreError::io(&request.dir, e))
-    });
-    if let Err(error) = built {
-        let _ = std::fs::remove_dir_all(&staging);
-        return Err(error);
-    }
-    if let Err(error) = super::registry::register(env, &request.dir) {
-        // The folder was wholly created by this call — a registry that
-        // refused after all takes it back with it.
-        let _ = std::fs::remove_dir_all(&request.dir);
-        return Err(error);
-    }
-    super::status::status(&request.dir)
-}
-
-fn build_in(staging: &Path, files: &[(String, String)]) -> Result<()> {
-    std::fs::create_dir_all(staging).map_err(|e| CoreError::io(staging, e))?;
-    for (rel, bytes) in files {
-        let path = staging.join(rel);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| CoreError::io(parent, e))?;
-        }
-        crate::fs::atomic_write(&path, bytes)?;
-    }
-    // git init failing (no git on the machine) costs the init, not the
-    // folder: the row reports repository:false and the person decides.
-    let _ = Hardened::git_in(staging, &["init", "--quiet"])
-        .timeout(std::time::Duration::from_secs(10))
-        .run();
-    Ok(())
 }
 
 /// The two optional offers a "use existing" row shows. Each is its own
@@ -352,3 +289,6 @@ jobs:
       path: .
       strict: true
 ";
+
+mod make;
+pub use make::create;

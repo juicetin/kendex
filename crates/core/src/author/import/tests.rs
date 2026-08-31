@@ -186,6 +186,167 @@ fn own_and_unmanaged_content_import_without_a_licence_question() {
     assert!(target.join("skills/stray/SKILL.md").exists());
 }
 
+/// A write that stops part-way leaves bytes behind, and the copy is not
+/// a transaction. The error has to name them: the next attempt reads
+/// them as somebody else's and tells the person to remove a file they
+/// never put there.
+#[test]
+#[allow(clippy::unwrap_used)]
+fn a_write_that_stops_part_way_names_what_reached_the_folder() {
+    let (tmp, env, scope) = seeded();
+    let scopes = [scope];
+    let target = target(&env, &tmp, "mine-interrupted");
+    // A regular file where the second selection's tree needs a
+    // directory. Nothing sits at the destination itself, so this is not a
+    // refusal pass one can make; the write is what meets it.
+    fs::create_dir_all(target.join("skills")).unwrap();
+    fs::write(target.join("skills/blocked"), "not a directory").unwrap();
+
+    let candidates = inventory(&env, &scopes).unwrap();
+    let mut second = selection(find(&candidates, "stray"), false);
+    second.destination = "blocked/here".to_owned();
+    let selections = [selection(find(&candidates, "mine"), false), second];
+
+    let message = apply(&env, &scopes, &target, &selections)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        message.contains("skills/blocked/here"),
+        "the error names the destination that failed: {message}"
+    );
+    assert!(
+        message.contains("skills/mine"),
+        "and what landed before it: {message}"
+    );
+    assert!(
+        message.contains("Remove them before importing again"),
+        "{message}"
+    );
+    // What the copy leaves, pinned rather than assumed: the selections
+    // before the failure are on disk, the one that failed is not, and
+    // nothing was rolled back. Restoring per-package atomicity would need
+    // the staging directory this issue removes.
+    assert!(
+        target.join("skills/mine/SKILL.md").is_file(),
+        "the earlier selection really is on disk"
+    );
+    assert!(
+        !target.join("skills/blocked/here").exists(),
+        "the selection that failed wrote nothing"
+    );
+    assert_eq!(
+        fs::read_to_string(target.join("skills/blocked")).unwrap(),
+        "not a directory",
+        "and what was in the way is untouched"
+    );
+}
+
+/// Two candidates with nothing to do with each other, one of them given
+/// a destination spelled under the other's. A nested destination name is
+/// ordinary and says nothing by itself about where the bytes land: these
+/// two trees never meet, so both are copied whole.
+///
+/// (A pair `source::layout::nested_names` itself offers is the other
+/// case. It lists `p` only where `p/SKILL.md` sits and `p/sub` only where
+/// `p/sub/SKILL.md` does, and a skill's tree is read whole, so `p` really
+/// does write into `p/sub` and this rule refuses it.)
+#[test]
+#[allow(clippy::unwrap_used)]
+fn a_nested_pair_whose_trees_do_not_meet_is_copied_whole() {
+    let (tmp, env, scope) = seeded();
+    let scopes = [scope];
+    let target = target(&env, &tmp, "mine-nested");
+    let candidates = inventory(&env, &scopes).unwrap();
+    let mut under = selection(find(&candidates, "stray"), false);
+    under.destination = "mine/nested".to_owned();
+    let selections = [selection(find(&candidates, "mine"), false), under];
+
+    let outcome = apply(&env, &scopes, &target, &selections).unwrap();
+    assert_eq!(outcome.written, ["skills/mine", "skills/mine/nested"]);
+    assert!(
+        fs::read_to_string(target.join("skills/mine/SKILL.md"))
+            .unwrap()
+            .contains("my own bytes")
+    );
+    assert!(
+        fs::read_to_string(target.join("skills/mine/nested/SKILL.md"))
+            .unwrap()
+            .contains("unmanaged bytes")
+    );
+}
+
+/// Two legal destination names whose trees meet in a directory without
+/// sharing a single filename. `mine` carries `nested/notes.md` and the
+/// second selection is destined for `mine/nested`, so neither writes a
+/// path the other writes and one skill's file would still end up sitting
+/// in the other skill's directory, with the outcome reporting both as
+/// copied cleanly.
+#[test]
+#[allow(clippy::unwrap_used)]
+fn two_selections_whose_trees_meet_refuse_and_write_nothing() {
+    let (tmp, env, scope) = seeded();
+    let Scope::Project { root } = &scope else {
+        unreachable!()
+    };
+    let nested = root
+        .join(crate::source::LOCAL_SOURCE_DIR)
+        .join("skills/mine/nested");
+    fs::create_dir_all(&nested).unwrap();
+    fs::write(nested.join("notes.md"), "the parent tree's own file").unwrap();
+    let scopes = [scope.clone()];
+    let target = target(&env, &tmp, "mine-overlap");
+    let candidates = inventory(&env, &scopes).unwrap();
+    let mut under = selection(find(&candidates, "stray"), false);
+    under.destination = "mine/nested".to_owned();
+    let selections = [selection(find(&candidates, "mine"), false), under];
+
+    let message = apply(&env, &scopes, &target, &selections)
+        .unwrap_err()
+        .to_string();
+    assert!(message.contains("both land at"), "{message}");
+    assert!(message.contains("mine/nested"), "it names both: {message}");
+    assert!(
+        !target.join("skills").exists(),
+        "a refused apply writes nothing at all"
+    );
+}
+
+/// Every refusal is decided before the first byte is written, so a
+/// second selection that cannot land takes the first one with it. Without
+/// that the import is half-done and there is nothing to say which half.
+#[test]
+#[allow(clippy::unwrap_used)]
+fn a_refusal_on_a_later_selection_writes_nothing_for_the_earlier_one() {
+    let (tmp, env, scope) = seeded();
+    let scopes = [scope];
+    let target = target(&env, &tmp, "mine-partial");
+    // The second selection's destination is occupied by other bytes.
+    skill(
+        &target.join("skills"),
+        "stray",
+        "different bytes already here",
+    );
+    let candidates = inventory(&env, &scopes).unwrap();
+    let selections = [
+        selection(find(&candidates, "mine"), false),
+        selection(find(&candidates, "stray"), false),
+    ];
+
+    let refused = apply(&env, &scopes, &target, &selections);
+    let message = refused.unwrap_err().to_string();
+    assert!(message.contains("different bytes"), "{message}");
+    assert!(
+        !target.join("skills/mine").exists(),
+        "the selection before the refusal must not have been written"
+    );
+    assert!(
+        fs::read_to_string(target.join("skills/stray/SKILL.md"))
+            .unwrap()
+            .contains("different bytes already here"),
+        "the occupied destination is untouched"
+    );
+}
+
 #[test]
 #[allow(clippy::unwrap_used)]
 fn a_destination_holding_different_bytes_is_a_refusal_naming_it() {
