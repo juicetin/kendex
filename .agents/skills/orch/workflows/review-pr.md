@@ -10,7 +10,10 @@ Pre-submission review: reviewer fan-out, bounded fix rounds, QA checks, and the 
 
 **Caller context** (via `⤵`): `worktree`; `agents` — an explicit reviewer panel, default every `reviewer-*` agent the harness exposes; `lifecycle` — `"managed"` (return at § 9) or `"self"` (default); `dev_agent` — a live dev agent for fix delegation; `issue_id` — the workflow-state key, the normalized issue ID, never the bare GitHub issue number.
 
-**With a PR number**: `github.sh pr-issue [PR_NUMBER] --format=text` gives `ISSUE`. Apply [Worktree Scope](../SKILL.md#workflow-execution); ask before `worktree create $ISSUE --pr [PR_NUMBER]`. With no argument, `WT_PATH` is the current directory.
+**With a PR number**: `github.sh pr-issue [PR_NUMBER] --format=text` gives `ISSUE`. Apply [Worktree Scope](../SKILL.md#workflow-execution); ask before `worktree create $ISSUE --pr [PR_NUMBER]`. With no argument, `WT_PATH` is `git-context repo-root .`.
+
+Fill `Worktree:` and its `Worktree Check:` from `git -C "[DIR]" rev-parse --show-toplevel`. The delegate compares that value against `pwd -P`, so a relative or symlinked path halts a correct checkout.
+`[DIR]` is the checkout the paragraph above resolves `WT_PATH` from.
 
 **Standalone init** (`lifecycle: "self"`): resolve `ISSUE_ID` with `git-context issue-from-branch .`, then `workflow-state exists --json [ISSUE_ID]`; when absent, initialize with `git-context branch [WT_PATH]` and `workflow-state init`, and resolve `TRACKER`. On this path § 5 derives its QA signals from the diff scan and judgment — there is no dev artifact.
 
@@ -130,6 +133,7 @@ Delegate to every reviewer in the active set in parallel. When `EXTERNAL_REVIEW_
 Follow workflow: .agents/skills/reviewer/workflows/review.md
 
 Worktree: [WORKTREE_PATH]
+Worktree Check: `pwd -P` before any repo-relative command. It must print [WORKTREE_PATH]; your shell can start in another lane's worktree, and `git status` or `tools/guard` resolves the repo from the process cwd, so an absolute path does not redirect it. On any other path, stop and report where the shell started; do not attempt recovery.
 Branch: [BRANCH]
 Artifact: [ARTIFACT_PATH]
 
@@ -360,7 +364,10 @@ Drop a signal when the triggering code is trivial or test-only; never drop one f
 
 **Skip if** the recorded `qa_decision.signals` is empty → § 7, which finds no QA artifacts, converges, and routes on: the exit is decided in one place even when QA never ran.
 
-Map each signal to its agent — `needs-safety-audit` → `reviewer-safety`, `needs-perf-test` → `reviewer-perf`, `needs-review` → `reviewer-correctness`; a project may override the mapping in its instructions. For each, delegate and wait:
+Map each signal to its agent — `needs-safety-audit` → `reviewer-safety`, `needs-perf-test` → `reviewer-perf`, `needs-review` → `reviewer-correctness`; a project may override the mapping in its instructions. For each, delegate and wait.
+
+Fill `Worktree:` and its `Worktree Check:` from `git -C "[DIR]" rev-parse --show-toplevel`. The delegate compares that value against `pwd -P`, so a relative or symlinked path halts a correct checkout.
+`[DIR]` is the checkout the top of this workflow resolves `WT_PATH` from.
 
 <delegation_format>
 Follow workflow: .agents/skills/reviewer/workflows/qa-review.md
@@ -369,6 +376,7 @@ Issue: [ISSUE_ID]
 Tracker: [TRACKER] [OWNER/REPO]
 Branch: [BRANCH]
 Worktree: [WORKTREE_PATH]
+Worktree Check: `pwd -P` before any repo-relative command. It must print [WORKTREE_PATH]; your shell can start in another lane's worktree, and `git status` or `tools/guard` resolves the repo from the process cwd, so an absolute path does not redirect it. On any other path, stop and report where the shell started; do not attempt recovery.
 Trigger: [QA signal]
 
 Dev summary:

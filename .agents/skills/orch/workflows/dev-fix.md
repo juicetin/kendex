@@ -10,7 +10,9 @@ Delegate fix items to a specialist dev agent. Standalone (user-initiated) or man
 
 **Caller context** (via `⤵`): `worktree`; `lifecycle` — `"managed"` (return at § 3) or `"self"` (default); `dev_agent` — a live dev agent; `issue_id` — the workflow-state key, the normalized issue ID (`issue-N` for GitHub, `PROJ-123` for Linear), never the bare GitHub issue number; `items` — formatted review items; `source` — `pr-review` | `qa-review` | `review` | `local-review` (default `conversation`); `qa_agent`.
 
-**Standalone init** (`lifecycle: "self"`). Use the argument as `ISSUE_ID`, else `git-context issue-from-branch .`. Apply [Worktree Scope](../SKILL.md#workflow-execution) and resolve `WT_PATH` (inside a worktree, the current directory; from the main repo, `worktree path [ISSUE_ID]`, asking before creating).
+**Standalone init** (`lifecycle: "self"`). Use the argument as `ISSUE_ID`, else `git-context issue-from-branch .`. Apply [Worktree Scope](../SKILL.md#workflow-execution) and resolve `WT_PATH` as `git-context repo-root "[DIR]"` (inside a worktree `[DIR]` is `.`; from the main repo, `worktree path [ISSUE_ID]`, asking before creating).
+
+Fill `Worktree:` and its `Worktree Check:` from `git -C "[DIR]" rev-parse --show-toplevel`. The delegate compares that value against `pwd -P`, so a relative or symlinked path halts a correct checkout.
 
 ## 1. Build Fix Items
 
@@ -110,6 +112,7 @@ Cancel ends the workflow; a selection goes to § 2.
    Source: [SOURCE]
    Issue: [ISSUE_ID]
    Worktree: [WORKTREE_PATH]
+   Worktree Check: `pwd -P` before any repo-relative command. It must print [WORKTREE_PATH]; your shell can start in another lane's worktree, and `git status` or `tools/guard` resolves the repo from the process cwd, so an absolute path does not redirect it. On any other path, stop and report where the shell started; do not attempt recovery.
    Worktree Lease: [WORKTREE_LEASE]
    Round ID: [DEV_ROUND_ID]
    Artifact Key: [ISSUE_ID]

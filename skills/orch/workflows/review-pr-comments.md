@@ -44,7 +44,11 @@ gh api user -q .login
 
 **Extract** per item: `thread_id`/`comment_id`, `author`, `body`, `path`, `line`, `url`, and `source` (`inline` or `pr-level`). Bot review summaries additionally get a `section` and a keyword-derived source type — architectural, documentation, security, testing, performance, or plain suggestion — plus `blocking: true` for security items and `false` when the text says non-blocking or optional. Skip anything the bot labels an inline comment: those are already captured as review threads, with the bot username as `author`. Never filter bot inline threads out.
 
-**Issue context.** `issue_id` from the caller, else `git-context issue-from-branch .`; ask the user if nothing matches. Resolve `WT_PATH` from `worktree exists`/`worktree path`, falling back to `.`. Then gather decisions:
+**Issue context.** `issue_id` from the caller, else `git-context issue-from-branch .`; ask the user if nothing matches. Resolve `WT_PATH` as `git-context repo-root "[DIR]"`, `[DIR]` being `worktree exists`/`worktree path` when they match and `.` otherwise.
+
+Fill `Worktree:` and its `Worktree Check:` from `git -C "[DIR]" rev-parse --show-toplevel`. The delegate compares that value against `pwd -P`, so a relative or symlinked path halts a correct checkout.
+
+Then gather decisions:
 
 ```bash
 .agents/skills/decider/scripts/decisions search --issue [ISSUE_ID]
@@ -72,6 +76,7 @@ Analyze these PR review comments for your domain.
 PR: #[PR_NUMBER] - [TITLE]
 Parent Issue: [ISSUE_ID]
 Worktree: [WORKTREE_PATH]
+Worktree Check: `pwd -P` before any repo-relative command. It must print [WORKTREE_PATH]; your shell can start in another lane's worktree, and `git status` or `tools/guard` resolves the repo from the process cwd, so an absolute path does not redirect it. On any other path, stop and report where the shell started; do not attempt recovery.
 
 Decision context (read before classifying — do NOT suggest changes that contradict these):
 [For each verified decision: "[DECISION_ID]: [ONE_LINE_SUMMARY] — [DECISION_FILE_PATH]"]
@@ -230,6 +235,8 @@ When the list is non-empty, write `[WORKTREE_PATH]/tmp/dev-round-adds-[DEV_ROUND
 
 ⚠ Fill placeholders only ([Format Tags Are Literal](../SKILL.md#format-tags-are-literal)). `Recommendation:` is the technical fix; the agent owns its own process.
 
+Fill `Worktree:` and its `Worktree Check:` from `git -C "[DIR]" rev-parse --show-toplevel`. The delegate compares that value against `pwd -P`, so a relative or symlinked path halts a correct checkout.
+
 <delegation_format>
 Follow workflow: .agents/skills/dev/workflows/dev-fix.md
 
@@ -237,6 +244,7 @@ Source: pr-comments
 Issue: [ISSUE_ID]
 PR: #[PR_NUMBER]
 Worktree: [WORKTREE_PATH]
+Worktree Check: `pwd -P` before any repo-relative command. It must print [WORKTREE_PATH]; your shell can start in another lane's worktree, and `git status` or `tools/guard` resolves the repo from the process cwd, so an absolute path does not redirect it. On any other path, stop and report where the shell started; do not attempt recovery.
 Worktree Lease: [WORKTREE_LEASE]
 Round ID: [DEV_ROUND_ID]
 Artifact Key: [ISSUE_ID]
