@@ -279,6 +279,106 @@ cmd_append() {
     fi
 }
 
+# Append one JSON value read from a FILE to an array field. The value never
+# crosses argv, so text nobody here authored — a finding's root cause, a
+# location, a reviewer's own words — reaches the state whatever quoting it
+# carries. The field's array is created when absent.
+cmd_append_file() {
+    local issue_id="$1"
+    local field="$2"
+    local file="$3"
+
+    [[ -n "$field" ]] || { echo "Error: append-file needs a field" >&2; return 1; }
+    [[ -f "$file" ]] || { echo "Error: append-file: no such file: $file" >&2; return 1; }
+    if ! jq -s -e 'length == 1' >/dev/null 2>&1 < "$file"; then
+        echo "Error: append-file: $file is not exactly one JSON value" >&2; return 1
+    fi
+
+    local state_file
+    state_file=$(resolve_state_file "$issue_id")
+    ensure_state_exists "$state_file"
+
+    atomic_update "$state_file" ".${field} = ((.${field} // []) + [\$entry[0]])" \
+        --slurpfile entry "$file"
+}
+
+# The round caps, spelled once: setting name, the workflow-state field its
+# count is read from (empty when the caller keeps its own count), and its
+# default. `cap`, the rereview_panel guard below, every refusal's roster and
+# the help text derive from this table, so a cap added or renamed here needs no
+# second edit kept in step, and `cap_limit` is the one place a cap resolves.
+cap_table() {
+    printf 'REVIEW_MAX_CYCLES\trereview_cycles\t4\n'
+    printf 'REVIEW_MAX_EXTERNAL_ROUNDS\tpr_comment_review.iterations\t4\n'
+    printf 'CI_FIX_MAX_CYCLES\t\t6\n'
+}
+
+# One cap's "<field><tab><default>", or the one refusal naming every known cap.
+cap_row() {
+    cap_table | awk -F'\t' -v want="$1" '$1 == want { print $2 "\t" $3; found = 1 } END { exit found ? 0 : 1 }' && return 0
+    echo "Error: unknown round cap: $1 (known: $(cap_table | awk -F'\t' '{ printf "%s%s", sep, $1; sep = ", " }'))" >&2
+    return 2
+}
+
+cap_limit() {
+    local row
+    row=$(cap_row "$1") || return 2
+    "$SCRIPT_DIR/orch-env" "$1" "${row##*$'\t'}"
+}
+
+# The workflows' reader for the table above: a cap is read through this command
+# instead of pairing an orch-env call with a private default and comparison.
+#
+#   cap SETTING                 -> the resolved cap number
+#   cap SETTING --issue ID      -> "<below|at-cap> <count>/<cap>", count from state
+#   cap SETTING --count N       -> "<below|at-cap> <N>/<cap>"
+#
+# `at-cap` is count >= cap: the count is entries already taken, so a count
+# equal to the cap has spent the whole budget.
+cmd_cap() {
+    local setting="${1:-}"
+    shift || true
+    local issue_id="" count="" have_count=0
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --issue) [[ $# -ge 2 ]] || { echo "Error: --issue needs an ID" >&2; return 2; }
+                     issue_id="$2"; shift 2 ;;
+            --count) [[ $# -ge 2 ]] || { echo "Error: --count needs a number" >&2; return 2; }
+                     count="$2"; have_count=1; shift 2 ;;
+            *) echo "Error: cap: unknown argument: $1" >&2; return 2 ;;
+        esac
+    done
+
+    local row field limit
+    row=$(cap_row "$setting") || return 2
+    field="${row%%$'\t'*}"
+    limit=$(cap_limit "$setting") || return 2
+
+    if [[ "$have_count" -eq 0 && -z "$issue_id" ]]; then
+        printf '%s\n' "$limit"
+        return 0
+    fi
+    if [[ "$have_count" -eq 1 && -n "$issue_id" ]]; then
+        echo "Error: cap takes --issue or --count, not both" >&2; return 2
+    fi
+
+    if [[ "$have_count" -eq 0 ]]; then
+        [[ -n "$field" ]] || { echo "Error: cap: $setting is not measured against workflow state; pass --count" >&2; return 2; }
+        local state_file
+        state_file=$(resolve_state_file "$issue_id")
+        ensure_state_exists "$state_file"
+        count=$(jq -r "(.${field} // 0) | tostring" "$state_file") || return 1
+    fi
+    [[ "$count" =~ ^[0-9]+$ ]] || { echo "Error: cap: count is not a whole number: $count" >&2; return 2; }
+
+    if (( count >= limit )); then
+        printf 'at-cap %s/%s\n' "$count" "$limit"
+    else
+        printf 'below %s/%s\n' "$count" "$limit"
+    fi
+}
+
 cmd_increment() {
     local issue_id="$1"
     local field="$2"
@@ -303,7 +403,7 @@ cmd_set() {
     # Nothing else spends that budget: `cycles` is the general fix-round tally, and § 7's QA re-check and § 2 verification pass write `qa_recheck_panel` and `verification_panel`, fields this branch never matches.
     if [[ "$field" == "rereview_panel" && "$value" == "{"* ]]; then
         local cap report
-        cap=$("$(dirname "${BASH_SOURCE[0]}")/orch-env" REVIEW_MAX_CYCLES 4) || { echo "workflow-state: could not resolve REVIEW_MAX_CYCLES; rereview_panel not set" >&2; return 1; }
+        cap=$(cap_limit REVIEW_MAX_CYCLES) || { echo "workflow-state: could not resolve REVIEW_MAX_CYCLES; rereview_panel not set" >&2; return 1; }
         report=$(cmd_update_report "$issue_id" "(.rereview_cycles // 0) as \$n | if \$n >= $cap then {state: ., report: {refused: true, entered: \$n}} else {state: (.rereview_panel = $value | .rereview_cycles = \$n + 1), report: {refused: false}} end") || return 1
         if [[ "$(jq -r '.refused' <<<"$report")" == "true" ]]; then
             echo "workflow-state: rereview_cycles is at the cap ($(jq -r '.entered' <<<"$report") >= REVIEW_MAX_CYCLES=$cap, entries already taken): the fix loop is over — no further re-review cycle and no further fix round; follow review-pr § 4 At The Cap, \"Capped items are escalated, never dropped\" — one update per still-outstanding blocker and category==fix suggestion records it in escalated_items (outcome \"blocked\") and drops its superseded fixed_items entry in the same write — then go to review-pr § 5 (verdict pass) and report them" >&2
@@ -454,6 +554,22 @@ Commands:
                                 (a separate get after update can interleave
                                 with another writer)
   append <issue_id> <field> <value>   Append to array field
+  append-file <issue_id> <field> <file>
+                                Append the one JSON value in <file> to the
+                                array at <field>, creating it when absent. The
+                                value never crosses argv, so text you did not
+                                author reaches the state whatever quoting it
+                                carries
+  cap <setting> [--issue <id> | --count <n>]
+                                Round caps. Bare: print the resolved cap.
+                                With --issue: read the state field the setting
+                                is measured against; with --count: use <n>.
+                                Either prints "<below|at-cap> <count>/<cap>",
+                                at-cap being count >= cap. Settings:
+EOF
+    cap_table | awk -F'\t' \
+        '{ printf "%34s%s (%s, %s)\n", "", $1, ($2 == "" ? "--count only" : $2), $3 }'
+    cat << 'EOF'
   increment <issue_id> <field>  Increment numeric field
   set <issue_id> <field> <value>  Set field value ({/[ prefix, null/true/false,
                                 or all digits parse as JSON; anything else is
@@ -534,6 +650,8 @@ case "${1:-help}" in
     update)    shift; cmd_update "$@" ;;
     update-report) shift; cmd_update_report "$@" ;;
     append)    shift; cmd_append "$@" ;;
+    append-file) shift; cmd_append_file "$@" ;;
+    cap)       shift; cmd_cap "$@" ;;
     increment) shift; cmd_increment "$@" ;;
     set)       shift; cmd_set "$@" ;;
     set-git-head) shift; cmd_set_git_head "$@" ;;

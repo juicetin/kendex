@@ -4,8 +4,8 @@
 # worktree skill's push must land in `.rebase_map` and rewrite every recorded
 # fix commit in the same call — including when the network push itself fails,
 # because the rebase (and its map) happens before the push. A map the wrapper
-# cannot record persists in a sidecar for the retry to consume; nothing may
-# leave stale SHAs silently.
+# cannot record is reported, with the replayed transcript as its only
+# surviving copy; nothing may leave stale SHAs silently.
 
 set -euo pipefail
 
@@ -65,12 +65,11 @@ OLD_B="$(printf 'b%.0s' {1..39})1"
 NEW_A="$(printf 'c%.0s' {1..39})2"
 NEW_A2="$(printf 'd%.0s' {1..39})3"
 
-# The pushed worktree is a real git checkout: the sidecar lives in ITS git
+# The pushed worktree is a real git checkout: round authorizations live in ITS git
 # dir, never in the tree and never in the state directory.
 wt="$TMP_ROOT/wt"
 git init -q "$wt"
 mkdir -p "$wt/tmp"
-SIDECAR="$wt/.git/worktree-push-pending-map-KEN-1.json"
 
 # Fresh state with recorded fix commits on both surfaces: a short prefix of
 # OLD_A in fixed_items; in pr_comment_review.fixes one prefix of OLD_B
@@ -80,7 +79,6 @@ reset_state() {
   local work="$1"
   rm -rf "$work"
   mkdir -p "$work"
-  rm -f "$SIDECAR"
   (cd "$work" \
     && "$STATE" init KEN-1 --agent generalist --worktree "$wt" --branch ken-1 >/dev/null \
     && "$STATE" append KEN-1 fixed_items "{\"description\":\"fix\",\"commit\":\"${OLD_A:0:7}\",\"source\":\"pr-review\"}" \
@@ -169,7 +167,6 @@ assert_eq "$(state_json "$work" | jq -r '.fixed_items[0].commit')" "${NEW_A:0:7}
 assert_eq "$(state_json "$work" | jq -r '.pr_comment_review.fixes[0].commit')" "dropped:${OLD_B:0:8}" "dropped mapping marks the recorded commit unpublishable"
 assert_eq "$(state_json "$work" | jq -r '.pr_comment_review.fixes[1].commit')" "${NEW_A:0:10}" "pr_comment_review.fixes SHA rewritten, truncated to recorded length"
 assert_contains "$(cat "$run_out")" "sha-reconcile: rebase_map +2, fixed_items 1 rewritten, pr_comment_review.fixes 2 rewritten" "reconcile summary reports what changed"
-[[ ! -f "$SIDECAR" ]] && pass "sidecar deleted after a successful state write" || fail "sidecar deleted after a successful state write"
 
 echo
 echo "=== a second push chains through the already-rewritten SHA ==="
@@ -239,8 +236,7 @@ STUB_PUSH_STDOUT="rebase-map: $restack_head $restack_base" \
 assert_eq "$RUN_RC" "1" "active authorization missing recovery fails reconciliation closed"
 assert_contains "$(cat "$run_err")" "recovery copy missing or not regular" \
   "active missing-recovery refusal names the required copy"
-rm -f "$restack_wt/.git/kendex/dev-round-authorizations/KEN-RESTACK-3-3.json" \
-  "$restack_wt/.git/worktree-push-pending-map-KEN-RESTACK.json"
+rm -f "$restack_wt/.git/kendex/dev-round-authorizations/KEN-RESTACK-3-3.json"
 
 "$ROUND_WRITE" --worktree "$restack_wt" --issue KEN-RESTACK --round-id 4-4 --item 1 divergent >/dev/null
 divergent_recovery="$restack_wt/tmp/dev-round-KEN-RESTACK-4-4.json"
@@ -262,40 +258,23 @@ STUB_PUSH_STDOUT="rebase-map: $OLD_A $NEW_A" STUB_PUSH_EXIT=7 run_push "$work" -
 assert_eq "$RUN_RC" "7" "push failure keeps the push's exit code"
 assert_eq "$(state_json "$work" | jq -r ".rebase_map[\"$OLD_A\"]")" "$NEW_A" "map from a failed push is still recorded"
 assert_eq "$(state_json "$work" | jq -r '.fixed_items[0].commit')" "${NEW_A:0:7}" "fix SHA rewritten even though the push failed"
-[[ ! -f "$SIDECAR" ]] && pass "sidecar consumed on the failed-push path too" || fail "sidecar consumed on the failed-push path too"
 
 echo
-echo "=== a map the wrapper cannot record persists for the retry ==="
+echo "=== a map the wrapper cannot record is reported, never swallowed ==="
 
-# No state file: the push landed, the SHAs are stale, and silence here is the
-# exact failure mode the wrapper exists to close — the map waits in the
-# worktree's git dir and the next run consumes it before pushing.
+# No state file: the push landed and the SHAs are stale. Silence here is the
+# exact failure mode the wrapper exists to close, so the call fails, names the
+# consequence, and replays the map's own lines in the transcript.
 work="$TMP_ROOT/work-nostate"
 rm -rf "$work" && mkdir -p "$work"
-rm -f "$SIDECAR"
 STUB_PUSH_STDOUT="rebase-map: $OLD_A $NEW_A" run_push "$work" --worktree "$wt" --issue KEN-1
 assert_eq "$RUN_RC" "1" "missing state file fails the call"
 assert_contains "$(cat "$run_err")" "NOT recorded" "missing state names the unreconciled-SHA consequence"
-[[ -f "$SIDECAR" ]] && pass "unapplied map persists in the sidecar" || fail "unapplied map persists in the sidecar"
-
-# The retry's own push rebases AGAIN: the pending sidecar (OLD_A→NEW_A) must
-# be consumed BEFORE the new push's map (NEW_A→NEW_A2) applies, or the
-# commit never chains through to NEW_A2.
-(cd "$work" \
-  && "$STATE" init KEN-1 --agent generalist --worktree "$wt" --branch ken-1 >/dev/null \
-  && "$STATE" append KEN-1 fixed_items "{\"description\":\"fix\",\"commit\":\"${OLD_A:0:7}\",\"source\":\"pr-review\"}")
-STUB_PUSH_STDOUT="rebase-map: $NEW_A $NEW_A2" run_push "$work" --worktree "$wt" --issue KEN-1
-assert_eq "$RUN_RC" "0" "retry after repairing state exits 0"
-assert_eq "$(state_json "$work" | jq -r '.fixed_items[0].commit')" "${NEW_A2:0:7}" "sidecar applies before the retry push's own map, chaining OLD_A through NEW_A to NEW_A2"
-assert_eq "$(state_json "$work" | jq -r '.rebase_map | length')" "2" "both the sidecar map and the retry push's map are recorded"
-[[ ! -f "$SIDECAR" ]] && pass "sidecar deleted after the retry applies it" || fail "sidecar deleted after the retry applies it"
-
 work="$TMP_ROOT/work-badmap"
 reset_state "$work"
 STUB_PUSH_STDOUT="rebase-map: not-a-sha $NEW_A" run_push "$work" --worktree "$wt" --issue KEN-1
 assert_eq "$RUN_RC" "1" "unparseable map line fails the call"
 assert_contains "$(cat "$run_err")" "NOT reconciled" "unparseable map names the unreconciled-SHA consequence"
-[[ ! -f "$SIDECAR" ]] && pass "no sidecar is written for an unparseable map" || fail "no sidecar is written for an unparseable map"
 
 # An unparseable map on a FAILED push keeps the push's exit code — exit 1
 # must never dress a failed push as a landed one.
@@ -305,48 +284,82 @@ assert_eq "$RUN_RC" "7" "unparseable map on a failed push keeps the push's exit 
 assert_contains "$(cat "$run_err")" "NOT reconciled" "the failed-push parse error still names the consequence"
 
 echo
+echo "=== a repaired state and a re-run do not reconcile the stranded map ==="
+
+# The header contract and the failure diagnostic once told the operator to
+# repair state and re-run. The sidecar that made that true is gone: the rebase
+# already happened, so the retry's push prints no map, reconciles nothing, and
+# exits 0 over the same stale record. Both surfaces must say so, or a stale
+# SHA gets published in the belief the retry fixed it.
+work="$TMP_ROOT/work-rerun"
+rm -rf "$work" && mkdir -p "$work"
+STUB_PUSH_STDOUT="rebase-map: $OLD_A $NEW_A" run_push "$work" --worktree "$wt" --issue KEN-1
+assert_eq "$RUN_RC" "1" "the run that cannot record its map fails"
+assert_contains "$(cat "$run_err")" "Re-running this command does NOT repair them" \
+  "the diagnostic denies that a bare re-run repairs the record"
+assert_contains "$(cat "$run_err")" "workflow-state update" "the diagnostic names the manual repair"
+
+# Repair the state exactly as an operator would, then re-run.
+(cd "$work" \
+  && "$STATE" init KEN-1 --agent generalist --worktree "$wt" --branch ken-1 >/dev/null \
+  && "$STATE" append KEN-1 fixed_items "{\"description\":\"fix\",\"commit\":\"${OLD_A:0:7}\",\"source\":\"pr-review\"}")
+STUB_PUSH_STDOUT="→ pushed" run_push "$work" --worktree "$wt" --issue KEN-1
+assert_eq "$RUN_RC" "0" "the re-run reports success"
+assert_eq "$(state_json "$work" | jq -r '.fixed_items[0].commit')" "${OLD_A:0:7}" \
+  "the re-run leaves the stale SHA stale, so it is not the repair"
+assert_eq "$(state_json "$work" | jq -r '.rebase_map | length')" "0" \
+  "the stranded map never reaches workflow state on the re-run"
+
+# `--help` prints the leading comment block, so the exit-code table is a
+# runtime surface and its recovery instruction is held to the same truth.
+help_out="$("$PUSH" --help)"
+assert_contains "$help_out" "re-running does not repair them" \
+  "the exit-code table denies that a re-run repairs the record"
+assert_contains "$help_out" "workflow-state update" "the exit-code table names the manual repair"
+
+# Exit 1 covers two families and they want opposite repairs. The refusals
+# asserted below (bad arguments, a state that does not resolve or does not
+# match) exit before the push, so for them the sentences above are all false --
+# nothing was rebased, no map was printed, and correcting the arguments and
+# re-running IS the repair. Each family carries its own row or the split rots
+# back into one sentence that misdirects half the operators who read it.
+assert_contains "$help_out" "the run refused before the push" \
+  "the exit-code table carries a row for the family where the push never ran"
+assert_contains "$help_out" "Nothing was pushed and nothing was rebased" \
+  "the never-ran row denies the rebase the post-push row asserts"
+assert_contains "$help_out" "there is nothing to hand-apply" \
+  "the never-ran row sends the operator back through the command instead of workflow-state"
+assert_eq "$(grep -cE '^ *1 \(' <<<"$help_out")" "2" \
+  "the exit-1 families are two rows, not one"
+
+echo
 echo "=== the arguments must match the state they would rewrite ==="
 
+# The resolved state is both what the reconcile rewrites and what names the
+# round authorization whose base_sha dev-artifact-check diffs against HEAD.
+# Linked worktrees share one git common dir, so a state belonging to another
+# issue or another worktree must refuse BEFORE the push rebases anything.
+mismatch_args_log="$TMP_ROOT/mismatch-args.log"
+
 work="$TMP_ROOT/work-mismatch"
-mkdir -p "$work/tmp"
+rm -rf "$work" && mkdir -p "$work/tmp"
 printf '%s\n' '{"issue_id":"KEN-9","worktree":"","fixed_items":[],"pr_comment_review":{"fixes":[]}}' >"$work/tmp/workflow-state-KEN-1.json"
-STUB_PUSH_STDOUT="→ pushed" run_push "$work" --worktree "$wt" --issue KEN-1
-assert_eq "$RUN_RC" "1" "a state recording another issue id refuses before pushing"
+: >"$mismatch_args_log"
+STUB_ARGS_LOG="$mismatch_args_log" STUB_PUSH_STDOUT="→ pushed" run_push "$work" --worktree "$wt" --issue KEN-1
+assert_eq "$RUN_RC" "1" "a state recording another issue id refuses"
 assert_contains "$(cat "$run_err")" "refusing to rewrite another issue" "the issue mismatch is named"
+assert_eq "$(wc -l <"$mismatch_args_log")" "0" "the push never ran against a mismatched issue id"
 
 other_wt="$TMP_ROOT/other-wt"
 mkdir -p "$other_wt"
 work="$TMP_ROOT/work-wt-mismatch"
 rm -rf "$work" && mkdir -p "$work"
 (cd "$work" && "$STATE" init KEN-1 --agent generalist --worktree "$other_wt" --branch ken-1 >/dev/null)
-STUB_PUSH_STDOUT="→ pushed" run_push "$work" --worktree "$wt" --issue KEN-1
-assert_eq "$RUN_RC" "1" "a state recording another worktree refuses before pushing"
+: >"$mismatch_args_log"
+STUB_ARGS_LOG="$mismatch_args_log" STUB_PUSH_STDOUT="→ pushed" run_push "$work" --worktree "$wt" --issue KEN-1
+assert_eq "$RUN_RC" "1" "a state recording another worktree refuses"
 assert_contains "$(cat "$run_err")" "refusing to rewrite another worktree" "the worktree mismatch is named"
-
-echo
-echo "=== a damaged sidecar fails closed, never merges ==="
-
-# Only worktree-push writes in the git dir, so there is no grammar gate any
-# more — but a damaged file must still fail the reconcile closed, keep the
-# map, and never partially apply.
-work="$TMP_ROOT/work-badsidecar"
-reset_state "$work"
-printf '%s\n' 'not json at all' >"$SIDECAR"
-before="$(state_json "$work")"
-: >"$args_log"
-STUB_ARGS_LOG="$args_log" STUB_PUSH_STDOUT="→ pushed" run_push "$work" --worktree "$wt" --issue KEN-1
-assert_eq "$RUN_RC" "1" "a damaged sidecar fails the call before pushing"
-assert_contains "$(cat "$run_err")" "could not be applied" "the failure names the unapplied map"
-assert_eq "$(state_json "$work")" "$before" "nothing from the damaged sidecar reaches the state"
-[[ -f "$SIDECAR" ]] && pass "the damaged sidecar is kept for inspection" || fail "the damaged sidecar is kept for inspection"
-# "before pushing" is the load-bearing half and needs its own witness
-# (KEN-907). Reconciling the pending map BELOW the push would still fail this
-# call and still keep this sidecar, so the assertions above pass either way —
-# but the push would have rebased by then, and its own map dies with the
-# process because nothing has staged it yet and the retry does not rebase
-# again to reprint it. The stub's argv log is what tells the two apart.
-assert_eq "$(cat "$args_log")" "" "the push never ran, so no rebase happened whose map this failure could strand"
-rm -f "$SIDECAR"
+assert_eq "$(wc -l <"$mismatch_args_log")" "0" "the push never ran against a mismatched worktree"
 
 echo
 echo "=== a dying stdout cannot lose the map ==="
@@ -362,7 +375,6 @@ if [[ -e /dev/full && -w /dev/full ]]; then
   [[ "$RUN_RC" -ne 0 ]] && pass "a dying stdout is reported as a failure" || fail "a dying stdout is reported as a failure"
   assert_eq "$(state_json "$work" | jq -r ".rebase_map[\"$OLD_A\"]")" "$NEW_A" "the map reaches workflow state despite the dead stdout"
   assert_eq "$(state_json "$work" | jq -r '.fixed_items[0].commit')" "${NEW_A:0:7}" "the fix SHA is rewritten despite the dead stdout"
-  rm -f "$SIDECAR"
 else
   printf '  skip  %s\n' "dying-stdout case: /dev/full not available on this host"
 fi
@@ -370,9 +382,8 @@ fi
 echo
 echo "=== a parse failure still shows the map in the transcript ==="
 
-# On a parse failure no sidecar exists and the completed rebase cannot
-# regenerate the map — the replayed transcript is the only surviving copy,
-# valid lines beside the malformed one included.
+# The completed rebase cannot regenerate the map, so the replayed transcript
+# is its only surviving copy — valid lines beside the malformed one included.
 work="$TMP_ROOT/work-parsefail-replay"
 reset_state "$work"
 map_out="rebase-map: $OLD_A $NEW_A
@@ -381,14 +392,13 @@ STUB_PUSH_STDOUT="$map_out" run_push "$work" --worktree "$wt" --issue KEN-1
 assert_eq "$RUN_RC" "1" "a malformed line beside a valid one still fails the call"
 assert_contains "$(cat "$run_out")" "rebase-map: $OLD_A $NEW_A" "the valid map line survives in the replayed transcript"
 assert_contains "$(cat "$run_out")" "rebase-map: not-a-sha $NEW_A2" "the malformed map line survives in the replayed transcript"
-[[ ! -f "$SIDECAR" ]] && pass "no sidecar exists on the parse-failure path" || fail "no sidecar exists on the parse-failure path"
 
 echo
-echo "=== an unwritable state directory strands the map safely in the git dir ==="
+echo "=== an unwritable state directory fails the landed push loudly ==="
 
-# The sidecar no longer shares a directory with the state file, so a state
-# write failure leaves the map recoverable in the git dir and the retry
-# consumes it once the state is repaired. chmod mode bits do not bind root
+# A state write that cannot land leaves the recorded SHAs stale, so the call
+# fails and says so rather than exiting 0 on a push that landed. chmod mode
+# bits do not bind root
 # (CAP_DAC_OVERRIDE writes straight through them), so the denial is probed
 # and the case skipped visibly where it cannot take effect — mirroring the
 # /dev/full gate above.
@@ -406,10 +416,7 @@ else
   assert_eq "$RUN_RC" "1" "a failed state write fails the landed push"
   assert_contains "$(cat "$run_err")" "NOT recorded" "the failure names the unreconciled SHAs"
   assert_eq "$(state_json "$work")" "$before" "the unwritable state is left untouched"
-  [[ -f "$SIDECAR" ]] && pass "the map survives in the git-dir sidecar" || fail "the map survives in the git-dir sidecar"
-  STUB_PUSH_STDOUT="→ pushed" run_push "$work" --worktree "$wt" --issue KEN-1
-  assert_eq "$RUN_RC" "0" "the retry after repair exits 0"
-  assert_eq "$(state_json "$work" | jq -r ".rebase_map[\"$OLD_A\"]")" "$NEW_A" "the retry consumes the stranded map"
+  assert_contains "$(cat "$run_out")" "rebase-map: $OLD_A $NEW_A" "the map's own lines survive in the replayed transcript"
 fi
 
 echo
@@ -420,10 +427,6 @@ echo "=== the bare-numeric alias binds, not refuses ==="
 # reconcile both through the resolved key.
 work="$TMP_ROOT/work-alias"
 rm -rf "$work" && mkdir -p "$work"
-# The sidecar is named by the RESOLVED key, so the alias and its issue-N
-# state share one recovery file in the worktree's git dir.
-alias_sidecar="$wt/.git/worktree-push-pending-map-issue-7.json"
-rm -f "$alias_sidecar"
 git -C "$wt" config user.email test@example.com
 git -C "$wt" config user.name Test
 git -C "$wt" commit -q --allow-empty -m alias-base
@@ -442,58 +445,6 @@ alias_auth="$wt/.git/kendex/dev-round-authorizations/issue-7-5-5.json"
 alias_recovery="$wt/tmp/dev-round-issue-7-5-5.json"
 assert_eq "$(jq -r '.base_sha' "$alias_auth")" "$alias_new" "the aliased authorization follows the resolved state key"
 assert_eq "$(jq -r '.base_sha' "$alias_recovery")" "$alias_new" "the aliased recovery copy follows the resolved state key"
-[[ ! -f "$alias_sidecar" ]] && pass "the resolved-key sidecar is consumed after the write" || fail "the resolved-key sidecar is consumed after the write"
-
-# Spelling must not strand a map: a bare-numeric push with NO state yet
-# strands its map under the normalized issue-N key, so the natural retry —
-# state created as issue-N, either spelling — finds and consumes it.
-work="$TMP_ROOT/work-alias-retry"
-rm -rf "$work" && mkdir -p "$work"
-retry_sidecar="$wt/.git/worktree-push-pending-map-issue-7.json"
-rm -f "$retry_sidecar"
-STUB_PUSH_STDOUT="rebase-map: $OLD_A $NEW_A" run_push "$work" --worktree "$wt" --issue 7
-assert_eq "$RUN_RC" "1" "a stateless bare-numeric push still fails the call"
-[[ -f "$retry_sidecar" ]] && pass "the stranded map is keyed by the normalized issue-N name" || fail "the stranded map is keyed by the normalized issue-N name (missing $retry_sidecar)"
-(cd "$work" \
-  && "$STATE" init issue-7 --agent generalist --worktree "$wt" --branch issue-7 >/dev/null \
-  && "$STATE" append issue-7 fixed_items "{\"description\":\"fix\",\"commit\":\"${OLD_A:0:7}\",\"source\":\"pr-review\"}")
-STUB_PUSH_STDOUT="→ pushed" run_push "$work" --worktree "$wt" --issue issue-7
-assert_eq "$RUN_RC" "0" "the issue-N-spelled retry exits 0"
-assert_eq "$(jq -r '.fixed_items[0].commit' "$work/tmp/workflow-state-issue-7.json")" "${NEW_A:0:7}" "the retry consumes the bare-numeric run's map and rewrites the SHA"
-[[ ! -f "$retry_sidecar" ]] && pass "the cross-spelling sidecar is consumed" || fail "the cross-spelling sidecar is consumed"
-
-echo
-echo "=== in-tree plants are inert: the sidecar lives outside the tree ==="
-
-# The structural close of the untrusted-sidecar class: recovery state lives
-# beside the workflow-state record, so nothing at the old in-tree path —
-# symlink or plausible tracked map — is ever read or written. The push
-# proceeds, only the real map lands, and the plants sit untouched.
-victim="$TMP_ROOT/victim.json"
-printf '%s\n' '{"untouched":true}' >"$victim"
-in_tree="$wt/tmp/worktree-push-pending-map-KEN-1.json"
-work="$TMP_ROOT/work-plants"
-reset_state "$work"
-ln -s "$victim" "$in_tree"
-STUB_PUSH_STDOUT="rebase-map: $OLD_A $NEW_A" run_push "$work" --worktree "$wt" --issue KEN-1
-assert_eq "$RUN_RC" "0" "a symlink at the old in-tree path does not touch the push"
-assert_eq "$(state_json "$work" | jq -r ".rebase_map[\"$OLD_A\"]")" "$NEW_A" "the real map is recorded"
-assert_eq "$(cat "$victim")" '{"untouched":true}' "the symlink target keeps its content"
-[[ -L "$in_tree" ]] && pass "the planted symlink is never consumed or deleted" || fail "the planted symlink is never consumed or deleted"
-rm -f "$in_tree"
-
-# A tracked file at the old path carrying a VALID-grammar map must never be
-# consumed as a pending sidecar — it belongs to the tree, not to this tool.
-planted_map="{\"$OLD_B\": \"$NEW_A2\"}"
-printf '%s\n' "$planted_map" >"$in_tree"
-work="$TMP_ROOT/work-plantfile"
-reset_state "$work"
-STUB_PUSH_STDOUT="→ pushed" run_push "$work" --worktree "$wt" --issue KEN-1
-assert_eq "$RUN_RC" "0" "a planted in-tree map file does not fail the push"
-assert_eq "$(state_json "$work" | jq -r '.rebase_map | length')" "0" "the planted map is never merged into workflow state"
-assert_eq "$(state_json "$work" | jq -r '.pr_comment_review.fixes[0].commit')" "${OLD_B:0:8}" "recorded commits are not rewritten by the plant"
-assert_eq "$(cat "$in_tree")" "$planted_map" "the planted file is left exactly as it was"
-rm -f "$in_tree"
 
 echo
 echo "=== an ambiguous state key refuses before pushing ==="
@@ -504,7 +455,6 @@ echo "=== an ambiguous state key refuses before pushing ==="
 # must not run at all.
 work="$TMP_ROOT/work-ambiguous"
 rm -rf "$work" && mkdir -p "$work"
-rm -f "$alias_sidecar"
 (cd "$work" \
   && "$STATE" init issue-7 --agent generalist --worktree "$wt" --branch issue-7 >/dev/null \
   && "$STATE" init 7 --agent generalist --worktree "$wt" --branch issue-7 >/dev/null)
@@ -515,7 +465,6 @@ STUB_ARGS_LOG="$ambig_args_log" STUB_PUSH_STDOUT="rebase-map: $OLD_A $NEW_A" \
 assert_eq "$RUN_RC" "1" "an ambiguous state key fails the call"
 assert_contains "$(cat "$run_err")" "ambiguous" "the refusal names the ambiguity"
 assert_eq "$(wc -l <"$ambig_args_log")" "0" "the push never runs against an ambiguous state"
-[[ ! -f "$alias_sidecar" ]] && pass "no sidecar is written when the push never ran" || fail "no sidecar is written when the push never ran"
 
 echo
 echo "=== duplicate subjects cannot advance an authorization base ==="
@@ -549,7 +498,6 @@ duplicate_auth="$duplicate_wt/.git/kendex/dev-round-authorizations/KEN-DUPLICATE
 assert_eq "$(jq -r '.base_sha' "$duplicate_auth")" "$duplicate_first" \
   "an ambiguous mapping does not advance the authorization base"
 
-rm -f "$duplicate_wt/.git/worktree-push-pending-map-KEN-DUPLICATE.json"
 "$ROUND_WRITE" --worktree "$duplicate_wt" --issue KEN-DUPLICATE --round-id 2-2 --item 1 positional >/dev/null
 duplicate_equal_old="$(git -C "$duplicate_wt" rev-parse HEAD)"
 git -C "$duplicate_wt" commit -q --allow-empty -m 'same subject'

@@ -72,7 +72,7 @@ Route the findings per the `review-finding` schema. No blockers and no `category
    .agents/skills/orch/scripts/worktree-push --worktree "[WORKTREE_PATH]" --issue [ISSUE_ID] --set-upstream
    ```
 
-   The push auto-rebases onto the updated base. When the rebase rewrites commits, `worktree-push` records the old→new map in `.rebase_map` and rewrites the fix commits stored in workflow state (`fixed_items`, `pr_comment_review.fixes`) itself — a commit that vanished in the rebase becomes `dropped:<sha>`, which is never published as a live SHA — reporting what changed on its `sha-reconcile:` line. A failed push exits with the push's own code after any printed map is applied (the rebase happens before the push). An error saying the map was NOT recorded means it waits in the sidecar the error names — repair workflow state and re-run `worktree-push` before publishing any recorded SHA.
+   The push auto-rebases onto the updated base. When the rebase rewrites commits, `worktree-push` records the old→new map in `.rebase_map` and rewrites the fix commits stored in workflow state (`fixed_items`, `pr_comment_review.fixes`) itself — a commit that vanished in the rebase becomes `dropped:<sha>`, which is never published as a live SHA — reporting what changed on its `sha-reconcile:` line. A failed push exits with the push's own code after any printed map is applied (the rebase happens before the push). An error saying the map was NOT recorded means the map never reached workflow state and cannot be regenerated: the rebase is already done, so a re-run prints no map and reports success over the same stale record. That run's transcript, `rebase-map:` lines included, is the only copy — repair workflow state, then apply those lines by hand with `workflow-state update` before publishing any recorded SHA.
 
    Regenerate any already-drafted publication text from the reconciled state, and resolve every SHA sourced from a review or QA artifact (e.g. a perf QA `benchmark_commit`) through `.rebase_map` before publishing it — follow the chain until no key matches. Publishing an unreconciled pre-rebase SHA is forbidden.
 
@@ -221,13 +221,10 @@ For `off` also record the legacy field the gate-4 check reads, then skip the wai
    **Restart check.** Every path that would restart the wait passes through here first — both restart arms above, `Keep waiting` on `timeout`, and § 6.1 gate 3's re-confirmation. Nothing restarts step 1 without it:
 
    ```bash
-   .agents/skills/orch/scripts/workflow-state get [ISSUE_ID] '{iterations: (.pr_comment_review.iterations // 0)}'
-   ```
-   ```bash
-   .agents/skills/orch/scripts/orch-env REVIEW_MAX_EXTERNAL_ROUNDS 4
+   .agents/skills/orch/scripts/workflow-state cap REVIEW_MAX_EXTERNAL_ROUNDS --issue [ISSUE_ID]
    ```
 
-   `iterations` below `REVIEW_MAX_EXTERNAL_ROUNDS` → restart step 1. At or past it the wait does not restart on its own: present the remaining feedback and ask `Triage again` | `Force merge` | `Stop here`. A standing `changes_requested` verdict on the current head outlives a disposition — only a dismissal or a newer review clears it, and triage dismisses only what it classifies as noise — so a restart returns that same verdict at once and triages past the cap. `Triage again` is the user's override for one more pass, which returns here; `Force merge` records the override and continues to step 2 with the § 6.1 gates applying; `Stop here` goes to § 6 with `MERGE_READY = false` and skips § 5.
+   A `below` verdict on `REVIEW_MAX_EXTERNAL_ROUNDS` → restart step 1. On `at-cap` the wait does not restart on its own: present the remaining feedback and ask `Triage again` | `Force merge` | `Stop here`. A standing `changes_requested` verdict on the current head outlives a disposition — only a dismissal or a newer review clears it, and triage dismisses only what it classifies as noise — so a restart returns that same verdict at once and triages past the cap. `Triage again` is the user's override for one more pass, which returns here; `Force merge` records the override and continues to step 2 with the § 6.1 gates applying; `Stop here` goes to § 6 with `MERGE_READY = false` and skips § 5.
 
    **On `timeout`**: `Keep waiting` goes to the Restart check; `Force merge` records the override and continues to step 2 with the § 6.1 gates still applying; `Stop here` goes to § 6 with `MERGE_READY = false` and skips § 5.
 
@@ -257,7 +254,7 @@ After any fix-up push: push → the Restart check, and on a restart wait for a N
 ### 5.1 CI Failure Recovery
 
 ```bash
-.agents/skills/orch/scripts/orch-env CI_FIX_MAX_CYCLES 6
+.agents/skills/orch/scripts/workflow-state cap CI_FIX_MAX_CYCLES
 ```
 
 The printed value is `MAX_CYCLES`. Reruns-in-place are for flakes and re-gating on unchanged workflows only; a PR that changes gate or CI workflow behavior exhibits it only on a fresh head.

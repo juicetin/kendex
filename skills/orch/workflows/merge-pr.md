@@ -226,7 +226,7 @@ Use the output as `MAIN_REPO_ROOT`.
    **Recovery cycle** — route the failure back into ci-fix, never fix CI by hand:
 
    ```bash
-   .agents/skills/orch/scripts/orch-env CI_FIX_MAX_CYCLES 6
+   .agents/skills/orch/scripts/workflow-state cap CI_FIX_MAX_CYCLES
    ```
 
    Max `[MAX_CYCLES]` recovery cycles per merge-pr run. At the cap, report the failing check names, ci-fix's last error summary, and what each cycle attempted — never a bare "persistent failure" — then skip steps 2-4 and hand back. Use rerun-in-place only for flakes; gate or CI behavior changes need a fresh head.
@@ -281,7 +281,7 @@ Use the output as `MAIN_REPO_ROOT`.
 
       `closed [PARENT_ID]` → record the closure in § 6 with every stderr diagnostic from the helper. If this container has a container parent, re-run the step-2 sync and repeat a-c for that parent.
 
-      `deferred [CHILD_IDS...]` → record `container [PARENT_ID] stays open (pending: [CHILD_IDS])` in § 6 and continue to step 3. When `[ISSUE]` is among `[CHILD_IDS]`, report `closure for [ISSUE] has not propagated; rerun merge-pr`. A bare `deferred` means the 120-second lock wait expired; report that and continue. On a non-zero exit, carry its diagnostic into § 6, do not climb to another parent, and continue to step 3.
+      `deferred [CHILD_IDS...]` → record `container [PARENT_ID] stays open (pending: [CHILD_IDS])` in § 6 and continue to step 3. When `[ISSUE]` is among `[CHILD_IDS]`, report `closure for [ISSUE] has not propagated; rerun merge-pr`. A bare `deferred` means the 120-second lock wait expired; report that and continue. On a non-zero exit, carry its diagnostic into § 6, do not climb to another parent, and continue to step 3; the container stays OPEN and the close is safe to repeat once the diagnostic's cause is gone — a failed `gh pr list` among them — so report `container [PARENT_ID] stays open; rerun merge-pr to close it`. Re-running costs nothing when the parent is already complete: the helper short-circuits to `closed`.
 
 3. **Sync the main repo** — always runs after a merge.
 
