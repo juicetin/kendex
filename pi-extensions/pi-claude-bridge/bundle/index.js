@@ -27552,8 +27552,13 @@ function deliveredSpellings(name) {
   const canonical = SDK_TOOL_ALIASES[name];
   return canonical ? [name, canonical] : [name];
 }
-var CONNECTOR_DISCOVERY_TOOLS = ["ToolSearch", "ListMcpResources", "ReadMcpResource"];
+var MCP_RESOURCE_TOOLS = ["ListMcpResources", "ReadMcpResource"];
+var CONNECTOR_DISCOVERY_TOOLS = ["ToolSearch", ...MCP_RESOURCE_TOOLS];
 var CONNECTOR_DISCOVERY_TOOL_NAMES = new Set(CONNECTOR_DISCOVERY_TOOLS.flatMap(deliveredSpellings));
+var MCP_RESOURCE_TOOL_NAMES = new Set(MCP_RESOURCE_TOOLS.flatMap(deliveredSpellings));
+function isMcpResourceTool(name) {
+  return MCP_RESOURCE_TOOL_NAMES.has(name);
+}
 var CONNECTOR_NS_PREFIX2 = "mcp__claude_ai_";
 var CONNECTOR_NS_GMAIL = `${CONNECTOR_NS_PREFIX2}Gmail__`;
 var CONNECTOR_NS_CALENDAR = `${CONNECTOR_NS_PREFIX2}Google_Calendar__`;
@@ -28304,8 +28309,8 @@ var QueryContext = class {
   deferredUserMessages = [];
   handledTerminalError = false;
   // Once visible text/thinking, a complete tool call, or a child-executed
-  // CONNECTOR dispatch reaches Pi, the request must never be replayed on
-  // another account (duplicate side effects). Query-scoped, not per-turn:
+  // connector/foreign-MCP dispatch reaches Pi, the request must never be
+  // replayed on another account (duplicate side effects). Query-scoped, not per-turn:
   // resetTurnState must not clear it.
   committedOutput = false;
   /** True when this query holds NO claim on the module-level shared session
@@ -45242,6 +45247,35 @@ var SDK_TO_PI_TOOL_NAME = {
   edit: "edit",
   bash: "bash"
 };
+var BRIDGED_TOOL_PREFIXES = [
+  MCP_TOOL_PREFIX,
+  `mcp__${MCP_SERVER_NAME.replace(/-/g, "_")}__`,
+  `mcp/${MCP_SERVER_NAME}/`,
+  `mcp/${MCP_SERVER_NAME.replace(/-/g, "_")}/`
+];
+function bridgedToolSuffix(normalized) {
+  const prefix = BRIDGED_TOOL_PREFIXES.find((candidate) => normalized.startsWith(candidate));
+  return prefix ? normalized.slice(prefix.length) : void 0;
+}
+function isForeignMcpTool(name) {
+  if (typeof name !== "string") return false;
+  const normalized = name.toLowerCase();
+  return (normalized.startsWith("mcp__") || normalized.startsWith("mcp/")) && bridgedToolSuffix(normalized) === void 0;
+}
+function isPiDispatchable(name, customToolNameToPi) {
+  if (typeof name !== "string" || !name) return false;
+  const normalized = name.toLowerCase();
+  const hasManifest = Boolean(customToolNameToPi?.size);
+  if (customToolNameToPi?.has(name) || customToolNameToPi?.has(normalized)) return true;
+  const bridgedSuffix = bridgedToolSuffix(normalized);
+  if (bridgedSuffix !== void 0) {
+    if (!hasManifest) return true;
+    return customToolNameToPi?.has(`${MCP_TOOL_PREFIX}${bridgedSuffix}`) ?? false;
+  }
+  if (isForeignMcpTool(name)) return false;
+  if (isMcpResourceTool(name)) return true;
+  return !hasManifest;
+}
 function mapToolName(name, customToolNameToPi) {
   const normalized = name.toLowerCase();
   const builtin = SDK_TO_PI_TOOL_NAME[normalized];
@@ -45250,13 +45284,9 @@ function mapToolName(name, customToolNameToPi) {
     const mapped = customToolNameToPi.get(name) ?? customToolNameToPi.get(normalized);
     if (mapped) return mapped;
   }
-  for (const prefix of [
-    MCP_TOOL_PREFIX,
-    `mcp__${MCP_SERVER_NAME.replace(/-/g, "_")}__`,
-    `mcp/${MCP_SERVER_NAME}/`,
-    `mcp/${MCP_SERVER_NAME.replace(/-/g, "_")}/`
-  ]) {
-    if (normalized.startsWith(prefix)) return normalized.slice(prefix.length);
+  const bridgedSuffix = bridgedToolSuffix(normalized);
+  if (bridgedSuffix !== void 0) {
+    return customToolNameToPi?.get(`${MCP_TOOL_PREFIX}${bridgedSuffix}`) ?? bridgedSuffix;
   }
   return name;
 }
@@ -45474,6 +45504,12 @@ function processStreamEvent(message, customToolNameToPi, model, c = ctx()) {
       debug(`processStreamEvent: child-executed tool ${event.content_block.name} [${event.content_block.id}] \u2014 not mirrored as a Pi tool call`);
       return;
     }
+    if (event.content_block?.type === "tool_use" && !isPiDispatchable(event.content_block.name, customToolNameToPi)) {
+      c.suppressedStreamIndexes.add(event.index);
+      if (isForeignMcpTool(event.content_block.name)) c.markOutputCommitted();
+      debug(`processStreamEvent: non-dispatchable tool ${event.content_block.name} [${event.content_block.id}] \u2014 not mirrored as a Pi tool call`);
+      return;
+    }
     if (event.content_block?.type === "text") {
       c.turnBlocks.push({ type: "text", text: "", index: event.index });
       c.currentPiStream.push({ type: "text_start", contentIndex: c.turnBlocks.length - 1, partial: c.turnOutput });
@@ -45591,6 +45627,11 @@ function appendMissingToolUsesFromAssistant(assistantMsg, model, customToolNameT
       debug(`assistant message: child-executed tool ${block.name} [${block.id}] \u2014 not mirrored as a Pi tool call`);
       continue;
     }
+    if (!isPiDispatchable(block.name, customToolNameToPi)) {
+      if (isForeignMcpTool(block.name)) c.markOutputCommitted();
+      debug(`assistant message: non-dispatchable tool ${block.name} [${block.id}] \u2014 not mirrored as a Pi tool call`);
+      continue;
+    }
     const existingIdx = c.turnBlocks.findIndex((b) => b.type === "toolCall" && b.id === block.id);
     if (existingIdx < 0 && (c.forwardedToolCallIds.has(block.id) || c.deadToolCallIds.has(block.id))) {
       debug(`assistant message: tool_use ${block.id} already ${c.forwardedToolCallIds.has(block.id) ? "forwarded" : "dead"} \u2014 skipping duplicate`);
@@ -45682,6 +45723,11 @@ function processAssistantMessage(message, model, customToolNameToPi, c = ctx()) 
       if (isChildExecutedTool(block.name)) {
         c.noteChildExecutedToolCall(block.id, block.name);
         debug(`processAssistantMessage fallback: child-executed tool ${block.name} [${block.id}] \u2014 not mirrored as a Pi tool call`);
+        continue;
+      }
+      if (!isPiDispatchable(block.name, customToolNameToPi)) {
+        if (isForeignMcpTool(block.name)) c.markOutputCommitted();
+        debug(`processAssistantMessage fallback: non-dispatchable tool ${block.name} [${block.id}] \u2014 not mirrored as a Pi tool call`);
         continue;
       }
       if (!c.turnBlocks.some((b) => b.type === "toolCall" && b.id === block.id) && (c.forwardedToolCallIds.has(block.id) || c.deadToolCallIds.has(block.id))) {
@@ -47270,6 +47316,7 @@ export {
   isChildInternalTool,
   isConnectorTool,
   isConnectorWriteTool,
+  isPiDispatchable,
   isUsageLimitMessage,
   listAccountConnectors,
   mapToolName,

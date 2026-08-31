@@ -1,10 +1,47 @@
+import { isMcpResourceTool } from "./connectors.js";
 import { MCP_SERVER_NAME, MCP_TOOL_PREFIX } from "./skills.js";
 
 const SDK_TO_PI_TOOL_NAME: Record<string, string> = {
 	read: "read", write: "write", edit: "edit", bash: "bash",
 };
 
+const BRIDGED_TOOL_PREFIXES = [
+	MCP_TOOL_PREFIX,
+	`mcp__${MCP_SERVER_NAME.replace(/-/g, "_")}__`,
+	`mcp/${MCP_SERVER_NAME}/`,
+	`mcp/${MCP_SERVER_NAME.replace(/-/g, "_")}/`,
+];
+
 // --- Provider helpers: tool name mapping ---
+
+function bridgedToolSuffix(normalized: string): string | undefined {
+	const prefix = BRIDGED_TOOL_PREFIXES.find((candidate) => normalized.startsWith(candidate));
+	return prefix ? normalized.slice(prefix.length) : undefined;
+}
+
+export function isForeignMcpTool(name: unknown): boolean {
+	if (typeof name !== "string") return false;
+	const normalized = name.toLowerCase();
+	return (normalized.startsWith("mcp__") || normalized.startsWith("mcp/")) && bridgedToolSuffix(normalized) === undefined;
+}
+
+export function isPiDispatchable(name: unknown, customToolNameToPi?: Map<string, string>): boolean {
+	if (typeof name !== "string" || !name) return false;
+	const normalized = name.toLowerCase();
+	const hasManifest = Boolean(customToolNameToPi?.size);
+	if (customToolNameToPi?.has(name) || customToolNameToPi?.has(normalized)) return true;
+	const bridgedSuffix = bridgedToolSuffix(normalized);
+	if (bridgedSuffix !== undefined) {
+		if (!hasManifest) return true;
+		return customToolNameToPi?.has(`${MCP_TOOL_PREFIX}${bridgedSuffix}`) ?? false;
+	}
+	// A foreign MCP namespace belongs to a child-loaded server, not Pi's bridge.
+	if (isForeignMcpTool(name)) return false;
+	// Resource discovery is deliberately mirrored as Pi's account-access audit.
+	if (isMcpResourceTool(name)) return true;
+	// A populated manifest is authoritative: every other bare name is a naming slip.
+	return !hasManifest;
+}
 
 export function mapToolName(name: string, customToolNameToPi?: Map<string, string>): string {
 	const normalized = name.toLowerCase();
@@ -14,13 +51,9 @@ export function mapToolName(name: string, customToolNameToPi?: Map<string, strin
 		const mapped = customToolNameToPi.get(name) ?? customToolNameToPi.get(normalized);
 		if (mapped) return mapped;
 	}
-	for (const prefix of [
-		MCP_TOOL_PREFIX,
-		`mcp__${MCP_SERVER_NAME.replace(/-/g, "_")}__`,
-		`mcp/${MCP_SERVER_NAME}/`,
-		`mcp/${MCP_SERVER_NAME.replace(/-/g, "_")}/`,
-	]) {
-		if (normalized.startsWith(prefix)) return normalized.slice(prefix.length);
+	const bridgedSuffix = bridgedToolSuffix(normalized);
+	if (bridgedSuffix !== undefined) {
+		return customToolNameToPi?.get(`${MCP_TOOL_PREFIX}${bridgedSuffix}`) ?? bridgedSuffix;
 	}
 	return name;
 }

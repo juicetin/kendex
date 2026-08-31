@@ -342,6 +342,80 @@ describe("child-executed tools are never mirrored as Pi tool calls", () => {
 		assert.equal(c.turnSawToolCall, true);
 	});
 
+	it("does not mirror bare Pi tools or foreign MCP calls on any emission path", () => {
+		const manifest = new Map([
+			["mcp__custom-tools__read", "read"],
+			["mcp__custom-tools__grep", "grep"],
+		]);
+		const freshContext = () => {
+			resetStack();
+			const c = ctx();
+			c.resetTurnState(model);
+			installFakeStream();
+			return c;
+		};
+		const assertNoPiCall = (c, committedOutput) => {
+			assert.equal(c.turnBlocks.length, 0);
+			assert.equal(c.turnSawToolCall, false);
+			assert.deepEqual(c.turnToolCallIds, []);
+			assert.equal(c.committedOutput, committedOutput);
+		};
+
+		let c = freshContext();
+		processStreamEvent(streamEvent({
+			type: "content_block_start", index: 0,
+			content_block: { type: "tool_use", id: "toolu_bare", name: "grep", input: {} },
+		}), manifest, model);
+		processStreamEvent(streamEvent({ type: "content_block_stop", index: 0 }), manifest, model);
+		assertNoPiCall(c, false);
+
+		c = freshContext();
+		processStreamEvent(streamEvent({
+			type: "content_block_start", index: 0,
+			content_block: { type: "tool_use", id: "toolu_nameless", input: {} },
+		}), manifest, model);
+		processStreamEvent(streamEvent({ type: "content_block_stop", index: 0 }), manifest, model);
+		assertNoPiCall(c, false);
+
+		c = freshContext();
+		processStreamEvent(streamEvent({
+			type: "content_block_start", index: 0,
+			content_block: { type: "tool_use", id: "toolu_native_stream", name: "mcp__filesystem__read_file", input: {} },
+		}), manifest, model);
+		processStreamEvent(streamEvent({ type: "content_block_stop", index: 0 }), manifest, model);
+		assertNoPiCall(c, true);
+
+		c = freshContext();
+		processStreamEvent(streamEvent({
+			type: "content_block_start", index: 0,
+			content_block: { type: "tool_use", id: "toolu_native_slash_stream", name: "mcp/filesystem/read_file", input: {} },
+		}), manifest, model);
+		processStreamEvent(streamEvent({ type: "content_block_stop", index: 0 }), manifest, model);
+		assertNoPiCall(c, true);
+
+		c = freshContext();
+		c.turnSawStreamEvent = true;
+		processAssistantMessage({
+			type: "assistant",
+			message: { content: [{ type: "tool_use", id: "toolu_native_boundary", name: "mcp__filesystem__read_file", input: {} }] },
+		}, model, manifest);
+		assertNoPiCall(c, true);
+
+		c = freshContext();
+		processAssistantMessage({
+			type: "assistant",
+			message: { content: [{ type: "tool_use", id: "toolu_native_fallback", name: "mcp__filesystem__read_file", input: {} }] },
+		}, model, manifest);
+		assertNoPiCall(c, true);
+
+		c = freshContext();
+		processAssistantMessage({
+			type: "assistant",
+			message: { content: [{ type: "tool_use", id: "toolu_bare_fallback", name: "bash", input: {} }] },
+		}, model, manifest);
+		assertNoPiCall(c, false);
+	});
+
 	it("mirrors a streamed MCP-resource read under its stream-side spelling (kendex#1007)", () => {
 		// What actually arrives on the stream is the SDK's ALIASED name
 		// (`ReadMcpResourceTool`, not the request-side `ReadMcpResource`), and it
@@ -355,7 +429,7 @@ describe("child-executed tools are never mirrored as Pi tool calls", () => {
 			type: "content_block_start",
 			index: 0,
 			content_block: { type: "tool_use", id: "toolu_rr", name: "ReadMcpResourceTool", input: {} },
-		}), new Map(), model);
+		}), new Map([["mcp__custom-tools__grep", "grep"]]), model);
 
 		assert.equal(c.turnBlocks.length, 1, "a resource read is a visible Pi tool call");
 		assert.equal(c.turnBlocks[0].name, "ReadMcpResourceTool");
@@ -374,7 +448,7 @@ describe("child-executed tools are never mirrored as Pi tool calls", () => {
 			message: {
 				content: [{ type: "tool_use", id: "toolu_lr", name: "ListMcpResourcesTool", input: { server: "s1" } }],
 			},
-		}, model, new Map());
+		}, model, new Map([["mcp__custom-tools__grep", "grep"]]));
 
 		assert.equal(c.turnBlocks.length, 1);
 		assert.equal(c.turnBlocks[0].name, "ListMcpResourcesTool");
