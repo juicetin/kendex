@@ -6,7 +6,8 @@
 //! one `<plugin>/<leaf>` segment pair, and nothing more.
 //!
 //! And what catalog text looks like on its way out: `shown` for a screen,
-//! `quoted` for a command a person is going to paste.
+//! `quoted` for a command a person is going to paste, `urlencoded` for a
+//! URL something is going to follow.
 
 mod stored;
 pub use stored::folding_sibling;
@@ -201,6 +202,23 @@ pub fn quoted(word: &str) -> String {
     format!("'{}'", word.replace('\'', "'\\''"))
 }
 
+/// A value inside a URL, percent-encoded. Every byte outside the unreserved
+/// set goes, not the ones that look dangerous: which characters are live is
+/// the URL grammar's judgement and not this function's, and a query kendex
+/// builds is a request somebody's machine makes.
+pub fn urlencoded(text: &str) -> String {
+    let mut encoded = String::with_capacity(text.len());
+    for byte in text.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(char::from(byte));
+            }
+            _ => encoded.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    encoded
+}
+
 /// Why this item name cannot be installed. A name from a plugin-registry-shaped
 /// catalog carries its plugin — `<plugin>/<leaf>` — and that is the only
 /// `/` any name may hold.
@@ -294,6 +312,33 @@ mod tests {
         // shown() renders them visible rather than letting them act.
         assert!(!shown("pay\u{202e}gnp").contains('\u{202e}'));
         assert!(!shown("a\u{200b}b").contains('\u{200b}'));
+    }
+
+    /// The two spellings meet: a pasteable command is `quoted`, and every
+    /// line the CLI prints is `shown`. For a word a shell can read back,
+    /// the escape changes nothing — the characters quoting is for are not
+    /// the characters escaping is for — so the command survives the seam.
+    ///
+    /// Where they do meet, the escape wins, and it has to: a word holding
+    /// a control character has no spelling a terminal can be handed, and
+    /// an unrunnable command is a smaller loss than a repainted screen.
+    #[test]
+    fn escaping_a_quoted_word_leaves_a_command_a_shell_still_reads() {
+        for word in [
+            "/home/me/dev",
+            "/home/me/it's",
+            "/home/me/a b",
+            "/home/me/a$x;b",
+            "/home/me/a`id`b",
+            "/home/me/a&b|c",
+            "C:\\Users\\me",
+        ] {
+            let quoted = quoted(word);
+            assert_eq!(shown(&quoted), quoted, "{word:?} did not survive the seam");
+        }
+        let hostile = quoted("/home/me/a\u{1b}[31mb");
+        assert_ne!(shown(&hostile), hostile, "the escape sequence was carried");
+        assert!(!shown(&hostile).contains('\u{1b}'));
     }
 
     #[test]

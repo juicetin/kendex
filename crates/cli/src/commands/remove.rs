@@ -8,7 +8,6 @@ use kendex_core::apply::Op;
 use kendex_core::engine::{EngineReport, ops};
 use kendex_core::env::Env;
 use kendex_core::model::Scope;
-use kendex_core::names::shown;
 
 /// What a removal does with the declaration.
 #[derive(Clone, Copy)]
@@ -49,11 +48,7 @@ pub fn run(env: &Env, names: Vec<String>, filter: ScopeFilter, mode: Removal) ->
             // so the run still fails: the person asked for a removal that
             // did not happen everywhere they asked for it.
             Err(error) if error.is_unreadable_record() => {
-                warn(&format!(
-                    "skipped {}: {}",
-                    scope_label(&scope),
-                    shown(&error.to_string())
-                ));
+                warn(&format!("skipped {}: {}", scope_label(&scope), error));
                 skipped.push(scope_label(&scope));
                 continue;
             }
@@ -68,11 +63,7 @@ pub fn run(env: &Env, names: Vec<String>, filter: ScopeFilter, mode: Removal) ->
         // until the refresh the closing line names; the warning carries no
         // type to tell it from the rest, so it prints with them.
         for warning in &report.warnings {
-            warn(&format!(
-                "warning: {}: {}",
-                shown(&warning.name),
-                shown(&warning.message)
-            ));
+            warn(&format!("warning: {}: {}", warning.name, warning.message));
         }
         if !takes_anything(&report) {
             continue;
@@ -88,7 +79,7 @@ pub fn run(env: &Env, names: Vec<String>, filter: ScopeFilter, mode: Removal) ->
         // list of writes under the word "removed" says the wrong thing.
         say("changes:");
         for op in &report.plan.ops {
-            say(&format!("  - {}", shown(&op.line())));
+            say(&format!("  - {}", op.line()));
         }
         if matches!(mode, Removal::KeepDeclaration) {
             say(&format!(
@@ -150,7 +141,7 @@ fn say_split(report: &EngineReport, mode: Removal) {
             note(&format!(
                 "removing {} {} for {}{reason}",
                 change.kind.name(),
-                shown(&change.name),
+                change.name,
                 change.harness.display_name()
             ));
         }
@@ -159,9 +150,9 @@ fn say_split(report: &EngineReport, mode: Removal) {
         note(&format!(
             "keeping {} {} for {} — {}",
             kept.kind.name(),
-            shown(&kept.name),
+            kept.name,
             kept.harness.display_name(),
-            shown(&kept.reason)
+            kept.reason
         ));
     }
 }

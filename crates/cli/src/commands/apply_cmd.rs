@@ -1,7 +1,6 @@
 use kendex_core::engine::{PlanOptions, plan_apply};
 use kendex_core::env::Env;
 use kendex_core::manifest::{self, ManifestFile};
-use kendex_core::names::shown;
 
 use super::engine_common::{confirm_and_apply, print_report, print_unmanaged};
 use super::ledger::{Wrote, say_ledger, say_preview};
@@ -64,11 +63,7 @@ pub fn run(env: &Env, args: ApplyArgs) -> CliResult {
                 continue;
             }
             Err(error) if error.is_unreadable_record() => {
-                warn(&format!(
-                    "skipped {}: {}",
-                    scope_label(&scope),
-                    shown(&error.to_string())
-                ));
+                warn(&format!("skipped {}: {}", scope_label(&scope), error));
                 skipped.push(scope_label(&scope));
                 continue;
             }
@@ -86,11 +81,7 @@ pub fn run(env: &Env, args: ApplyArgs) -> CliResult {
             match plan_apply(env, &scope, &options) {
                 Ok(report) => report,
                 Err(error) if error.is_unreadable_record() => {
-                    warn(&format!(
-                        "skipped {}: {}",
-                        scope_label(&scope),
-                        shown(&error.to_string())
-                    ));
+                    warn(&format!("skipped {}: {}", scope_label(&scope), error));
                     skipped.push(scope_label(&scope));
                     continue;
                 }
@@ -140,10 +131,7 @@ pub fn run(env: &Env, args: ApplyArgs) -> CliResult {
                 // warning under the run's own closing line reads as a line
                 // from the next one.
                 if let Err(error) = kendex_core::drift::snapshot::record(env, &scope) {
-                    warn(&format!(
-                        "warning: snapshot not derived ({})",
-                        shown(&error.to_string())
-                    ));
+                    warn(&format!("warning: snapshot not derived ({})", error));
                 }
                 // `None` where the plan had nothing to do: a scope that
                 // wrote nothing because it had nothing to write is up to

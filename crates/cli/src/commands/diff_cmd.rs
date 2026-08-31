@@ -1,7 +1,6 @@
 use clap::Args;
 
 use kendex_core::env::Env;
-use kendex_core::names::shown;
 use kendex_core::package::diff::{FileStatus, LineKind, VersionSel};
 
 use super::pin::parse_kind;
@@ -71,11 +70,13 @@ pub fn run(env: &Env, args: DiffArgs) -> CliResult {
             FileStatus::Binary => " (binary)",
             FileStatus::TooLarge => " (too large to show)",
         };
+        // The blank line before each heading is said rather than written
+        // into the line: a break in a value is a value's break, and only
+        // a call is a break of this verb's own.
+        say("");
         say(&format!(
-            "\n{}{status}  +{} -{}",
-            shown(&file.path),
-            file.additions,
-            file.deletions
+            "{}{status}  +{} -{}",
+            file.path, file.additions, file.deletions
         ));
         for hunk in &file.hunks {
             say(&hunk.header);

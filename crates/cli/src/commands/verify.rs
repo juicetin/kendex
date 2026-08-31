@@ -3,10 +3,9 @@ use std::process::ExitCode;
 use kendex_core::engine::{DriftRow, DriftState, audit};
 use kendex_core::env::Env;
 use kendex_core::lock::{load as load_lock, lock_path};
-use kendex_core::names::shown;
 
 use super::engine_common::print_unmanaged;
-use super::{fail, resolve_scopes, say, scope_label};
+use super::{fail, fail_refusal, resolve_scopes, say, scope_label};
 use crate::scope::ScopeFilter;
 use crate::ui;
 
@@ -41,11 +40,13 @@ pub fn run(
         let report = match (audited, lock.entries.is_empty()) {
             (Ok(report), _) => report,
             (Err(error), true) => {
-                fail(&format!(
-                    "! {} not checked: {}",
-                    scope_label(&scope),
-                    shown(&error.to_string())
-                ));
+                // The error picks its own door. A manifest that will not
+                // parse names one finding per line and keeps those breaks;
+                // every other failure here — unreadable TOML, a file that
+                // would not open — is a sentence naming a path, and a break
+                // in that path is content rather than a line of kendex's
+                // own verdict.
+                fail_refusal(&format!("! {} not checked: ", scope_label(&scope)), &error);
                 continue;
             }
             (Err(error), false) => return Err(error.into()),
@@ -115,18 +116,12 @@ fn say_row(
                 || n.contains("not found in source")
                 || n.contains("unreadable"))
     });
-    // A locked name came out of a manifest a person wrote and a catalog
-    // kendex did not, and all three rows below print it, so it is escaped
-    // once here rather than in each of them.
     let kind = entry.kind.name();
-    let name = shown(&entry.name);
+    let name = &entry.name;
     let harness = entry.harness.name();
     let bad = match problem {
         Some(row) => {
-            fail(&format!(
-                "✗ {kind} {name} [{harness}]: {}",
-                shown(&row.detail)
-            ));
+            fail(&format!("✗ {kind} {name} [{harness}]: {}", row.detail));
             true
         }
         None if unreachable_source => {
@@ -150,7 +145,7 @@ fn say_row(
                 .harness
                 .is_none_or(|harness| harness == entry.harness)
     }) {
-        say(&format!("  ! {}", shown(&warning.message)));
+        say(&format!("  ! {}", warning.message));
     }
     bad
 }

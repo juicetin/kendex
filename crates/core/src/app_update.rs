@@ -15,24 +15,8 @@ use crate::update_feed::{ReleaseFeed, VersionRelation, release_notes_url};
 
 pub const DEFAULT_TTL_SECS: u64 = 6 * 60 * 60;
 const MAX_CACHE_BYTES: u64 = crate::update_feed::MAX_FEED_BYTES as u64 * 3;
-const MAX_ERROR_BYTES: usize = 512;
 const MAX_ETAG_BYTES: usize = 512;
 const LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
-
-static CHECK_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct AppUpdateView {
-    pub automatic_check_enabled: bool,
-    pub status: AppUpdateStatus,
-    pub last_attempt_at: Option<String>,
-    pub last_success_at: Option<String>,
-    pub served_feed_at: Option<String>,
-    pub served_feed_age_secs: Option<u32>,
-    pub served_feed_in_future: bool,
-    pub last_error: Option<AppUpdateError>,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
 #[serde(
@@ -56,31 +40,27 @@ pub enum AppUpdateStatus {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct AppUpdateError {
-    pub kind: AppUpdateErrorKind,
-    pub message: String,
-}
+/// One check at a time in this process. Two run on every launch — the
+/// startup schedule and the webview asking as it mounts — and without this
+/// both read a cache neither has written yet, both fetch, and the second
+/// write puts its own generation over the first. Held across the read, the
+/// fetch and the write, so the second caller reads what the first left and
+/// finds the interval already served. Another process is held off by
+/// [`update_lock`], which this one saves the cost of taking twice.
+static CHECK_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub enum AppUpdateErrorKind {
-    Network,
-    Http,
-    InvalidFeed,
-}
-
+/// What the last check left behind: which feed it read, the validator to
+/// send back, when it was attempted, and the document itself. Nothing
+/// about how the attempt went — the notice card names a release or says
+/// nothing, and an attempt that failed is an attempt for the interval
+/// either way.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct Cache {
     #[serde(default)]
     feed_url: String,
     etag: Option<String>,
-    fetched_at: Option<u64>,
     last_attempt_at: Option<u64>,
-    last_success_at: Option<u64>,
     body: Option<String>,
-    last_error: Option<AppUpdateError>,
 }
 
 /// Runtime inputs that identify the build and the requested check.
@@ -89,14 +69,13 @@ pub struct CheckRequest<'a> {
     pub target: &'a str,
     pub feed_url: &'a str,
     pub refresh: bool,
-    pub automatic_check_enabled: bool,
     pub muted_version: Option<&'a str>,
 }
 
-/// Return the remembered result and, when due, refresh it through the
-/// caller's transport. `refresh` is the explicit manual-check path and may
-/// fetch while automatic checks are off.
-pub fn check(env: &Env, fetch: &dyn Fetch, request: CheckRequest<'_>) -> Result<AppUpdateView> {
+/// Return the remembered standing and, when due, refresh it through the
+/// caller's transport. `refresh` is the explicit manual-check path and
+/// fetches whether or not the interval has elapsed.
+pub fn check(env: &Env, fetch: &dyn Fetch, request: CheckRequest<'_>) -> Result<AppUpdateStatus> {
     check_with_clock(env, fetch, request, clock::unix_now)
 }
 
@@ -106,7 +85,7 @@ fn check_at(
     fetch: &dyn Fetch,
     request: CheckRequest<'_>,
     now: u64,
-) -> Result<AppUpdateView> {
+) -> Result<AppUpdateStatus> {
     check_with_clock(env, fetch, request, || now)
 }
 
@@ -115,14 +94,14 @@ fn check_with_clock(
     fetch: &dyn Fetch,
     request: CheckRequest<'_>,
     clock: impl FnOnce() -> u64,
-) -> Result<AppUpdateView> {
+) -> Result<AppUpdateStatus> {
     // No protected state lives in memory. A prior panic releases the mutex,
-    // and the atomic cache file is either the old or new generation.
-    let _guard = CHECK_LOCK
+    // and the atomic cache file is either the old or the new generation.
+    let _one_at_a_time = CHECK_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let _process_guard = update_lock(env)?;
+    let _one_process_at_a_time = update_lock(env)?;
     let now = clock();
     let mut cached = read_cache(env)?.unwrap_or_default();
     let feed_url = request.feed_url.trim();
@@ -140,81 +119,48 @@ fn check_with_clock(
     let due = cached
         .last_attempt_at
         .is_none_or(|attempt| attempt > now || now - attempt >= DEFAULT_TTL_SECS);
-    if (!due || !request.automatic_check_enabled) && !request.refresh {
+    if !due && !request.refresh {
         return view(
             &cached,
-            now,
             request.current_version,
             request.target,
-            request.automatic_check_enabled,
             request.muted_version,
         );
     }
 
+    // The attempt is recorded whatever comes back, so a server that is
+    // down does not put this on the network every time the app opens. A
+    // reply that is not a usable feed leaves the last good document in
+    // place: the card names a release or says nothing, and a failed read
+    // is no evidence either way.
     cached.last_attempt_at = Some(now);
-    let response = fetch.get(feed_url, cached.etag.as_deref());
-    match response {
-        Ok(response) if response.status == 304 && cached.body.is_some() => {
-            cached.fetched_at = Some(now);
-            cached.last_success_at = Some(now);
-            cached.last_error = None;
-        }
-        Ok(response) if response.status == 200 => match ReleaseFeed::parse(&response.body) {
-            Ok(_) => match String::from_utf8(response.body) {
-                Ok(body) => {
-                    cached.etag = response.etag.filter(|etag| etag.len() <= MAX_ETAG_BYTES);
-                    cached.fetched_at = Some(now);
-                    cached.last_success_at = Some(now);
-                    cached.body = Some(body);
-                    cached.last_error = None;
-                }
-                Err(error) => {
-                    cached.last_error = Some(update_error(
-                        AppUpdateErrorKind::InvalidFeed,
-                        &error.to_string(),
-                    ));
-                }
-            },
-            Err(error) => {
-                cached.last_error = Some(update_error(
-                    AppUpdateErrorKind::InvalidFeed,
-                    &error.to_string(),
-                ));
+    match fetch.get(feed_url, cached.etag.as_deref()) {
+        Ok(response) if response.status == 200 => {
+            if ReleaseFeed::parse(&response.body).is_ok()
+                && let Ok(body) = String::from_utf8(response.body)
+            {
+                cached.etag = response.etag.filter(|etag| etag.len() <= MAX_ETAG_BYTES);
+                cached.body = Some(body);
             }
-        },
-        Ok(response) => {
-            cached.last_error = Some(update_error(
-                AppUpdateErrorKind::Http,
-                &format!("the release feed answered {}", response.status),
-            ));
         }
-        Err(error) => {
-            cached.last_error = Some(update_error(
-                AppUpdateErrorKind::Network,
-                &error.to_string(),
-            ));
-        }
+        Ok(_) | Err(_) => {}
     }
     write_cache(env, &cached)?;
     view(
         &cached,
-        now,
         request.current_version,
         request.target,
-        request.automatic_check_enabled,
         request.muted_version,
     )
 }
 
 fn view(
     cached: &Cache,
-    now: u64,
     current_version: &str,
     target: &str,
-    automatic_check_enabled: bool,
     muted_version: Option<&str>,
-) -> Result<AppUpdateView> {
-    let status = match cached.body.as_deref() {
+) -> Result<AppUpdateStatus> {
+    Ok(match cached.body.as_deref() {
         None => AppUpdateStatus::NeverChecked,
         Some(body) => {
             let feed = ReleaseFeed::parse(body.as_bytes())?;
@@ -236,20 +182,42 @@ fn view(
                 }
             }
         }
-    };
-    Ok(AppUpdateView {
-        automatic_check_enabled,
-        status,
-        last_attempt_at: cached.last_attempt_at.map(clock::iso_from_unix),
-        last_success_at: cached.last_success_at.map(clock::iso_from_unix),
-        served_feed_at: cached.fetched_at.map(clock::iso_from_unix),
-        served_feed_age_secs: cached
-            .fetched_at
-            .filter(|at| *at <= now)
-            .map(|at| u32::try_from(now - at).unwrap_or(u32::MAX)),
-        served_feed_in_future: cached.fetched_at.is_some_and(|at| at > now),
-        last_error: cached.last_error.clone(),
     })
+}
+
+/// The same one-at-a-time, held against every other kendex process.
+///
+/// The read, the fetch and the write are one transaction because the write
+/// puts back the whole document, the body read before the fetch included.
+/// Two processes overlapping without this both read the old cache; the one
+/// whose fetch succeeds writes the new feed, and the one whose fetch fails
+/// writes the old body back over it under a fresh `last_attempt_at` — the
+/// release is gone and no automatic attempt is due for six hours. Re-reading
+/// just before the write would narrow that window and not close it, so the
+/// whole transaction is serialised instead.
+///
+/// The loser waits rather than skipping: it goes on to read what the winner
+/// left, finds the interval already served, and answers from that without a
+/// fetch or a write of its own. Nothing is guarded in memory, so a process
+/// that died holding this released it with its file descriptors; one still
+/// running after `LOCK_WAIT` is named rather than written over.
+fn update_lock(env: &Env) -> Result<LockedFile> {
+    let path = env.app_update_lock_file();
+    let parent = path
+        .parent()
+        .ok_or_else(|| CoreError::io(&path, std::io::Error::other("path has no parent")))?;
+    std::fs::create_dir_all(parent).map_err(|error| CoreError::io(parent, error))?;
+    let deadline = std::time::Instant::now() + LOCK_WAIT;
+    loop {
+        match LockedFile::try_exclusive_no_follow(&path) {
+            Ok(Some(lock)) => return Ok(lock),
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Ok(None) => return Err(CoreError::AppUpdateBusy { lock: path }),
+            Err(error) => return Err(CoreError::io(&path, error)),
+        }
+    }
 }
 
 fn read_cache(env: &Env) -> Result<Option<Cache>> {
@@ -302,43 +270,6 @@ fn write_cache(env: &Env, cache: &Cache) -> Result<()> {
         why: error.to_string(),
     })?;
     atomic_write_no_follow(&path, &json)
-}
-
-fn update_lock(env: &Env) -> Result<LockedFile> {
-    let path = env.app_update_lock_file();
-    let parent = path
-        .parent()
-        .ok_or_else(|| CoreError::io(&path, std::io::Error::other("path has no parent")))?;
-    std::fs::create_dir_all(parent).map_err(|error| CoreError::io(parent, error))?;
-    let deadline = std::time::Instant::now() + LOCK_WAIT;
-    loop {
-        match LockedFile::try_exclusive_no_follow(&path) {
-            Ok(Some(lock)) => return Ok(lock),
-            Ok(None) if std::time::Instant::now() < deadline => {
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-            Ok(None) => return Err(CoreError::AppUpdateBusy { lock: path }),
-            Err(error) => return Err(CoreError::io(&path, error)),
-        }
-    }
-}
-
-fn update_error(kind: AppUpdateErrorKind, message: &str) -> AppUpdateError {
-    let message = match message.len() <= MAX_ERROR_BYTES {
-        true => message.to_owned(),
-        false => {
-            const MARKER: &str = "...";
-            let content_limit = MAX_ERROR_BYTES - MARKER.len();
-            let end = message
-                .char_indices()
-                .map(|(at, character)| at + character.len_utf8())
-                .take_while(|end| *end <= content_limit)
-                .last()
-                .unwrap_or(0);
-            format!("{}{MARKER}", &message[..end])
-        }
-    };
-    AppUpdateError { kind, message }
 }
 
 #[cfg(test)]
