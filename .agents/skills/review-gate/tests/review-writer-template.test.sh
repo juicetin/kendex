@@ -1,27 +1,28 @@
 #!/usr/bin/env bash
 # Assertions on the review-gate WORKFLOW YAML — split out of
-# review-writer.test.sh, which is the review-writer.sh engine suite. Two
-# instrument classes live here, and they are different kinds of evidence:
+# review-writer.test.sh, which is the review-writer.sh engine suite.
 #
-#   tpl:*    grep-pins on expressions offline runs cannot execute (job-level
-#            if:, permissions, triggers, refs, budgets). GitHub evaluates
-#            those, so these keep them from being silently dropped or
-#            reworded; the eviction behavior they stand for is asserted live
-#            in tests/e2e-sandbox.sh.
-#   relay:*  the relay step's SCRIPT, extracted from the YAML and EXECUTED
-#            against a gh stub — not a pin, the real shell (VST-210).
+# Two instrument classes, over two different subjects:
 #
-# BOTH RUN AGAINST BOTH COPIES: the shipped template, and the adopted
-# .github/workflows/review-gate-writer.yml found by walking up to the
-# enclosing repo. That copy is what actually gates PRs and is hand-maintained,
-# so template-only assertions would prove the behavior of a file CI never
-# runs. The template is copied VERBATIM — it carries no per-repo values — so
-# the pins below assert the same literals in both copies. Two divergence
-# classes remain, and neither is a value anyone types: this repo's
-# self-adoption swaps the vendored script path for the tracked one, and a
-# consumer that opted into check_run has uncommented two trigger lines. The
-# whole-file drift check is scoped to self-adoption for the second of those.
-# Only the template is asserted when no adopted copy is found at all.
+#   [template]  the TEMPLATE's own contract, run against
+#               templates/review-gate-writer.yml ALONE. What it covers is
+#               enumerated once, in DEVELOPMENT.md § The workflow template —
+#               repeating that list here would be a second copy to drift.
+#               What it does NOT cover is in two places: the ledger below
+#               for the IN-SET exclusions and what covers each, and that
+#               same section for the classes outside the set altogether.
+#   relay:*     the relay step's SCRIPT, extracted from the YAML and EXECUTED
+#               against a gh stub — not a pin, the real shell (VST-210). Run
+#               against both copies.
+#
+# The relay battery runs against BOTH copies: the shipped template, and the
+# adopted .github/workflows/review-gate-writer.yml found by walking up to the
+# enclosing repo. That copy is what actually gates PRs and is hand-maintained.
+# Two divergence classes are legitimate, and neither is a value anyone types:
+# this repo's self-adoption swaps the vendored script path for the tracked
+# one, and a consumer that opted into check_run has uncommented two trigger
+# lines. The whole-file drift check is scoped to self-adoption for the second
+# of those. Only the template is asserted when no adopted copy is found.
 #
 # THE RELAY NEVER REDS is the invariant every relay case asserts, over both
 # the runner's shells AND over its own environment (each env: binding dropped
@@ -112,306 +113,211 @@ else
   printf '  note  %s\n' "no adopted workflow found at ${SELF_ADOPTION:-<no enclosing repo root>} — asserting the template only"
 fi
 
-# The relay's `if:` has ONE correct spelling — the template carries no
-# per-repo values — so the pin is the string itself.
-RELAY_IF_EXPECTED="    if: github.event_name != 'merge_group' && github.event_name != 'workflow_dispatch' && github.event_name != 'schedule' && (github.event_name != 'check_run' || github.event.check_run.name == vars.REVIEW_GATE_CHECK_RUN_NAME)"
+# --------------------------------------------- the template's own contract ---
 
-# Its own must-fail control: an equality pin is only worth its verdict if it
-# rejects the edit it was written for.
-[[ "$RELAY_IF_EXPECTED || true" != "$RELAY_IF_EXPECTED" ]] &&
-  { PASS=$((PASS + 1)); printf '  ok    %s\n' "control: the relay if: pin rejects an appended '|| true'"; } ||
-  { FAIL=$((FAIL + 1)); printf '  FAIL  %s\n' "control: the relay if: pin would accept an appended '|| true'"; }
+# Derivations over the SHIPPED TEMPLATE, and only it. `validate-workflow.sh`
+# answers whether an adopted COPY is still a copy; it derives nothing, so it
+# cannot judge what the template says — edit the template, re-copy, and its
+# diff is empty on a broken contract. These run once rather than per copy:
+# equality already carries the template into every copy.
+#
+# WHAT THE SET IS. Every property is a check below or a ledger row below,
+# and DEVELOPMENT.md § The workflow template writes that list out. It is NOT
+# every property the workflow rests on — the same section names the two
+# classes deliberately outside it. Read it before calling something a gap.
+#
+# LEDGER — inside the set, deliberately NOT checked here, because something
+# else reds when the property goes:
+#   * the relay step's converge-leg refusal (`workflow_dispatch|schedule)`)
+#     — the battery below EXECUTES the step on both converge legs, so
+#     removing the guard turns each into a dispatch the case did not expect.
+#   * every status-escaping grep in the relay tolerates a no-match — the two
+#     header readers carry `|| true`, and the battery runs the step under
+#     `-eo pipefail` asserting THE RELAY NEVER REDS, so dropping either guard
+#     reds the retry and status-parsing cases. No count: it moves with the
+#     battery.
+#   * the WRITE job holds no `actions: write` — subsumed by the exactly-one
+#     grant check below, which counts the whole file and requires the one
+#     grant to sit on the relay.
+# No fourth row for DISPATCH_REF, WORKFLOW_REF or EVENT_NAME: `_relay_once`
+# supplies all three as literals, so the battery proves the step degrades
+# safely without one and nothing about whether the file still carries it.
 
-# ------------------------------------------------------------------ pins ----
+if [[ -f "$TEMPLATE" ]]; then
+  echo "=== the template's own contract ==="
+  # The write job is the file's last; the relay sits between the merge-group
+  # job and it.
+  write_block="$(sed -n '/^  write:/,$p' "$TEMPLATE")"
+  relay_block="$(sed -n '/^  request-converge:/,/^  write:/p' "$TEMPLATE")"
+  whole="$(cat "$TEMPLATE")"
 
-pin_workflows() { # file, label
-  local wf="$1" tag="$2"
-  local write_block relay_block rc count
-
-  pin() { # needle, name
-    if grep -qF -- "$1" "$wf"; then
-      PASS=$((PASS + 1)); printf '  ok    [%s] %s\n' "$tag" "$2"
-    else
-      FAIL=$((FAIL + 1)); printf '  FAIL  [%s] %s\n        missing: %s\n' "$tag" "$2" "$1"
-    fi
+  # Every presence and count read drops full-line comments first, through
+  # `live`. DEVELOPMENT.md § The workflow template states the rest of the
+  # technique — which patterns avoid a spelling, which are byte-exact on
+  # purpose, and what none of them reach.
+  live() { grep -v '^[[:space:]]*#' <<<"$1"; }
+  # A match is the failure — and so is a grep READ error, which never passes.
+  # An EXTRA match reds, which is the fail-closed direction for an absence.
+  absent() { # haystack, ERE, name
+    local rc=0
+    grep -qE -- "$2" <<<"$(live "$1")" || rc=$?
+    case "$rc" in
+      1) PASS=$((PASS + 1)); printf '  ok    [template] %s\n' "$3" ;;
+      0) FAIL=$((FAIL + 1)); printf '  FAIL  [template] %s\n' "$3" ;;
+      *) FAIL=$((FAIL + 1)); printf '  FAIL  [template] %s — could not be read\n' "$3" ;;
+    esac
   }
-  # The write job is the file's last job; the relay sits between the
-  # merge-group job and it.
-  write_block="$(sed -n '/^  write:/,$p' "$wf")"
-  relay_block="$(sed -n '/^  request-converge:/,/^  write:/p' "$wf")"
+  # COUNTED, never "at least one": a count says how many LIVE lines carry it,
+  # so a deletion and a comment-out both move the number.
+  count_is() { # haystack, ERE, expected, name
+    assert_eq "$(grep -cE -- "$2" <<<"$(live "$1")" || true)" "$3" "[template] $4"
+  }
+  tpl_eq() { assert_eq "$1" "$2" "[template] $3"; }
+
   if [[ -z "$write_block" || -z "$relay_block" ]]; then
-    FAIL=$((FAIL + 1)); printf '  FAIL  [%s] %s\n' "$tag" "could not slice the relay and write job blocks (job renamed or reordered?)"
-    return
-  fi
-
-  # --- leg routing -----------------------------------------------------
-  if grep -qF -- "    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'" <<<"$write_block"; then
-    PASS=$((PASS + 1)); printf '  ok    [%s] %s\n' "$tag" "tpl: the write job's if: is exactly the two converge legs (VST-210: no PR-attached leg holds the evictable group)"
+    FAIL=$((FAIL + 1)); printf '  FAIL  [template] %s\n' "could not slice the relay and write job blocks (job renamed or reordered?)"
   else
-    FAIL=$((FAIL + 1)); printf '  FAIL  [%s] %s\n' "$tag" "tpl: the write job's if: is exactly the two converge legs (VST-210: no PR-attached leg holds the evictable group)"
-  fi
-  # BYTE-EQUAL, not term-wise: an appended `|| true` leaves all four tokens
-  # in place and makes the expression always true, so the relay runs on the
-  # converge legs it exists to exclude.
-  local if_line
-  if_line="$(grep -m 1 -E '^    if: ' <<<"$relay_block" || true)"
-  assert_eq "$if_line" "$RELAY_IF_EXPECTED" "[$tag] tpl: the relay's if: is EXACTLY the expected expression (a term-wise check passes an appended '|| true', which makes it always true and relays every converge leg)"
+    # --- leg routing ---------------------------------------------------
+    # BYTE-EXACT, not term-wise: an appended '|| true' leaves every term in
+    # place and makes the expression always true, so the relay runs on the
+    # converge legs it excludes and the write job's evictable concurrency
+    # group lands on a PR-attached leg (VST-210).
+    tpl_eq "$(grep -m 1 -E '^    if: ' <<<"$relay_block" || true)" \
+      "    if: github.event_name != 'merge_group' && github.event_name != 'workflow_dispatch' && github.event_name != 'schedule' && (github.event_name != 'check_run' || github.event.check_run.name == vars.REVIEW_GATE_CHECK_RUN_NAME)" \
+      "the relay's if: is EXACTLY the expected expression"
+    tpl_eq "$(grep -m 1 -E '^    if: ' <<<"$write_block" || true)" \
+      "    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'" \
+      "the write job's if: is EXACTLY the two converge legs"
 
-  # EVERY status STATE converges (no state filter of ANY spelling): under
-  # newest-row evidence semantics a success→pending/failure transition is a
-  # withdrawal and must close the gate event-fast. Grep's exit code is
-  # branched explicitly — 1 is the passing absence; anything else (2 = read
-  # error) fails rather than laundering into a pass.
-  rc=0; grep -qF -- "github.event.state" "$wf" || rc=$?
-  case "$rc" in
-    1) PASS=$((PASS + 1)); printf '  ok    [%s] %s\n' "$tag" "tpl: no status state filter of any spelling" ;;
-    0) FAIL=$((FAIL + 1)); printf '  FAIL  [%s] %s\n' "$tag" "tpl: a status state filter returned — withdrawals would wait for the cron floor" ;;
-    *) FAIL=$((FAIL + 1)); printf '  FAIL  [%s] %s\n' "$tag" "tpl: the workflow could not be read (grep error)" ;;
-  esac
+    # --- the triggers the VST-210 split made load-bearing ---------------
+    # workflow_dispatch is the relay's DISPATCH TARGET, not a manual kick: a
+    # consumer pruning it strips every event-fast path to the cron floor and
+    # every relay run burns its retry against a 422. The cron floor is then
+    # the write job's only non-dispatch leg.
+    count_is "$whole" '^  workflow_dispatch: \{\}$' "1" "workflow_dispatch stays in on: — it is the relay's dispatch target"
+    count_is "$whole" '^    - cron: ' "1" "the schedule floor survives — the write job's only non-dispatch leg"
+    # Under newest-row evidence semantics a success->pending/failure
+    # transition is a WITHDRAWAL and must converge event-fast; any state
+    # filter would make it wait for the cron floor instead.
+    absent "$whole" 'github\.event\.state' "no status state filter of any spelling"
 
-  # --- the triggers the split made load-bearing ------------------------
-  # workflow_dispatch stopped being a manual convenience at VST-210: it is
-  # the relay's dispatch target. A consumer pruning it as "we never kick it
-  # by hand" silently strips every event-fast path down to the cron floor,
-  # and every relay run burns its retry against a 422.
-  pin "  workflow_dispatch: {}" "tpl: workflow_dispatch stays in on: — it is the relay's DISPATCH TARGET, not a manual kick"
-  pin "    - cron:" "tpl: the schedule floor survives — with the PR-attached legs relaying, it is the write job's only non-dispatch leg"
+    # --- the relay executes nothing, and cannot be evicted ---------------
+    # It is the job every PR-attached leg reaches, pull_request_target
+    # included: no checkout, no engine, no PR code. An evictable relay puts
+    # the CANCELLED check straight back on the PR head.
+    absent "$relay_block" 'uses: actions/checkout' "the relay checks nothing out — the pull_request_target job holds no repository content"
+    absent "$relay_block" '^    concurrency:' "the relay holds NO concurrency group, so it can never be evicted onto a PR as a cancelled check"
+    # Dispatch is its whole scope; sustained failure surfaces as gate
+    # staleness (cron floor + pr-watch --heal), never as an incident here.
+    # No `$` on the three permission patterns: YAML permits a trailing
+    # `# comment` after a scalar, which an end-anchored pattern misses. No
+    # key extends these two, so the indentation anchor alone ties them to a
+    # job-level `permissions:` entry.
+    absent "$relay_block" '^      issues: write' "the relay holds NO issues:write — the no-escalation decision stands"
 
-  # --- concurrency -----------------------------------------------------
-  pin "cancel-in-progress: false" "tpl: pending writer runs are never cancelled mid-write"
-  pin "group: review-gate-writer" "tpl: single writer concurrency group"
-  # The whole point of VST-210: the relay is the job PR-attached runs
-  # execute, so it must hold NO concurrency group — an evictable relay would
-  # put the CANCELLED check straight back into the PR's rollup.
-  rc=0; grep -q '^    concurrency:' <<<"$relay_block" || rc=$?
-  case "$rc" in
-    1) PASS=$((PASS + 1)); printf '  ok    [%s] %s\n' "$tag" "tpl: the relay holds NO concurrency group (it can never be evicted, so it can never leave a cancelled check on a PR)" ;;
-    0) FAIL=$((FAIL + 1)); printf '  FAIL  [%s] %s\n' "$tag" "tpl: the relay grew a concurrency group — PR-attached runs are evictable again (VST-210 regression)" ;;
-    *) FAIL=$((FAIL + 1)); printf '  FAIL  [%s] %s\n' "$tag" "tpl: the relay block could not be read (grep error)" ;;
-  esac
+    # --- permissions -----------------------------------------------------
+    # ONE grant in the whole file, and it is the relay's dispatch scope: the
+    # writer never re-runs CI, so a second grant anywhere — the write job
+    # included — is the decision reversed.
+    count_is "$whole" '^      actions: write' "1" "exactly ONE actions:write in the workflow (the writer never re-runs CI)"
+    count_is "$relay_block" '^      actions: write' "1" "and it is the RELAY's dispatch scope, not the write job's"
 
-  # --- the relay executes nothing ---------------------------------------
-  # The relay is the job every PR-attached leg reaches, pull_request_target
-  # included. Its stated design is "no checkout, no engine, no PR code".
-  # The persist-credentials pin below is satisfied anywhere in the file, so
-  # a checkout added HERE would otherwise keep the suite green.
-  rc=0; grep -q 'uses: actions/checkout' <<<"$relay_block" || rc=$?
-  case "$rc" in
-    1) PASS=$((PASS + 1)); printf '  ok    [%s] %s\n' "$tag" "tpl: the relay checks nothing out — the pull_request_target leg's job holds no repository content at all" ;;
-    0) FAIL=$((FAIL + 1)); printf '  FAIL  [%s] %s\n' "$tag" "tpl: the relay grew a checkout — it is the pull_request_target job and must execute no repository code" ;;
-    *) FAIL=$((FAIL + 1)); printf '  FAIL  [%s] %s\n' "$tag" "tpl: the relay block could not be read (grep error)" ;;
-  esac
+    # --- the single-writer contract --------------------------------------
+    # Two writer runs must not interleave, and a pending one must never be
+    # cancelled mid-write — the group is on the WRITE job, never the relay.
+    count_is "$write_block" '^      group: review-gate-writer$' "1" "the write job holds the single-writer concurrency group"
+    count_is "$write_block" '^      cancel-in-progress: false$' "1" "pending writer runs are never cancelled mid-write"
 
-  # --- permissions ------------------------------------------------------
-  rc=0; grep -qF -- "actions: write" <<<"$write_block" || rc=$?
-  case "$rc" in
-    1) PASS=$((PASS + 1)); printf '  ok    [%s] %s\n' "$tag" "tpl: the WRITE job holds no actions:write — the writer never re-runs CI" ;;
-    0) FAIL=$((FAIL + 1)); printf '  FAIL  [%s] %s\n' "$tag" "tpl: the write job requested actions:write (the writer never re-runs CI)" ;;
-    *) FAIL=$((FAIL + 1)); printf '  FAIL  [%s] %s\n' "$tag" "tpl: the write block could not be read (grep error)" ;;
-  esac
-  count="$(grep -cF -- "actions: write" "$wf" || true)"
-  if [[ "$count" == "1" ]] && grep -qF -- "actions: write" <<<"$relay_block"; then
-    PASS=$((PASS + 1)); printf '  ok    [%s] %s\n' "$tag" "tpl: exactly ONE actions:write in the workflow, and it is the relay's dispatch scope"
-  else
-    FAIL=$((FAIL + 1)); printf '  FAIL  [%s] %s\n        actions:write occurrences: %s (expected exactly 1, on the relay job)\n' "$tag" "tpl: exactly ONE actions:write in the workflow, and it is the relay's dispatch scope" "$count"
-  fi
-
-  # --- the check_run loop breaker names THIS workflow's own jobs --------
-  # The breaker is a literal list, and its only job is to recognise this
-  # workflow's own job completions once a consumer opts check_run in. Rename
-  # a job without the list and the guard silently stops matching — and the
-  # relay holds no concurrency group to throttle the self-amplification that
-  # follows. Pin the two sets to each other so a rename cannot land alone.
-  # Job names are the 4-space `name:`; step names carry a `- ` and do not
-  # match. The guard's arm is read as the one case-pattern line, not the
-  # whole block, so the `esac`-bound prose above it contributes no quotes.
-  local job_names guard_names
-  job_names="$(grep -E '^    name: ' "$wf" | sed 's/^    name: //' | sort)"
-  guard_names="$(sed -n '/case "\${CHECK_NAME:-}" in/,/esac/p' "$wf" \
-    | grep -E '^ *"[^"]+"(\|"[^"]+")*\)$' \
-    | tr '|' '\n' | sed 's/[")]//g; s/^ *//' | sort)"
-  if [[ -n "$guard_names" && "$job_names" == "$guard_names" ]]; then
-    PASS=$((PASS + 1)); printf '  ok    [%s] %s\n' "$tag" "tpl: the check_run breaker lists exactly this workflow's job names — a rename cannot slip past it"
-  else
-    FAIL=$((FAIL + 1)); printf '  FAIL  [%s] %s\n        jobs:  [%s]\n        guard: [%s]\n' "$tag" "tpl: the check_run breaker's list has drifted from the workflow's job names — a check_run opt-in would relay this workflow's own completions with no concurrency group to throttle it" "$(tr '\n' '/' <<<"$job_names")" "$(tr '\n' '/' <<<"$guard_names")"
-  fi
-
-  # --- the dispatch ref: which ENGINE the indirection executes ----------
-  # The single expression that decides that. github.ref_name here would be
-  # the PR's BASE branch on the pull_request_target leg, so the relay would
-  # dispatch whatever engine lives on a non-default branch — silently
-  # breaking the default-branch-defined-writer guarantee the design rests
-  # on. Two teeth: the exact literal is present on the relay, and no OTHER
-  # DISPATCH_REF value can exist anywhere. BARE, with no `|| 'branch'`
-  # fallback: the fallback was a per-repo value in a file that must carry
-  # none, and an empty resolution now lands on the step's missing-env guard,
-  # which warns and exits 0 rather than reddening a PR-attached leg.
-  if grep -qF -- 'DISPATCH_REF: ${{ github.event.repository.default_branch }}' <<<"$relay_block"; then
-    PASS=$((PASS + 1)); printf '  ok    [%s] %s\n' "$tag" "tpl: the relay dispatches onto the DEFAULT branch, with no per-repo fallback to keep in sync"
-  else
-    FAIL=$((FAIL + 1)); printf '  FAIL  [%s] %s\n' "$tag" "tpl: the relay's DISPATCH_REF is not the bare default-branch expression — either the converge pass runs a non-default-branch engine, or a hardcoded fallback branch is back in a file that must carry no per-repo values"
-  fi
-  # The env: BINDING, at its own indentation — the step reads the same name
-  # into a defaulted local, and counting that as a second binding would make
-  # the pin fire on the fail-closed guard instead of on a real second value.
-  count="$(grep -cE '^      DISPATCH_REF: ' "$wf" || true)"
-  assert_eq "$count" "1" "[$tag] tpl: exactly ONE DISPATCH_REF binding (a second could not be reached by the shape pin above)"
-
-  # --- the budget pair: backoff cap vs the job's timeout ----------------
-  # Assert the RELATION, not the literals, so a deliberate coordinated retune
-  # still passes and an uncoordinated one lands on a test that explains why.
-  local tmo cap_s attempt_s jitter_s worst
-  # `|| true` on each: a no-match grep exits 1, and under this file's
-  # `set -euo pipefail` that status propagates out of the command
-  # substitution and kills the SUITE — so removing the very term being pinned
-  # would abort the run instead of failing it, which is silence reading as
-  # success in the check meant to catch it.
-  tmo="$(grep -oE '^    timeout-minutes: [0-9]+' <<<"$relay_block" | head -n 1 | awk '{print $2}' || true)"
-  cap_s="$(grep -oE '^          cap=[0-9]+' <<<"$relay_block" | head -n 1 | cut -d= -f2 || true)"
-  # Extracted, not hardcoded: all three terms of the budget come from the
-  # file, so raising any one of them without the others lands here.
-  attempt_s="$(grep -oE 'timeout [0-9]+ gh api' <<<"$relay_block" | head -n 1 | awk '{print $2}' || true)"
-  jitter_s="$(grep -oE '^          jitter_max=[0-9]+' <<<"$relay_block" | head -n 1 | cut -d= -f2 || true)"
-  if [[ -z "$tmo" || -z "$cap_s" || -z "$attempt_s" || -z "$jitter_s" ]]; then
-    FAIL=$((FAIL + 1)); printf '  FAIL  [%s] %s\n        timeout-minutes=%s cap=%s per-attempt=%s jitter_max=%s\n' "$tag" "tpl: could not read the relay's timeout-minutes, backoff cap, per-attempt bound and jitter bound — the budget is unpinned" "$tmo" "$cap_s" "$attempt_s" "$jitter_s"
-  else
-    # Worst case the step can produce: two bounded dispatch attempts plus the
-    # capped wait between them plus the jitter added on top of that wait.
-    worst=$(( 2 * attempt_s + cap_s + jitter_s ))
-    if (( tmo * 60 > worst )); then
-      PASS=$((PASS + 1)); printf '  ok    [%s] %s\n' "$tag" "tpl: the relay's timeout budget (${tmo}m) still outlasts its worst case (2 x ${attempt_s}s attempts + ${cap_s}s cap + ${jitter_s}s jitter = ${worst}s) — a retry can finish instead of being CANCELLED on the PR head"
+    # --- checkouts -------------------------------------------------------
+    # A write-capable token on a checked-out tree is the pull_request_target
+    # hazard. COUNTED against the checkouts: a single-match pin is satisfied
+    # by the first and says nothing about the second.
+    checkouts="$(grep -cE 'uses: actions/checkout' <<<"$(live "$whole")" || true)"
+    creds="$(grep -cE '^          persist-credentials: false$' <<<"$(live "$whole")" || true)"
+    if [[ "$checkouts" != "0" && "$creds" == "$checkouts" ]]; then
+      PASS=$((PASS + 1)); printf '  ok    [template] %s\n' "all $checkouts checkout(s) drop credentials"
     else
-      FAIL=$((FAIL + 1)); printf '  FAIL  [%s] %s\n' "$tag" "tpl: the relay's timeout budget (${tmo}m) is NOT above its worst case (${worst}s) — a rate-limit retry would be killed by the timeout, leaving a cancelled check on the PR head"
+      FAIL=$((FAIL + 1)); printf '  FAIL  [template] EVERY checkout must drop credentials — %s checkout(s), %s persist-credentials: false\n' "$checkouts" "$creds"
+    fi
+    # Both engine jobs check out the DEFAULT branch, bare: a fallback would
+    # be a per-repo value in a file that carries none, and a wrong one runs
+    # an engine from a branch that does not exist.
+    count_is "$whole" '^          ref: \$\{\{ github\.event\.repository\.default_branch \}\}$' "$checkouts" "EVERY checkout pins the bare default-branch expression"
+    absent "$whole" 'default_branch \|\|' "no ref falls back to a hardcoded branch name"
+    # ORDER, not ingredients: a guard AFTER its checkout has already let the
+    # unpinned ref onto disk. G a guard's binding, C a checkout, in file order.
+    tpl_eq "$(live "$whole" | awk '/^          DEFAULT_BRANCH: / { printf "G" } /uses: actions\/checkout/ { printf "C" } END { printf "\n" }')" "GCGC" "each engine job's default-branch guard PRECEDES its checkout"
+    # The REFUSAL, not the diagnostic beside it. Bound to the guard's OWN
+    # message: the two missing-engine guards also exit 1.
+    tpl_eq "$(live "$whole" | awk '/default_branch resolved empty/ { w = 3; next } w > 0 { if ($0 ~ /^[[:space:]]*exit[[:space:]]+[1-9]/) { n++; w = 0 } else w-- } END { print n + 0 }')" "2" "BOTH guard steps exit NONZERO on an empty resolution"
+
+    # --- which ENGINE the indirection executes ---------------------------
+    # github.ref_name here would be the PR's BASE branch on the
+    # pull_request_target leg, so the relay would dispatch whatever engine
+    # lives on a non-default branch. Equality on the binding, plus a count so
+    # a second binding cannot sit out of reach of it. The battery cannot
+    # cover this: _relay_once supplies DISPATCH_REF as a literal.
+    tpl_eq "$(grep -m 1 -E '^      DISPATCH_REF: ' <<<"$relay_block" || true)" \
+      "      DISPATCH_REF: \${{ github.event.repository.default_branch }}" \
+      "the relay dispatches onto the DEFAULT branch, with no per-repo fallback"
+    count_is "$whole" '^      DISPATCH_REF: ' "1" "exactly ONE DISPATCH_REF binding, so no second value sits out of reach"
+    # Same reason for the other two the step reads. Without WORKFLOW_REF no
+    # converge pass is ever requested and every event defers to the cron
+    # floor; without EVENT_NAME the step's own loop breaker reads an unset
+    # var, and the job if: becomes the only one left.
+    count_is "$relay_block" '^      WORKFLOW_REF: \$\{\{ github\.workflow_ref \}\}$' "1" "the relay binds WORKFLOW_REF — without it no converge pass is ever requested"
+    count_is "$relay_block" '^      EVENT_NAME: \$\{\{ github\.event_name \}\}$' "1" "the relay binds EVENT_NAME — its step's independent loop breaker reads it"
+
+    # --- the relay's failure surface -------------------------------------
+    # A red or a hang on a PR-attached leg is a failed check on the PR head.
+    # The battery executes the step and cannot see these: a dropped `timeout`
+    # still reaches the gh stub, and an added mktemp still succeeds.
+    count_is "$relay_block" 'timeout [0-9]+ gh api' "1" "each dispatch attempt is time-bounded — an unresponsive API would otherwise hang to timeout-minutes and be CANCELLED on the PR head"
+    absent "$relay_block" 'mktemp' "the relay allocates no temp file — an unchecked mktemp is an undeclared failure path on a job that must never red"
+    count_is "$relay_block" "tr -d '\\\\r'" "2" "BOTH header readers normalize CR — a CRLF status line otherwise carries \\r into the status comparison"
+
+    # --- the fork leg, and the escalation arm ----------------------------
+    # A fork pull_request_review hands the workflow a read-only token, so
+    # the step must know to no-op rather than red.
+    count_is "$whole" "github\.event\.pull_request\.head\.repo\.full_name != github\.repository" "1" "the fork pull_request_review read-only flag is derived, not assumed"
+    # VST-36: a job killed by its timeout is CANCELLED, not failed, so an
+    # escalation armed on failure() alone would miss exactly the case it exists for.
+    count_is "$whole" '^        if: failure\(\) \|\| cancelled\(\)$' "1" "the escalation arm covers timeout-cancelled jobs (VST-36)"
+
+    # --- the check_run loop breaker --------------------------------------
+    # It recognises this workflow's own completions once a consumer opts
+    # check_run in. Rename a job without the list and it stops matching, with
+    # no concurrency group on the relay to throttle what follows. Job names
+    # are the 4-space `name:`; step names carry a `- `.
+    job_names="$(grep -E '^    name: ' "$TEMPLATE" | sed 's/^    name: //' | sort)"
+    guard_names="$(sed -n '/case "\${CHECK_NAME:-}" in/,/esac/p' "$TEMPLATE" | grep -E '^ *"[^"]+"(\|"[^"]+")*\)$' | tr '|' '\n' | sed 's/[")]//g; s/^ *//' | sort)"
+    if [[ -n "$guard_names" && "$job_names" == "$guard_names" ]]; then
+      PASS=$((PASS + 1)); printf '  ok    [template] %s\n' "the check_run breaker lists exactly this workflow's job names"
+    else
+      FAIL=$((FAIL + 1)); printf '  FAIL  [template] the check_run breaker has drifted from the job names\n        jobs:  [%s]\n        guard: [%s]\n' "$(tr '\n' '/' <<<"$job_names")" "$(tr '\n' '/' <<<"$guard_names")"
+    fi
+
+    # --- the budget pair --------------------------------------------------
+    # The RELATION, so a coordinated retune passes and an uncoordinated one
+    # lands here. All four terms come from the file; a timeout under the
+    # retry budget kills a rate-limit retry and leaves a CANCELLED check on
+    # the PR head. `|| true` on each read: a no-match would abort the suite
+    # under this file's pipefail rather than fail the check.
+    tmo="$(grep -oE '^    timeout-minutes: [0-9]+' <<<"$relay_block" | head -n 1 | awk '{print $2}' || true)"
+    cap_s="$(grep -oE '^          cap=[0-9]+' <<<"$relay_block" | head -n 1 | cut -d= -f2 || true)"
+    attempt_s="$(grep -oE 'timeout [0-9]+ gh api' <<<"$(live "$relay_block")" | head -n 1 | awk '{print $2}' || true)"
+    jitter_s="$(grep -oE '^          jitter_max=[0-9]+' <<<"$relay_block" | head -n 1 | cut -d= -f2 || true)"
+    if [[ -z "$tmo" || -z "$cap_s" || -z "$attempt_s" || -z "$jitter_s" ]]; then
+      FAIL=$((FAIL + 1)); printf '  FAIL  [template] the relay budget is unpinned — timeout-minutes=%s cap=%s per-attempt=%s jitter_max=%s\n' "$tmo" "$cap_s" "$attempt_s" "$jitter_s"
+    elif (( tmo * 60 > 2 * attempt_s + cap_s + jitter_s )); then
+      PASS=$((PASS + 1)); printf '  ok    [template] %s\n' "the relay's timeout budget (${tmo}m) outlasts its worst case (2 x ${attempt_s}s + ${cap_s}s cap + ${jitter_s}s jitter)"
+    else
+      FAIL=$((FAIL + 1)); printf '  FAIL  [template] %s\n' "the relay's timeout budget (${tmo}m) is NOT above its worst case — a retry is killed and leaves a cancelled check on the PR head"
     fi
   fi
+fi
 
-  # --- no unbounded or unchecked calls in the relay ---------------------
-  assert_contains "$relay_block" "tr -d '\\r'" "[$tag] tpl: response header reads strip CR — a CRLF status line otherwise carries \\r into the status comparison"
-  assert_eq "$(grep -cF -- "tr -d '\\r'" <<<"$relay_block" || true)" "2" "[$tag] tpl: BOTH header readers normalize CR (header and header_status), not just one"
-  # VALUE-AGNOSTIC: the magnitude is the extracted relation's business above.
-  # A literal here contradicts it — a coordinated retune to 90s attempts and a
-  # 10-minute budget satisfies the relation and reds this pin.
-  rc=0; grep -qE 'timeout [0-9]+ gh api' <<<"$relay_block" || rc=$?
-  case "$rc" in
-    0) PASS=$((PASS + 1)); printf '  ok    [%s] %s\n' "$tag" "tpl: each dispatch attempt is time-bounded — an unresponsive API would otherwise hang to timeout-minutes and be CANCELLED on the PR head" ;;
-    1) FAIL=$((FAIL + 1)); printf '  FAIL  [%s] %s\n' "$tag" "tpl: a dispatch attempt lost its timeout bound — an unresponsive API hangs to timeout-minutes and lands a CANCELLED check on the PR head" ;;
-    *) FAIL=$((FAIL + 1)); printf '  FAIL  [%s] %s\n' "$tag" "tpl: the relay block could not be read (grep error)" ;;
-  esac
-  # Comment lines stripped first: the block explains WHY it allocates no temp
-  # file, and a needle that its own rationale satisfies is not a check.
-  rc=0; grep -v '^ *#' <<<"$relay_block" | grep -q 'mktemp' || rc=$?
-  case "$rc" in
-    1) PASS=$((PASS + 1)); printf '  ok    [%s] %s\n' "$tag" "tpl: the relay allocates no temp file — an unchecked mktemp is an undeclared failure path (empty name, ambiguous redirect) on a job that must never red" ;;
-    0) FAIL=$((FAIL + 1)); printf '  FAIL  [%s] %s\n' "$tag" "tpl: the relay grew an mktemp — check it or drop it; the response belongs in a variable" ;;
-    *) FAIL=$((FAIL + 1)); printf '  FAIL  [%s] %s\n' "$tag" "tpl: the relay block could not be read (grep error)" ;;
-  esac
-  # The no-match guard inside header(): without it a pipefail shell kills the
-  # step on the ordinary path where the API simply sent no such header.
-  # STRUCTURAL, not a single needle: EVERY grep in the relay's script must
-  # tolerate a no-match. A bare one exits 1 on the ordinary path where the
-  # API simply sent no such header, and under a pipefail shell that status
-  # propagates out of the command substitution and `set -e` reds the PR.
-  # A grep used as an if/elif CONDITION is exempt: `set -e` does not act on a
-  # command in a condition, and its status is consumed by the test rather
-  # than escaping. The hazard is a grep whose status can propagate out — in a
-  # command substitution or a pipeline — so those are the ones counted.
-  local escaping_greps guarded_greps
-  escaping_greps="$(grep -v '^ *#' <<<"$relay_block" | grep 'grep ' | grep -vcE '^ *(el)?if ' || true)"
-  guarded_greps="$(grep -v '^ *#' <<<"$relay_block" | grep 'grep ' | grep -vE '^ *(el)?if ' | grep -c '|| true' || true)"
-  if [[ "$escaping_greps" == "$guarded_greps" && "$escaping_greps" != "0" ]]; then
-    PASS=$((PASS + 1)); printf '  ok    [%s] %s\n' "$tag" "tpl: all $escaping_greps status-escaping grep(s) in the relay step tolerate a no-match (a bare one reds the PR under pipefail on the ORDINARY path)"
-  else
-    FAIL=$((FAIL + 1)); printf '  FAIL  [%s] %s\n        %s status-escaping grep(s) in the relay step, only %s guarded with || true\n' "$tag" "tpl: every status-escaping grep in the relay step must tolerate a no-match under pipefail" "$escaping_greps" "$guarded_greps"
-  fi
 
-  # --- the loop breaker's second tooth ---------------------------------
-  # The job if: is the first breaker and the line adoption.md tells
-  # consumers to hand-edit; the step's own EVENT_NAME guard survives that
-  # mis-edit. Nothing throttles a self-dispatch loop once started — the
-  # relay holds no concurrency group by design.
-  rc=0; grep -q '^      EVENT_NAME: \${{ github\.event_name }}$' <<<"$relay_block" || rc=$?
-  case "$rc" in
-    0) PASS=$((PASS + 1)); printf '  ok    [%s] %s\n' "$tag" "tpl: the RELAY binds EVENT_NAME (its step's independent loop breaker reads it)" ;;
-    1) FAIL=$((FAIL + 1)); printf '  FAIL  [%s] %s\n' "$tag" "tpl: the relay lost its EVENT_NAME binding — the step's loop breaker reads an unset var (the write job's identical binding does NOT cover this)" ;;
-    *) FAIL=$((FAIL + 1)); printf '  FAIL  [%s] %s\n' "$tag" "tpl: the relay block could not be read (grep error)" ;;
-  esac
-  assert_contains "$relay_block" "workflow_dispatch|schedule)" "[$tag] tpl: the relay step refuses to dispatch when it ran on a converge leg"
-  # WORKFLOW_REF reads like a convenience — it exists so a renamed copy needs
-  # no edit at all — which is exactly why it is the binding a consumer is
-  # most likely to drop. Its absence now degrades to the warn-and-defer path
-  # rather than a red, but a dropped line still means no converge pass is
-  # ever requested, so it is pinned as well as defaulted.
-  rc=0; grep -q '^      WORKFLOW_REF: \${{ github\.workflow_ref }}$' <<<"$relay_block" || rc=$?
-  case "$rc" in
-    0) PASS=$((PASS + 1)); printf '  ok    [%s] %s\n' "$tag" "tpl: the relay binds WORKFLOW_REF (without it no converge pass is ever requested — every event would silently defer to the cron floor)" ;;
-    1) FAIL=$((FAIL + 1)); printf '  FAIL  [%s] %s\n' "$tag" "tpl: the relay lost its WORKFLOW_REF binding — it degrades safely but requests NOTHING, so the event-fast path is gone" ;;
-    *) FAIL=$((FAIL + 1)); printf '  FAIL  [%s] %s\n' "$tag" "tpl: the relay block could not be read (grep error)" ;;
-  esac
-
-  # --- the relay's scope is dispatch and nothing else -------------------
-  # Its dispatch failure exits GREEN by decision (a red relay recreates the
-  # UNSTABLE pin) and it carries NO escalation — sustained failure surfaces
-  # as gate staleness via the cron floor and pr-watch --heal. So issues:write
-  # must not appear here: the rolling incident stays on the write job, and a
-  # relay that grew the scope would mean the decision was reversed silently.
-  rc=0; grep -q '^      issues: write$' <<<"$relay_block" || rc=$?
-  case "$rc" in
-    1) PASS=$((PASS + 1)); printf '  ok    [%s] %s\n' "$tag" "tpl: the relay holds NO issues:write — dispatch is its whole scope; sustained failure is detected as gate staleness, not by this job" ;;
-    0) FAIL=$((FAIL + 1)); printf '  FAIL  [%s] %s\n' "$tag" "tpl: the relay grew issues:write — the no-escalation decision was reversed without updating the docs that state it" ;;
-    *) FAIL=$((FAIL + 1)); printf '  FAIL  [%s] %s\n' "$tag" "tpl: the relay block could not be read (grep error)" ;;
-  esac
-
-  # --- checkouts --------------------------------------------------------
-  pin "if: failure() || cancelled()" "tpl: VST-36 escalation covers timeout-cancelled jobs"
-  # COUNTED against the checkouts: a single-match pin is satisfied by the
-  # first checkout in the file and says nothing about the second, so dropping
-  # it from the write job's checkout leaves the suite green.
-  local checkouts creds
-  checkouts="$(grep -c 'uses: actions/checkout' "$wf" || true)"
-  creds="$(grep -cF -- "persist-credentials: false" "$wf" || true)"
-  if [[ "$checkouts" != "0" && "$creds" == "$checkouts" ]]; then
-    PASS=$((PASS + 1)); printf '  ok    [%s] %s\n' "$tag" "tpl: all $checkouts checkout(s) drop credentials"
-  else
-    FAIL=$((FAIL + 1)); printf '  FAIL  [%s] %s\n        %s checkout(s), %s persist-credentials: false\n' "$tag" "tpl: EVERY checkout must drop credentials (a write-capable token on a checked-out tree is the pull_request_target hazard)" "$checkouts" "$creds"
-  fi
-  pin "github.event.pull_request.head.repo.full_name != github.repository" "tpl: fork pull_request_review read-only flag"
-  # BOTH engine checkouts are counted: a one-match pin would stay green if
-  # either job regressed.
-  count="$(grep -cF -- 'ref: ${{ github.event.repository.default_branch }}' "$wf" || true)"
-  assert_eq "$count" "2" "[$tag] tpl: BOTH checkouts pin the bare default-branch expression"
-  # An empty resolution is REFUSED, not papered over with a branch name: the
-  # guard step runs before each checkout and reds the job. Counted, for the
-  # same reason the checkouts are.
-  # ORDER, not ingredients: counting both says nothing about which runs
-  # first, and a guard AFTER its checkout has already let the unpinned ref
-  # onto disk. G for a guard's binding, C for a checkout, in file order.
-  assert_eq "$(awk '/^          DEFAULT_BRANCH: / { printf "G" } /^      - uses: actions\/checkout/ { printf "C" } END { printf "\n" }' "$wf")" \
-    "GCGC" "[$tag] tpl: each engine job's default-branch guard PRECEDES its checkout (counting the two ingredients passes a guard that runs after the ref is already on disk)"
-  # The REFUSAL is the point, not the diagnostic beside it: a guard whose
-  # exit went to 0 prints the same line and checks the unpinned ref out
-  # anyway. Bound to the guard's OWN diagnostic, not counted file-wide: the
-  # two missing-engine guards also exit 1, and counting those would pass a
-  # default-branch guard whose refusal was removed.
-  count="$(awk '
-    /default_branch resolved empty/ { w = 3; next }
-    w > 0 {
-      if ($0 ~ /^[[:space:]]*exit[[:space:]]+[1-9]/) { n++; w = 0 } else w--
-    }
-    END { print n + 0 }
-  ' "$wf")"
-  assert_eq "$count" "2" "[$tag] tpl: BOTH guard steps exit NONZERO on an empty resolution (the diagnostic without the refusal checks out the event's ref regardless)"
-  rc=0; grep -qE -- "default_branch \|\|" "$wf" || rc=$?
-  case "$rc" in
-    1) PASS=$((PASS + 1)); printf '  ok    [%s] %s\n' "$tag" "tpl: no ref falls back to a hardcoded branch name — the copy carries no per-repo values" ;;
-    0) FAIL=$((FAIL + 1)); printf '  FAIL  [%s] %s\n' "$tag" "tpl: a hardcoded default-branch fallback is back — the copy would need a per-repo edit again, and a wrong value dispatches a branch that does not exist" ;;
-    *) FAIL=$((FAIL + 1)); printf '  FAIL  [%s] %s\n' "$tag" "tpl: the workflow could not be read (grep error)" ;;
-  esac
-}
-
-echo "=== workflow pins ==="
-for i in "${!WORKFLOWS[@]}"; do
-  pin_workflows "${WORKFLOWS[$i]}" "${WORKFLOW_LABELS[$i]}"
-done
 
 
 # ---------------------------------------------------- relay step behavior ---
@@ -884,7 +790,7 @@ done
 # code difference is drift. In a CONSUMER one difference is legitimate and
 # indistinguishable from drift by diff: the check_run opt-in uncomments two
 # trigger lines, which a code diff reads as added code. A consumer's copy is
-# checked by the pins above and by validate-workflow.sh instead. The
+# checked by validate-workflow.sh instead, which knows that opt-in. The
 # relay-step byte-identity check below stays unconditional — that script
 # carries no vendored path and no opt-in, so it is the same bytes in every
 # copy.

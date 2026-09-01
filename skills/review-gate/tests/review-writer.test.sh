@@ -56,10 +56,11 @@
 #   wp1-wp3. pagination merges               -> page-two PRs enumerate; a
 #                                               page-two guard entry defers
 # The WORKFLOW YAML is asserted in its own suite,
-# review-writer-template.test.sh — grep-pins on the expressions offline runs
-# cannot execute, plus the relay step extracted and EXECUTED against a gh
-# stub, both run against the shipped template and the adopted copy. This file
-# is the review-writer.sh engine suite: one instrument class, one subject.
+# review-writer-template.test.sh — the template's own contract derived from
+# the shipped template alone (expressions offline runs cannot execute, and
+# relations between values in the file), plus the relay step extracted and
+# EXECUTED against a gh stub over both copies. This file is the
+# review-writer.sh engine suite: one instrument class, one subject.
 set -euo pipefail
 
 TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -114,10 +115,10 @@ cat > "$TMP_ROOT/scripts/review-predicate.sh" <<'EOF'
 # (no verdict); otherwise STUB_VERDICT_LINE is the authoritative verdict and
 # STUB_EVIDENCE_AT is written to the REVIEW_GATE_EVIDENCE_AT_FILE seam.
 # STUB_PREDICATE_FAIL_PR fails only that PR's evaluation (containment
-# cases). STUB_PREDICATE_ENV_LOG records the outage-context env the writer
-# hands down (the OVERRIDE_CONTEXT alias cases).
+# cases). STUB_PREDICATE_ENV_LOG records the override-context env the writer
+# hands down (the override-context cases).
 if [[ -n "${STUB_PREDICATE_ENV_LOG:-}" ]]; then
-  printf 'OUTAGE=%s\n' "${REVIEW_GATE_OUTAGE_CONTEXT-<unset>}" >> "$STUB_PREDICATE_ENV_LOG"
+  printf 'OVERRIDE=%s\n' "${REVIEW_GATE_OVERRIDE_CONTEXT-<unset>}" >> "$STUB_PREDICATE_ENV_LOG"
 fi
 if [[ "${STUB_PREDICATE_RC:-0}" != "0" ]]; then
   echo "::error::stubbed predicate failure" >&2
@@ -543,9 +544,9 @@ assert_eq "$(( $(wc -l < "$POST_LOG") ))" "0" "wp3: no post past the paginated g
 
 echo "=== settings: the writer never rewrites the override context ==="
 
-# The OVERRIDE_CONTEXT alias lives in review-predicate.sh (so EVERY live gate
-# read honors it, not just this writer — pre-PR review finding 4); the
-# writer must not export a competing REVIEW_GATE_OUTAGE_CONTEXT on top of it.
+# REVIEW_GATE_OVERRIDE_CONTEXT is resolved in review-predicate.sh (so EVERY
+# live gate read honors it, not just this writer — pre-PR review finding 4);
+# the writer must not export its own resolution on top of that.
 ENV_LOG="$TMP_ROOT/predicate-env.log"
 cat > "$TMP_ROOT/override-settings.toml" <<'EOF'
 REVIEW_GATE_OVERRIDE_CONTEXT = "ops-override"
@@ -555,13 +556,13 @@ rc=0; out=$(run_writer STUB_VERDICT_LINE="$AWAITING" STUB_GATE_HISTORY='[]' \
   REVIEW_GATE_SETTINGS_FILE="$TMP_ROOT/override-settings.toml" \
   STUB_PREDICATE_ENV_LOG="$ENV_LOG") || rc=$?
 assert_eq "$rc" "0" "w30: override-context settings file exits 0"
-assert_contains "$(cat "$ENV_LOG")" "OUTAGE=<unset>" "w30: the writer leaves the override alias entirely to the predicate (one mechanism, honored by every reader)"
+assert_contains "$(cat "$ENV_LOG")" "OVERRIDE=<unset>" "w30: the writer leaves the override context entirely to the predicate (one mechanism, honored by every reader)"
 
 : > "$ENV_LOG"
 rc=0; out=$(run_writer STUB_VERDICT_LINE="$AWAITING" STUB_GATE_HISTORY='[]' \
   STUB_PREDICATE_ENV_LOG="$ENV_LOG") || rc=$?
 assert_eq "$rc" "0" "w30b: absent override key exits 0"
-assert_contains "$(cat "$ENV_LOG")" "OUTAGE=<unset>" "w30b: absent key leaves the predicate's own resolution untouched"
+assert_contains "$(cat "$ENV_LOG")" "OVERRIDE=<unset>" "w30b: absent key leaves the predicate's own resolution untouched"
 echo
 printf 'pass: %d   fail: %d\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]
