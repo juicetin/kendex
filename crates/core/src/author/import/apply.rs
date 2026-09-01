@@ -50,8 +50,9 @@ pub fn apply(
                 ),
             });
         }
-        let answer = super::resolve_selection(env, scopes, selection)?;
+        let mut answer = super::resolve_selection(env, scopes, selection)?;
         license_gate(selection, &answer.group)?;
+        declare_destination(&mut answer, selection)?;
         let dest = crate::source::local_slot(&target, selection.kind, &selection.destination);
         occupies(&resolved, selections, &dest, &answer, selection)?;
         origin_overlap(&target, &answer)?;
@@ -64,6 +65,109 @@ pub fn apply(
     };
     write_all(&target, &resolved, selections, &mut outcome)?;
     Ok(outcome)
+}
+
+/// A copy taken under a new name declares that name.
+///
+/// A skill's SKILL.md and an agent's own file carry the name its tool
+/// answers to, so bytes copied verbatim under a different destination
+/// still spell the candidate's name and the import calls that a success.
+/// What is written in is the destination's *leaf*: a nested destination
+/// puts the item in a directory, and the leaf is the whole of what a file
+/// inside the item can declare.
+///
+/// Only where that leaf really changes. This is a copy and not a repair,
+/// so an import keeping the candidate's name copies its bytes untouched:
+/// a declaration that was already wrong at the origin travels as it is,
+/// and a tree with no declaration at all stays a tree with none.
+///
+/// The other three kinds carry no name anything keys on, so they are
+/// copied unchanged whatever they are renamed to.
+fn declare_destination(answer: &mut ResolvedSelection, selection: &ImportSelection) -> Result<()> {
+    let wanted = crate::names::leaf(&selection.destination);
+    if wanted == declared_leaf(&selection.name) {
+        return Ok(());
+    }
+    // A candidate name is read off a directory on disk, and the inventory
+    // keeps illegal spellings so the wizard can offer them under another
+    // destination — which is the path that reaches this refusal.
+    let shown = crate::names::shown;
+    let origin = origin_file(answer.read_from.as_deref());
+    let renamed = |bytes: &[u8], at: &str| {
+        crate::render::skill::bytes_named(bytes, wanted).map_err(|problem| CoreError::Authoring {
+            message: format!(
+                "'{}' cannot be imported as '{}' — {problem} in '{}', so the copy would still call itself '{}'. Import it under its own name: a copy is renamed only where the file it comes from carries a frontmatter block a name can be written into.",
+                shown(&selection.name),
+                shown(&selection.destination),
+                shown(at),
+                shown(declared_leaf(&selection.name)),
+            ),
+        })
+    };
+    match (selection.kind, &mut answer.bytes) {
+        (ItemKind::Skill, Bytes::Tree(files)) => {
+            for (rel, bytes) in files
+                .iter_mut()
+                .filter(|(rel, _)| crate::render::skill::carries_name(rel))
+            {
+                let at = rel.to_string_lossy().into_owned();
+                *bytes = renamed(bytes, &at)?;
+            }
+        }
+        (ItemKind::Agent, Bytes::File(bytes)) => *bytes = renamed(bytes, &origin)?,
+        // Named rather than fallen through to, because "nothing to
+        // declare" and "a shape we did not expect" are different answers
+        // and only one of them is safe to be silent about. Their bytes go
+        // unasked: no shape any of the three arrives in carries a name
+        // anything keys on.
+        (ItemKind::Hook | ItemKind::Command | ItemKind::McpServer, _) => {}
+        // Everything left is unconstructible today, and says so rather
+        // than copying quietly: `origins::read_bytes` is the one place
+        // bytes come from and it makes a skill a tree and every other kind
+        // a file, and `apply` turns away a plugin and a Pi extension before
+        // anything resolves. Falling through here would put the old name
+        // back into a renamed copy and call the import a success, which is
+        // the defect this function exists to end.
+        (kind, _) => {
+            return Err(CoreError::Authoring {
+                message: format!(
+                    "kendex has no way to give a copied {} a new name — import '{}' under its own name",
+                    kind.name(),
+                    shown(&selection.name),
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// The leaf a file inside the item declares: the segment after the last
+/// `/`, whatever the rest of the name is.
+///
+/// Deliberately not [`crate::names::leaf`], which answers whether a name
+/// is installable and hands back the whole string when it is not. The
+/// inventory keeps illegal names on purpose so the wizard can offer them
+/// under a legal destination, and that repair renames nothing — a
+/// declaration inside an item never carried the namespace, so `-bad/foo`
+/// landing at `foo` finds `foo` already written in. Asking the legality
+/// question here made the common repair look like a rename. The
+/// destination keeps `names::leaf`, because `apply` has already put it
+/// past `item_problem` before any of this runs.
+fn declared_leaf(name: &str) -> &str {
+    name.rsplit_once('/').map_or(name, |(_, leaf)| leaf)
+}
+
+/// What to call the file a refusal is about. Shown, never decided on: an
+/// unmanaged scan offers agent files as their harness keeps them, and the
+/// spellings do not end — `.md`, Cursor's `.mdc`, Codex's `.toml`,
+/// Copilot's compound `.agent.md`, any of them parked as `.disabled` — so
+/// the name only tells the person which file to open. Whether a name can
+/// be written in is asked of the bytes.
+fn origin_file(read_from: Option<&Path>) -> String {
+    read_from.and_then(Path::file_name).map_or_else(
+        || "its own file".to_owned(),
+        |at| at.to_string_lossy().into_owned(),
+    )
 }
 
 /// Whether a selection already taken occupies the place this one wants.

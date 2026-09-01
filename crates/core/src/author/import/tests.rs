@@ -45,8 +45,26 @@ fn skill(dir: &Path, name: &str, body: &str) {
     .unwrap();
 }
 
+/// A skill whose SKILL.md is whatever the caller says, for the shapes the
+/// `skill` helper cannot spell.
+#[allow(clippy::unwrap_used)]
+fn raw_skill(dir: &Path, name: &str, skill_md: &str) {
+    let skill = dir.join(name);
+    fs::create_dir_all(&skill).unwrap();
+    fs::write(skill.join("SKILL.md"), skill_md).unwrap();
+}
+
+/// One item that is a file rather than a tree, at the extension its kind
+/// is stored under.
+#[allow(clippy::unwrap_used)]
+fn file_item(dir: &Path, file: &str, text: &str) {
+    fs::create_dir_all(dir).unwrap();
+    fs::write(dir.join(file), text).unwrap();
+}
+
 /// A project with all three origins: a marketplace skill (path source with
-/// a licence), the person's own local-source skill, and an unmanaged one.
+/// a licence), the person's own local-source content, and unmanaged
+/// content of three kinds.
 #[allow(clippy::unwrap_used)]
 fn seeded() -> (tempfile::TempDir, Env, Scope) {
     let tmp = tempfile::tempdir().unwrap();
@@ -60,10 +78,46 @@ fn seeded() -> (tempfile::TempDir, Env, Scope) {
     .unwrap();
     let project = tmp.path().join("app");
     skill(&project.join(".claude/skills"), "stray", "unmanaged bytes");
-    skill(
-        &project.join(crate::source::LOCAL_SOURCE_DIR).join("skills"),
-        "mine",
-        "my own bytes",
+    // A body file beside the declaration, because a skill is a tree and
+    // only the file that declares the name may be rewritten. It carries no
+    // frontmatter, so a rewrite reaching it refuses the whole import
+    // rather than landing something subtly wrong.
+    file_item(
+        &project.join(".claude/skills/stray/references"),
+        "notes.md",
+        "Body file. No frontmatter here.\n",
+    );
+    // A tree no name can be written into, and two kinds that are not
+    // skills.
+    raw_skill(
+        &project.join(".claude/skills"),
+        "bare",
+        "No frontmatter at all.\n",
+    );
+    file_item(
+        &project.join(".claude/agents"),
+        "drifter.md",
+        "---\nname: drifter\ndescription: about drifter\n---\nAgent body.\n",
+    );
+    file_item(
+        &project.join(".claude/commands"),
+        "note.md",
+        "---\ndescription: a note\n---\nCommand body.\n",
+    );
+    let local = project.join(crate::source::LOCAL_SOURCE_DIR);
+    skill(&local.join("skills"), "mine", "my own bytes");
+    // A hook and an MCP server reach the wizard through a lock entry
+    // pointing at the local source, which is an import candidate like any
+    // other.
+    file_item(
+        &local.join("hooks"),
+        "watcher.sh",
+        "#!/bin/sh\n# ---\n# name: watcher\n# event: SessionStart\n# ---\necho watching\n",
+    );
+    file_item(
+        &local.join("mcp"),
+        "server.toml",
+        "command = \"serve\"\nargs = []\n",
     );
     fs::write(
         project.join("kendex.toml"),
@@ -81,10 +135,15 @@ fn seeded() -> (tempfile::TempDir, Env, Scope) {
         version: crate::lock::LOCK_VERSION,
         ..Lock::default()
     };
-    for (name, source, repo) in [("gh", "cat", "cat"), ("mine", "local", "local")] {
+    for (kind, name, source, repo) in [
+        (ItemKind::Skill, "gh", "cat", "cat"),
+        (ItemKind::Skill, "mine", "local", "local"),
+        (ItemKind::Hook, "watcher", "local", "local"),
+        (ItemKind::McpServer, "server", "local", "local"),
+    ] {
         lock.entries.insert(
-            crate::lock::entry_key(ItemKind::Skill, name, HarnessId::Claude),
-            entry(ItemKind::Skill, name, source, repo),
+            crate::lock::entry_key(kind, name, HarnessId::Claude),
+            entry(kind, name, source, repo),
         );
     }
     crate::lock::save(&crate::lock::lock_path(&env, &scope), &lock).unwrap();
@@ -413,6 +472,7 @@ fn a_stale_hash_refuses_instead_of_copying_moved_bytes() {
     apply(&env, &scopes, &target, &[chosen]).unwrap();
 }
 
+mod rename;
 mod review;
 
 /// A skill adopted in place: its bytes live under the project's shared
