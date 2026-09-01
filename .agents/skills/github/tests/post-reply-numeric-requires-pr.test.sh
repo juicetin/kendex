@@ -23,13 +23,12 @@ trap 'rm -rf "$TMP_ROOT"' EXIT
 # the working directory must be a git repo. gh remains stubbed — no network.
 git -C "$TMP_ROOT" init -q
 
-# The shared `gh` fake, which logs every invocation — the log is how the
-# assertions below tell "the API was never touched" from "it was". Only the
-# calls the REST path legitimately makes are staged; anything else is
-# refused. The source tree is found through git rather than a relative hop,
-# so this works from skills/ and from the .agents/ render beside it.
-# shellcheck source=../../../tools/tests/lib/gh-stub.sh
-. "$(git -C "$TEST_DIR" rev-parse --show-toplevel)/tools/tests/lib/gh-stub.sh"
+# The shared `gh` fake logs every invocation, which lets the assertions tell
+# "the API was never touched" from "it was". Identity probes are seeded; this
+# suite stages the REST calls it expects, and other calls are refused. The stub
+# ships beside this test in both the source package and its render.
+# shellcheck source=lib/gh-stub.sh
+. "$TEST_DIR/lib/gh-stub.sh"
 GH_STUB_DIR="$TMP_ROOT/gh-stub" gh_stub_install "$TMP_ROOT"
 GH_CALLS="$STUB_DIR/gh.calls"
 
