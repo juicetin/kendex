@@ -19,7 +19,10 @@ import {
   VIEW_CHANGES_LABEL,
   viewChangesInLabel,
 } from "@/lib/copy";
-import { UPDATE_NEEDS_CHECK_NOTE } from "@/lib/copy-updates";
+import {
+  UPDATE_NEEDS_CHECK_NOTE,
+  UPDATES_ONE_AT_A_TIME_NOTE,
+} from "@/lib/copy-updates";
 import { harnessName } from "@/lib/labels";
 import { sameScope } from "@/lib/scope";
 import { rowUnsettled } from "@/lib/updates-read-state";
@@ -42,12 +45,16 @@ export function ForkNotice({
   onResolved: () => void;
 }) {
   const busy = useUpdatesStore((s) => s.busy);
+  const checking = useUpdatesStore((s) => s.checking);
   // Discarding applies the retained row's latest commit when the place is
   // held — from rows a failed check left behind, or rows a running check
   // is about to replace, that pins an old version — so the discard waits
-  // for a check. Keeping the files as a fork copies what is on disk and
-  // stays live.
+  // for a check.
   const held = useUpdatesStore((s) => rowUnsettled(s, row));
+  // The fork copies what is on disk and reads nothing off the row, so a
+  // failed check does not bar it. It commits, so the work already running
+  // does: the same pair the store refuses it on.
+  const running = busy || checking;
   const [confirmDiscard, setConfirmDiscard] = useState(false);
   const several = row.editedHarnesses.length > 1;
   const whyNoFork = row.derived
@@ -74,7 +81,8 @@ export function ForkNotice({
         {row.forkableHarness ? (
           <Button
             size="sm"
-            disabled={busy}
+            disabled={running}
+            title={running ? UPDATES_ONE_AT_A_TIME_NOTE : undefined}
             onClick={() => void keepAsOwn(row).then(onResolved)}
           >
             {KEEP_AS_FORK_LABEL}

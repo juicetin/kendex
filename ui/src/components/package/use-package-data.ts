@@ -17,6 +17,7 @@ import {
   VERSION_ERROR_TITLE,
 } from "@/lib/copy";
 import { sameScope } from "@/lib/scope";
+import { settled } from "@/lib/settled";
 import {
   type OutcomeLines,
   showUpdateOutcome,
@@ -28,7 +29,7 @@ import { useEditorStore } from "@/stores/editor";
 import type { PackageRef } from "@/stores/nav";
 import { useProblemsStore } from "@/stores/problems";
 import { useScanStore } from "@/stores/scan";
-import { useUpdatesStore } from "@/stores/updates";
+import { holdingBusy, useUpdatesStore } from "@/stores/updates";
 import { writeRev, writeUpdate } from "@/stores/updates-writes";
 
 export type PackageView =
@@ -150,6 +151,10 @@ export function packageVersionActions(
   // This page has no edited-row filter, and a refusal is broader than an
   // edit anyway — files kendex never put there, a provenance clash — so
   // the held answer arrives here whatever the page believes about edits.
+  // Under the updates store's `busy` as well as the page's own spinner:
+  // these commit like any update does, and the Updates page's check refuses
+  // on that flag alone. Without it a check runs beside this write and lands
+  // a report built before it.
   const run = (
     call: Promise<
       | { status: "ok"; data: PackageUpdate_Serialize }
@@ -158,7 +163,11 @@ export function packageVersionActions(
     lines: OutcomeLines,
   ) => {
     setBusy(true);
-    void call.then((response) => {
+    return holdingBusy(async () => {
+      // A transport failure rejects rather than refusing. Unwrapped it
+      // would skip the report, leave `setBusy` up for the life of the view
+      // and skip the read-back this promises either way.
+      const response = await settled(call);
       setBusy(false);
       if (response.status === "error") {
         showError(response.error);
@@ -224,4 +233,17 @@ export function useManifestBusy(switching: boolean, scopes: Scope[]): boolean {
   );
   const saving = useEditorStore((s) => s.saving);
   return auditBusy || switching || updatesBusy || settling || saving;
+}
+
+/** The gate for the three version-changing controls this page keeps on
+ *  screen through a check — Update, switch version, and Follow source.
+ *  They commit through `holdingBusy`, so a check must not run beside them.
+ *  The Projects tab's Update and Update all commit the same way and need
+ *  no gate here: `place.updatable` reads `rowUnsettled`, which carries
+ *  `checking`, so neither is rendered while a check is out. Save, Delete
+ *  and the enable/disable toggle write through the audit or editor store
+ *  and take no part — gating them on a mirror fetch would cost a save. */
+export function useVersionsBusy(manifestBusy: boolean): boolean {
+  const checking = useUpdatesStore((s) => s.checking);
+  return manifestBusy || checking;
 }

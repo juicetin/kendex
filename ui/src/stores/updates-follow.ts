@@ -1,11 +1,17 @@
 // The Follow source switch: one row's state change, then a write that
 // settles behind it. The chain a flip starts — move the hold, apply the
 // scope, then read every scope's standing again — takes seconds of git and
-// planning, and awaiting it before the switch moved held the whole page for
-// as long as it ran. The flip is recorded here as pending, worn by the rows
-// on screen until the read that follows the write lands, and its scope
-// holds while it is outstanding: an apply moves what is installed there,
-// and nowhere else.
+// planning, and awaiting it before the switch moved left the switch itself
+// dead under the hand that clicked it. The flip is recorded here as
+// pending, worn by the rows on screen until the read that follows the
+// write lands.
+//
+// Two different things are scoped and page-wide. What the pending record
+// decides is which ROWS the landing may not be acted on from — an apply
+// moves what is installed in that scope and nowhere else. The write itself
+// raises the store's page-wide `busy` for as long as it and its reload
+// run, because that flag is what a check refuses on, and a write it did
+// not cover is a check running beside a commit its report predates.
 import type { ItemKind, Scope, UpdateRow } from "@/bindings";
 import { UPDATE_NEEDS_CHECK_NOTE } from "@/lib/copy-updates";
 import type { ReadState } from "@/lib/read-state";
@@ -75,10 +81,15 @@ interface FollowStore {
 export function followSwitch({
   set,
   get,
+  holding,
   report,
 }: {
   set: (partial: Partial<Pick<FollowStore, "rows" | "pendingFollows">>) => void;
   get: () => FollowStore;
+  /** The store's `holdingBusy`, taken as an argument because this module is
+   *  the one the store imports. The flip commits like any other write, so
+   *  it raises `busy` and a check started beside it is refused. */
+  holding: <T>(work: () => Promise<T>) => Promise<T>;
   report: (error: string) => void;
 }) {
   return async (row: UpdateRow, auto: boolean): Promise<void> => {
@@ -106,33 +117,38 @@ export function followSwitch({
       rows: withPending(get().rows, [flip]),
       pendingFollows: [...get().pendingFollows, flip],
     });
-    try {
-      const response = await settled(
-        writeRev(row.scope, row.kind, row.name, auto ? null : hold),
-      );
-      // Say why now rather than in the seconds a read takes.
-      if (response.status === "error") report(response.error);
-    } finally {
-      // Retired before the read, so the rows come back as the engine has
-      // them rather than wearing a flip that has already answered.
-      set({
-        pendingFollows: get().pendingFollows.filter(
-          (one) => one.id !== flip.id,
-        ),
-      });
-      // Read again whichever way the write answered. An error is not proof
-      // that nothing changed: `package_set_rev` persists the revision
-      // through `set_rev_with` and only then runs the apply, so a failed
-      // apply returns an error over a manifest that already moved. Putting
-      // the switch back from the click's own row would show that as
-      // settled and re-open every action against it.
-      //
-      // The scan and the audit are not re-read. Switching Follow back on
-      // moves installed bytes they both answer for, so both are left dated
-      // until something else asks — how the flip has always behaved, held
-      // by `update-follow.dom.test.tsx` as it is rather than as it ought
-      // to be.
-      await get().reload();
-    }
+    // The switch has already moved on screen; `busy` covers the write and
+    // the read behind it, and holds every control on the page for that
+    // long — a commit is a commit, whichever scope it lands in.
+    await holding(async () => {
+      try {
+        const response = await settled(
+          writeRev(row.scope, row.kind, row.name, auto ? null : hold),
+        );
+        // Say why now rather than in the seconds a read takes.
+        if (response.status === "error") report(response.error);
+      } finally {
+        // Retired before the read, so the rows come back as the engine has
+        // them rather than wearing a flip that has already answered.
+        set({
+          pendingFollows: get().pendingFollows.filter(
+            (one) => one.id !== flip.id,
+          ),
+        });
+        // Read again whichever way the write answered. An error is not proof
+        // that nothing changed: `package_set_rev` persists the revision
+        // through `set_rev_with` and only then runs the apply, so a failed
+        // apply returns an error over a manifest that already moved. Putting
+        // the switch back from the click's own row would show that as
+        // settled and re-open every action against it.
+        //
+        // The scan and the audit are not re-read. Switching Follow back on
+        // moves installed bytes they both answer for, so both are left dated
+        // until something else asks — how the flip has always behaved, held
+        // by `update-follow.dom.test.tsx` as it is rather than as it ought
+        // to be.
+        await get().reload();
+      }
+    });
   };
 }

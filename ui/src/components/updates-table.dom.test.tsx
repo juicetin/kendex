@@ -6,7 +6,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AuditView } from "@/bindings";
 import { commands } from "@/bindings";
 import { ADOPTABLE } from "@/lib/adoptable";
-import { UPDATE_LABEL } from "@/lib/copy";
+import {
+  IGNORE_CONFIRM_LABEL,
+  IGNORE_UPDATES_LABEL,
+  UPDATE_LABEL,
+} from "@/lib/copy";
 import { SAFETY_CAVEAT } from "@/lib/copy-safety";
 import {
   EDITED_TAG_HELP,
@@ -15,6 +19,7 @@ import {
   OWN_COPY_NAME_LABEL,
   SHOW_VERSION_LABEL,
   TABLE_OPTIONS_LABEL,
+  UPDATES_ONE_AT_A_TIME_NOTE,
 } from "@/lib/copy-updates";
 import { READ_LANDED } from "@/lib/read-state";
 import { UpdatesPage } from "@/pages/updates";
@@ -233,6 +238,76 @@ describe("the table's own menu", () => {
     expect(useUpdatesView.getState().showVersion).toBe(true);
     expect(host.querySelectorAll("th")).toHaveLength(12);
     expect(host.textContent).toContain("1111111 → v2");
+  });
+});
+
+// Ignoring a package is the one action the row's own staleness does not
+// bar, so its surfaces take the pair the store refuses on. The item only
+// exists once the menu is open, which is why it is held here.
+describe("the row's Ignore item", () => {
+  it("is held while a check is out", async () => {
+    vi.mocked(commands.updatesOverview).mockResolvedValue({
+      status: "ok",
+      data: { rows: [row("one", null)], warnings: [], lastFetched: null },
+    });
+    mount(<UpdatesPage />);
+    await settle();
+
+    const open = async () => {
+      const trigger = button("More actions");
+      act(() => trigger.focus());
+      await userEvent.keyboard("{Enter}");
+      const item = [...document.querySelectorAll('[role="menuitem"]')].find(
+        (el) => el.textContent?.includes(IGNORE_UPDATES_LABEL),
+      );
+      if (!(item instanceof HTMLElement))
+        throw new Error("no Ignore updates item");
+      return item;
+    };
+
+    expect((await open()).getAttribute("data-disabled")).toBeNull();
+    await userEvent.keyboard("{Escape}");
+
+    await act(async () => {
+      useUpdatesStore.setState({ checking: true });
+    });
+    expect((await open()).getAttribute("data-disabled")).toBe("");
+    useUpdatesStore.setState({ checking: false });
+  });
+
+  // The dialog it opens outlives the click: a check or a write can begin
+  // while it is up, and the store refuses the mute on either. The confirm
+  // says so rather than closing over an error.
+  it("holds the confirm it opens for either half of the pair", async () => {
+    vi.mocked(commands.updatesOverview).mockResolvedValue({
+      status: "ok",
+      data: { rows: [row("one", null)], warnings: [], lastFetched: null },
+    });
+    mount(<UpdatesPage />);
+    await settle();
+
+    const trigger = button("More actions");
+    act(() => trigger.focus());
+    await userEvent.keyboard("{Enter}");
+    const item = [...document.querySelectorAll('[role="menuitem"]')].find(
+      (el) => el.textContent?.includes(IGNORE_UPDATES_LABEL),
+    );
+    if (!(item instanceof HTMLElement)) throw new Error("no Ignore item");
+    await userEvent.click(item);
+
+    const confirm = () => button(IGNORE_CONFIRM_LABEL);
+    expect(confirm().disabled).toBe(false);
+
+    for (const flag of ["checking", "busy"] as const) {
+      await act(async () => {
+        useUpdatesStore.setState({ [flag]: true });
+      });
+      expect(confirm().disabled).toBe(true);
+      expect(confirm().title).toBe(UPDATES_ONE_AT_A_TIME_NOTE);
+      await act(async () => {
+        useUpdatesStore.setState({ [flag]: false });
+      });
+    }
   });
 });
 

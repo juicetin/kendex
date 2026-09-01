@@ -5,13 +5,14 @@ import {
   installedAsNewToastLabel,
   installedBesideUnfinishedToast,
   UPDATE_NEEDS_CHECK_NOTE,
+  UPDATES_ONE_AT_A_TIME_NOTE,
 } from "@/lib/copy-updates";
 import { packageDisplayName } from "@/lib/labels";
 import { rescanEverything } from "@/lib/rescan";
 import { caught } from "@/lib/settled";
 import { rowUnsettled } from "@/lib/updates-read-state";
 import { useProblemsStore } from "./problems";
-import { useUpdatesStore } from "./updates";
+import { holdingBusy, useUpdatesStore } from "./updates";
 import {
   writeDiscardEdits,
   writeFork,
@@ -26,9 +27,8 @@ import {
 
 type Outcome<T> = { error: string } | { ok: T };
 
-const run = async <T>(work: () => Promise<Outcome<T>>): Promise<Outcome<T>> => {
-  useUpdatesStore.setState({ busy: true });
-  try {
+const run = <T>(work: () => Promise<Outcome<T>>): Promise<Outcome<T>> =>
+  holdingBusy(async () => {
     // A transport failure rejects rather than refusing; caught here it is
     // presented as the refusal shape, which claims nothing happened.
     const answer = await caught(work());
@@ -39,10 +39,7 @@ const run = async <T>(work: () => Promise<Outcome<T>>): Promise<Outcome<T>> => {
     if (answer.status === "error") return { error: answer.error };
     if (!("error" in answer.data)) await rescanEverything();
     return answer.data;
-  } finally {
-    useUpdatesStore.setState({ busy: false });
-  }
-};
+  });
 
 const report = (outcome: Outcome<unknown>) => {
   if ("error" in outcome)
@@ -58,12 +55,29 @@ const report = (outcome: Outcome<unknown>) => {
 const stale = (row: UpdateRow): boolean =>
   rowUnsettled(useUpdatesStore.getState(), row);
 
+/** Whether a check or another write is already out — the pair the store
+ *  refuses a commit on when nothing is wrong with the row itself. */
+const running = (): boolean => {
+  const { busy, checking } = useUpdatesStore.getState();
+  return busy || checking;
+};
+
 /** Keep an edited place's files as a local fork of its own. Only some
  *  tools' renderings read back as source; the row names the edited one a
  *  fork can take, and the button is not offered without it. */
 export const keepAsOwn = async (row: UpdateRow): Promise<void> => {
   const harness = row.forkableHarness;
   if (!harness) return;
+  // The fork copies what is on disk and reads nothing off the row, so
+  // `stale` is its siblings' predicate and not this one's: rows a failed
+  // check left behind are still perfectly good to fork from, and that is
+  // the state most in need of the way out. What does bar it is that it
+  // commits — a check out has a report built before that commit which
+  // would land after it.
+  if (running()) {
+    report({ error: UPDATES_ONE_AT_A_TIME_NOTE });
+    return;
+  }
   report(
     await run(async () => {
       const response = await writeFork(row.scope, row.kind, row.name, harness);

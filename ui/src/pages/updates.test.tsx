@@ -20,6 +20,13 @@ import { UpdatesPage } from "./updates";
 // escaped the same way before it can be looked for.
 const esc = (copy: string) => copy.replace(/'/g, "&#x27;");
 
+/** Markup for a disabled button carrying `label`. Nothing between the tag
+ *  and the label may open another button: `.*` on one line of static markup
+ *  would let an earlier disabled button reach this one's words and pass
+ *  over a button that is live. */
+const disabledButton = (label: string) =>
+  new RegExp(`<button[^>]*disabled=""[^>]*>(?:(?!<button)[\\s\\S])*?${label}<`);
+
 // Static rendering reads a zustand store's initial snapshot, never one set
 // later, so the store is wrapped to let a test stage what the last read
 // left behind.
@@ -30,6 +37,7 @@ const stub = vi.hoisted(() => ({
     error: string | null;
   },
   lastFetched: null as number | null,
+  busy: false,
 }));
 
 vi.mock("@/stores/updates", async (importOriginal) => {
@@ -39,7 +47,7 @@ vi.mock("@/stores/updates", async (importOriginal) => {
       ...mod.useUpdatesStore.getState(),
       rows: stub.rows as UpdateRow[],
       warnings: [],
-      busy: false,
+      busy: stub.busy,
       checking: false,
       read: stub.read,
       pendingFollows: [],
@@ -55,6 +63,7 @@ beforeEach(() => {
   stub.rows = [];
   stub.read = { status: "landed", error: null };
   stub.lastFetched = null;
+  stub.busy = false;
 });
 
 /** Unix seconds `ago` seconds before now — the shape the overview reports,
@@ -112,6 +121,27 @@ describe("the Updates page across its read states", () => {
     expect(html).toContain(CHECK_FOR_UPDATES_LABEL);
   });
 
+  // The store refuses a check while a write of the standing is out, so the
+  // button that starts one says so rather than taking a click the store
+  // then refuses.
+  it("holds Check while a write is out", () => {
+    stub.rows = [updateRow("gh", null)];
+    stub.busy = true;
+    expect(renderToStaticMarkup(<UpdatesPage />)).toMatch(
+      disabledButton(CHECK_FOR_UPDATES_LABEL),
+    );
+  });
+
+  // The empty state's retry calls the same handler as the header's Check,
+  // and `updateRows` clearing the last visible row renders it while that
+  // write still holds `busy` — a live button the store would refuse.
+  it("holds the empty state's retry while a write is out", () => {
+    stub.busy = true;
+    expect(renderToStaticMarkup(<UpdatesPage />)).toMatch(
+      disabledButton(CHECK_FOR_UPDATES_LABEL),
+    );
+  });
+
   it("offers no header check button on a clean page with nothing visible", () => {
     stub.rows = [updateRow("gh", null, { ignored: true })];
     const html = renderToStaticMarkup(<UpdatesPage />);
@@ -124,9 +154,7 @@ describe("the Updates page across its read states", () => {
     stub.rows = [updateRow("one", null), updateRow("two", null)];
     stub.read = { status: "failed", error: "no network" };
     const html = renderToStaticMarkup(<UpdatesPage />);
-    expect(html).toMatch(
-      new RegExp(`<button[^>]*disabled=""[^>]*>${UPDATE_ALL_LABEL}<`),
-    );
+    expect(html).toMatch(disabledButton(UPDATE_ALL_LABEL));
     expect(html).toContain(`title="${UPDATE_NEEDS_CHECK_NOTE}"`);
   });
 });

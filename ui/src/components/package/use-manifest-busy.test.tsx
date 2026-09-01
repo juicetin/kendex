@@ -1,13 +1,14 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import type { Scope } from "@/bindings";
-import { useManifestBusy } from "./use-package-data";
+import { useManifestBusy, useVersionsBusy } from "./use-package-data";
 
 // Static rendering reads each store's initial snapshot, so both store hooks
 // are wrapped to let a test flip their busy flags.
 const stub = vi.hoisted(() => ({
   audit: false,
   updates: false,
+  checking: false,
   saving: false,
   settling: [] as { scope: { scope: string; root?: string } }[],
 }));
@@ -17,6 +18,7 @@ vi.mock("@/stores/updates", async (importOriginal) => {
     const state = {
       ...mod.useUpdatesStore.getState(),
       busy: stub.updates,
+      checking: stub.checking,
       pendingFollows: stub.settling,
     };
     return selector ? selector(state) : state;
@@ -48,8 +50,29 @@ function Probe({ switching, scopes }: { switching: boolean; scopes: Scope[] }) {
   return <span>{useManifestBusy(switching, scopes) ? "busy" : "idle"}</span>;
 }
 
+function VersionsProbe() {
+  return <span>{useVersionsBusy(false) ? "busy" : "idle"}</span>;
+}
+
 const render = (switching: boolean, scopes: Scope[] = [GLOBAL]) =>
   renderToStaticMarkup(<Probe switching={switching} scopes={scopes} />);
+
+// A check builds its report once, so a commit the version controls make
+// while it is out would be missing from it and the landing would put the
+// rows back. This gate is for the three that stay on screen through a
+// check; the Projects tab's Update controls commit the same way but are
+// not rendered while one is out. Save, Delete and the toggle write through
+// the audit or editor store and take no part in that: gating them on a
+// mirror fetch would only cost a save.
+describe("useVersionsBusy", () => {
+  it("adds a running check, and nothing else does", () => {
+    stub.checking = true;
+    expect(renderToStaticMarkup(<VersionsProbe />)).toContain("busy");
+    expect(render(false)).toContain("idle");
+    stub.checking = false;
+    expect(renderToStaticMarkup(<VersionsProbe />)).toContain("idle");
+  });
+});
 
 describe("useManifestBusy", () => {
   it("is one gate over the audit apply, a version switch, updates-store work, and a save", () => {
