@@ -25,14 +25,6 @@ pub struct SourceRow {
     pub declared_items: Vec<String>,
 }
 
-/// What the scope declares, for the pages that list it. A manifest this
-/// build cannot read declares nothing it can name, so those pages show
-/// the scopes they can read instead of failing whole.
-pub(crate) fn load_current(env: &Env, scope: &Scope) -> Result<Option<Manifest>> {
-    let manifest = manifest::observed(&manifest::manifest_path(env, scope))?;
-    Ok((manifest != Manifest::default()).then_some(manifest))
-}
-
 fn referents(manifest: &Manifest, source: &str) -> Vec<String> {
     let mut names = Vec::new();
     for (table, items) in [
@@ -54,7 +46,7 @@ fn referents(manifest: &Manifest, source: &str) -> Vec<String> {
 }
 
 pub fn list_sources(env: &Env, scope: &Scope) -> Result<Vec<SourceRow>> {
-    let Some(manifest) = load_current(env, scope)? else {
+    let Some(manifest) = manifest::load_current(&manifest::manifest_path(env, scope))? else {
         return Ok(Vec::new());
     };
     Ok(manifest
@@ -108,7 +100,7 @@ pub struct SubscriptionRow {
 /// rather than zero, because "nothing here" and "not counted yet" are
 /// different sentences.
 pub fn list_subscriptions(env: &Env, scope: &Scope) -> Result<Vec<SubscriptionRow>> {
-    let Some(manifest) = load_current(env, scope)? else {
+    let Some(manifest) = manifest::load_current(&manifest::manifest_path(env, scope))? else {
         return Ok(Vec::new());
     };
     let mut rows = Vec::new();
@@ -174,7 +166,7 @@ pub struct BundleRow {
 /// be read right now offers nothing here — the Catalogs page already says why
 /// that source is unreachable, and repeating it per set would say it twice.
 pub fn list_bundles(env: &Env, scope: &Scope) -> Result<Vec<BundleRow>> {
-    let Some(manifest) = load_current(env, scope)? else {
+    let Some(manifest) = manifest::load_current(&manifest::manifest_path(env, scope))? else {
         return Ok(Vec::new());
     };
     let mut rows = Vec::new();

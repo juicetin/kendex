@@ -34,13 +34,10 @@ use crate::settings_template::TemplateSource;
 /// settings.
 pub fn settings_templates(env: &Env, scope: &Scope) -> Result<BTreeMap<String, TemplateSource>> {
     let scope = &scope.canonical();
-    // Both read for observation: this answers what the Customize tab
-    // lists, and a scope whose files this build cannot read lists nothing
-    // rather than taking the tab down. Absent reads the same way — a scope
-    // that has never installed still declares skills, and what they
-    // declare is what this answers for.
-    let manifest = manifest::observed(&manifest::manifest_path(env, scope))?;
-    let lock = crate::lock::observed(&lock_path(env, scope))?;
+    let lock = crate::lock::load(&lock_path(env, scope))?;
+    let Some(manifest) = manifest::load_current(&manifest::manifest_path(env, scope))? else {
+        return Ok(BTreeMap::new());
+    };
     let state = super::desired::desired_state(env, scope, &manifest, &lock, false, None)?;
     Ok(state.settings_templates)
 }

@@ -56,6 +56,15 @@ pub fn load(path: &Path) -> Result<ManifestFile> {
     parse_text(path, &text)
 }
 
+/// The current manifest when the file exists. Absence is `None`; a present
+/// file this build cannot read is an error.
+pub fn load_current(path: &Path) -> Result<Option<Manifest>> {
+    match load(path)? {
+        ManifestFile::Absent => Ok(None),
+        ManifestFile::Current(manifest) => Ok(Some(*manifest)),
+    }
+}
+
 /// [`load`] for text the caller already read — the importer classifies the
 /// exact bytes its preconditions bind to.
 pub fn parse_text(path: &Path, text: &str) -> Result<ManifestFile> {
@@ -102,23 +111,6 @@ pub fn parse_text(path: &Path, text: &str) -> Result<ManifestFile> {
             message: e.to_string(),
         })?;
     Ok(ManifestFile::Current(Box::new(manifest)))
-}
-
-/// The scope's manifest for a read that only annotates rows: what the
-/// file declares, or nothing where there is no file and nothing this
-/// build can read. A browse, a library table or a marketplace page shows
-/// what is installed and marks which of it this scope declares; a scope
-/// whose manifest came from another version of kendex marks nothing, and
-/// blanking every other scope's rows over it is the failure this exists
-/// to stop. Everything else still propagates — the refusal absorbed here
-/// is exactly [`CoreError::is_unreadable_record`], never an IO error.
-pub fn observed(path: &Path) -> Result<Manifest> {
-    match load(path) {
-        Ok(ManifestFile::Current(manifest)) => Ok(*manifest),
-        Ok(ManifestFile::Absent) => Ok(Manifest::default()),
-        Err(error) if error.is_unreadable_record() => Ok(Manifest::default()),
-        Err(error) => Err(error),
-    }
 }
 
 /// The predicates the model's serde attributes skip through. They live

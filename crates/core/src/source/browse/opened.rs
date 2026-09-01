@@ -27,15 +27,11 @@ pub(crate) struct Browsed {
     subscription: Option<String>,
 }
 
-/// The scope records the join reads. Browsing observes: a scope whose
-/// manifest or lock this build cannot read answers for none of its own
-/// rows rather than blanking the page — the records only feed the
-/// installed-state join.
 fn records(env: &Env, scope: &Scope) -> Result<(Manifest, Lock)> {
-    Ok((
-        crate::manifest::observed(&crate::manifest::manifest_path(env, scope))?,
-        crate::lock::observed(&crate::lock::lock_path(env, scope))?,
-    ))
+    let manifest = crate::manifest::load_current(&crate::manifest::manifest_path(env, scope))?
+        .unwrap_or_default();
+    let lock = crate::lock::load(&crate::lock::lock_path(env, scope))?;
+    Ok((manifest, lock))
 }
 
 pub(crate) fn open(env: &Env, catalog: &Catalog) -> Result<Browsed> {

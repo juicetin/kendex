@@ -159,16 +159,16 @@ pub(crate) fn scope_key(scope: &Scope) -> String {
 /// back flagged, never filtered, so the surface that hides them can also
 /// offer the way back.
 pub fn updates(env: &Env, scope: &Scope) -> Result<UpdatesReport> {
-    let Some(manifest) = load_current(env, scope)? else {
+    let Some(manifest) =
+        crate::manifest::load_current(&crate::manifest::manifest_path(env, scope))?
+    else {
         return Ok(UpdatesReport {
             rows: Vec::new(),
             warnings: Vec::new(),
             last_fetched: None,
         });
     };
-    // The record annotates these rows; it does not produce them. A lock
-    // this build cannot read costs the annotations, never the page.
-    let lock = crate::lock::observed(&crate::lock::lock_path(env, scope))?;
+    let lock = crate::lock::load(&crate::lock::lock_path(env, scope))?;
     let eval = Eval {
         env,
         scope,
@@ -341,12 +341,4 @@ pub fn set_ignored(
         Ok(())
     })?;
     Ok(())
-}
-
-/// What the scope declares, for a page that only lists it. A manifest
-/// this build cannot read declares nothing it can name, which is the same
-/// empty report a scope with no manifest gets.
-fn load_current(env: &Env, scope: &Scope) -> Result<Option<crate::manifest::Manifest>> {
-    let manifest = crate::manifest::observed(&crate::manifest::manifest_path(env, scope))?;
-    Ok((manifest != crate::manifest::Manifest::default()).then_some(manifest))
 }
