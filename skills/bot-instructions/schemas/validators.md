@@ -10,6 +10,14 @@ it rejects. A failure fails the run; none of them warns. Which tree each one
 reads, and which verb runs it, is § Where these run, and it is not the same
 answer for all of them.
 
+**No validator parses a render back.** One whose input is bytes this run
+emitted checks the emitter against itself and needs a reader for every format
+this package writes. The structure is in hand before it is serialised, so a
+validator that judges a document reads that structure. What is left to judge
+on bytes is size, which has no pre-emission form. A validator whose input is
+the REPO's own files is a different thing: `orphan`, `drift` and
+`agents-section` are it.
+
 ## Controls
 
 A validator's Rejects paragraph names several independent clauses. One fixture
@@ -19,7 +27,7 @@ stays green for good. So the rule is per clause, not per validator:
 
 - **One red control per rejection clause.** Each asserts on that validator's
   own identity or message, never on the run's exit code. All the validators run
-  together, so a `coderabbit-filters` fixture that also trips `toml-schema`
+  together, so a `coderabbit-schema` fixture that also trips `toml-schema`
   reds for the wrong reason and reads as coverage.
 - **One canonical valid render asserted green.** Without it, a validator that
   rejects everything satisfies the entire red set.
@@ -35,26 +43,37 @@ validator's controls are repo fixtures, not scratch-tree ones.
 ## The glob dialect's vectors
 
 The dialect claims a set of patterns five targets read alike. That is a claim
-about five engines rather than about this code, and only two of the five can be
-asked: CodeRabbit's `path_filters` go through minimatch and through real `git
-sparse-checkout`, both of which a test can run at a pinned version. Copilot's
+about five engines rather than about this code, and **one** of the five can be
+asked from a repo carrying no third-party runtime: git's own wildmatch, which
+is the engine `git sparse-checkout` uses and the one CodeRabbit feeds
+`path_filters` to. minimatch is the second half of CodeRabbit's path and needs
+a Node runtime this package deliberately does not depend on. Copilot's
 `applyTo` matcher, Qodo's `[ignore]` matcher and Macroscope's `include` matcher
-are unpublished — `references/limits.md` documents no grammar for any of them,
-and says outright that Macroscope documents none.
+are unpublished. Macroscope's `ignore.md` is the one exception, whose grammar
+`references/limits.md` § Macroscope carries from the vendor page; the other
+four matchers have no published grammar to hold this dialect against.
 
-So the vectors cover the two that can be measured, and the other three are a
+So the vectors cover the one that can be measured, and the other four are a
 one-time confirmation in `references/checklist.md`. Claiming five-engine
-conformance from a harness that can reach two would be the false confidence
+conformance from a harness that can reach one would be the false confidence
 this file exists to prevent.
+
+What the vectors compare is this package's own matcher — the one
+`exclusion-consistency`'s dead-exclusion clause decides with — against git's.
+A disagreement there means a dead-exclusion verdict is wrong.
 
 The harness needs its own control, and it cannot be a pattern the dialect
 allows: if the dialect is right, no such pattern produces disagreement, so that
 control could only be built by first finding a dialect bug. The buildable one
-runs in the other direction. Feed a pattern the dialect **refuses** — a brace
-and an extglob are two the dialect names, and their disagreement is exactly why
-they are refused — through the vector harness with the dialect check bypassed,
-and assert the harness reports the disagreement. That proves the instrument on
-an input the dialect guarantees exists.
+runs in the other direction. Feed a pattern the dialect **refuses** through the
+vector harness with the dialect check bypassed, and assert the harness reports
+the disagreement. An empty component is the sharpest: git normalizes `a//f` to
+`a/f` and selects a file where this package's matcher selects nothing — one
+pattern, two answers, which is why the path-shape rule refuses it. A leading
+`/` and a `..` component disagree differently, and worse: git refuses the
+pathspec outright rather than answering, so a rendered exclusion carrying one
+is not a narrow exclusion but a broken checkout. All three are inputs the
+dialect guarantees exist.
 
 ## Cross-file sets
 
@@ -65,17 +84,36 @@ named source, or checked by a validator that reds when the copies diverge.**
 Neither "compare them by reading" nor "keep them in sync" counts; both are what
 the divergence gets past.
 
+**"Derived" covers two different things, and a row says which.** *Derived, read
+at run time* means the generator parses that file and the set arrives as data:
+exactly two files are read that way, the doctrine source and the routing table,
+and SKILL.md § The render inputs names both because a render's bytes come from
+them. *Derived, one statement* means the file carries the single statement of
+the set and one implementation encodes it — the encoding is behavior, not data,
+so its source is not a path a render reads. The line is stateable rather than
+convenient: a file carrying **text a render emits** is data; a file carrying a
+**refusal predicate** is a specification the implementation holds in one place,
+where a control reds if it stops matching.
+
 Its sites, and which answer each takes:
 
 | Set | Answer |
 |-----|--------|
-| Doctrine block ids: the doctrine source's `###` headings against the routing table's rows | `doctrine-routing`, set equality in both directions |
-| Which block reaches which destination, and in what order | Derived. The routing table in `renders.md` is the single source; per-surface sections cite it and state no order of their own |
-| Content refusals: which input string is under which refusal, and what each refusal's predicate is | Derived. The table in `repo-toml.md` § The content refusals is the single source; `toml-schema`, `agents-section` and the Escaping paragraphs cite it |
-| The Qodo verbs `[cadence] qodo_commands` accepts, and which half `qodo-parity` requires guidance for | Derived. `repo-toml.md` § `[cadence]` states the set and the split; `qodo-parity` reads it rather than carrying its own |
-| Which paths a render reads: the marker's input list, `drift`'s `--staged` index set, the policy set, the open rule's coverage | Derived. SKILL.md § The render inputs is the single source; the routing table is one of them, and all four cite it rather than each naming its own set |
+| Doctrine block ids: the doctrine source's `###` headings against the routing table's rows, and both against the frozen id set | `doctrine-routing`, set equality in both directions |
+| Which block reaches which destination, and in what order | Derived, read at run time. The routing table in `renders.md` is the single source; per-surface sections cite it and state no order of their own |
+| Content refusals: which input string is under which refusal, and what each refusal's predicate is | Derived, one statement. The table in `repo-toml.md` § The content refusals is the single source; `toml-schema` and the Escaping paragraphs cite it. Three structures encode it: `refusals.ROWS` holds the content-class rows, `globs.check` the glob row, and `config._cadence` the `qodo_commands` row, and `toml-schema.test.sh` holds the table against all three |
+| The Qodo verbs `[cadence] qodo_commands` accepts, and which half `qodo-parity` requires guidance for | Derived, one statement. `repo-toml.md` § `[cadence]` states the set and the split; the implementation encodes the role column once and `qodo-parity` reads that |
+| Which paths a render reads: the marker's input list, `drift`'s `--staged` index set, the policy set | Derived, one statement. SKILL.md § The render inputs is the single source; the routing table is one of them, and all three cite it rather than each naming its own set |
+| The marker line: its exact form, the prologue that may precede it, and the two fields it varies by | Derived, one statement. One function emits the marker and one answers ownership against it, so the writer and the reader cannot spell it differently; one function splits the prologue and both the ownership test and the marker's insertion read it; and the version and path classes are one pair of constants, which `spec.py` refuses outside of |
 | The routing table's own shape: positions contiguous per column, no duplicates, and every block in the two all-eight columns | `doctrine-routing`, which judges the table as well as comparing it to the doctrine source |
 | Rejection clauses against their controls | Checked by reading, and the one exception. § Controls makes the count checkable by requiring one control per clause, which is why every clause has to be enumerated somewhere a reader can count |
+
+**The frozen id set is behavior, not data.** Block ids are frozen, and renaming
+a heading and its routing row together leaves both sides agreeing, so a
+comparison of the pair cannot enforce it. `doctrine-routing` compares against a
+frozen set the implementation carries, so changing it is a deliberate edit in
+code a reviewer reads — which is what a breaking change to every render should
+cost.
 
 **What no validator can do.** Each one judges bytes this generator produced.
 None of them observes a bot's actual behavior, and several of the guarantees
@@ -93,23 +131,34 @@ default in force, and the render is plausible, complete, and wrong.
 **Rejects, the shape set.** Any key or table the schema does not define, any
 value of the wrong type, an empty glob list, a surface name that is empty,
 malformed, duplicated or reserved, an unknown doctrine block id in
-`[doctrine.append]` or `[doctrine.replace]`, and a `schema` value other than
-`1`.
+`[doctrine.append]` or `[doctrine.replace]`, an exclusion glob that appears
+twice in the resolved set, and a `schema` value other than `1`.
+
+**Rejects, an absent required key.** The clause derives from the Required
+column of § Keys rather than restating which fields are required, and covers
+any key that column marks plus any this file states in prose rather than in a
+table row — the shape `schema` has, because it precedes every table. Absent is
+a different state from empty, which the empty-value clauses cover.
 
 **Rejects, the content set.** Closure over keys and types leaves the contents of
 values that land in a control position, and those are where an injection goes.
-The clauses are the cells of `repo-toml.md` § The content refusals: every marked
-cell is one clause with one control, and the predicates are that table's. That
-table carries every one of them, `[tone] coderabbit`'s ASCII rule and the
-`qodo_commands` verb set included, so neither list has anything the other lacks.
+The clauses are the cells of `repo-toml.md` § The content refusals **whose row
+this file supplies** — every marked cell on such a row is one clause with one
+control, and the predicates are that table's, the `qodo_commands` verb set
+included. The `doctrine block text` row is the one this validator does not
+carry: that value is in the spec copy and never passes through
+`bot-instructions.toml`, so its enforcer is the render-side check
+`repo-toml.md` § Render-side second checks names, and the table's Enforced column
+says so per row.
 The glob row's path-shape rule is the one entry whose clauses that table names
 rather than marks, because they are shapes rather than content refusals: an
 empty glob, a leading or trailing `/`, a `..` component, and an empty component,
 each its own clause with its own control. The character class catches none of
 them — every byte in them is permitted, and an empty glob has no bytes at all.
 
-Reading the table's marked cells is how the control count is checked, which is
-what a validator restating its own copy of the predicates would defeat.
+Reading the table's marked cells against its Enforced column is how the control
+count is checked, which is what a validator restating its own copy of the
+predicates would defeat.
 
 **Rejects, the cross-flag set.** `qodo_best_practices` or `qodo_review_md` true
 while `qodo` is false. `copilot` or `coderabbit` true while `codex` is false,
@@ -148,6 +197,15 @@ routing table — an unrouted block is an error, never a silent drop. A
 routing-table row naming an id the doctrine source does not define. Set equality
 in both directions: the one-directional half leaves the orphaned row unchecked.
 
+**Rejects, against the frozen id set.** A frozen id the doctrine source no
+longer defines, and an id it defines that the frozen set does not carry. This
+is the enforcer for "block ids are frozen", and it has to be a third set: rename
+a heading and its row together and the two above agree, the check passes, and a
+consuming repo's `[doctrine.append]` keyed on the old id silently reaches
+nothing. § Cross-file sets says why that set lives in the implementation rather
+than in a fourth file — it is a predicate, not text a render emits, and a
+deliberate edit in code a reviewer reads is what a breaking change should cost.
+
 **Rejects, the table's own shape.** Nothing else judges the table, and it is the
 generator's single routing input, so a one-character edit to it is a silent
 policy change:
@@ -177,7 +235,7 @@ config for as long as nobody re-reads the file. One over-long
 `tone_instructions` does this, and the root schema sets
 `additionalProperties: false`, so a single misspelled top-level key does it too.
 
-**Rejects.** Any deviation of the rendered file from CodeRabbit's published
+**Rejects.** Any deviation of the rendered document from CodeRabbit's published
 schema, validated against the copy vendored at
 `.bot-instructions/coderabbit-schema.json` rather than fetched at check
 time: an unknown top-level key, a wrong type, an enum miss
@@ -185,17 +243,32 @@ time: an unknown top-level key, a wrong type, an enum miss
 length cap, of which `tone_instructions` at 250 and
 `reviews.path_instructions[].instructions` at 20,000 are the two this package
 can reach. Lengths count Unicode code points, which is what the schema's
-`maxLength` counts; `[tone] coderabbit` is required to be ASCII so the local
-count and the vendor's cannot disagree.
+`maxLength` counts.
 
-**Rejects, the completeness clause.** A top-level property the vendored schema
-defines that the render does not carry. Schema validation alone judges what is
-present and says nothing about what is absent, so a render that dropped a
-property would validate while that setting silently resumed resolving down the
-unversioned ladder — which is the whole thing full state exists to stop.
-`renders.md` promises every top-level property; this is what holds the promise,
-and it is what makes the next schema refresh report a newly added property
-instead of quietly widening the gap.
+**Rejects, the completeness clause.** A property the vendored schema defines a
+default for, at **any depth**, that the render does not carry. Schema validation
+alone judges what is present and says nothing about what is absent, so a render
+that dropped a property would validate while that setting silently resumed
+resolving down the unversioned ladder — which is the whole thing full state
+exists to stop. Root-only would pass a render that dropped a nested option
+under an existing object: the top-level property is still present, and the
+setting one level down resolves away.
+
+What is in the clause is what `renders.md` § `.coderabbit.yaml` § Keys puts in
+full state, read through the same `in_full_state` predicate the render reads.
+So a property the vendor defines **no default for** is outside the clause
+until this package overrides it. A property the vendor *adds* arrives at its
+own default and shows in the diff; what this clause holds is the other
+direction, a renderer regression that drops one.
+
+**Rejects, the unresolved-override clause.** An override this package chooses
+that the vendored copy defines no property for. The render consults overrides
+by dotted path, so such a key is not applied — it is dropped, and the setting
+resolves to the vendor default with nothing said. Renaming a property is what
+a vendored-schema refresh does, and refreshing that copy is a checklist step.
+This clause runs before the ones above, which read the rendered document: an
+override naming nothing is a question about the schema and the overrides, and
+a missing render does not answer it.
 
 **Rejects, also.** A missing, unreadable or unparseable
 `.bot-instructions/coderabbit-schema.json`, whenever `[bots] coderabbit` is
@@ -207,6 +280,17 @@ failure this validator exists to catch, one level up. `references/checklist.md`
 file is one of
 this validator's controls.
 
+**Rejects, the control-class clause.** A string in the rendered document
+carrying a character a YAML reader breaks a line on — C0 less tab and newline,
+DEL, U+0085, U+2028, U+2029. This is the one arrival route
+`repo-toml.md` § The content refusals cannot cover: the value comes from a
+vendored-schema default or from this package's own overrides, neither of which
+passes through `bot-instructions.toml`. A break there is read as more lines
+than the render wrote, so a rendered comment becomes a `path_filters:` key and
+the exclusion list becomes an allowlist. The refusal is this validator's
+finding rather than a raise out of the emitter, which would reach the operator
+naming no validator at all.
+
 **Rejects, also.** A schema keyword the validator does not implement. A
 hand-written validator that ignores an unknown constraint under-validates while
 reporting success, which is the same class of failure one level up. Naming the
@@ -216,18 +300,6 @@ and its refresh step are a checklist line for that reason. That copy is also a
 policy path, since a loosened schema turns this validator green on a file
 CodeRabbit discards whole and keeps it green afterwards.
 
-## `coderabbit-filters`
-
-**Silent failure.** Two of them. A `path_filters` list with one entry lacking
-the `!` prefix is an allowlist, and every file in the repo that no entry names
-stops being reviewed. And CodeRabbit feeds these same patterns to `git
-sparse-checkout`, which understands plain globs only, so an extglob or brace
-pattern matches nothing and excludes nothing while reading as an exclusion.
-
-**Rejects.** Any `path_filters` entry not starting with `!`. Any entry whose
-remainder is outside the glob dialect. Both are checked on the rendered file,
-not on the TOML, so a future generator change cannot route around them.
-
 ## `exclusion-consistency`
 
 **Silent failure.** A harness refresh renders a new skill into the repo. The
@@ -235,13 +307,46 @@ exclusion lists name the skills that existed when someone last wrote them, so
 the new tree is reviewed as if it were this repo's code. Findings arrive on
 files nobody here can fix, and the only signal is reviewer noise.
 
-**Rejects.** A mismatch between the derived part of the rendered exclusion set
-and the set derived fresh from the repo's resolved install manifest: every
-rendered `.agents/skills/<name>`, no tree declared `in-place`, plus the
-per-harness render directories the install declares. The comparison is over the
-derived part alone, because the rendered set also holds every
-`[[exclusions.path]]` entry and whole-set equality would fail on the first
-hand-written exclusion. Runs only when `[exclusions] derive_render` is true.
+**Rejects.** A declared exclusion glob matching no tracked path. A dead
+exclusion silences nothing and reads clean, which is how a typo or a wrong
+anchor — `app/[slug]/**` against a repo with no such route — survives as
+config that looks like an exclusion. This repo already implements the check for
+its own settings in `skills/review-gate/scripts/validate.sh`, including the
+guard this borrows: in a repo tracking no files every glob matches nothing for
+a reason that is not the author's, so the clause says the verdict is
+unreachable rather than reporting each exclusion as dead. A repo declaring no
+exclusion at all is the other side of that: nothing can be dead, so the clause
+is silent rather than reporting an unreachable verdict about an empty set.
+
+A glob matching no tracked path is dead wherever it sits, symlink entries
+included. git stores one as a blob, and a pull request editing the tree behind
+a link carries that tree's real path in its diff, never the path through the
+link, so a glob under the link reaches no diff on any bot.
+
+**Rejects, also.** A declared render root the index holds as an entry of its
+own — a harness root staged as a symlink, or as a file. The derivation asks
+which immediate subdirectories under that root hold a tracked path, and git
+stores such a root as one entry with the tree under its real name, so the
+question has no answer and an empty set would put the harness tree back in
+review scope with nothing saying so. Refusing names the root: an empty
+derivation means the root holds no tracked subdirectory, and it must not also
+mean the root is not a directory.
+
+**The derived set is every immediate subdirectory of a declared render root
+holding a tracked path**, read from the index in both modes so a worktree
+render and a `--staged` check of it cannot disagree. The rule is the further
+segment: a tracked path under the root names a subdirectory only when
+something follows its first component. An entry directly under the root
+derives nothing, whatever its mode — `.claude/settings.json`, a file this repo
+owns and can fix, which a glob one shape too wide would silence review on; and
+`.claude/CLAUDE.md`, which six consumer repos track as a `120000` link to
+`../AGENTS.md` and which would otherwise emit a `.claude/CLAUDE.md/**` glob
+covering nothing. The consumer repos link per skill (`.claude/skills/code-quality`),
+whose tracked path already carries the further segment.
+
+The rendered exclusion lists are not compared against each other, nor against
+a fresh derivation. Every destination writes one set, and on `check` a
+destination whose bytes disagree with a fresh render is `drift`'s finding.
 
 **Rejects, also.** A resolved manifest that declares no install. Reading the
 wrong file and finding nothing to exclude is indistinguishable from a repo with
@@ -251,14 +356,22 @@ validator's controls is a source-catalog repo, where `kendex.toml` carries the
 published catalog and `kendex-local.toml` carries the install — the shape that
 would otherwise derive nothing and pass.
 
-**Rejects, also.** An exclusion entry present in one rendered surface and
-absent from another, where both surfaces have an exclusion mechanism.
-
 **Rejects, also.** A non-empty exclusion set that a destination the routing
 table marks as carrying the paths does not carry: `AGENTS.md`, `pr_agent
-issues`, `pr_agent extra`. That is what holds the requirement in SKILL.md
-§ Every rendered config excludes the render trees — without it a render could
-drop the paths from the one surface Codex reads and violate nothing checkable.
+issues`, `pr_agent extra`. Each is read as the value the bot reads — the
+region body, `[review_agent] issues_user_guidelines`, `[pr_reviewer]
+extra_instructions` — never as the whole rendered file, because `.pr_agent.toml`
+also carries `[ignore] glob` listing every exclusion, and asking whether a
+path appears anywhere in that file is answered by the unrelated mechanism
+beside the guidance. That is what holds the requirement in SKILL.md § Every
+rendered config excludes the render trees — without it a render could drop the
+paths from the one surface Codex reads and violate nothing checkable.
+
+Each destination's `Those paths here:` sentence is parsed into its entries and
+compared as a SET, so the clause also rejects a destination listing a path the
+TOML does not exclude. Asking whether each glob APPEARS in the text answers yes
+for `src/**` whenever `vendor/src/**` is listed, so containment cannot stand in
+for membership.
 
 **What it does not establish.** That the bots exclude the same files. Codex has
 no exclusion mechanism at all, Copilot's lives in a settings page no repo file
@@ -266,34 +379,6 @@ can read, Qodo's `[ignore]` governs `/improve` rather than what the review
 agent reads, and a Macroscope agent's own `include` overrides `ignore.md`. This
 validator compares the strings the generator emitted. Effective parity across
 five bots is not a property any repo-side check can assert.
-
-## `copilot-frontmatter`
-
-**Silent failure.** A `.instructions.md` file with no `applyTo`, or an empty
-one, matches nothing and is never loaded. And `excludeAgent` fails in the
-direction that looks fine: the value names the agent the file is hidden from, so
-a missing key or the wrong one of the two leaves reviewer-only instructions
-loading into the working agent — the inverse of what `reviewer_only` asks for,
-with the file present and its frontmatter parsing.
-
-**Rejects.** A generated `.instructions.md` with no `applyTo`, an `applyTo`
-that is empty or whitespace, and an `applyTo` emitted as a YAML array rather
-than a single comma-separated string.
-
-**Rejects, on `excludeAgent`.** For a surface with `reviewer_only = true`: a
-missing `excludeAgent`, and any value other than `cloud-agent`. `code-review` is
-the documented opposite — it hides the file from the reviewer and leaves the
-working agent reading it — so accepting either value here would accept the one
-case the key exists to prevent. For a surface with `reviewer_only = false` the
-render emits no `excludeAgent`; if one is present it must still be one of the
-two values `references/limits.md` documents.
-
-Three controls, per § Controls, one per clause: a reviewer-only surface
-rendered with the key missing, one rendered with `code-review`, and an ordinary
-surface rendered with an `excludeAgent` outside the two documented values. The
-third is easy to leave out because the render emits no key there, which is
-exactly why it needs naming — a clause nothing exercises is a clause nothing
-proves.
 
 ## `copilot-budget`
 
@@ -312,23 +397,21 @@ author can see what to cut.
 absent from the other command's path, and the review runs with less context
 while the file looks configured.
 
-**Rejects.** A doctrine block present in `[pr_reviewer] extra_instructions` and
-absent from the union of `[review_agent] issues_user_guidelines` and
-`compliance_user_guidelines`, or the reverse. Blocks are compared by identity
-after the same normalization the render applies, not by whole-string equality:
-the two sections carry the same set of blocks, split differently. It also
-rejects a `[github_app] pr_commands` entry **whose role in `repo-toml.md`
-§ `[cadence]`'s verb table is review** and whose section carries no guidance.
-The clause reads that table's role column rather than restating a set: a
-non-review verb reads a section this render leaves alone by design, so its
-presence is not a finding, and the vendor's own documented default carries
+**Rejects.** A `[github_app] pr_commands` entry **whose role in
+`repo-toml.md` § `[cadence]`'s verb table is review** and whose section carries
+no guidance. The clause reads that table's role column rather than restating a
+set: a non-review verb reads a section this render leaves alone by design, so
+its presence is not a finding, and the vendor's own documented default carries
 one.
 
-The set it compares is the routing table's three `pr_agent` columns, read as
-data rather than restated here. That is what keeps this a check on the render
-and not a fourth hand-written copy of the routing: a block moved between the two
-`[review_agent]` keys changes one table cell and nothing else, while a block
-dropped from a column reds this validator.
+Which section that is comes from the routing table: `/review` reads
+`[pr_reviewer] extra_instructions`, `/agentic_review` the union of the two
+`[review_agent]` keys. The guidance is read as the value the render composed
+for each key, before it was written into TOML.
+
+Which block reaches which of the three `pr_agent` columns is the routing
+table's, read as data rather than restated here: a block moved between the two
+`[review_agent]` keys changes one table cell and nothing else.
 
 ## `qodo-best-practices`
 
@@ -337,8 +420,9 @@ Qodo's guidance is that long best-practices files are processed less
 effectively, and it states no length at which it rejects or truncates one, so
 there is no error to wait for and no signal that guidance went unread.
 
-**Rejects.** A rendered `best_practices.md` over 800 lines, naming the surfaces
-contributing the most lines so the author can see what to cut.
+**Rejects.** A rendered `best_practices.md` over `[budgets]
+qodo_best_practices_lines`, default 800, naming the count, the budget, and the
+surfaces contributing the most lines so the author can see what to cut.
 
 **That 800 is this package's budget, not a vendor cap.** Qodo documents it as
 writing guidance; `references/limits.md` marks it a recommendation, and this
@@ -352,41 +436,6 @@ generated one and the generator cannot see them, so nothing here bounds the
 total; `references/checklist.md` carries that as a question rather than a
 number.
 
-## `macroscope-render`
-
-**Silent failure.** A `.macroscope/correctness/` file whose frontmatter
-Macroscope cannot read is a file it will not apply, and the repo's only signal
-is the absence of a comment it was expecting.
-
-**Rejects.** In a generated correctness file for a `[[surface]]`: a frontmatter
-key other than `include` or `exclude`, a value that is not a YAML array of
-strings, an `include` that is empty **or absent**, and a body carrying no
-instruction text below the marker. That last one is what makes SKILL.md's
-promise that surface text reaches Macroscope true rather than assumed: without
-it a render could emit frontmatter and a marker, satisfy every other clause
-here, and tell Macroscope nothing. Absent is the one that
-matters: omitted frontmatter applies repo-wide, so a renderer bug dropping
-`include` silently widens a path-scoped surface to the whole repository with
-every validator green.
-
-`doctrine.md` is the one generated correctness file that carries no frontmatter,
-and it is deliberate — the routing table gives it every block precisely because
-it applies repo-wide. It is told apart by its name, which is reserved and which
-no surface may take, so the two cases never have to be guessed at.
-
-**Rejects, in the generated `ignore.md`.** A non-blank line that is neither a
-glob in the dialect nor a single-line HTML comment, and any line after the first
-`-->` on a comment line.
-
-The `ignore.md` half holds the render to this package's own conservative
-grammar, not to a vendor rule: Macroscope documents none. The grammar assumes
-every non-blank line is a pattern and keeps everything else inside a comment,
-which is the safe direction to be wrong in. Whether Macroscope agrees is a
-checklist line, not something this validator can answer.
-
-Check-run agent frontmatter is not validated, because this package writes no
-check-run agents. A validator for keys nothing emits passes vacuously.
-
 ## `agents-section`
 
 **Silent failure.** Codex reads `AGENTS.md` § Code Review Rules and nothing
@@ -395,9 +444,13 @@ reviews every pull request with no repo rules at all, posting normally
 throughout.
 
 **Rejects, always.** A nested `AGENTS.md` anywhere below the root carrying a
-`## Code Review Rules` section. Codex reads the nearest nested file covering each
-changed path, so such a section reaches it without passing through doctrine, and
-the generator writes only the root one.
+`## Code Review Rules` section. Codex reads the nearest nested file covering
+each changed path, so such a section reaches it without passing through
+doctrine, and the generator writes only the root one. The scan is over the
+repository's tracked paths, because that is what a bot reads: an untracked
+working-directory file is in no tree a pull request presents, and walking
+everything else would mean walking a repo's dependency directories to judge
+files no bot loads.
 
 Unconditional, and this is the clause the flag does not gate. `[bots] codex =
 false` says this package does not manage the section; it says nothing about
@@ -408,19 +461,25 @@ off, while the policy set still counts every `AGENTS.md` as policy-bearing for
 exactly that reason. Its control is independent of the flag.
 
 **Rejects, when `[bots] codex` is true.** A root `AGENTS.md` with no `## Code
-Review Rules` heading, or with more than one. A doctrine or repo line matching
-the heading predicate in `repo-toml.md` § The content refusals, which markdown
-reads as a heading and which would end the owned region at the next render,
-taking the rest of the section with it.
+Review Rules` heading, or with more than one. Both presuppose a managed region,
+so with the flag off there is none to judge and rejecting a missing heading
+would fail a repo that never asked for one.
 
-Both presuppose a managed region, so with the flag off there is none to judge
-and rejecting a missing heading would fail a repo that never asked for one.
+**The heading predicate over the region's content is not a clause here.** A
+doctrine or repo line that markdown reads as a heading would end the owned
+region at the next render, and every route into that region is already refused
+at input: `toml-schema` for the values `bot-instructions.toml` supplies, and
+`repo-toml.md` § Render-side second checks for doctrine text. Nothing else lands
+in the region — the exclusion globs are under a dialect that refuses `#` — so a
+clause here would be unreachable, and § Controls' own warning is that an
+unproven clause which is dead or unreachable stays green for good.
+`repo-toml.md` § The content refusals owns that predicate in both directions.
 
 **The region's bytes are `drift`'s, not this validator's.** Every clause here is
 structural — does the section exist, is it unique, is there an unmanaged nested
-one, would a line break the region — and none compares anything against a
-render. That is what lets all of them run before the write, which is what makes
-the write-phase splice failure unreachable. A byte comparison could not: before
+one — and none compares anything against a render. That is what lets all of
+them run before the write, which is what makes the write-phase splice failure
+unreachable. A byte comparison could not: before
 the write the repo holds the last render, so any change to doctrine, the TOML or
 the tracker substitution would make it fire and `render` would write nothing,
 leaving the region unable to be updated at all in a repo where `toml-schema`
@@ -462,10 +521,15 @@ That is also the state every incoming repo is in before `adopt` runs. Taking one
 over is `adopt`'s job and needs the capability on.
 
 **The scan is recursive, over what each bot reads rather than what the generator
-writes.** `.github/instructions/**` and `.macroscope/correctness/**` both, since
-Copilot and Macroscope walk those subtrees. A marked file one directory down,
-left by a hand move or a directory rename, is at no path the generator would
-write, so a flat scan would miss it while Copilot kept loading it.
+writes.** `.github/instructions/**`, `.macroscope/correctness/**`,
+`.macroscope/check-run-agents/**` and `.macroscope/approvability.md`, since
+Copilot and Macroscope read all four and the policy set already counts them. A
+marked file one directory down, left by a hand move or a directory rename, is
+at no path the generator would write, so a flat scan would miss it while
+Copilot kept loading it — and the two `.macroscope/` paths this package never
+writes are exactly where a marked generated file could be moved and stay
+active, particularly after `macroscope = false`, with neither this nor `drift`
+reporting it.
 
 **Retiring one is delete-then-render.** `render` runs this before the write and
 fails on what it finds, so the render that would create the orphan never
@@ -530,40 +594,42 @@ failing on bytes nobody is committing.
 **Controls.** The hand-edit fixture; a fixture whose only change is a deleted
 marker line; a fixture editing the `AGENTS.md` owned region, which reds this
 validator alone and is what proves the region comparison lives here rather than
-in `agents-section`; and one pair per render input for the mode. Per input —
-the TOML, the spec copy, the vendored schema, each install manifest read — a
-staged, consistent set with a divergent worktree copy of that input, asserted
-green, and a staged copy of that input that its staged outputs are stale
-against, asserted red. Plus one for absence: an input staged as absent,
-asserted on the absence rather than on its worktree copy.
+in `agents-section`; and **one pair per render input for the mode**, worked
+from SKILL.md § The render inputs rather than from a copy of the list here —
+that source names the spec copy as two files, and a staged doctrine source with
+an unstaged routing table is its own case since `doctrine-routing` compares
+them. Each pair is a staged, consistent set with a divergent worktree copy of
+that input, asserted green, and a staged copy of that input that its staged
+outputs are stale against, asserted red. Plus one for absence: an input staged
+as absent, asserted on the absence rather than on its worktree copy.
 
 A TOML-only pair is what a generator reading the index for the TOML and the
 worktree for everything else passes, with the failure § Which tree names
-shipping intact. One clause, one control, applied to the validator whose clause
-names four inputs.
+shipping intact — and the `AGENTS.md` pair is that same class, since that file
+is both a render input and an output.
 
 ## Where these run
 
 Two kinds, and the difference is what each judges.
 
-**Byte validators** judge one render — its inputs and the bytes it produced —
-and nothing around it, so they read the scratch tree, on both verbs:
-`toml-schema`, `coderabbit-schema`, `coderabbit-filters`,
-`copilot-frontmatter`, `copilot-budget`, `qodo-parity`, `qodo-best-practices`,
-`macroscope-render`, `doctrine-routing`, and `exclusion-consistency`'s
-cross-surface clause.
+**Byte validators** judge one render — its inputs and the document it produced
+— and nothing around it, so they read the scratch tree, on both verbs:
+`toml-schema`, `coderabbit-schema`, `copilot-budget`, `qodo-parity`,
+`qodo-best-practices`, `doctrine-routing`, and `exclusion-consistency`'s
+prose-destination clause.
 
 **Repo-state validators** judge the repository, so a scratch tree is the one
 place they cannot fail. `orphan` looks for what the current TOML does not
 produce, and the scratch tree holds only what it does produce. `drift` compares
 a path's bytes against a fresh render, which in the scratch tree are the same
-bytes. `exclusion-consistency`'s derived-set clause compares a set against a
-fresh derivation from the same manifest in the same run. Every `agents-section`
-clause reads the repo: the nested-`AGENTS.md` walk needs a repo to walk, and the
-other two need a file the scratch tree does not hold at all, since `AGENTS.md`
-is the one output the build never assembles whole — the build produces the
-region's body and the write splices it. Comparing that body against itself is
-the vacuity the split exists to remove.
+bytes. Every `agents-section` clause reads the repo: the nested-`AGENTS.md`
+tracked-path read needs a repo to read, and the other two need a file the
+scratch tree does not hold at all, since `AGENTS.md` is the one output the build never assembles
+whole — the build produces the region's body and the write splices it.
+Comparing that body against itself is the vacuity the split exists to remove.
+
+`exclusion-consistency`'s dead-exclusion clause reads the repository, since
+what it asks is whether a declared glob reaches a tracked path.
 
 So they read the repo:
 
@@ -572,7 +638,7 @@ So they read the repo:
 | `orphan` | the repo, before the write | the repo |
 | `agents-section`, every clause | the repo, before the write | the repo |
 | `drift`, the `AGENTS.md` owned region included | skipped, and named as skipped | the repo |
-| `exclusion-consistency`, derived-set clause | skipped, and named as skipped | the repo |
+| `exclusion-consistency`, dead-exclusion clause | the repo, before the write | the repo |
 
 `orphan` runs before the write because that is the render that creates the
 orphan: retiring a `[[surface]]` or flipping a bot flag is what leaves the file
@@ -587,15 +653,14 @@ the heading before the write is what makes that failure unreachable. Every
 clause it has is structural, so none of them compares against a render and none
 needs skipping; the region's bytes belong to `drift`, which is skipped.
 
-The two skips are not vacuous checks left running; they are checks with no
-question to answer at render time, and the run says so rather than counting them
+The one skip is not a vacuous check left running; it is a check with no
+question to answer at render time, and the run says so rather than counting it
 as passed. A render exists to change the bytes `drift` compares, so at render
 time `drift` would red on its own purpose — the `AGENTS.md` region most of all,
 where the repo holds the last render and any doctrine, TOML or tracker change
-makes the bytes differ by design. And `exclusion-consistency`'s derived clause
-compares a derivation against itself. Both have force in `check`, against
-a committed tree whose manifest and whose files have moved on since someone
-last rendered — which is the question they were written for.
+makes the bytes differ by design. It has force in `check`, against a committed
+tree that has moved on since someone last rendered, which is the question it
+was written for.
 
 A repo wires `check` into whatever runs its other repo guards. This package
 ships no hook of its own, because a repo that already has a commit chain does

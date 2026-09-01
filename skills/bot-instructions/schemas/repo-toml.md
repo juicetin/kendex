@@ -239,29 +239,70 @@ doctrine constant, and no doctrine block asserts what a push triggers.
 
 ### `[tone]`
 
-`coderabbit`, string, optional, ASCII only. Renders to `tone_instructions`,
-whose hard cap is 250 characters after the generator strips the newlines a TOML
-multi-line string introduces. Over the cap, CodeRabbit rejects the entire file.
-ASCII is required so that the local count and the vendor's cannot disagree
-about what one character is. Absent, the shipped default is used; see
-`renders.md` for its text.
+`coderabbit`, string, optional. Renders to `tone_instructions`, whose hard cap
+is 250 characters after the generator strips the newlines a TOML multi-line
+string introduces. Over the cap, CodeRabbit rejects the entire file. The cap
+counts Unicode code points, which is what the vendored schema's `maxLength`
+counts. Absent, the shipped default is used; see `renders.md` for its text.
 
 ### `[budgets]`
 
-`copilot_chars`, integer, default `6000`. The rendered
-`.github/copilot-instructions.md` may not exceed it. GitHub documents no
-numeric cap for that file and asks for "no longer than 2 pages", so this is the
-package's reading of two pages rather than a vendor limit. Raise it in a repo
-whose surfaces genuinely need more, and say why in a comment.
+| Key | Type | Default | Bounds |
+|-----|------|---------|--------|
+| `copilot_chars` | integer | `6000` | the rendered `.github/copilot-instructions.md`, in characters |
+| `qodo_best_practices_lines` | integer | `800` | the rendered `best_practices.md`, in lines |
+
+Both are package budgets rather than vendor caps, and they are the same kind of
+thing: GitHub documents no numeric cap and asks for "no longer than 2 pages",
+Qodo recommends keeping a best-practices file under about 800 lines and states
+no length at which it rejects or truncates one. `references/limits.md` carries
+each recommendation and marks the budget built on it. Raise one in a repo whose
+surfaces genuinely need more, and say why in a comment.
+
+The vendor caps this package can reach — `tone_instructions` at 250 characters
+and a `path_instructions` entry at 20,000 — take no key. They are the vendored
+CodeRabbit schema's own `maxLength`, so `coderabbit-schema` is their single
+enforcer and nothing here carries a second copy of either number.
 
 ### `[exclusions]`
 
 `derive_render`, bool, default `false`. When true, the generator reads the
 repo's install manifest and adds every rendered harness tree to the exclusion
 set. What it derives is exactly two things: each `.agents/skills/<name>` whose
-entry does not declare `source = "in-place"`, and each per-harness render
-directory the repo's install declares. A skill declared `in-place` is this
-repo's own file and stays in review scope.
+entry does not declare `source = "in-place"`, and each **immediate
+subdirectory holding a tracked path** of each per-harness render root the
+repo's install declares. A skill declared `in-place` is this repo's own file
+and stays in review scope. The tracked-path condition is what keeps a
+derivation and the dead-exclusion clause from contradicting each other: a
+subtree the install has not produced, or one git ignores, excludes nothing,
+and deriving it would name a glob that clause rejects with no edit an author
+could make to clear it. A render root the index holds as an entry of its own — staged as a symlink, or
+as a file — is refused naming that root rather than derived as an empty set,
+because git stores such a root as one entry with the tree under its real name
+and an empty derivation would leave that tree in review scope silently. A
+derived glob is held to the glob dialect like a declared one, and a manifest
+key or directory name outside it fails naming the manifest row that produced
+it: this is the one glob source no author writes as
+a glob, and the paths render as prose on the two surfaces that read them as
+prose, where nothing would judge them as patterns at all.
+
+**A harness root is never derived whole**, and the subdirectory rule is why. A
+harness root holds two kinds of thing: subdirectories the harness install owns
+whole, and root-level files it merges its own entries into while the repo owns
+the rest — `.claude/settings.json`, `.codex/config.toml`, `.pi/settings.json`,
+and the repo's own memory file beside them. Excluding the root would silence
+bot review on files this repo actually owns and can fix, which is the opposite
+of what the derivation is for: it exists to keep vendored render output out of
+review, not to hide hand-maintained config.
+`skills/review-gate/references/vendored-paths.md` § The harness-render variant
+draws the same line for the review gate's own set and names the merged paths.
+
+One harness root is the repo's own directory rather than the harness's:
+Copilot's is `.github`, where the install owns `agents`, `hooks` and `skills`
+and the repo owns everything else. That row names its subtrees instead of
+taking the root. A harness the generator has no row for is an error rather than
+a guessed root, because guessing wrong there is the silenced-settings-file
+failure above.
 
 **The manifest is the one kendex resolves, never a hardcoded filename.** That
 is `kendex.toml`, except in a repo whose `kendex.toml` declares
@@ -291,8 +332,9 @@ path actually read.
 Every derived entry carries that exact string, because every derived entry is
 excluded for that one reason and nothing about the tree distinguishes them. A
 render rule that wants a reason takes it from here rather than restating it, and
-the string is single-line ASCII with no `-->` and no `#`, so it satisfies every
-constraint a rendered comment is under by construction rather than by check.
+the string is a single ASCII line with no `-->` and no `#`, so it satisfies
+every constraint a rendered comment is under by construction rather than by
+check.
 Without it the render rules would demand bytes the schema never supplies:
 `reason` is a required key on `[[exclusions.path]]` entries alone, and a derived
 entry has no TOML row to carry one.
@@ -318,8 +360,8 @@ A path set plus what a reviewer needs to know about it. Zero or more.
 |-----|------|----------|---------|
 | `name` | string | yes | Lowercase, `[a-z0-9-]`, non-empty, unique. Becomes the generated filenames |
 | `globs` | array of string | yes | Non-empty. Paths this surface covers |
-| `exclude_globs` | array of string | no | Subtracted from `globs`, and real subtraction only on Macroscope |
-| `reviewer_only` | bool | no, default `false` | Renders `excludeAgent: "cloud-agent"` into the Copilot file, keeping reviewer doctrine away from the working agent. `copilot-frontmatter` requires exactly that key and value when this is true, since the other permitted value hides the file from the reviewer instead |
+| `exclude_globs` | array of string | no | Subtracted from `globs`, and real subtraction only on Macroscope. Kept rather than cut: it is the only path-scoped subtraction any of the five bots offers a repo file, and losing it would leave narrowing `globs` as the only tool. Everywhere else it renders as prose asking a bot to disregard rules it has already loaded, which SKILL.md says plainly rather than dressing up |
+| `reviewer_only` | bool | no, default `false` | Renders `excludeAgent: "cloud-agent"` into the Copilot file, keeping reviewer doctrine away from the working agent. The other permitted value, `code-review`, hides the file from the reviewer instead, so `renders.md` fixes which one is written |
 | `instructions` | string | yes | What a reviewer gets wrong here, and what is true instead |
 
 `name` may not be `doctrine`, `correctness`, `ignore`, or `approvability`. Each
@@ -327,45 +369,85 @@ is a path this package or Macroscope already governs, and a surface claiming one
 would silently lose a file to write order.
 `.macroscope/correctness/correctness.md` is the one worth naming: it is
 Macroscope's governing file, carrying `waitsFor`, `requires` and their two
-timeouts for the whole correctness run, and `macroscope-render` permits no
-frontmatter key but `include` and `exclude`, so an `adopt` over it would drop a
-repo's check prerequisites for good. A `name` colliding with another
-surface, or producing a path another output already claims, is an error.
+timeouts for the whole correctness run, and the render writes no frontmatter
+key but `include` and `exclude`, so an `adopt` over it would drop a repo's
+check prerequisites for good. A `name` colliding with another surface is
+an error. There is no separate check for a path collision, because the name
+**is** the generated filename: uniqueness plus the reserved set decides it, and
+a second check could never red.
 
-`instructions` is under the heading, frontmatter and marker refusals below.
-Each restructures at least one output: a heading ends the `AGENTS.md` owned
-region, `---` opens frontmatter, and the marker decides which files this package
-owns.
+`instructions` is under the heading, marker and control refusals below. Each
+restructures at least one output: a heading — `#` or an underline — ends the
+`AGENTS.md` owned region or forges a section, and the marker decides which
+files this package owns. It is also required to be non-empty, which is a rule
+about the surface rather than about the string: whitespace renders a
+`path_instructions` entry with no text, a `.instructions.md` carrying a marker
+and nothing under it, and a best-practices section with no body — a surface
+that costs its bots a read and tells them nothing. Drop the surface instead.
+
+A `[...]` class is made of permitted characters and is not itself checked
+character by character, so the dialect admits one shape no engine can compile:
+a reversed range like `[z-a]`. `globs.check` proves the pattern compiles as its
+last clause, which makes that a `toml-schema` finding naming the glob rather
+than a traceback out of a validator much later. Consecutive `**/` are collapsed
+to one before matching — `**/**/` covers exactly what `**/` covers, and nesting
+the translation of `**/` is exponential in the number of them, which is a
+runtime the dead-exclusion clause pays once per tracked path.
 
 ## The content refusals
 
-One row per input string, one column per refusal class. Everything that judges
-these — `toml-schema`, `agents-section`, and the Escaping paragraphs in
-`renders.md` — cites this table rather than restating it, so a predicate written
-here is the only predicate.
+One row per input string, one column per refusal class, and an **Enforced**
+column saying which side reads that row's value. Every class here is one that
+would break the STRUCTURE of a file this package emits; a value this package
+merely dislikes is not refused. Everything that judges these —
+`toml-schema` and the Escaping paragraphs in `renders.md` — cites this table
+rather than restating it, so a predicate written here is the only predicate.
+Three structures encode it, one per kind of cell: `refusals.ROWS` holds the
+eight rows whose refusals are content classes, `globs.check` holds the glob
+row, whose character class and path-shape clauses are its own, and
+`config._cadence` holds the `qodo_commands` row. A reader counting clauses off
+this table lands on those three, and `tests/toml-schema.test.sh` holds the
+table against them so a row added on one side without the other reds.
 
-| Input string | heading | frontmatter | marker | comment-close | toml-delimiter | control | character class |
-|--------------|---------|-------------|--------|---------------|----------------|---------|-----------------|
-| `[repo] name` | – | – | – | – | – | – | single line, `[A-Za-z0-9._-]` |
-| `[repo] tracker` | – | – | – | – | – | – | single line, `[A-Za-z0-9._-]` |
-| `[repo] summary` | yes | yes | yes | – | yes | yes | – |
-| `[[surface]] instructions` | yes | yes | yes | – | – | yes | – |
-| `[doctrine.append]` / `[doctrine.replace]` values | yes | yes | yes | – | yes | yes | – |
-| doctrine block text | yes | yes | yes | – | yes | yes | – |
-| `[[exclusions.path]] reason` | – | – | yes | yes | – | yes | single line |
-| `[[surface]] globs`, `exclude_globs`, `[[exclusions.path]] glob` | – | – | – | – | – | – | non-empty, the glob dialect above, and its path-shape rule |
-| `[tone] coderabbit` | – | – | – | – | – | yes | ASCII only |
-| `[cadence] qodo_commands` entries | – | – | – | – | – | – | a verb from the set above, no whitespace, no `--` |
+The Enforced column exists because one row is not in `bot-instructions.toml` at
+all. Doctrine block text lives in the spec copy, so `toml-schema` never sees it
+and cannot be the clause's owner; the render-side check is. Without the column
+a reader counting `toml-schema`'s clauses off this table would count three that
+nothing there implements.
+
+| Input string | heading | marker | comment-close | toml-delimiter | control | character class | Enforced |
+|--------------|---------|--------|---------------|----------------|---------|-----------------|----------|
+| `[repo] name` | – | yes | – | yes | yes | single line | `toml-schema` |
+| `[repo] tracker` | – | yes | – | yes | yes | single line | `toml-schema` |
+| `[repo] summary` | yes | yes | – | yes | yes | – | `toml-schema` |
+| `[[surface]] instructions` | yes | yes | – | – | yes | – | `toml-schema` |
+| `[doctrine.append]` / `[doctrine.replace]` values | yes | yes | – | yes | yes | – | `toml-schema` |
+| doctrine block text | yes | yes | – | yes | yes | – | render-side |
+| `[[exclusions.path]] reason` | – | yes | yes | – | yes | single line | `toml-schema` |
+| `[[surface]] globs`, `exclude_globs`, `[[exclusions.path]] glob` | – | – | – | – | – | non-empty, the glob dialect above, and its path-shape rule | `toml-schema` |
+| `[tone] coderabbit` | – | – | – | – | yes | – | `toml-schema` |
+| `[cadence] qodo_commands` entries | – | – | – | – | – | a verb from the set above, no whitespace, no `--` | `toml-schema` |
 
 The predicates, written once:
 
-- **heading** — a line whose first non-whitespace character is `#` after three
-  or fewer leading spaces. That is what markdown reads as a heading, and the
-  wide form is the one the outputs need: a line indented two spaces before `#`
-  ends the `AGENTS.md` owned region just as surely as one in column zero, so a
-  narrower input rule would pass a value the render then refuses.
-- **frontmatter** — a line that is exactly `---`, which opens or closes YAML
-  frontmatter in a `.instructions.md` file.
+- **heading** — a line markdown reads as a heading, in **either** of the two
+  forms `scripts/lib/markdown.py` states. ATX is one to six `#` after three or
+  fewer leading spaces, followed by a space, a tab, or the end of the line.
+  Wide about the indentation, because a line indented two spaces ends the
+  `AGENTS.md` owned region as surely as one in column zero and a narrower input
+  rule would pass a value the render then refuses. Exact about the delimiter,
+  in both directions: `#1917` is a heading to no reader, and refusing it here
+  made a doctrine block carrying a pull request number unrenderable, while `##`
+  before a no-break space is a heading to no reader either and reading it as
+  one ended the owned region early.
+  Setext is a run of `=` or of `-`, indented at most three spaces with only
+  whitespace after it, **under a non-blank line** — `Injected` over `===` is an
+  H1 to every CommonMark reader. This half is wide on purpose: it does not ask
+  whether the line above is a paragraph or the opener of a fenced block,
+  because a refusal that is too wide costs an author a rewrite while one that
+  is too narrow puts a structural heading into a generated file. The section
+  terminators read ATX alone and `markdown.py` says why; what makes that safe
+  is this row, which keeps a setext underline out of every string they parse.
 - **marker** — a line carrying the marker text, which is what decides which
   files this package owns.
 - **comment-close** — `-->`, which would end the HTML comment a `reason` is
@@ -376,32 +458,36 @@ The predicates, written once:
   closes its own string and the rest of it becomes TOML. Marked on exactly the
   values that reach a TOML string; `[[surface]] instructions` reaches Qodo
   through `best_practices.md`, which is markdown.
-- **control** — any C0 control character other than tab and newline, and DEL
-  (`U+007F`). One predicate for both structured targets, because the values
+- **control** — any C0 control character other than tab and newline, DEL
+  (`U+007F`), and the three characters above that range a reader still breaks
+  a line on: `U+0085` NEL, `U+2028` LINE SEPARATOR and `U+2029` PARAGRAPH
+  SEPARATOR. One predicate for both structured targets, because the values
   reaching them are the same set: a TOML basic multi-line string permits tab
   and newline and no other control, and so does a YAML scalar. TOML's own
   escapes are how one arrives — `summary = "\u0000"` parses cleanly and yields
   a literal NUL — so the value is already decoded by the time this sees it.
 
-  A character class exempts a row from this mark only when it **enumerates the
-  permitted characters**, because then no control is among them. A class that
-  names an encoding does not: ASCII contains NUL and every C0 control, so
-  `[tone] coderabbit` carries the mark despite having a class. Neither does a
-  class constraining one dimension only: `single line` says nothing about the
-  controls that are not newlines, which is why `[[exclusions.path]] reason`
-  carries it too. Read the test against each class rather than counting the
-  rows that have one.
-- **character class** — as stated per row above. Three enumerate their
-  permitted characters and so need no `control` mark: `[repo] name` and
-  `[repo] tracker` take `[A-Za-z0-9._-]`, the globs take the dialect's own
-  class, and `qodo_commands` takes a verb from a closed literal set. `[tone]
-  coderabbit` is ASCII so the local length count and the vendor's cannot
-  disagree about what one character is — which matters there and nowhere else,
-  since `tone_instructions` is the cap CodeRabbit discards the whole file over —
-  and ASCII is an encoding rather than an enumeration, so that row is marked
-  `control` as well. Tab and newline stay legal there: the documented way to
-  author a tone is a TOML multi-line string, and the render collapses its
-  newlines to single spaces.
+  The three above C0 are in the class for the same reason the C0 ones are, one
+  layer out: YAML 1.1 lists them as line breaks and every reader CodeRabbit's
+  file reaches acts on them. A value carrying one is emitted as a single line
+  here and read as two there, so a rendered `reason` comment becomes a
+  `path_filters:` key of its own and the entry below it loses its `!` — the
+  state `renders.md` § `reviews.path_filters` names as the one that turns the
+  exclusion list into an allowlist. `scripts/lib/refusals.py` is the one
+  statement of the class, and `coderabbit-schema` runs that same predicate over
+  the document it validates: a default in the vendored schema reaches a
+  rendered file through no row of this table.
+
+  A `single line` class does not exempt a row from this mark: it refuses the
+  line breaks and says nothing about the rest of the class — NUL, DEL, the C0
+  controls that break no line. Read the test against each class rather than
+  counting the rows that have one.
+- **character class** — as stated per row above. `single line` on `[repo]
+  name`, `[repo] tracker` and `[[exclusions.path]] reason`; the dialect's own
+  class on the globs; a verb from a closed literal set on `qodo_commands`. Tab
+  and newline stay legal in `[tone] coderabbit`: the documented way to author a
+  tone is a TOML multi-line string, and the render collapses its newlines to
+  single spaces.
 
 **Refusals, not escapes.** Every class here is refused at input. The render
 escapes only what a format requires of text already known to be legal — a
@@ -409,17 +495,25 @@ backslash in a TOML basic string — and rewrites nothing else. An escape for on
 of these would mean the generator silently altering an author's words to make
 them fit a file, which is worse than telling the author the words do not fit.
 
-**Render-side second checks.** `renders.md` re-checks the heading class when it
-assembles the `AGENTS.md` region and the Copilot file, because doctrine text
-does not come through this file at all and so is not covered by any input
-refusal. It does not re-check frontmatter or marker there, and that is a
-decision rather than an omission: neither can reach those two outputs from
-doctrine without also reaching a `.instructions.md` file, where the frontmatter
-the generator emits is fixed and the marker is written by the generator itself.
+**Render-side second checks.** The `doctrine block text` row is enforced where
+that value is read — when the generator parses the `## Doctrine` section — and it
+carries **every** class the row marks, not the heading class alone. Doctrine
+text does not come through this file, so no input refusal covers it, and each
+of the three markdown classes is reachable on its own route: a heading line
+ends the `AGENTS.md` owned region at the next render, and an underline under a
+text line renders into `.github/copilot-instructions.md`, where blocks are `##`
+subsections with paragraphs preserved, forging a section in the one file whose
+Escaping paragraph exists so a repo string cannot forge one; a line that is
+exactly `---` opens frontmatter where a block reaches byte 0; and the marker
+text would forge ownership of a file the repo wrote. Doctrine text reaches no
+`.instructions.md` file on any route — the routing table gives it eight
+destinations and that is not one of them — so nothing about the generator
+emitting that file's frontmatter itself covers any of the three.
 
-Every row is one clause with one control, and § Controls' count is checkable
-against this table. `toml-schema` carries no list of its own: it names this
-table and adds the one clause that is a path shape rather than a content
+Every marked cell is one clause with one control, and § Controls' count is
+checkable against this table read with its Enforced column. `toml-schema`
+carries no list of its own: it names this table, takes the rows Enforced marks
+as its, and adds the one clause that is a path shape rather than a content
 refusal.
 
 Two surfaces may match the same file. Macroscope stacks both, CodeRabbit may
@@ -437,8 +531,12 @@ be true of any repo is doctrine, and belongs in a doctrine block.
 Both are tables keyed by doctrine block id. `append` adds a paragraph to a
 block for this repo; `replace` substitutes the block's whole text. An unknown
 block id is an error, so a doctrine rename cannot leave a repo silently
-carrying an override that reaches nothing. Both are subject to the same
-leading-`#`, `---` and marker refusals as `instructions`.
+carrying an override that reaches nothing. Their values carry the refusals
+their own row in § The content refusals marks, which is a wider set than
+`instructions` has and is stated only there. They are repo text, so their line
+breaks are preserved wherever the block lands — a fenced example survives as
+one — with the `AGENTS.md` owned region the one exception, since a block
+renders there as a single bullet whatever wrote it.
 
 Prefer `append`. A `replace` means this repo disagrees with doctrine, which is
 worth arguing at the doctrine source rather than in one repo's TOML. A
