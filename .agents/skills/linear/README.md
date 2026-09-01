@@ -6,7 +6,7 @@ A Bash CLI over Linear's GraphQL API with a local JSON cache. Reads are served f
 
 1. Install Bash 4.0 or newer, plus `curl` and `jq`. macOS system Bash 3.2 is unsupported — invoke `linear.sh` with the newer Bash.
 2. Put `LINEAR_API_KEY` in `.env.local`.
-3. Set `LINEAR_TEAM` in committed `kendex.settings.toml` under `[env]`, along with any other non-secret defaults (`LINEAR_FORMAT`, `LINEAR_TEAM_PREFIX`, `LINEAR_AGENT_LABELS`).
+3. Set `LINEAR_TEAM` in committed `kendex.settings.toml` under `[env]`, along with the other non-secret defaults. [`kendex.settings.toml.example`](kendex.settings.toml.example) is the key list, each with what it does and what leaving it unset means.
 
 ```bash
 ./scripts/linear.sh auth-check --strict
@@ -20,7 +20,7 @@ A Bash CLI over Linear's GraphQL API with a local JSON cache. Reads are served f
 ```bash
 ./scripts/linear.sh cache issues list --project "Phase 2" --state "Todo,In Progress"
 ./scripts/linear.sh cache issues get ABC-100 --with-bundle
-./scripts/linear.sh issues create --title "New task" --project "Phase 2" --labels "agent:generalist"
+./scripts/linear.sh issues create --title "New task" --project "Phase 2" --labels "agent:generalist" --description "Reached by: kendex apply"
 ./scripts/linear.sh issues update ABC-100 --state Done
 ./scripts/linear.sh sync --reconcile
 ```

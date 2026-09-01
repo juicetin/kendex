@@ -108,6 +108,14 @@ Create Options:
                         skill), which owns labels, project, priority, and
                         relations — do not create tracked issues directly.
 
+  --review-born         This create came from a review finding, which is what
+                        subjects it to the `Symptom:` half of the bar below.
+
+  Reach guard: with LINEAR_REQUIRE_REACH set in kendex.settings.toml [env],
+  create refuses a description whose `Reached by:` line is missing or names no
+  producer, and a `--review-born --priority 2` one with no `Symptom:` line.
+  The rule: project-management SKILL.md, § Disposition, Name what reaches it.
+
 Update Options:
   --state <name>        New state
   --label(s) <a,b,c>    Replace labels (comma-separated)
@@ -183,13 +191,13 @@ Examples:
   # Basic operations
   issues.sh list --label "backend" --state "Todo"
   issues.sh get PROJ-42
-  issues.sh create --title "New task" --labels "backend,priority:high"
-  issues.sh create --title "Bundle" --project "Phase 2" --format=ids  # Print only the new identifier
+  issues.sh create --title "New task" --labels "backend,priority:high" --description "Reached by: kendex apply"
+  issues.sh create --title "Bundle" --project "Phase 2" --description "Reached by: kendex apply" --format=ids  # identifier only
   issues.sh update PROJ-42 --state "In Progress"
   issues.sh archive PROJ-42
 
   # Parent/sub-issues
-  issues.sh create --title "Sub-task" --parent PROJ-42
+  issues.sh create --title "Sub-task" --parent PROJ-42 --description "Reached by: kendex apply"
   issues.sh children PROJ-42                    # Direct children only
   issues.sh children PROJ-42 --recursive        # All descendants (3 levels deep)
   issues.sh children PROJ-42 --recursive --pending  # Pending only (excludes completed/canceled)
@@ -1080,6 +1088,7 @@ create_issue() {
     local requested_parent_id=""
     local output_format=""
     local no_agent_label=0
+    local review_born=0
     local attach_paths=()
     local attach_pending=()
 
@@ -1165,6 +1174,10 @@ create_issue() {
             no_agent_label=1
             shift
             ;;
+        --review-born)
+            review_born=1
+            shift
+            ;;
         --)
             shift
             break
@@ -1215,6 +1228,7 @@ create_issue() {
     fi
 
     require_agent_routing_label "$labels" "$no_agent_label" || return 1
+    require_issue_reach "$description" "$priority" "$review_born" || return 1
 
     # --attach: refuse unreadable paths before any API call, then upload
     # (uploads run only after the routing guard above has passed). Images
