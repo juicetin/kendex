@@ -13,9 +13,12 @@ TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$TEST_DIR/../../.." && pwd)"
 PUSH="$REPO_ROOT/skills/orch/scripts/worktree-push"
 STATE="$REPO_ROOT/skills/orch/scripts/workflow-state"
-ROUND_WRITE="$REPO_ROOT/skills/orch/scripts/dev-round-write"
+ROUND_WRITE_BIN="$REPO_ROOT/skills/orch/scripts/dev-round-write"
+ROUND_WRITE=round_write
 RETURN_WRITE="$REPO_ROOT/skills/orch/scripts/dev-return-write"
 ARTIFACT_CHECK="$REPO_ROOT/skills/orch/scripts/dev-artifact-check"
+# shellcheck source=lib/growth-state.sh
+source "$TEST_DIR/lib/growth-state.sh"
 
 TMP_ROOT="$(mktemp -d)"
 trap 'rm -rf "$TMP_ROOT"' EXIT
@@ -46,6 +49,10 @@ assert_contains() {
   fi
 }
 
+round_write() {
+  growth_round_write "$STATE" "$ROUND_WRITE_BIN" "$@"
+}
+
 # Stub worktree script: prints STUB_PUSH_STDOUT, exits STUB_PUSH_EXIT, and
 # logs its argv so pass-through flags can be asserted.
 stub="$TMP_ROOT/worktree-stub"
@@ -68,7 +75,7 @@ NEW_A2="$(printf 'd%.0s' {1..39})3"
 # The pushed worktree is a real git checkout: round authorizations live in ITS git
 # dir, never in the tree and never in the state directory.
 wt="$TMP_ROOT/wt"
-git init -q "$wt"
+git init -q -b main "$wt"
 mkdir -p "$wt/tmp"
 
 # Fresh state with recorded fix commits on both surfaces: a short prefix of
@@ -188,6 +195,7 @@ git -C "$restack_wt" config user.name Test
 git -C "$restack_wt" config commit.gpgsign false
 git -C "$restack_wt" commit -q --allow-empty -m delegation-base
 restack_old="$(git -C "$restack_wt" rev-parse HEAD)"
+init_growth_state "$STATE" "$restack_wt" KEN-RESTACK seed 1000000
 "$ROUND_WRITE" --worktree "$restack_wt" --issue KEN-RESTACK --round-id 1-1 --item 1 restack >/dev/null
 mkdir -p "$restack_wt/tools"
 printf 'upstream\n' > "$restack_wt/tools/upstream-tool"
@@ -431,6 +439,7 @@ git -C "$wt" config user.email test@example.com
 git -C "$wt" config user.name Test
 git -C "$wt" commit -q --allow-empty -m alias-base
 alias_old="$(git -C "$wt" rev-parse HEAD)"
+init_growth_state "$STATE" "$wt" issue-7 seed 1000000
 "$ROUND_WRITE" --worktree "$wt" --issue issue-7 --round-id 5-5 --item 1 alias >/dev/null
 git -C "$wt" commit -q --allow-empty -m alias-restack
 alias_new="$(git -C "$wt" rev-parse HEAD)"
@@ -478,6 +487,7 @@ printf 'first\n' >"$duplicate_wt/first.txt"
 git -C "$duplicate_wt" add first.txt
 git -C "$duplicate_wt" commit -q -m 'same subject'
 duplicate_first="$(git -C "$duplicate_wt" rev-parse HEAD)"
+init_growth_state "$STATE" "$duplicate_wt" KEN-DUPLICATE seed 1000000
 "$ROUND_WRITE" --worktree "$duplicate_wt" --issue KEN-DUPLICATE --round-id 1-1 --item 1 duplicate >/dev/null
 printf 'second\n' >"$duplicate_wt/second.txt"
 git -C "$duplicate_wt" add second.txt

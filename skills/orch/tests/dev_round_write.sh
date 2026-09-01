@@ -12,9 +12,13 @@ set -euo pipefail
 
 TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$TEST_DIR/../../.." && pwd)"
-WRITE="$REPO_ROOT/skills/orch/scripts/dev-round-write"
+WRITE_BIN="$REPO_ROOT/skills/orch/scripts/dev-round-write"
+WRITE=round_write
 CHECK="$REPO_ROOT/skills/orch/scripts/dev-artifact-check"
 RETURN_WRITE="$REPO_ROOT/skills/orch/scripts/dev-return-write"
+STATE="$REPO_ROOT/skills/orch/scripts/workflow-state"
+# shellcheck source=lib/growth-state.sh
+source "$TEST_DIR/lib/growth-state.sh"
 TMP_ROOT="$(mktemp -d)"
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
@@ -75,18 +79,23 @@ assert_text_not_matches() {
   fi
 }
 
+round_write() {
+  growth_round_write "$STATE" "$WRITE_BIN" "$@"
+}
+
 run_workflow_round_command() {
   local workflow="$1" wt="$2" issue_id="$3" rid="$4" block line
   block="$(fenced_block_with "$workflow" "dev-round-write --worktree")"
   line="$(awk '/dev-round-write --worktree/ { print; exit }' <<<"$block")"
   [[ -n "$line" ]] || return 1
-  line="${line//.agents\/skills\/orch\/scripts\/dev-round-write/$WRITE}"
+  line="${line//.agents\/skills\/orch\/scripts\/dev-round-write/$WRITE_BIN}"
   line="${line//\[WORKTREE_PATH\]/$wt}"
   line="${line//\[ISSUE_ID\]/$issue_id}"
   line="${line//\[DEV_ROUND_ID\]/$rid}"
   line="${line/\[--adds-file/--adds-file}"
   line="${line/.json\]/.json}"
-  bash -c "$line"
+  "$STATE" --state-dir "$wt/tmp" set "$issue_id" dev_round_id "$rid" >/dev/null
+  env ORCH_STATE_DIR="$wt/tmp" bash -c "$line"
 }
 
 # Assert an invocation fails validation with exit code 2.
@@ -109,6 +118,9 @@ git -C "$worktree" config user.name Test
 git -C "$worktree" config commit.gpgsign false
 git -C "$worktree" commit -q --allow-empty -m base
 base_sha="$(git -C "$worktree" rev-parse HEAD)"
+init_growth_state "$STATE" "$worktree" issue-1230 seed 1000000
+init_growth_state "$STATE" "$worktree" i seed 1000000
+init_growth_state "$STATE" "$worktree" issue-826 seed 1000000
 RID="1750000000-77"
 adds_file="$TMP_ROOT/adds.json"
 printf '%s' '["crates/parser/src/lib.rs","skills/orch/scripts/new-check"]' > "$adds_file"
@@ -156,6 +168,65 @@ assert_eq "$(jq -c '[.items[].n]' "$out")" "[1,2]" "identical re-invocation leav
 assert_exit2 "a different item set under the same round id exits 2 (immutable round)" \
   --worktree "$worktree" --issue issue-1230 --round-id "$RID" --item 3 "replacement"
 assert_eq "$(jq -c '[.items[].n]' "$out")" "[1,2]" "the refused rewrite left the original record intact"
+
+growth_wt="$TMP_ROOT/growth-wt"
+growth_remote="$TMP_ROOT/growth-remote.git"
+mkdir -p "$growth_wt"
+git -C "$growth_wt" init -q -b main
+git -C "$growth_wt" config user.email test@example.com
+git -C "$growth_wt" config user.name Test
+git -C "$growth_wt" config commit.gpgsign false
+git -C "$growth_wt" commit -q --allow-empty -m base
+git -C "$growth_wt" switch -q -c growth
+printf 'one\ntwo\n' > "$growth_wt/change.txt"
+git -C "$growth_wt" add change.txt
+git -C "$growth_wt" commit -q -m implementation
+init_growth_state "$STATE" "$growth_wt" KEN-GROWTH 1-1 2
+printf 'three\nfour\n' >> "$growth_wt/change.txt"
+git -C "$growth_wt" add change.txt
+git -C "$growth_wt" commit -q -m at-limit
+"$WRITE" --worktree "$growth_wt" --issue KEN-GROWTH --round-id 2-2 --item 1 at-limit >/dev/null
+printf 'five\n' >> "$growth_wt/change.txt"
+git -C "$growth_wt" add change.txt
+git -C "$growth_wt" commit -q -m over-limit
+set +e
+growth_error="$("$WRITE" --worktree "$growth_wt" --issue KEN-GROWTH --round-id 3-3 --item 1 over-limit 2>&1)"
+growth_rc=$?
+set -e
+assert_eq "$growth_rc" "3" "a pre-push fix round past twice the baseline is refused"
+assert_eq "$([[ "$growth_error" == *"branch diffstat is 5 lines"* && "$growth_error" == *"baseline is 2 lines"* && "$growth_error" == *"2x"* ]] && echo yes)" \
+  "yes" "the refusal prints both numbers and the rule"
+git init -q --bare "$growth_remote"
+git -C "$growth_wt" remote add origin "$growth_remote"
+git -C "$growth_wt" push -q origin main growth
+set +e
+"$WRITE" --worktree "$growth_wt" --issue KEN-GROWTH --round-id 4-4 --item 1 after-push >/dev/null 2>&1
+after_push_rc=$?
+set -e
+assert_eq "$after_push_rc" "3" "the same oversized branch is refused after its first push"
+
+mutant_root="$TMP_ROOT/tripwire-mutant"
+mkdir -p "$mutant_root"
+cp -R "$REPO_ROOT/skills/orch/scripts" "$mutant_root/"
+mutant_write="$mutant_root/scripts/dev-round-write"
+mutant_check="$mutant_root/scripts/dev-artifact-check"
+assert_eq "$(grep -Fc 'run_size_tripwire "$worktree" "$issue"' "$mutant_write")" "1" \
+  "tripwire control finds exactly one live gate call"
+assert_eq "$(grep -Fc 'if (.pr.baseline_lines // null) == null' "$mutant_check")" "1" \
+  "tripwire control finds exactly one set-once guard"
+sed -i.bak 's|^run_size_tripwire "$worktree" "$issue"$|: # tripwire removed by must-fail control|' "$mutant_write"
+sed -i.bak 's/if (.pr.baseline_lines \/\/ null) == null/if true/' "$mutant_check"
+assert_eq "$([[ "$(grep -Fc 'run_size_tripwire "$worktree" "$issue"' "$mutant_write")" == 0 ]] && ! cmp -s "$mutant_write" "$WRITE_BIN" && echo yes)" \
+  "yes" "tripwire control removes the gate only from its private copy"
+"$STATE" --state-dir "$growth_wt/tmp" set KEN-GROWTH dev_round_id 5-5 >/dev/null
+env ORCH_STATE_DIR="$growth_wt/tmp" "$mutant_write" --worktree "$growth_wt" --issue KEN-GROWTH --round-id 5-5 --item 1 mutant >/dev/null
+growth_head="$(git -C "$growth_wt" rev-parse HEAD)"
+"$RETURN_WRITE" --worktree "$growth_wt" --kind implement --issue KEN-GROWTH --round-id 6-6 \
+  --branch growth --commit "$growth_head" --validate pass >/dev/null
+env ORCH_STATE_DIR="$growth_wt/tmp" "$mutant_check" --worktree "$growth_wt" --issue KEN-GROWTH --round-id 6-6 >/dev/null
+assert_eq "$([[ -f "$growth_wt/tmp/dev-round-KEN-GROWTH-5-5.json" && "$("$STATE" --state-dir "$growth_wt/tmp" get KEN-GROWTH .pr.baseline_lines)" == 5 ]] && echo yes)" \
+  "yes" "must-fail control kills tripwire removal and baseline overwrite"
+"$STATE" --state-dir "$growth_wt/tmp" set KEN-GROWTH pr '{"baseline_lines":2}' >/dev/null
 
 # A partial record pair is never repaired after delegation. The orchestrator
 # mints a fresh round instead of recreating authorization or baseline state.
@@ -335,6 +406,7 @@ git -C "$linked_main" config user.name Test
 git -C "$linked_main" config commit.gpgsign false
 git -C "$linked_main" commit -q --allow-empty -m base
 git -C "$linked_main" worktree add -q -b linked "$linked_wt"
+init_growth_state "$STATE" "$linked_wt" issue-826 seed 1000000
 "$WRITE" --worktree "$linked_wt" --issue issue-826 --round-id 30-30 --item 1 linked >/dev/null
 linked_auth="$linked_main/.git/kendex/dev-round-authorizations/issue-826-30-30.json"
 assert_eq "$([[ -f "$linked_auth" && ! -e "$linked_wt/.git/kendex/dev-round-authorizations/issue-826-30-30.json" ]] && echo yes)" \
@@ -436,13 +508,20 @@ for workflow in dev-fix review-pr-comments; do
   assert_text_matches "$round_block" '^[[:space:]]*\.agents/.+dev-round-write .+--adds-file ' "$workflow live command passes an additions data file"
   assert_text_not_matches "$round_block" '(^|[[:space:]])--add([[:space:]]|$)' "$workflow live command carries no repository path argument"
   assert_text_matches "$delegation" '^[[:space:]]*\[If the round may add files: "Adds: \[REPO_RELATIVE_PATHS_JSON_ARRAY\]' "$workflow live delegation carries the JSON Adds line"
+  workflow_text="$(<"$workflow_file")"
+  assert_text_matches "$workflow_text" 'Exit 3 is the branch-size refusal' "$workflow routes the size-specific exit"
+  assert_text_matches "$workflow_text" 'Cut required' "$workflow names the required cut response"
 done
+
+disposition_text="$(<"$REPO_ROOT/skills/orch/references/finding-disposition.md")"
+assert_text_matches "$disposition_text" 'Size tripwire, enforced before fix delegation:' \
+  "finding disposition states the live enforcement point"
 
 scope_docs=(
   "$REPO_ROOT/skills/dev/workflows/dev-fix.md"
   "$REPO_ROOT/skills/orch/workflows/dev-fix.md"
   "$REPO_ROOT/skills/orch/workflows/review-pr-comments.md"
-  "$WRITE"
+  "$WRITE_BIN"
   "$CHECK"
 )
 for scope_doc in "${scope_docs[@]}"; do
@@ -524,6 +603,7 @@ git -C "$wait_round" config user.email test@example.com
 git -C "$wait_round" config user.name Test
 git -C "$wait_round" config commit.gpgsign false
 git -C "$wait_round" commit -q --allow-empty -m base
+init_growth_state "$STATE" "$wait_round" issue-826 seed 1000000
 wait_head="$(git -C "$wait_round" rev-parse HEAD)"
 "$WRITE" --worktree "$wait_round" --issue issue-826 --round-id 21-21 --item 1 wait >/dev/null
 ( sleep 2; "$RETURN_WRITE" --worktree "$wait_round" --kind fix --issue issue-826 --round-id 21-21 \

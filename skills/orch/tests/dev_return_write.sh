@@ -13,6 +13,9 @@ REPO_ROOT="$(cd "$TEST_DIR/../../.." && pwd)"
 WRITE="$REPO_ROOT/skills/orch/scripts/dev-return-write"
 CHECK="$REPO_ROOT/skills/orch/scripts/dev-artifact-check"
 ROUND_WRITE="$REPO_ROOT/skills/orch/scripts/dev-round-write"
+STATE="$REPO_ROOT/skills/orch/scripts/workflow-state"
+# shellcheck source=lib/growth-state.sh
+source "$TEST_DIR/lib/growth-state.sh"
 TMP_ROOT="$(mktemp -d)"
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
@@ -44,11 +47,22 @@ echo "=== dev-return-write ==="
 
 worktree="$TMP_ROOT/wt"
 mkdir -p "$worktree"
+git -C "$worktree" init -q -b main
+git -C "$worktree" config user.email test@example.com
+git -C "$worktree" config user.name Test
+git -C "$worktree" config commit.gpgsign false
+git -C "$worktree" commit -q --allow-empty -m base
+git -C "$worktree" switch -q -c issue-776
+printf 'one\ntwo\nthree\n' > "$worktree/implementation.txt"
+git -C "$worktree" add implementation.txt
+git -C "$worktree" commit -q -m implementation
+implementation_head="$(git -C "$worktree" rev-parse HEAD)"
 RID="1750000000-99"
 
 # --- valid implement (single): no --item → items: [] ---
+init_growth_state "$STATE" "$worktree" issue-776 "$RID"
 out="$("$WRITE" --worktree "$worktree" --kind implement --issue issue-776 --round-id "$RID" \
-  --branch issue-776 --commit abc123f --validate pass --qa-label needs-review)"
+  --branch issue-776 --commit "$implementation_head" --validate pass --qa-label needs-review)"
 assert_eq "$out" "$worktree/tmp/dev-return-issue-776-$RID.json" "implement single prints the round-scoped artifact path"
 assert_eq "$([[ -f "$out" ]] && echo yes)" "yes" "implement single wrote the file"
 assert_eq "$(jq -r '.schema_version' "$out")" "1" "implement single .schema_version is 1"
@@ -56,20 +70,33 @@ assert_eq "$(jq -r '.schema_version | type' "$out")" "number" "implement single 
 assert_eq "$(jq -r '.round_id' "$out")" "$RID" "implement single .round_id matches --round-id"
 assert_eq "$(jq -r '.kind' "$out")" "implement" "implement single .kind"
 assert_eq "$(jq -r '.issue' "$out")" "issue-776" "implement single .issue"
-assert_eq "$(jq -r '.commit' "$out")" "abc123f" "implement single .commit"
+assert_eq "$(jq -r '.commit' "$out")" "$implementation_head" "implement single .commit"
+assert_eq "$(jq -r '.baseline_lines' "$out")" "3" "implement single carries its measured baseline"
 assert_eq "$(jq -r '.validate' "$out")" "pass" "implement single .validate"
 assert_eq "$(jq -c '.qa_labels' "$out")" '["needs-review"]' "implement single .qa_labels"
 assert_eq "$(jq -r '.summary_posted' "$out")" "true" "implement single .summary_posted true"
 assert_eq "$(jq -r '.summary' "$out")" "null" "implement single .summary null without --summary-file"
 assert_eq "$(jq -r '.bundled' "$out")" "false" "implement single .bundled false"
 assert_eq "$(jq -c '.items' "$out")" "[]" "implement single .items is []"
+assert_eq "$("$STATE" --state-dir "$worktree/tmp" get issue-776 '.pr.baseline_lines // "null"')" "null" \
+  "the developer-side writer does not mutate workflow state"
 # round-trips through dev-artifact-check round mode as valid
-assert_eq "$("$CHECK" --worktree "$worktree" --issue issue-776 --round-id "$RID" | jq -r '.reason')" "valid" \
+assert_eq "$(env ORCH_STATE_DIR="$worktree/tmp" "$CHECK" --worktree "$worktree" --issue issue-776 --round-id "$RID" | jq -r '.reason')" "valid" \
   "implement single round-trips through dev-artifact-check round mode as valid"
+assert_eq "$("$STATE" --state-dir "$worktree/tmp" get issue-776 .pr.baseline_lines)" "3" \
+  "orchestrator acceptance records additions plus deletions"
+printf 'four\nfive\n' >> "$worktree/implementation.txt"
+git -C "$worktree" add implementation.txt
+git -C "$worktree" commit -q -m growth
+current_head="$(git -C "$worktree" rev-parse HEAD)"
+"$WRITE" --worktree "$worktree" --kind implement --issue issue-776 --round-id later \
+  --branch issue-776 --commit "$current_head" --validate pass >/dev/null
+env ORCH_STATE_DIR="$worktree/tmp" "$CHECK" --worktree "$worktree" --issue issue-776 --round-id later >/dev/null
+assert_eq "$("$STATE" --state-dir "$worktree/tmp" get issue-776 .pr.baseline_lines)" "3" "a later round preserves the first baseline"
 
 # --- valid implement: no qa labels → [] ; --no-summary → false ; FAILING validate ---
 out="$("$WRITE" --worktree "$worktree" --kind implement --issue issue-100 --round-id 5-5 \
-  --branch b --commit c --validate "FAILING: lint,build" --no-summary)"
+  --branch b --commit "$current_head" --validate "FAILING: lint,build" --no-summary)"
 assert_eq "$(jq -c '.qa_labels' "$out")" "[]" "implement no labels → qa_labels []"
 assert_eq "$(jq -r '.summary_posted' "$out")" "false" "--no-summary sets summary_posted false"
 assert_eq "$(jq -r '.validate' "$out")" "FAILING: lint,build" "FAILING validate accepted verbatim"
@@ -78,7 +105,7 @@ assert_eq "$("$CHECK" --file "$out" | jq -r '.reason')" "valid" "implement no-su
 # --- --summary-file embeds content for GitHub/ad-hoc recovery ---
 printf '## Completion Summary\n- did the thing\n' > "$worktree/summary.md"
 out="$("$WRITE" --worktree "$worktree" --kind implement --issue issue-gh --round-id 6-6 \
-  --branch b --commit c --validate pass --no-summary --summary-file "$worktree/summary.md")"
+  --branch b --commit "$current_head" --validate pass --no-summary --summary-file "$worktree/summary.md")"
 assert_eq "$(jq -r '.summary' "$out" | head -1)" "## Completion Summary" "--summary-file embeds the summary content"
 assert_eq "$(jq -r '.summary_posted' "$out")" "false" "--summary-file keeps summary_posted false (nothing posted to a tracker)"
 
@@ -91,7 +118,8 @@ git -C "$fix_worktree" config user.name Test
 git -C "$fix_worktree" config commit.gpgsign false
 git -C "$fix_worktree" commit -q --allow-empty -m base
 fix_head="$(git -C "$fix_worktree" rev-parse HEAD)"
-"$ROUND_WRITE" --worktree "$fix_worktree" --issue issue-776 --round-id 7-7 \
+init_growth_state "$STATE" "$fix_worktree" issue-776 7-7 100
+env ORCH_STATE_DIR="$fix_worktree/tmp" "$ROUND_WRITE" --worktree "$fix_worktree" --issue issue-776 --round-id 7-7 \
   --item 1 "fix nil deref" --item 2 "review decision" >/dev/null
 out="$("$WRITE" --worktree "$fix_worktree" --kind fix --issue issue-776 --round-id 7-7 \
   --branch issue-776 --commit "$fix_head" --validate pass \
@@ -104,14 +132,15 @@ assert_eq "$("$CHECK" --worktree "$fix_worktree" --issue issue-776 --round-id 7-
   "fix round-trips through bound round authorization"
 
 # --- valid bundled implement: --bundled + items ---
+current_head="$(git -C "$worktree" rev-parse HEAD)"
 out="$("$WRITE" --worktree "$worktree" --kind implement --issue PROJ-100 --round-id 8-8 \
-  --branch feat/proj-100 --commit aaa111 --validate pass --bundled \
+  --branch feat/proj-100 --commit "$current_head" --validate pass --bundled \
   --item 1 Applied "sub A done" --item 2 Applied "sub B done" \
   --qa-label needs-safety-audit --qa-label needs-review)"
 assert_eq "$(jq -r '.bundled' "$out")" "true" "bundled implement .bundled true"
 assert_eq "$(jq -r '.items | length' "$out")" "2" "bundled implement has 2 items"
 assert_eq "$(jq -c '.qa_labels' "$out")" '["needs-safety-audit","needs-review"]' "bundled implement aggregated qa_labels"
-assert_eq "$("$CHECK" --worktree "$worktree" --issue PROJ-100 --round-id 8-8 | jq -r '.reason')" "valid" \
+assert_eq "$("$CHECK" --file "$out" | jq -r '.reason')" "valid" \
   "bundled implement round-trips as valid"
 
 # --- Blocked decision accepted ---
@@ -150,7 +179,7 @@ assert_eq "$("$CHECK" --worktree "$worktree" --issue issue-1236 --round-id 11-11
 
 # Inline --summary is a general alternative summary source, not analysis-only.
 out="$("$WRITE" --worktree "$worktree" --kind implement --issue issue-1236i --round-id 12-12 \
-  --branch b --commit c --validate pass --no-summary --summary "inline completion summary")"
+  --branch b --commit "$current_head" --validate pass --no-summary --summary "inline completion summary")"
 assert_eq "$(jq -r '.summary' "$out")" "inline completion summary" "implement inline --summary embeds the summary text"
 assert_eq "$("$CHECK" --file "$out" | jq -r '.reason')" "valid" "implement inline-summary round-trips as valid"
 
@@ -313,20 +342,20 @@ assert_eq "$([[ -f "$worktree/tmp/dev-return-issue-noitems-$RID.json" ]] && echo
 # the artifact orch treats as authoritative.
 NOTE="80/80 on re-run; first run flaked on Rust Tests (release), same git_diff_hash"
 noted="$("$WRITE" --worktree "$worktree" --kind implement --issue issue-note --round-id "$RID" \
-  --branch b --commit c --validate pass --validate-note "$NOTE")"
+  --branch b --commit "$current_head" --validate pass --validate-note "$NOTE")"
 assert_eq "$(jq -r '.validate' "$noted")" "pass" "--validate-note leaves validate strictly enumerated"
 assert_eq "$(jq -r '.validate_note' "$noted")" "$NOTE" "--validate-note is recorded verbatim"
 
 # A FAILING run can carry a caveat too — the note is not pass-only.
 failnote="$("$WRITE" --worktree "$worktree" --kind implement --issue issue-failnote --round-id "$RID" \
-  --branch b --commit c --validate "FAILING: lint" --validate-note "lint fails only under --release")"
+  --branch b --commit "$current_head" --validate "FAILING: lint" --validate-note "lint fails only under --release")"
 assert_eq "$(jq -r '.validate' "$failnote")" "FAILING: lint" "a note does not relax a FAILING verdict"
 assert_eq "$(jq -r '.validate_note' "$failnote")" "lint fails only under --release" "FAILING artifacts can carry a note"
 
 # Omitted: the field is present and null, so consumers never have to distinguish
 # "absent key" from "no note".
 plain="$("$WRITE" --worktree "$worktree" --kind implement --issue issue-nonote --round-id "$RID" \
-  --branch b --commit c --validate pass)"
+  --branch b --commit "$current_head" --validate pass)"
 assert_eq "$(jq -r 'has("validate_note")' "$plain")" "true" "validate_note is always present"
 assert_eq "$(jq -r '.validate_note' "$plain")" "null" "an omitted note is null, not empty string"
 

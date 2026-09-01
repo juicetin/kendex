@@ -4,6 +4,8 @@ The on-disk record a dev or QA agent writes at the end of an implement, fix, or 
 
 Written **only** by `dev-return-write` — never hand-authored, never composed with a file-write tool. The writer builds the JSON with `jq` and writes it atomically; its `--help` is the flag reference. Validation gates live in `dev-artifact-check --help`; round-closure routing in [`../references/artifact-checks.md`](../references/artifact-checks.md).
 
+Every `implement` receipt carries the branch's additions plus deletions at its commit as `baseline_lines`, with binary rows omitted and a floor of 1. When the round-mode receipt is accepted, `dev-artifact-check` records that value in workflow state only if `pr.baseline_lines` is null. The writer never changes workflow state.
+
 ## Identity: the round id
 
 Each delegation stamps a unique token (`workflow-state new-round-id [ISSUE] dev_round_id`) and embeds it in the delegation. The artifact is bound to that token twice: its filename is `[WORKTREE_PATH]/tmp/dev-return-[ISSUE_ID]-[ROUND_ID].json`, and it carries `"round_id": ROUND_ID` inside. `dev-artifact-check --round-id RID` resolves that exact path and requires the internal token to match.
@@ -22,6 +24,7 @@ Fix rounds have an input-side sibling bound by the same token, `tmp/dev-round-[I
   "issue": "PROJ-123",
   "branch": "user/proj-123",
   "commit": "abc123f",
+  "baseline_lines": 138,
   "validate": "pass",
   "validate_note": "80/80 on re-run; first run flaked on Rust Tests (release), same git_diff_hash",
   "qa_labels": ["needs-review"],
@@ -42,6 +45,7 @@ Fix rounds have an input-side sibling bound by the same token, `tmp/dev-round-[I
 | `issue` | Yes | `--issue` | Normalized workflow-state key (Parent ID when bundled) |
 | `branch` | Yes | `--branch` | Git branch (non-empty string) |
 | `commit` | implement/fix | `--commit` | HEAD SHA after the commit, or the prior HEAD when no commit was needed. **Absent for `analysis`** |
+| `baseline_lines` | implement | measured by writer | Additions plus deletions against the base branch at `commit`, omitting binary rows and floored at 1. Round-mode acceptance writes the first value to workflow state. **Absent for `fix` and `analysis`** |
 | `validate` | implement/fix | `--validate` | `pass` or `FAILING: check1,check2` — a closed enumeration. **Absent for `analysis`** |
 | `validate_note` | Optional | `--validate-note` | A free-text qualifier the enumeration cannot express, or `null`. **Absent for `analysis`** |
 | `qa_labels` | Optional | `--qa-label` (repeatable) | Applied QA labels; `[]` when none |

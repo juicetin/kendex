@@ -61,11 +61,15 @@
 #
 # It is a sanctioned single-command invocation. Writes the recovery copy and
 # immutable external authorization, then prints the recovery path. All
-# usage/validation errors exit 2.
+# usage/validation errors exit 2; an oversized branch exits 3.
 
 set -euo pipefail
 
 PROG="dev-round-write"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# shellcheck source=lib/branch-growth.sh
+source "$SCRIPT_DIR/lib/branch-growth.sh"
 
 # Path-safe token grammar for --issue / --round-id: no '/', no '..', no
 # whitespace, so a value can never escape the tmp/ directory. Shared verbatim
@@ -104,7 +108,11 @@ Protected-addition scope: skills/orch/schemas/dev-round.md § Protected addition
 traversing, empty-component, multiline, and duplicate paths are rejected. Paths stay in the file channel, never argv. The
 record captures the worktree's current HEAD as base_sha; a worktree with no
 resolvable HEAD is rejected.
-Both record halves must already exist or both be absent. A missing half is
+Before either record is written, the branch's additions plus deletions must be
+at most twice workflow state pr.baseline_lines. Full implementation acceptance
+sets it; a null or invalid value refuses before either round record is written.
+An oversized branch exits 3 and must be cut before another fix round. Both
+record halves must already exist or both be absent. A missing half is
 never recreated; mint a new round.
 --issue / --round-id must match
 ^[A-Za-z0-9._-]+$ with no '..'. Canonical schema:
@@ -140,6 +148,16 @@ check_id_token() {
   [[ -n "$2" ]] || die "$1 is required (non-empty)"
   [[ "$2" =~ $ID_GRAMMAR && "$2" != *..* ]] \
     || die "$1 '$2' must match ${ID_GRAMMAR} with no '..' (path-safe: no '/' or whitespace)"
+}
+
+run_size_tripwire() {
+  local worktree="$1" issue="$2"
+
+  if ! enforce_size_tripwire "$worktree" "$issue" "$SCRIPT_DIR"; then
+    printf '%s: %s\n' "$PROG" "$BRANCH_GROWTH_ERROR" >&2
+    [[ "$BRANCH_GROWTH_STATUS" == "over-limit" ]] && exit 3
+    exit 2
+  fi
 }
 
 worktree=""
@@ -204,6 +222,8 @@ worktree_root="$(git -C "$worktree" rev-parse --show-toplevel 2>/dev/null)" \
   || die "worktree '$worktree' has no repository root"
 git_common_dir="$(git -C "$worktree" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" \
   || die "worktree '$worktree' has no resolvable git common directory"
+
+run_size_tripwire "$worktree" "$issue"
 
 # --- Exactly one item source: inline --item xor --items-file ---
 if [[ "$items_file_given" == "true" ]] && (( ${#item_n[@]} > 0 )); then
