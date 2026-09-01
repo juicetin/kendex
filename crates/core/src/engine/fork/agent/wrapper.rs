@@ -34,6 +34,13 @@ pub(super) struct Wrapper {
     /// and a count taken from the source would read a rewritten line as a
     /// section the publisher never brought.
     pub published: String,
+    /// The same prose as the catalog holds it, which stands line for line
+    /// against `published` once its trailing whitespace is off: every
+    /// agent renderer writes `trim_end` of this text, and where one says it
+    /// in the harness's words first, the rewrite gives back one line per
+    /// line. The pair is what gives a captured line back the words it was
+    /// written in.
+    pub authored: String,
 }
 
 /// Every input that can produce a section, in the order the renderer is
@@ -97,6 +104,7 @@ pub(super) fn wrapper(
         before: vec![bare_before.clone()],
         after: Vec::new(),
         published: published.to_owned(),
+        authored: publisher.body.clone(),
     };
     for wrote in from(around) {
         let Some((one_before, one_after)) = ends(scope, publisher, harness, &only(around, wrote))
