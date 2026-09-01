@@ -17,6 +17,7 @@ trap 'rm -rf "$TMP_ROOT"' EXIT
 fail() { printf 'FAIL: %s\n' "$1" >&2; exit 1; }
 ok() { printf 'PASS: %s\n' "$1"; }
 assert_contains() { grep -Fq "$2" "$1" || fail "$3: $(sed -n '1,40p' "$1")"; ok "$3"; }
+assert_matches() { grep -Eq "$2" "$1" || fail "$3: $(sed -n '1,40p' "$1")"; ok "$3"; }
 assert_rc() { [[ "$1" == "$2" ]] || fail "$3 (expected $2, got $1)"; ok "$3"; }
 
 # --- Hermetic, harness-free session ------------------------------------------
@@ -339,15 +340,22 @@ workflow_files=(
   "$REPO_ROOT/skills/orch/workflows/review-pr.md"
   "$REPO_ROOT/skills/orch/workflows/submit-pr.md"
 )
+# A workflow states the recoverable and terminal exit codes itself, or names
+# the --help that owns them. Both spellings are in the tree, so each row
+# matches either one, anchored on the sentence that routes the exit code — a
+# bare identifier appears elsewhere in these files and would pass a workflow
+# that dropped the contract.
+RESUME_FORM='Exit 75 means completion is still recoverable|per its exit code \(`second-opinion --help`\)'
+TERMINAL_FORM='Exit 124 is terminal|per its exit code \(`second-opinion --help`\) until terminal'
 for workflow_file in "${workflow_files[@]}"; do
   workflow_commands_detach "$workflow_file" \
     || fail "$workflow_file has no capped second-opinion command or one lacks --foreground"
   ok "${workflow_file##*/} launches with --foreground"
   assert_contains "$workflow_file" 'exact command printed after `wait:`' \
     "${workflow_file##*/} executes the emitted wait command"
-  assert_contains "$workflow_file" 'Exit 75 means completion is still recoverable' \
+  assert_matches "$workflow_file" "$RESUME_FORM" \
     "${workflow_file##*/} resumes bounded waits"
-  assert_contains "$workflow_file" 'Exit 124 is terminal' \
+  assert_matches "$workflow_file" "$TERMINAL_FORM" \
     "${workflow_file##*/} treats the deadline result as terminal"
 done
 cat > "$TMP_ROOT/no-command-workflow.md" <<'EOF'
@@ -357,3 +365,40 @@ if workflow_commands_detach "$TMP_ROOT/no-command-workflow.md"; then
   fail "the workflow wiring check accepted prose with no launch command"
 fi
 ok "the workflow wiring check rejects a missing launch command"
+# Decoy: both spellings' tokens present on unrelated lines, no exit code
+# routed. It passed the file-global forms this suite shipped before, so it is
+# the case that keeps the identifiers from floating free of their sentence.
+cat > "$TMP_ROOT/free-floating-tokens.md" <<'EOF'
+Continue until terminal before reading the artifact.
+Options and sidecar files are in `second-opinion --help`.
+EOF
+if grep -Eq "$RESUME_FORM" "$TMP_ROOT/free-floating-tokens.md"; then
+  fail "the resume row accepted a free-floating second-opinion --help mention"
+fi
+if grep -Eq "$TERMINAL_FORM" "$TMP_ROOT/free-floating-tokens.md"; then
+  fail "the terminal row accepted a free-floating until-terminal mention"
+fi
+ok "both wait-contract rows reject tokens that float free of the contract sentence"
+# Control: each row must red on a real workflow that keeps every surrounding
+# word and loses only its exit-code routing. Prose carrying neither form would
+# prove just that the assertion runs; one file per spelling is staged so both
+# alternation arms are shown able to fail.
+for control_source in \
+  "$REPO_ROOT/skills/second-opinion/workflows/review.md" \
+  "$REPO_ROOT/skills/orch/workflows/review-pr.md"; do
+  staged="$TMP_ROOT/staged-${control_source##*/}"
+  sed -e 's/ Exit 75 means completion is still recoverable; do other event checks, then rerun the same command\.//' \
+      -e 's/ Exit 124 is terminal: the run reached its deadline, and its processes are stopped when they can still be identified as belonging to it\.//' \
+      -e 's/ and repeat it per its exit code (`second-opinion --help`) until terminal//' \
+      "$control_source" > "$staged"
+  if cmp -s "$control_source" "$staged"; then
+    fail "the ${control_source##*/} control staged no change — its exit sentence moved"
+  fi
+  if grep -Eq "$RESUME_FORM" "$staged"; then
+    fail "the resume row passed ${control_source##*/} stripped of its exit routing"
+  fi
+  if grep -Eq "$TERMINAL_FORM" "$staged"; then
+    fail "the terminal row passed ${control_source##*/} stripped of its exit routing"
+  fi
+  ok "both wait-contract rows red on ${control_source##*/} stripped of its exit routing"
+done
