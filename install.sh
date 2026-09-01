@@ -114,7 +114,25 @@ install_cli() {
     install -m 0755 "$work/kendex" "$bindir/kendex"
   else
     echo "Installing to $bindir needs elevated permissions."
-    sudo install -D -m 0755 "$work/kendex" "$bindir/kendex"
+    # The branch is taken because the directory is not writable, whether or
+    # not it exists. Two commands rather than the one `install -D` that
+    # made the directory itself: -D makes directories on GNU coreutils
+    # only, and BSD install on macOS spells its own -D "-D dest" and takes
+    # an operand, so it reads the "-m" behind it as that operand and exits
+    # 64 on the usage it is left with. The mkdir covers the one case -D
+    # covered, the directory the unprivileged mkdir above could not make,
+    # and its -m sets the mode of that directory rather than leaving it to
+    # root's umask. It is not the general equivalent of -D, which modes
+    # every leading directory it makes where -m modes only the last.
+    #
+    # Both run bare under set -eu, so a refused escalation stops the run
+    # here rather than reaching the line that says the command installed.
+    #
+    # The default macOS layout comes here: /etc/paths puts root-owned
+    # /usr/local/bin on PATH. A mac whose /usr/local Homebrew chowned to
+    # the account takes the writable branch above instead.
+    [ -d "$bindir" ] || sudo mkdir -m 0755 -p "$bindir"
+    sudo install -m 0755 "$work/kendex" "$bindir/kendex"
   fi
   echo "Installed the kendex command to $bindir/kendex"
   # What this script installed, so the desktop app can tell this file from

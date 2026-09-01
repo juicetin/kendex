@@ -35,14 +35,14 @@ fn requested_urls(os: &str, arch: &str) -> String {
 #[allow(clippy::unwrap_used)]
 fn run_install(os: &str, arch: &str, fail: Option<(&str, i32)>) -> (std::process::Output, String) {
     let tmp = tempfile::tempdir().unwrap();
-    run_install_in(os, arch, fail, tmp.path(), &[])
+    run_install_in(os, arch, fail, tmp.path(), &[], SUDO_STUB)
 }
 
 /// The same run against a home the caller keeps, for a test that reads what
 /// the script left behind rather than only what it fetched.
 #[allow(clippy::unwrap_used)]
 fn run_install_at(os: &str, arch: &str, home: &Path) -> (std::process::Output, String) {
-    run_install_in(os, arch, None, home, &[])
+    run_install_in(os, arch, None, home, &[], SUDO_STUB)
 }
 
 /// What `uname -s` answers on the machine running these tests.
@@ -66,18 +66,18 @@ fn run_install_in(
     fail: Option<(&str, i32)>,
     home: &Path,
     path_ahead: &[&str],
+    sudo: &str,
 ) -> (std::process::Output, String) {
     let fake = home.join("fake-bin");
     let bindir = home.join(".local/bin");
     fs::create_dir_all(&fake).unwrap();
-    fs::create_dir_all(&bindir).unwrap();
     write_exe(
         &fake.join("uname"),
         &format!("#!/bin/sh\ncase \"$1\" in -s) echo {os} ;; -m) echo {arch} ;; esac\n"),
     );
     // The host's own `PATH` is appended below, so both commands the script
     // writes through resolve outside the fixture. Neither may reach past it.
-    write_exe(&fake.join("sudo"), SUDO_STUB);
+    write_exe(&fake.join("sudo"), sudo);
     write_exe(&fake.join("install"), &install_stub(home));
     // Logs the URL; `-o FILE` gets a runnable stand-in for the download,
     // and the release lookup gets a tag.
@@ -362,7 +362,14 @@ fn path_order_does_not_decide_where_a_re_run_lands() {
 
     let tmp = tempfile::tempdir().unwrap();
     let home = rooted(&tmp);
-    let (output, _) = run_install_in(HOST_UNAME, "x86_64", None, &home, &["/usr/local/bin"]);
+    let (output, _) = run_install_in(
+        HOST_UNAME,
+        "x86_64",
+        None,
+        &home,
+        &["/usr/local/bin"],
+        SUDO_STUB,
+    );
     // Asked first, because it is the answer a drifted script gives: a run
     // that chose the system directory stops at the stub, and reading the
     // destination first would report only that it never said one.
@@ -490,5 +497,178 @@ fn install_sh_says_when_it_cannot_record_the_command() {
         kendex_core::command_update::recorded_command(&env),
         None,
         "the app was handed a record install.sh never wrote"
+    );
+}
+
+/// A `sudo` that stands in for root over the fixture, and refuses to be
+/// anything else.
+///
+/// Root's write ignores a directory's mode, and the fixture's unwritable
+/// directory is the whole reason the script takes its privileged branch,
+/// so the refusing stub every other case here uses could never reach the
+/// invocation that branch makes. This one lifts the write bit, runs the
+/// command, and puts the directory back the way it found it.
+///
+/// The guard is the last argument, which is where both commands the
+/// script escalates write: outside the fixture root it refuses before it
+/// chmods or runs anything. `install_stub`'s own guard covers only the
+/// destination of an `install`, so a `sudo mkdir` would otherwise reach
+/// the host's real `mkdir` with nothing checking where. The source it
+/// copies from is not checked, and cannot be: `install.sh` downloads into
+/// a `mktemp -d` of its own.
+///
+/// The `umask 0` is what makes the mode flags on this branch observable at
+/// all. Under the runner's own 022 a `mkdir` yields 0755 whether or not the
+/// script asked for it, so an assertion about the mode reads the fixture
+/// back rather than the script, and dropping the flag kills nothing. Clear
+/// it and every mode on an escalated command is the one the script named.
+/// It is set here, in the escalated child, because a `umask()` on the test
+/// process would leak into every other case in this binary.
+#[allow(
+    clippy::unwrap_used,
+    reason = "a fixture root always renders, as install_stub's does"
+)]
+fn sudo_as_root(root: &Path) -> String {
+    format!(
+        r#"#!/bin/sh
+for arg in "$@"; do dest="$arg"; done
+case "$dest" in
+  {root}/*) ;;
+  *) echo "installer test tried to escalate outside its fixture: $dest" >&2; exit 1 ;;
+esac
+dir="$(dirname "$dest")"
+saved=""
+if [ -d "$dir" ] && [ ! -w "$dir" ]; then
+  saved="$(stat -c %a "$dir" 2>/dev/null || stat -f %Lp "$dir")"
+  [ -n "$saved" ] || {{ echo "installer test could not read the mode of $dir" >&2; exit 1; }}
+  chmod u+w "$dir"
+fi
+umask 0
+"$@"
+rc=$?
+[ -n "$saved" ] && chmod "$saved" "$dir"
+exit $rc
+"#,
+        root = root.display()
+    )
+}
+
+/// The flags the elevated branch hands `install`, which have to be ones
+/// the mac's `install` reads the same way: GNU's `-D` is an
+/// operand-taking flag there and swallows the `-m` behind it, so a run
+/// that passes the pair installs nothing at all.
+///
+/// The branch itself is taken on the write bit, not on the platform. It is
+/// where the default macOS layout lands, because `/etc/paths` puts
+/// root-owned `/usr/local/bin` on PATH, and where any machine lands whose
+/// chosen directory the account cannot write.
+///
+/// The refusal is the stub's, not this case's: `install_stub` reads the
+/// flags and rejects the ones it does not model, so this only has to reach
+/// the branch and let the run say whether it worked.
+#[test]
+#[allow(clippy::unwrap_used)]
+fn the_privileged_branch_installs_with_flags_bsd_install_reads_alike() {
+    // Root writes through a mode bit, so `[ -w "$bindir" ]` answers true
+    // for it and the script takes the unprivileged branch instead. Nothing
+    // this case is about happens on such a runner.
+    if rustix::process::geteuid().is_root() {
+        eprintln!("skipped: root writes through the unwritable bindir this case needs");
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let home = rooted(&tmp);
+    let bindir = home.join(".local/bin");
+    fs::create_dir_all(&bindir).unwrap();
+    fs::set_permissions(&bindir, fs::Permissions::from_mode(0o555)).unwrap();
+
+    let (output, _) = run_install_in(HOST_UNAME, "x86_64", None, &home, &[], &sudo_as_root(&home));
+    // Writable again before any assertion can fail: a directory left 0555
+    // is one the temp dir cannot clean up.
+    fs::set_permissions(&bindir, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let said = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // Asked first: a run that took the writable branch would install
+    // perfectly well and prove nothing about the one under test.
+    assert!(
+        said.contains(&format!(
+            "Installing to {} needs elevated permissions.",
+            bindir.display()
+        )),
+        "install.sh did not take the branch that needs privilege:\n{said}{stderr}"
+    );
+    assert!(
+        output.status.success(),
+        "install.sh failed on the branch it takes when the bindir needs privilege:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("this stub does not model"),
+        "install.sh passed the elevated write a flag macOS reads differently:\n{stderr}"
+    );
+    let installed = bindir.join("kendex");
+    assert!(
+        installed.is_file(),
+        "the elevated branch installed nothing at {}",
+        installed.display()
+    );
+    assert_eq!(
+        fs::metadata(&installed).unwrap().permissions().mode() & 0o777,
+        0o755,
+        "the elevated branch installed {} with the wrong mode",
+        installed.display()
+    );
+}
+
+/// The other half of what `install -D` did: make the directory. The
+/// unprivileged `mkdir -p` a few lines earlier cannot, because the parent
+/// belongs to root — `/usr/local` on a stock mac, and here a `.local` the
+/// fixture made unwritable — so without an elevated `mkdir` the elevated
+/// `install` has nowhere to land.
+#[test]
+#[allow(clippy::unwrap_used)]
+fn the_privileged_branch_makes_the_bindir_it_could_not_make_unprivileged() {
+    // As above: root makes the directory through the mode bit and the
+    // script never reaches this branch.
+    if rustix::process::geteuid().is_root() {
+        eprintln!("skipped: root makes the directory this case needs it to be refused");
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let home = rooted(&tmp);
+    // The data directory is made first and stays writable: the script
+    // installs the app and records the command under it, and this case is
+    // about the bindir alone.
+    fs::create_dir_all(home.join(".local/share")).unwrap();
+    let parent = home.join(".local");
+    fs::set_permissions(&parent, fs::Permissions::from_mode(0o555)).unwrap();
+
+    let (output, _) = run_install_in(HOST_UNAME, "x86_64", None, &home, &[], &sudo_as_root(&home));
+    fs::set_permissions(&parent, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let said = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        said.contains("needs elevated permissions."),
+        "install.sh did not take the branch that needs privilege:\n{said}{stderr}"
+    );
+    assert!(
+        output.status.success(),
+        "install.sh failed on a bindir only the elevated branch could make:\n{stderr}"
+    );
+    assert!(
+        home.join(".local/bin/kendex").is_file(),
+        "the elevated branch made no directory to install into:\n{said}{stderr}"
+    );
+    // The mode the script named, not the one root's umask would have left:
+    // `sudo_as_root` clears the umask, so 0755 here can only be the -m.
+    assert_eq!(
+        fs::metadata(home.join(".local/bin"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o755,
+        "the elevated branch made the bindir with the wrong mode:\n{said}{stderr}"
     );
 }
