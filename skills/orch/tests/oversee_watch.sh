@@ -15,7 +15,14 @@
 #       pr-watch; rc≠0 with no lines is a global failure (exit 2); attention
 #       at start does not starve a lane's question; the state file is
 #       rewritten after every pass, and an uncreatable state dir or an
-#       unreadable state file exits 2 naming the path
+#       unreadable state file exits 2 naming the path; the reducer runs for
+#       every --repo, with per-repo baselines and repo-prefixed lines on both
+#       streams, no baseline advances until the whole pass has reduced, a repo
+#       named for the first time baselines its standing attention in either
+#       ordering, the context header carries the highest status across repos, a
+#       global failure names its repo, a repeated --repo exits 2 naming the
+#       spelling given, --repo=VALUE is the same option, and a fleet of more
+#       than one repo is told which repo `merged` reads
 #   2.  merged: an --item's PR merged at/after --since fires; a PR merged
 #       BEFORE --since, a non-item branch, and a non-item conventional branch
 #       do not; a fork's PR on the same head branch name does not; item ids
@@ -100,7 +107,7 @@ err="$TMP_ROOT/e1e"
 out="$(run_watch -- 2>"$err")" && rc=0 || rc=$?
 assert_eq "$rc" "2" "pr-watch rc=2 with no lines exits 2" "$err"
 assert_eq "$out" "" "pr-watch global failure prints no EVENT" "$err"
-assert_contains "$(cat "$err")" "pr-watch failed (rc=2) with no per-PR lines" "global failure is named on stderr"
+assert_contains "$(cat "$err")" "pr-watch failed for owner/repo (rc=2) with no per-PR lines" "global failure is named on stderr"
 assert_contains "$(cat "$err")" "GH_REPO is not set" "pr-watch stderr is surfaced"
 
 # 1f. attention at start does not starve a lane's question
@@ -149,7 +156,7 @@ printf '12\tabcdef01\tthreads-open\t2 unresolved\n' > "$STUB_DIR/prwatch.out"
 printf '1' > "$STUB_DIR/prwatch.rc"
 err="$TMP_ROOT/e1h1"
 out="$(run_watch -- 2>"$err")" && rc=0 || rc=$?
-assert_eq "$(ls -1 "$STATE_DIR" 2>/dev/null | wc -l | tr -d '[:space:]')" "1" "one state file per fleet, no temp left behind" "$err"
+assert_eq "$(ls -1 "$STATE_DIR" 2>/dev/null | wc -l | tr -d '[:space:]')" "1" "one state file for the one repo, no temp left behind" "$err"
 state_file="$STATE_DIR/owner_repo__none"
 assert_eq "$([[ -f "$state_file" ]] && echo yes || echo no)" "yes" "the state file is keyed on the repo and --since" "$err"
 assert_eq "$(cat "$state_file")" "$(printf '12\tthreads-open')" "the state file holds the pass's <pr> <kind> keys" "$err"
@@ -191,6 +198,322 @@ else
   assert_contains "$(cat "$err")" "cannot read the pr-watch state file: $state_file" \
     "the failure names the state file path"
 fi
+
+# 1j'. a state file that cannot be written exits 2, on the staging guard here
+# and on the rename if that guard is ever dropped. Root writes anywhere, so the
+# case cannot run there.
+new_case prwatch_state_unwritable_file
+if [[ "$(id -u)" -eq 0 ]]; then
+  printf '  skip  unwritable state file (running as root)\n'
+else
+  printf '12\tabcdef01\tthreads-open\t2 unresolved\n' > "$STUB_DIR/prwatch.out"
+  printf '1' > "$STUB_DIR/prwatch.rc"
+  # A read-only directory in the state file's place: staging rejects the target
+  # before any temp is written, and the mode keeps the rename failing too if
+  # that guard is ever dropped. The discard has nothing to remove on this pass
+  # (one repo, no temp yet), so 1m run 4 owns that behaviour.
+  mkdir -p "$STATE_DIR/owner_repo__none"
+  chmod 500 "$STATE_DIR/owner_repo__none"
+  err="$TMP_ROOT/e1j3"
+  out="$(run_watch -- 2>"$err")" && rc=0 || rc=$?
+  chmod 700 "$STATE_DIR/owner_repo__none"
+  assert_eq "$rc" "2" "a state file that cannot be written exits 2" "$err"
+  assert_eq "$out" "" "a failed state write on a pass with no event prints no EVENT" "$err"
+  assert_contains "$(cat "$err")" "could not write the pr-watch state file" \
+    "the failure names what could not be written"
+fi
+
+# 1k. the reducer covers EVERY --repo: attention on a second repo is the event,
+# every repo's latest lines reach the context prefixed with the repo they came
+# from, and each repo keeps its own baseline. Red when the reducer runs for the
+# first --repo alone: the second repo is never reduced, so its rising edge is
+# invisible and the pass falls through to the heartbeat.
+new_case prwatch_multi_repo
+printf '12\taaaa0000\tthreads-open\t2 unresolved\n' > "$STUB_DIR/prwatch.out.owner_repo"
+printf '1' > "$STUB_DIR/prwatch.rc.owner_repo"
+# other/repo is clear on pass 1 and grows a thread on pass 2, so the event
+# cannot be owner/repo's standing line — which is pass 1's baseline.
+printf '0' > "$STUB_DIR/prwatch.rc.other_repo.1"
+printf '7\tbbbb0000\tthreads-open\t1 unresolved\n' > "$STUB_DIR/prwatch.out.other_repo.2"
+printf '1' > "$STUB_DIR/prwatch.rc.other_repo.2"
+printf 'pr-watch: 1 PR could not be read\n' > "$STUB_DIR/prwatch.err.other_repo"
+err="$TMP_ROOT/e1k"
+out="$(run_watch -- --repo owner/repo --repo other/repo 2>"$err")" && rc=0 || rc=$?
+assert_eq "$rc" "0" "a second repo's attention exits 0" "$err"
+assert_eq "$(head -1 <<<"$out")" "EVENT pr-watch rc=1" \
+  "attention on a second --repo is the event" "$err"
+assert_contains "$out" "$(printf 'other/repo\t7\tbbbb0000\tthreads-open')" \
+  "the second repo's line carries its repo" "$err"
+assert_contains "$out" "$(printf 'owner/repo\t12\taaaa0000\tthreads-open')" \
+  "every repo's latest lines reach the event's context" "$err"
+assert_contains "$out" "$(printf 'other/repo\tpr-watch: 1 PR could not be read')" \
+  "the reducer's stderr carries its repo too" "$err"
+assert_contains "$(cat "$STUB_DIR/prwatch.repos")" "other/repo" \
+  "the reducer is run for the second repo" "$err"
+assert_eq "$(ls -1 "$STATE_DIR" 2>/dev/null | wc -l | tr -d '[:space:]')" "2" \
+  "each repo keeps its own baseline file" "$err"
+assert_eq "$(cat "$STATE_DIR/other_repo__none")" "$(printf '7\tthreads-open')" \
+  "the second repo's baseline holds its own keys" "$err"
+
+# 1l. one repo's global failure names that repo, and a repeated --repo is a
+# usage error rather than a double reduction over one state file
+new_case prwatch_multi_repo_failure
+printf '2' > "$STUB_DIR/prwatch.rc.other_repo"
+printf 'pr-watch: GH_REPO is not set\n' > "$STUB_DIR/prwatch.err.other_repo"
+err="$TMP_ROOT/e1l1"
+out="$(run_watch -- --repo owner/repo --repo other/repo 2>"$err")" && rc=0 || rc=$?
+assert_eq "$rc" "2" "a global pr-watch failure on any repo exits 2" "$err"
+assert_eq "$out" "" "a global failure on any repo prints no EVENT" "$err"
+assert_contains "$(cat "$err")" "pr-watch failed for other/repo (rc=2)" \
+  "the global failure names the repo it came from" "$err"
+
+new_case prwatch_repo_twice
+err="$TMP_ROOT/e1l2"
+out="$(run_watch -- --repo owner/repo --repo Owner/Repo 2>"$err")" && rc=0 || rc=$?
+assert_eq "$rc" "2" "the same repository twice, differing only in case, exits 2" "$err"
+assert_eq "$out" "" "a repeated --repo prints no EVENT" "$err"
+assert_contains "$(cat "$err")" "--repo 'Owner/Repo' given twice" \
+  "the usage error names the argument as the caller spelled it" "$err"
+
+# one canonical spelling: the dedupe, the state file, and GH_REPO agree
+new_case prwatch_repo_case_canonical
+printf '12\taaaa0000\tthreads-open\t2 unresolved\n' > "$STUB_DIR/prwatch.out"
+printf '1' > "$STUB_DIR/prwatch.rc"
+err="$TMP_ROOT/e1l3"
+out="$(run_watch -- --repo Owner/Repo 2>"$err")" && rc=0 || rc=$?
+assert_eq "$(cat "$STUB_DIR/prwatch.repo")" "owner/repo" \
+  "the repo reaches pr-watch in one canonical spelling" "$err"
+assert_eq "$([[ -f "$STATE_DIR/owner_repo__none" ]] && echo yes || echo no)" "yes" \
+  "and its baseline is keyed on that same spelling" "$err"
+
+# 1m. the pass advances no baseline until every repo has been reduced: a later
+# repo's global failure must not consume an earlier repo's undelivered event
+new_case prwatch_multi_repo_transactional
+printf '0' > "$STUB_DIR/prwatch.rc.owner_repo"
+printf '0' > "$STUB_DIR/prwatch.rc.other_repo"
+err="$TMP_ROOT/e1m1"
+out="$(run_watch -- --repo owner/repo --repo other/repo 2>"$err")" && rc=0 || rc=$?
+assert_eq "$(head -1 <<<"$out")" "EVENT heartbeat loops=2 interval=0s since=none" \
+  "run 1: a clear fleet reaches the heartbeat" "$err"
+
+# run 2: owner/repo raises a line, then other/repo fails globally
+printf '12\taaaa0000\tthreads-open\t2 unresolved\n' > "$STUB_DIR/prwatch.out.owner_repo"
+printf '1' > "$STUB_DIR/prwatch.rc.owner_repo"
+printf '2' > "$STUB_DIR/prwatch.rc.other_repo"
+printf 'pr-watch: HTTP 502: bad gateway\n' > "$STUB_DIR/prwatch.err.other_repo"
+err="$TMP_ROOT/e1m2"
+out="$(run_watch -- --repo owner/repo --repo other/repo 2>"$err")" && rc=0 || rc=$?
+assert_eq "$rc" "2" "run 2: a global failure on a later repo exits 2" "$err"
+assert_eq "$out" "" "run 2 prints no EVENT" "$err"
+assert_eq "$([[ -f "$STATE_DIR/owner_repo__none" ]] && echo yes || echo no)" "yes" \
+  "the earlier repo's baseline file is still there after the pass dies" "$err"
+assert_eq "$(cat "$STATE_DIR/owner_repo__none"; echo x)" "x" \
+  "a pass that dies leaves the earlier repo's baseline where the last complete pass left it" "$err"
+
+# run 3: other/repo recovers and owner/repo's line is still a rising edge
+rm -f "$STUB_DIR/prwatch.err.other_repo"
+printf '0' > "$STUB_DIR/prwatch.rc.other_repo"
+err="$TMP_ROOT/e1m3"
+out="$(run_watch -- --repo owner/repo --repo other/repo 2>"$err")" && rc=0 || rc=$?
+assert_eq "$(head -1 <<<"$out")" "EVENT pr-watch rc=1" \
+  "the event the failing pass could not print is still an event" "$err"
+assert_contains "$out" "$(printf 'owner/repo\t12\taaaa0000\tthreads-open')" \
+  "and it carries the line that was never delivered" "$err"
+
+# run 4: a state file that cannot be written is judged AFTER the event it would
+# have consumed is printed. Root writes anywhere, so the run is skipped there.
+if [[ "$(id -u)" -eq 0 ]]; then
+  printf '  skip  event printed before the baselines are flushed (running as root)\n'
+else
+  rm -f "$STATE_DIR/other_repo__none"
+  mkdir -p "$STATE_DIR/other_repo__none"
+  chmod 500 "$STATE_DIR/other_repo__none"
+  printf '12\taaaa0000\tthreads-open\t2 unresolved\n34\tcccc0000\tthreads-open\t1 unresolved\n' > "$STUB_DIR/prwatch.out.owner_repo"
+  err="$TMP_ROOT/e1m4"
+  out="$(run_watch -- --repo owner/repo --repo other/repo 2>"$err")" && rc=0 || rc=$?
+  chmod 700 "$STATE_DIR/other_repo__none"
+  assert_eq "$rc" "2" "run 4: a state file that cannot be written exits 2" "$err"
+  assert_eq "$(head -1 <<<"$out")" "EVENT pr-watch rc=1" \
+    "the event is delivered before any baseline is written" "$err"
+  assert_contains "$out" "$(printf 'owner/repo\t34\tcccc0000\tthreads-open')" \
+    "and it carries the line that raised it" "$err"
+  assert_contains "$(cat "$err")" "could not write the pr-watch state file" \
+    "the write failure is still reported"
+  assert_eq "$(cat "$STATE_DIR/owner_repo__none")" "$(printf '12\tthreads-open')" \
+    "the baseline of the repo that raised the event does not advance over it" "$err"
+  assert_eq "$(ls -1 "$STATE_DIR" | grep -c '\.tmp$' || true)" "0" \
+    "a staging failure discards the temp an earlier repo already staged" "$err"
+
+  # run 5: everything healthy again — the event run 4 raised is still an event
+  chmod 700 "$STATE_DIR/other_repo__none"
+  rmdir "$STATE_DIR/other_repo__none"
+  err="$TMP_ROOT/e1m5"
+  out="$(run_watch -- --repo owner/repo --repo other/repo 2>"$err")" && rc=0 || rc=$?
+  assert_eq "$(head -1 <<<"$out")" "EVENT pr-watch rc=1" \
+    "the run after a failed state write reports that event again" "$err"
+  assert_contains "$out" "$(printf 'owner/repo\t34\tcccc0000\tthreads-open')" \
+    "and carries the line whose baseline never advanced" "$err"
+fi
+
+# 1n. each repo's rising edge is measured against its OWN baseline: a standing
+# line on one repo is not news again because a clear repo shares the pass
+new_case prwatch_per_repo_baseline
+printf '0' > "$STUB_DIR/prwatch.rc.owner_repo"
+printf '7\tbbbb0000\tthreads-open\t1 unresolved\n' > "$STUB_DIR/prwatch.out.other_repo"
+printf '1' > "$STUB_DIR/prwatch.rc.other_repo"
+err="$TMP_ROOT/e1n"
+out="$(run_watch -- --repo owner/repo --repo other/repo 2>"$err")" && rc=0 || rc=$?
+assert_eq "$(head -1 <<<"$out")" "EVENT heartbeat loops=2 interval=0s since=none" \
+  "a standing line beside a clear repo is not re-reported" "$err"
+assert_not_contains "$out" "EVENT pr-watch" "no repo reads another repo's baseline" "$err"
+
+# 1o. the context header carries the highest status across the repos, whichever
+# repo returned it
+new_case prwatch_rc_fold
+printf '12\taaaa0000\tthreads-open\t2 unresolved\n' > "$STUB_DIR/prwatch.out.owner_repo"
+printf '1' > "$STUB_DIR/prwatch.rc.owner_repo"
+printf '0' > "$STUB_DIR/prwatch.rc.other_repo"
+err="$TMP_ROOT/e1o"
+out="$(run_watch -- --repo owner/repo --repo other/repo 2>"$err")" && rc=0 || rc=$?
+assert_eq "$(head -1 <<<"$out")" "EVENT heartbeat loops=2 interval=0s since=none" \
+  "attention on the first repo alone is that repo's baseline" "$err"
+assert_contains "$out" "pr-watch rc=1" \
+  "a clear repo reduced last does not erase the fleet's status" "$err"
+assert_contains "$out" "$(printf 'owner/repo\t12\taaaa0000\tthreads-open')" \
+  "and the attention line still reaches the context" "$err"
+
+# 1p. every repo is reduced even once an earlier one has news
+new_case prwatch_every_repo_reduced
+printf '0' > "$STUB_DIR/prwatch.rc.owner_repo.1"
+printf '12\taaaa0000\tthreads-open\t2 unresolved\n' > "$STUB_DIR/prwatch.out.owner_repo.2"
+printf '1' > "$STUB_DIR/prwatch.rc.owner_repo.2"
+printf '7\tbbbb0000\tthreads-open\t1 unresolved\n' > "$STUB_DIR/prwatch.out.other_repo"
+printf '1' > "$STUB_DIR/prwatch.rc.other_repo"
+err="$TMP_ROOT/e1p"
+out="$(run_watch -- --repo owner/repo --repo other/repo 2>"$err")" && rc=0 || rc=$?
+assert_eq "$(head -1 <<<"$out")" "EVENT pr-watch rc=1" "the first repo's new line is the event" "$err"
+assert_contains "$out" "$(printf 'other/repo\t7\tbbbb0000\tthreads-open')" \
+  "a repo reduced after the one with news still reaches the context" "$err"
+assert_eq "$(cat "$STATE_DIR/other_repo__none")" "$(printf '7\tthreads-open')" \
+  "and the same pass writes its baseline" "$err"
+
+# 1q. a fleet that names a NEW repo on a later run baselines that repo's
+# standing attention rather than letting it preempt the lane checks
+new_case prwatch_new_repo_baseline
+printf '12\taaaa0000\tthreads-open\t2 unresolved\n' > "$STUB_DIR/prwatch.out.owner_repo"
+printf '1' > "$STUB_DIR/prwatch.rc.owner_repo"
+err="$TMP_ROOT/e1q1"
+out="$(run_watch -- --repo owner/repo 2>"$err")" && rc=0 || rc=$?
+assert_eq "$(head -1 <<<"$out")" "EVENT heartbeat loops=2 interval=0s since=none" \
+  "run 1: one repo, its attention at start is that repo's baseline" "$err"
+
+printf '7\tbbbb0000\tthreads-open\t1 unresolved\n' > "$STUB_DIR/prwatch.out.other_repo"
+printf '1' > "$STUB_DIR/prwatch.rc.other_repo"
+err="$TMP_ROOT/e1q2"
+out="$(run_watch -- --repo owner/repo --repo other/repo 2>"$err")" && rc=0 || rc=$?
+assert_eq "$(head -1 <<<"$out")" "EVENT heartbeat loops=2 interval=0s since=none" \
+  "a repo named for the first time baselines its standing attention" "$err"
+assert_not_contains "$out" "EVENT pr-watch" "the newly named repo never preempts the lane checks" "$err"
+assert_eq "$(grep -c 'attention present at start' "$err")" "1" "exactly one baseline note on that run"
+assert_contains "$(cat "$err")" "attention present at start for other/repo" \
+  "and the note names the repo that has no baseline yet"
+assert_eq "$(ls -1 "$STATE_DIR" 2>/dev/null | wc -l | tr -d '[:space:]')" "2" \
+  "the newly named repo gets its own baseline file" "$err"
+
+# 1r. the mirror ordering: a baselined repo's genuinely new line is still an
+# event when a repo with no baseline is named ahead of it
+new_case prwatch_new_repo_first
+printf '12\taaaa0000\tthreads-open\t2 unresolved\n' > "$STUB_DIR/prwatch.out.owner_repo"
+printf '1' > "$STUB_DIR/prwatch.rc.owner_repo"
+err="$TMP_ROOT/e1r1"
+out="$(run_watch -- --repo owner/repo 2>"$err")" && rc=0 || rc=$?
+assert_eq "$(head -1 <<<"$out")" "EVENT heartbeat loops=2 interval=0s since=none" \
+  "run 1: the one repo baselines its standing line" "$err"
+
+printf '7\tbbbb0000\tthreads-open\t1 unresolved\n' > "$STUB_DIR/prwatch.out.other_repo"
+printf '1' > "$STUB_DIR/prwatch.rc.other_repo"
+printf '12\taaaa0000\tthreads-open\t2 unresolved\n34\tcccc0000\tthreads-open\t1 unresolved\n' > "$STUB_DIR/prwatch.out.owner_repo"
+err="$TMP_ROOT/e1r2"
+out="$(run_watch -- --repo other/repo --repo owner/repo 2>"$err")" && rc=0 || rc=$?
+assert_eq "$(head -1 <<<"$out")" "EVENT pr-watch rc=1" \
+  "a baselined repo's new line is an event behind a repo named for the first time" "$err"
+assert_contains "$out" "$(printf 'owner/repo\t34\tcccc0000\tthreads-open')" \
+  "and the event carries that line" "$err"
+
+# 1s. --repo=VALUE is the same option: two of them are a two-repo fleet, and an
+# empty value is the parser's usage error
+new_case prwatch_repo_equals
+printf '12\taaaa0000\tthreads-open\t2 unresolved\n' > "$STUB_DIR/prwatch.out.owner_repo"
+printf '1' > "$STUB_DIR/prwatch.rc.owner_repo"
+printf '0' > "$STUB_DIR/prwatch.rc.other_repo.1"
+printf '7\tbbbb0000\tthreads-open\t1 unresolved\n' > "$STUB_DIR/prwatch.out.other_repo.2"
+printf '1' > "$STUB_DIR/prwatch.rc.other_repo.2"
+err="$TMP_ROOT/e1s1"
+out="$(run_watch -- --repo=owner/repo --repo=other/repo 2>"$err")" && rc=0 || rc=$?
+assert_eq "$(head -1 <<<"$out")" "EVENT pr-watch rc=1" \
+  "the = spelling builds the same two-repo fleet" "$err"
+assert_contains "$out" "$(printf 'other/repo\t7\tbbbb0000\tthreads-open')" \
+  "and reduces the second repo the same way" "$err"
+
+new_case prwatch_repo_equals_empty
+err="$TMP_ROOT/e1s2"
+out="$(run_watch -- --repo= 2>"$err")" && rc=0 || rc=$?
+assert_eq "$rc" "2" "an empty --repo= exits 2" "$err"
+assert_eq "$out" "" "an empty --repo= prints no EVENT" "$err"
+assert_contains "$(cat "$err")" "--repo requires a value" "the parser names the option missing its value"
+
+# 1t. a fleet of more than one repo is told what the checks below the reducer
+# do NOT cover — and the note names only the checks this run actually performs
+new_case prwatch_coverage_note
+err="$TMP_ROOT/e1t1"
+out="$(run_watch -- --repo owner/repo --repo other/repo --item issue-5 2>"$err")" && rc=0 || rc=$?
+assert_contains "$(cat "$err")" \
+  "the reducer covers owner/repo other/repo; the merged check and the heartbeat's open-PR list read owner/repo only" \
+  "a multi-repo fleet is told which repo the merged check reads"
+err="$TMP_ROOT/e1t2"
+out="$(run_watch -- 2>"$err")" && rc=0 || rc=$?
+assert_not_contains "$(cat "$err")" "the reducer covers" "a one-repo fleet gets no coverage note"
+
+# no --item: the note must not explain a merged check this run skipped
+err="$TMP_ROOT/e1t3"
+out="$(run_watch -- --repo owner/repo --repo other/repo 2>"$err")" && rc=0 || rc=$?
+assert_contains "$(cat "$err")" \
+  "the reducer covers owner/repo other/repo; the heartbeat's open-PR list reads owner/repo only" \
+  "the note drops the merged check when the run skipped it"
+assert_not_contains "$(cat "$err")" "the merged check and" \
+  "a skipped check is never claimed as covered"
+
+# no pr-watch: the note must not claim a reducer this run skipped
+err="$TMP_ROOT/e1t4"
+out="$(run_watch OVERSEE_WATCH_PR_WATCH="$TMP_ROOT/bin/absent-pr-watch.sh" -- --repo owner/repo --repo other/repo --item issue-5 2>"$err")" && rc=0 || rc=$?
+assert_contains "$(cat "$err")" \
+  "the merged check and the heartbeat's open-PR list read owner/repo only" \
+  "the note still names what the merged check reads without the reducer"
+assert_not_contains "$(cat "$err")" "the reducer covers" \
+  "and never claims a reducer that is not installed"
+
+# 1u. the repository resolved from `gh repo view` — the documented default,
+# reached only when no --repo is given — is canonicalized like any other: the
+# merged check matches its owner, pr-watch is handed one spelling, and the
+# baseline is keyed on it
+new_case default_repo_canonical
+printf 'VanillaGreenCom/Kendex\n' > "$STUB_DIR/repoview.txt"
+cat > "$STUB_DIR/merged.json" <<'EOF'
+[
+  {"number": 5, "headRefName": "issue-5", "headRepositoryOwner": {"login": "VanillaGreenCom"}, "mergedAt": "2026-08-15T10:00:00Z"}
+]
+EOF
+printf '12\taaaa0000\tthreads-open\t2 unresolved\n' > "$STUB_DIR/prwatch.out"
+printf '1' > "$STUB_DIR/prwatch.rc"
+err="$TMP_ROOT/e1u"
+out="$(run_watch -- --no-repo --since 2026-08-15T09:00:00Z --item issue-5 2>"$err")" && rc=0 || rc=$?
+assert_eq "$rc" "0" "a default-resolved repository exits 0" "$err"
+assert_contains "$out" "EVENT merged 5 issue-5" \
+  "a repository resolved from gh repo view still fires merged" "$err"
+assert_eq "$(cat "$STUB_DIR/prwatch.repo")" "vanillagreencom/kendex" \
+  "and reaches pr-watch in the canonical spelling" "$err"
+assert_eq "$([[ -f "$STATE_DIR/vanillagreencom_kendex__2026-08-15T09_00_00Z" ]] && echo yes || echo no)" "yes" \
+  "and keys its baseline on that same spelling" "$err"
 
 # --- 2. merged, with item, since, and case controls -------------------------
 new_case merged
