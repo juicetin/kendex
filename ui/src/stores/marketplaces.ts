@@ -18,6 +18,7 @@ import {
 } from "@/lib/read-state";
 import { rescanEverything } from "@/lib/rescan";
 import { settled } from "@/lib/settled";
+import { saying, sayUndone } from "@/lib/undone";
 import { catalogReads } from "./marketplaces-catalog-reads";
 import { type InstallActions, installActions } from "./marketplaces-install";
 import { dropCatalogCaches, openLead } from "./marketplaces-shared";
@@ -126,6 +127,7 @@ export const useMarketplacesStore = create<MarketplacesState>((set, get) => ({
     set({ error: null });
     toast.success(`Subscribed to '${response.data.name}'`);
     for (const note of response.data.notes) toast.message(note);
+    sayUndone(response.data.undone);
     // A repository page may now have a subscription to carry on as, under
     // whatever spelling the dialog was submitted with; the dropped summaries
     // re-read and the page picks it up.
@@ -160,6 +162,7 @@ export const useMarketplacesStore = create<MarketplacesState>((set, get) => ({
         ? `Unsubscribed from '${source}' — its packages are yours now`
         : `Unsubscribed from '${source}'`,
     );
+    saying(response);
     // A page carried on as this subscription must stop pointing at it, and
     // every other derived read goes with it.
     dropCatalogCaches(set);

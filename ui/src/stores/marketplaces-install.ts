@@ -19,6 +19,7 @@ import {
   repoEffectsWithheldToast,
 } from "@/lib/copy-repo-effects";
 import { rescanEverything } from "@/lib/rescan";
+import { sayUndone } from "@/lib/undone";
 import { catalogKey, subscription } from "./marketplaces-shared";
 import { useProblemsStore } from "./problems";
 
@@ -136,6 +137,10 @@ export function installActions(set: Set, get: Get): InstallActions {
           ? items[0].name
           : `${items.length} packages`;
       toast.success(`Installed ${what}`);
+      // Whatever an install's plan took away, and what its uninstaller
+      // ran on the way out. Said, never asked about: the second question
+      // this dialog exists for is about arming, and this already happened.
+      sayUndone(response.data.undone);
       for (const held of withheld) {
         toast.info(repoEffectsWithheldToast(held.name, held.reason));
       }

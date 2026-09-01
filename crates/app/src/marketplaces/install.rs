@@ -6,7 +6,6 @@
 //! tool added since the scope was set up is offerable and one removed since
 //! does not read as present.
 
-use kendex_core::apply;
 use kendex_core::engine::ops::{self as engine_ops, AddRequest};
 use kendex_core::env::Env;
 use kendex_core::manifest::Method;
@@ -71,13 +70,16 @@ pub struct InstallItem {
 }
 
 /// What an install hands back: the subscription's packages as they stand
-/// now, and the repository effects the install brought — read and asked
-/// about in the window, because nothing here ran them.
+/// now, the repository effects the install brought — read and asked about
+/// in the window, because nothing here ran them — and what any package the
+/// plan took away had undone, which is not asked about at all.
 #[derive(Debug, Clone, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct Installed {
     pub packages: Vec<AvailablePackage>,
     pub repo_effects: Offers,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub undone: Vec<String>,
 }
 
 /// Install packages or a curated set from one subscription. `destination`
@@ -172,21 +174,36 @@ pub fn install(
         _ => engine_ops::add(env, &target, &request),
     }
     .map_err(|e| e.to_string())?;
-    apply::execute(env, &report.plan).map_err(|e| e.to_string())?;
+    // Through the one executor, like every report, because no path here
+    // can prove its own plan takes nothing away. An add is not exempt: a
+    // rendering the engine refuses drops that package's lock entry
+    // whatever the planning options say, and its uninstaller runs.
+    let undone = crate::repo_effects::write(env, &report)?;
     // After the write, because the script an effect runs is the one this
     // install just put on disk.
-    let repo_effects = kendex_core::repo_effects::offers_for(env, &target, &report.repo_effects)
-        .map_err(|e| e.to_string())?;
-    let packages = browse::packages(
-        env,
-        &Catalog::Subscription {
-            scope: target,
-            source,
-        },
-    )
-    .map_err(|e| e.to_string())?;
+    // Both reads are enrichment past the write, so both carry the account
+    // on their failure rather than through it: the uninstallers have run
+    // and the plan is committed, and a listing error over a repository
+    // that was just disarmed is this issue's own failure mode.
+    let repo_effects = crate::repo_effects::after_writing(
+        &undone,
+        kendex_core::repo_effects::offers_for(env, &target, &report.repo_effects)
+            .map_err(|e| e.to_string()),
+    )?;
+    let packages = crate::repo_effects::after_writing(
+        &undone,
+        browse::packages(
+            env,
+            &Catalog::Subscription {
+                scope: target,
+                source,
+            },
+        )
+        .map_err(|e| e.to_string()),
+    )?;
     Ok(Installed {
         packages,
         repo_effects,
+        undone,
     })
 }

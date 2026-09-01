@@ -110,7 +110,7 @@ export const commands = {
 	 *  window — would put the older file back over it. A copy of a file that
 	 *  is no longer there is refused, never applied.
 	 */
-	updateSettings: (settings: AppSettings, base: string | null) => typedError<SettingsRead, WriteRefused>(__TAURI_INVOKE("update_settings", { settings, base })),
+	updateSettings: (settings: AppSettings, base: string | null) => typedError<SettingsRead, WriteRefused_Serialize>(__TAURI_INVOKE("update_settings", { settings, base })),
 	/**
 	 *  The size on screen, written on its own. Nothing else in the file moves
 	 *  with it, and nothing else can move it: a size the person is looking at
@@ -181,7 +181,7 @@ export const commands = {
 } | null, settings: {
 	edits: SettingsEdit[],
 	base: string | null,
-} | null) => typedError<AuditView_Serialize, WriteRefused>(__TAURI_INVOKE("save_customize", { scope, manifest, settings })),
+} | null) => typedError<AuditView_Serialize, WriteRefused_Serialize>(__TAURI_INVOKE("save_customize", { scope, manifest, settings })),
 	editorInventory: (scope: Scope) => typedError<EditorInventory, string>(__TAURI_INVOKE("editor_inventory", { scope })),
 	/**
 	 *  Per-hook, per-harness delivery for the hooks as currently drafted in the
@@ -225,9 +225,9 @@ export const commands = {
 	openUrl: (url: string) => typedError<null, string>(__TAURI_INVOKE("open_url", { url })),
 	/**  Every declared source in every scope — the Sources page's one query. */
 	sourcesOverview: () => typedError<SourceRow[], string>(__TAURI_INVOKE("sources_overview")),
-	sourceAdd: (scope: Scope, name: string, reference: string) => typedError<SourceRow[], string>(__TAURI_INVOKE("source_add", { scope, name, reference })),
-	sourceRemove: (scope: Scope, name: string) => typedError<SourceRow[], string>(__TAURI_INVOKE("source_remove", { scope, name })),
-	sourceToggle: (scope: Scope, name: string, enabled: boolean) => typedError<SourceRow[], string>(__TAURI_INVOKE("source_toggle", { scope, name, enabled })),
+	sourceAdd: (scope: Scope, name: string, reference: string) => typedError<SourcesAfter_Serialize, string>(__TAURI_INVOKE("source_add", { scope, name, reference })),
+	sourceRemove: (scope: Scope, name: string) => typedError<SourcesAfter_Serialize, string>(__TAURI_INVOKE("source_remove", { scope, name })),
+	sourceToggle: (scope: Scope, name: string, enabled: boolean) => typedError<SourcesAfter_Serialize, string>(__TAURI_INVOKE("source_toggle", { scope, name, enabled })),
 	/**
 	 *  Re-resolve every enabled remote across every scope. Returns warnings
 	 *  (offline caches keep serving); hard failures surface as the error.
@@ -239,7 +239,7 @@ export const commands = {
 	 *  Install a set whole. Its members derive from the catalog, so this declares
 	 *  one name and applies the plan that follows from it.
 	 */
-	bundleInstall: (scope: Scope, source: string, name: string, hold: boolean) => typedError<BundleInstalled, string>(__TAURI_INVOKE("bundle_install", { scope, source, name, hold })),
+	bundleInstall: (scope: Scope, source: string, name: string, hold: boolean) => typedError<BundleInstalled_Serialize, string>(__TAURI_INVOKE("bundle_install", { scope, source, name, hold })),
 	/**
 	 *  Every subscription across every scope — the Marketplaces page's one
 	 *  query.
@@ -272,7 +272,7 @@ export const commands = {
 	 *  carry the picker's answer; absent, the scope's own install defaults
 	 *  decide, brought up to date against this machine by the add itself.
 	 */
-	marketplaceInstall: (scope: Scope, source: string, items: InstallItem[], bundle: string | null, destination: { scope: "global" } | { scope: "project"; root: string } | null, hold: boolean, harnesses: HarnessId[] | null, method: "symlink" | "copy" | null) => typedError<Installed, string>(__TAURI_INVOKE("marketplace_install", { scope, source, items, bundle, destination, hold, harnesses, method })),
+	marketplaceInstall: (scope: Scope, source: string, items: InstallItem[], bundle: string | null, destination: { scope: "global" } | { scope: "project"; root: string } | null, hold: boolean, harnesses: HarnessId[] | null, method: "symlink" | "copy" | null) => typedError<Installed_Serialize, string>(__TAURI_INVOKE("marketplace_install", { scope, source, items, bundle, destination, hold, harnesses, method })),
 	/**
 	 *  Where an install of these kinds could land, for the picker the install
 	 *  flow draws. Two filters, both read from core: which tools can take the
@@ -288,7 +288,7 @@ export const commands = {
 	 *  Subscribe a scope to a marketplace: `owner/repo[@rev]`, a git URL, a
 	 *  GitHub tree URL, a skills.sh package URL, or a local folder.
 	 */
-	marketplaceSubscribe: (scope: Scope, reference: string, name: string | null) => typedError<SubscribeOutcome, string>(__TAURI_INVOKE("marketplace_subscribe", { scope, reference, name })),
+	marketplaceSubscribe: (scope: Scope, reference: string, name: string | null) => typedError<SubscribeOutcome_Serialize, string>(__TAURI_INVOKE("marketplace_subscribe", { scope, reference, name })),
 	/**
 	 *  The dialog's preview: the closure partitioned into removable, edited, and
 	 *  the bundles that go. Refuses (as an error) while the source cannot be read.
@@ -299,7 +299,7 @@ export const commands = {
 	 *  installation to a local fork; otherwise they are uninstalled, and
 	 *  `discard_edits` takes hand edits along instead of refusing.
 	 */
-	marketplaceUnsubscribe: (scope: Scope, source: string, keep: boolean, discardEdits: boolean) => typedError<null, string>(__TAURI_INVOKE("marketplace_unsubscribe", { scope, source, keep, discardEdits })),
+	marketplaceUnsubscribe: (scope: Scope, source: string, keep: boolean, discardEdits: boolean) => typedError<Unsubscribed_Serialize, string>(__TAURI_INVOKE("marketplace_unsubscribe", { scope, source, keep, discardEdits })),
 	/**
 	 *  The directory as the tab shows it. `refresh` forces a revalidation;
 	 *  otherwise the cached list is served within its TTL.
@@ -602,6 +602,15 @@ export type AuditView_Deserialize = {
 	 */
 	exits: RowExits[],
 	/**
+	 *  What a removal in this action did about the repository effects of
+	 *  the packages that left with it: the same lines the terminal prints,
+	 *  so the window says what ran rather than leaving a repository armed
+	 *  against scripts that are gone. Empty on a plain read and on every
+	 *  action that took no declaring package away — and left off the wire
+	 *  entirely when it is empty, which is almost every read.
+	 */
+	undone: string[],
+	/**
 	 *  Set when this one scope couldn't be read at all — a corrupt or
 	 *  future-version lock or manifest. Carried as data so one scope's
 	 *  failure never blanks every other scope's audit (drift/plan/notes/
@@ -641,6 +650,15 @@ export type AuditView_Serialize = {
 	 *  ends up offering an action the plan rejects.
 	 */
 	exits: RowExits[],
+	/**
+	 *  What a removal in this action did about the repository effects of
+	 *  the packages that left with it: the same lines the terminal prints,
+	 *  so the window says what ran rather than leaving a repository armed
+	 *  against scripts that are gone. Empty on a plain read and on every
+	 *  action that took no declaring package away — and left off the wire
+	 *  entirely when it is empty, which is almost every read.
+	 */
+	undone?: string[],
 	/**
 	 *  Set when this one scope couldn't be read at all — a corrupt or
 	 *  future-version lock or manifest. Carried as data so one scope's
@@ -703,12 +721,32 @@ export type BundleDetail = {
 };
 
 /**
- *  What a bundle install hands back: every set as it stands now, and the
- *  repository effects its members brought for the window to ask about.
+ *  What a bundle install hands back: every set as it stands now, the
+ *  repository effects its members brought for the window to ask about, and
+ *  what any package the plan took away had undone.
  */
-export type BundleInstalled = {
+export type BundleInstalled = BundleInstalled_Serialize | BundleInstalled_Deserialize;
+
+/**
+ *  What a bundle install hands back: every set as it stands now, the
+ *  repository effects its members brought for the window to ask about, and
+ *  what any package the plan took away had undone.
+ */
+export type BundleInstalled_Deserialize = {
 	bundles: BundleRow[],
 	repoEffects: Offers,
+	undone: string[],
+};
+
+/**
+ *  What a bundle install hands back: every set as it stands now, the
+ *  repository effects its members brought for the window to ask about, and
+ *  what any package the plan took away had undone.
+ */
+export type BundleInstalled_Serialize = {
+	bundles: BundleRow[],
+	repoEffects: Offers,
+	undone?: string[],
 };
 
 /**  One member of a curated set, with where it stands here. */
@@ -1595,12 +1633,34 @@ export type InstallTarget = {
 
 /**
  *  What an install hands back: the subscription's packages as they stand
- *  now, and the repository effects the install brought — read and asked
- *  about in the window, because nothing here ran them.
+ *  now, the repository effects the install brought — read and asked about
+ *  in the window, because nothing here ran them — and what any package the
+ *  plan took away had undone, which is not asked about at all.
  */
-export type Installed = {
+export type Installed = Installed_Serialize | Installed_Deserialize;
+
+/**
+ *  What an install hands back: the subscription's packages as they stand
+ *  now, the repository effects the install brought — read and asked about
+ *  in the window, because nothing here ran them — and what any package the
+ *  plan took away had undone, which is not asked about at all.
+ */
+export type Installed_Deserialize = {
 	packages: AvailablePackage[],
 	repoEffects: Offers,
+	undone: string[],
+};
+
+/**
+ *  What an install hands back: the subscription's packages as they stand
+ *  now, the repository effects the install brought — read and asked about
+ *  in the window, because nothing here ran them — and what any package the
+ *  plan took away had undone, which is not asked about at all.
+ */
+export type Installed_Serialize = {
+	packages: AvailablePackage[],
+	repoEffects: Offers,
+	undone?: string[],
 };
 
 /**  One declared item: `[agents.<name>]` / `[skills.<name>]`. */
@@ -2644,6 +2704,39 @@ export type SourceRow = {
 	declaredItems: string[],
 };
 
+/**
+ *  What a source action leaves: every declared source across every scope,
+ *  and what the removal did about the repository effects of any package
+ *  that left with it — the same account the terminal prints, so the window
+ *  says what ran rather than leaving a repository armed against scripts
+ *  that are gone.
+ */
+export type SourcesAfter = SourcesAfter_Serialize | SourcesAfter_Deserialize;
+
+/**
+ *  What a source action leaves: every declared source across every scope,
+ *  and what the removal did about the repository effects of any package
+ *  that left with it — the same account the terminal prints, so the window
+ *  says what ran rather than leaving a repository armed against scripts
+ *  that are gone.
+ */
+export type SourcesAfter_Deserialize = {
+	sources: SourceRow[],
+	undone: string[],
+};
+
+/**
+ *  What a source action leaves: every declared source across every scope,
+ *  and what the removal did about the repository effects of any package
+ *  that left with it — the same account the terminal prints, so the window
+ *  says what ran rather than leaving a repository armed against scripts
+ *  that are gone.
+ */
+export type SourcesAfter_Serialize = {
+	sources: SourceRow[],
+	undone?: string[],
+};
+
 /**  One check finding shaped for a screen with an Open button. */
 export type StatusFinding = {
 	file: string,
@@ -2687,7 +2780,10 @@ export type SubmittedView = {
 };
 
 /**  What subscribing declared, after the plan ran. */
-export type SubscribeOutcome = {
+export type SubscribeOutcome = SubscribeOutcome_Serialize | SubscribeOutcome_Deserialize;
+
+/**  What subscribing declared, after the plan ran. */
+export type SubscribeOutcome_Deserialize = {
 	name: string,
 	/**  The declared repository or path. */
 	reference: string,
@@ -2698,6 +2794,32 @@ export type SubscribeOutcome = {
 	 */
 	lead: string | null,
 	notes: string[],
+	/**
+	 *  What a package leaving with this plan had undone, if one did. Its
+	 *  own field rather than more notes, so the account a removal owes has
+	 *  one name across every command that can make one.
+	 */
+	undone: string[],
+};
+
+/**  What subscribing declared, after the plan ran. */
+export type SubscribeOutcome_Serialize = {
+	name: string,
+	/**  The declared repository or path. */
+	reference: string,
+	rev: string | null,
+	/**
+	 *  The package a tree or skills.sh URL was leading to — where the app
+	 *  opens next, never an identity.
+	 */
+	lead: string | null,
+	notes: string[],
+	/**
+	 *  What a package leaving with this plan had undone, if one did. Its
+	 *  own field rather than more notes, so the account a removal owes has
+	 *  one name across every command that can make one.
+	 */
+	undone?: string[],
 };
 
 /**
@@ -2759,6 +2881,46 @@ export type UnsubscribePreview = {
 	removable: PackageRef[],
 	edited: PackageRef[],
 	bundles: string[],
+};
+
+/**
+ *  What unsubscribing did about the repository effects of the packages
+ *  that left with the source — the same account the terminal prints.
+ * 
+ *  A struct rather than the bare list it used to be, spelling the account
+ *  `undone` like every other command that can make one. The window reads
+ *  the account off an answer by that name, so a bare list is a shape it
+ *  can only be told about by hand, and the day this write goes through
+ *  the shared one it would fall silent with nothing going red.
+ */
+export type Unsubscribed = Unsubscribed_Serialize | Unsubscribed_Deserialize;
+
+/**
+ *  What unsubscribing did about the repository effects of the packages
+ *  that left with the source — the same account the terminal prints.
+ * 
+ *  A struct rather than the bare list it used to be, spelling the account
+ *  `undone` like every other command that can make one. The window reads
+ *  the account off an answer by that name, so a bare list is a shape it
+ *  can only be told about by hand, and the day this write goes through
+ *  the shared one it would fall silent with nothing going red.
+ */
+export type Unsubscribed_Deserialize = {
+	undone: string[],
+};
+
+/**
+ *  What unsubscribing did about the repository effects of the packages
+ *  that left with the source — the same account the terminal prints.
+ * 
+ *  A struct rather than the bare list it used to be, spelling the account
+ *  `undone` like every other command that can make one. The window reads
+ *  the account off an answer by that name, so a bare list is a shape it
+ *  can only be told about by hand, and the day this write goes through
+ *  the shared one it would fall silent with nothing going red.
+ */
+export type Unsubscribed_Serialize = {
+	undone?: string[],
 };
 
 /**  One declared package's update standing. */
@@ -2955,13 +3117,47 @@ export type Withheld = {
  *  here, not a failure, so it is a shape the page can act on rather than
  *  a message it would have to recognise by its words.
  */
-export type WriteRefused = 
+export type WriteRefused = WriteRefused_Serialize | WriteRefused_Deserialize;
+
+/**
+ *  Why a whole-file write did not happen. Refusing is a normal answer
+ *  here, not a failure, so it is a shape the page can act on rather than
+ *  a message it would have to recognise by its words.
+ */
+export type WriteRefused_Deserialize = 
 /**
  *  The file is no longer the one this copy was read from. Something
  *  else wrote it — a fork, a hold, an install, another window — and
  *  writing this copy would put that back.
+ * 
+ *  Carries whatever the write already did to the repository before it
+ *  refused. A plan runs a leaving package's uninstaller before it
+ *  touches the files, so a refusal landing after that point is a
+ *  refusal with a disarmed repository behind it — and a reload notice
+ *  on its own would send somebody away believing nothing happened.
+ *  Empty on the base check, which refuses before anything runs.
  */
-{ kind: "stale" } | { kind: "failed"; message: string };
+({ kind: "stale"; undone: string[] }) & { message?: never } | ({ kind: "failed"; message: string }) & { undone?: never };
+
+/**
+ *  Why a whole-file write did not happen. Refusing is a normal answer
+ *  here, not a failure, so it is a shape the page can act on rather than
+ *  a message it would have to recognise by its words.
+ */
+export type WriteRefused_Serialize = 
+/**
+ *  The file is no longer the one this copy was read from. Something
+ *  else wrote it — a fork, a hold, an install, another window — and
+ *  writing this copy would put that back.
+ * 
+ *  Carries whatever the write already did to the repository before it
+ *  refused. A plan runs a leaving package's uninstaller before it
+ *  touches the files, so a refusal landing after that point is a
+ *  refusal with a disarmed repository behind it — and a reload notice
+ *  on its own would send somebody away believing nothing happened.
+ *  Empty on the base check, which refuses before anything runs.
+ */
+({ kind: "stale"; undone?: string[] }) & { message?: never } | ({ kind: "failed"; message: string }) & { undone?: never };
 
 /**  One path the package writes, where it actually lands. */
 export type Written = {

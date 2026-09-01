@@ -10,6 +10,7 @@ import { type Draft, emptyDraft } from "@/lib/editor-draft";
 
 import { everyPlace, sameScope } from "@/lib/scope";
 import { settingsDraft, withEdit } from "@/lib/settings-rows";
+import { saying, sayUndone } from "@/lib/undone";
 import { useAuditStore } from "./audit";
 import {
   mergedPlaces,
@@ -149,12 +150,22 @@ export const useEditorStore = create<EditorState>((set, get) => {
       // rather than taking the person's edits on its own.
       if (response.error.kind === "stale") {
         set({ stale: true, error: null });
+        // A refusal is not always "nothing happened". The plan runs a
+        // leaving package's uninstaller before it writes, so a save that
+        // refused after that point left the repository disarmed — and the
+        // reload notice on its own would say the opposite.
+        sayUndone(response.error.undone);
       } else {
         set({ error: response.error.message, stale: false });
       }
       return;
     }
     set({ error: null, stale: false });
+    // Saving a manifest that takes a package away owes the same account a
+    // removal does. Wired here rather than by the write the update commands
+    // share: the editor answers a refusal shape of its own and never goes
+    // through it — which is also why the stale branch above says it too.
+    saying(response);
     await load();
     // Forced: a save rewrote the manifest this scope renders from, so an
     // audit inside its freshness window would keep every score answering

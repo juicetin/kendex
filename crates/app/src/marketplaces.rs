@@ -5,7 +5,6 @@
 //! command here. Reads take a [`Catalog`]: a subscription, or a repository
 //! opened from the Community tab before subscribing.
 
-use kendex_core::apply;
 use kendex_core::env::Env;
 use kendex_core::library::{self, ProvenanceRow};
 use kendex_core::manifest::{Manifest, manifest_path};
@@ -187,6 +186,11 @@ pub struct SubscribeOutcome {
     /// opens next, never an identity.
     pub lead: Option<String>,
     pub notes: Vec<String>,
+    /// What a package leaving with this plan had undone, if one did. Its
+    /// own field rather than more notes, so the account a removal owes has
+    /// one name across every command that can make one.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub undone: Vec<String>,
 }
 
 /// Subscribe a scope to a marketplace: `owner/repo[@rev]`, a git URL, a
@@ -201,7 +205,11 @@ pub fn marketplace_subscribe(
     let env = env()?;
     let subscribed = source_ops::subscribe(&env, &scope, &reference, name.as_deref())
         .map_err(|e| e.to_string())?;
-    apply::execute(&env, &subscribed.report.plan).map_err(|e| e.to_string())?;
+    // Through the one executor, like every report, precisely because no
+    // path can prove its own plan takes nothing away. Orphan removal being
+    // off does not settle it: a rendering the engine refuses drops the
+    // package's lock entry regardless, and its uninstaller runs.
+    let undone = crate::repo_effects::write(&env, &subscribed.report)?;
     let mut notes = subscribed.report.notes;
     // Fetch so counts and browsing land right away; a failure costs the
     // counts, never the subscription — the CLI verb behaves the same.
@@ -219,6 +227,7 @@ pub fn marketplace_subscribe(
         rev: subscribed.rev,
         lead: subscribed.lead,
         notes,
+        undone,
     })
 }
 
