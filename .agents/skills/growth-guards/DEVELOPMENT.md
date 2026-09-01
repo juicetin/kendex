@@ -45,14 +45,69 @@ docs live in README.md.
 - `README.md` — consumer documentation
 - `CHECKS.md` — what each check bans, and how it is scoped
 - `tests/` — run any file directly; every suite sources the harness first
+- `tests/terminal-paths.test.sh` — the cases that only exist at a tty, and
+  the pins for the pty probe itself
 - `tests/lib/install-hooks.bash` — the consumer-shaped fixture repository
   and installer invocations the four `install-git-hooks` suites share
+- `tests/lib/pty.bash` — running a case at a terminal, and the rules such a
+  probe follows; sourced by `terminal-paths.test.sh` alone
 - `tests/lib/harness.bash` — the scratch root a suite owns, a `TMPDIR`
   inside it, and git-config isolation; sourced, so the name stays outside
   the `tests/*.sh` glob runners execute
 
 `bash tests/*.sh` is the lane `tools/validate-changed` derives for a change
 under this skill.
+
+## Probing a terminal-only code path
+
+A suite run with stdin off a terminal cannot reach a branch that only exists
+at a tty, so a probe written headless measures nothing there. `mv` prompts
+before replacing a destination that denies write ONLY at a tty, which makes
+plain `mv` and `mv -f` indistinguishable to such a run — how a prompting
+`gg_install_file` shipped green. Where a suite's own stdin IS a terminal the
+same branch is live and unguarded: `index-reads.test.sh` installs onto a 0444
+destination, so with the `-f` reverted such a run reaches the prompt and
+waits for a person.
+
+`gg_pty_run CAP SCRIPT_FILE`, in `tests/lib/pty.bash`, runs a bash script file
+with fds 0, 1 and 2 on a pseudo-terminal. It picks the `script` grammar from
+`uname` — Darwin takes the BSD form, everything else the util-linux one — and
+a host whose `script` answers neither has no working spawner here, which is a
+RED naming the spawner as its cause rather than a skip: a case that cannot
+reach the terminal branch is not covering it. What a call sets is documented
+above the function; the states are enumerated there and nowhere else.
+
+Two rules hold, and a probe that drops either is worse than no probe:
+
+- **Stdin redirected.** The spawner reads `/dev/null`, so a prompt is
+  answered by EOF the moment it is written and the session returns instead of
+  waiting for a person who is not there. What it returns differs by platform,
+  which is why a case asserts on the destination.
+- **A time cap.** After `CAP` seconds the session's process group is killed,
+  the spawner's after it. `script` puts the session in a group of its own, so
+  killing the spawner alone leaves the stuck child behind. A probe that HANGS
+  yields no measurement at all, so a mutation run scores it as not killed and
+  prints a silent miss rather than a wedge.
+
+Three things to assert, and `terminal-paths.test.sh` is the worked example —
+its `pty_call` is the wrapper shape a new case copies:
+
+- **The effect the branch has, not the spawner's status.** Whether the
+  destination was replaced is what the branch does; a status is what one `mv`
+  on one host chose to say about it. `GG_PTY_STATE = ok` is the separate
+  claim that the probe ran rather than wedged.
+- **Positive evidence that the code under test was entered**, paired with
+  every negative. An unreplaced destination is also what a session that never
+  got there leaves behind, which is why the mutant control echoes a marker
+  before the call it measures and requires it back.
+- **The premise, inside the session.** A destination that denies write is
+  what makes `mv` prompt, and at euid 0 mode `0444` is not enforced — so
+  without that check a root run covers nothing and says nothing.
+
+Every path written into the session goes through `%q`. They come from
+`TMPDIR` and from the caller, so an unquoted one lands in a shell script as
+syntax rather than as a path. The session also exports `LC_ALL=C`, because a
+case matching a tool's own words is matching a string that gets translated.
 
 ## Design
 
