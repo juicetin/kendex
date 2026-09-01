@@ -9,8 +9,25 @@ set -euo pipefail
 
 TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ORCH="$(cd "$TEST_DIR/.." && pwd)"
+# Relative first, so an exported tree that is no git checkout still runs
+# these suites — the mutation harness extracts one with git archive.
+SEALED="$(cd "$TEST_DIR/../../.." && pwd)/tools/tests/lib/sealed-bin"
+# git's own failure must not become this script's: in a non-git tree the
+# substitution exits 128, and under set -e that would end the run before the
+# named error below ever printed.
+if [[ ! -x "$SEALED/gh" ]]; then
+  REPO_TOP="$(git -C "$TEST_DIR" rev-parse --show-toplevel 2>/dev/null || true)"
+  SEALED="$REPO_TOP/tools/tests/lib/sealed-bin"
+fi
+[[ -x "$SEALED/gh" ]] || { echo "merge_queue_rearm_e2e: sealed-bin fixture is missing: $SEALED" >&2; exit 1; }
 TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
+# This suite launches real detached supervisors; teardown owns their pids.
+# shellcheck source=lib/merge-queue-reaper.sh
+. "$TEST_DIR/lib/merge-queue-reaper.sh"
+mq_reap_own "$TMP"
+trap mq_reap_teardown EXIT
+trap 'exit 143' TERM HUP
+trap 'exit 130' INT
 PASS=0 FAIL=0
 ok() { PASS=$((PASS+1)); printf '  ok    %s\n' "$1"; }
 bad() { FAIL=$((FAIL+1)); printf '  FAIL  %s\n' "$1"; }
@@ -70,7 +87,7 @@ echo "unexpected gh: $*" >&2
 exit 1
 EOF
 chmod +x "$BIN/gh" "$SCRIPTS/merge-queue-watch" "$SCRIPTS/workflow-state" "$SCRIPTS/orch-env" "$SCRIPTS/queue-wait"
-export PATH="$BIN:$PATH" E2E_PHASE="$PHASE" E2E_QUEUE_LOG="$QUEUE_LOG" E2E_HEAD="$HEAD"
+export PATH="$BIN:$SEALED:$PATH" E2E_PHASE="$PHASE" E2E_QUEUE_LOG="$QUEUE_LOG" E2E_HEAD="$HEAD"
 export QUEUE_WAIT_CONFIRM_POLLS=2
 unset GH_TOKEN GITHUB_TOKEN GH_BOT_TOKEN GH_REPO GITHUB_REPOSITORY
 
