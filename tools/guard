@@ -10,6 +10,9 @@
 # Checks the working tree, not the staged index — accepted trade-off:
 # agents commit whole files; partial staging is out of scope.
 set -uo pipefail
+# Resolved before the cd below: the sibling tools this script runs live
+# beside it, not necessarily in the repository it judges.
+TOOLS_DIR="$(cd "$(dirname "$0")" && pwd)" || exit 1
 cd "$(git rev-parse --show-toplevel)"
 fail=0
 say() {
@@ -110,16 +113,19 @@ done)
   say 'fixture HOME without KENDEX_REAL_HOME on the next line — that command would run in the dev sandbox'
 }
 
+# What the diff-scoped rules below diff against: HEAD, or on an unborn
+# branch the index against nothing, so the first commit is judged too.
+if git cat-file -e 'HEAD^{commit}' 2>/dev/null; then
+  diff_against=(HEAD)
+else
+  diff_against=(--cached)
+fi
+
 # New integration-test temp roots take their canonical spelling immediately
 # through the shared rooted() helper. Older fixtures stay out of this
 # diff-scoped rule.
-if git cat-file -e 'HEAD^{commit}' 2>/dev/null; then
-  temp_fixture_diff=$(git diff --no-color --unified=100000 --no-ext-diff --text HEAD -- 'crates/*/tests/*.rs') ||
-    say "test fixture changes could not be read"
-else
-  temp_fixture_diff=$(git diff --cached --no-color --unified=100000 --no-ext-diff --text -- 'crates/*/tests/*.rs') ||
-    say "test fixture changes could not be read"
-fi
+temp_fixture_diff=$(git diff --no-color --unified=100000 --no-ext-diff --text "${diff_against[@]}" -- 'crates/*/tests/*.rs') ||
+  say "test fixture changes could not be read"
 if ! temp_fixture_hits=$(awk '
   function flush() {
     if (pending != "") print file ":" pending_line ": " pending_text
@@ -181,6 +187,61 @@ fi
 [ -n "$temp_fixture_hits" ] && {
   show "$temp_fixture_hits" | head -5
   say 'temporary fixture bypasses rooted(): import crates/test_util.rs and bind the canonical root on the next source line'
+}
+
+# Bash 3.2 portability over the skill tree. The roster and the pattern set
+# are the lint's own; exit 1 is a construct, exit 2 a scan that could not
+# run, and neither is a pass. One line on purpose: the must-fail control in
+# tools/tests/guard.test.sh removes this lane by deleting it.
+"$TOOLS_DIR/bash32-lint" || say "tools/bash32-lint refused the tree — a Bash 4+ construct, or a scan that could not run"
+
+# A render source lands its renders in the same change: skills/<x>/<p>
+# renders to .agents/skills/<x>/<p>, and an agent definition to one file per
+# harness. Presence, not byte equality — a render can carry an injected block
+# the source has no copy of, so bytes cannot be compared. Rendered is judged
+# at the tree: a skill with anything tracked under .agents/skills/<x> renders
+# every file, so a new source there owes a new render, and an agent owes a
+# file to each harness directory that tracks any. A skill with no tracked
+# render has nothing to land, and a render-only change is the sync direction
+# and passes. A deletion is in the changed set too, so the render must also
+# still exist wherever its source does. Path quoting is off on both reads:
+# a quoted path matches neither the case arms nor its own render.
+render_changed=$(git -c core.quotePath=false diff --name-only --no-renames "${diff_against[@]}") ||
+  { render_changed=""; say "the changed-file set for the render rule could not be read"; }
+render_tracked=$(git -c core.quotePath=false ls-files -- .agents/skills .claude/agents .codex/agents .pi/agents) ||
+  { render_tracked=""; say "the tracked render set could not be read"; }
+render_hits=""
+NL='
+'
+renders_under() { # DIR — anything is tracked under DIR, DIR read literally
+  case "$NL$render_tracked$NL" in *"$NL$1/"*) return 0 ;; esac
+  return 1
+}
+require_render() { # SOURCE RENDER — RENDER changes with SOURCE and outlives it
+  { grep -Fxq -- "$2" <<<"$render_changed" && { [ ! -e "$1" ] || [ -e "$2" ]; }; } ||
+    render_hits="$render_hits$1 -> $2
+"
+}
+while IFS= read -r f; do
+  [ -n "$f" ] || continue
+  case "$f" in
+  skills/*/*)
+    x="${f#skills/}"
+    x="${x%%/*}"
+    renders_under ".agents/skills/$x" && require_render "$f" ".agents/$f"
+    ;;
+  agents/*.md)
+    n="${f#agents/}"
+    n="${n%.md}"
+    renders_under .claude/agents && require_render "$f" ".claude/agents/$n.md"
+    renders_under .codex/agents && require_render "$f" ".codex/agents/$n.toml"
+    renders_under .pi/agents && require_render "$f" ".pi/agents/$n.md"
+    ;;
+  esac
+done <<<"$render_changed"
+[ -n "$render_hits" ] && {
+  show "$render_hits" | head -5
+  say "a render source changed without its tracked render — land the render in the same change"
 }
 
 # Structural invariants.
