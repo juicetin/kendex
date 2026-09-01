@@ -281,6 +281,8 @@ Apply the fix-round A×B table in [`dev-fix.md` § 2](dev-fix.md), which is cano
 git -C "[WORKTREE_PATH]" push origin HEAD
 ```
 
+**A round ends with the description matching its head.** The PR body describes the commits actually on the PR head and names every issue § 6.2 filed this round; nothing else regenerates it after round one, so rebuild it per [`submit-pr.md` § 2](submit-pr.md) step 3 and post it with `pr-edit-body` until both hold.
+
 ### 6.2 Create Issues
 
 **Skip if** nothing clears the filing bar in [references/finding-disposition.md](../references/finding-disposition.md). Blocked items, skipped items, `category: "issue"` suggestions, and each `freeze` row's class issue that clear it go into an audit-input file at `[WORKTREE_PATH]/tmp/audit-pr-comments-YYYYMMDD-HHMMSS.json` per `.agents/skills/project-management/schemas/audit-issues-input.md`, with `source: "pr-comments"` and `tracker.type` set to the resolved `TRACKER` (plus `tracker.repository` for GitHub items), then `⤵ .agents/skills/project-management/workflows/audit-issues.md --issues [FILE_PATH] § 1-9 → § 6.3`.
