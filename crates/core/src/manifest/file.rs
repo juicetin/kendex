@@ -121,6 +121,36 @@ pub fn observed(path: &Path) -> Result<Manifest> {
     }
 }
 
+/// The predicates the model's serde attributes skip through. They live
+/// beside the write because that is the whole reason they exist.
+///
+/// Why every field with a default skips at it: an absent key already reads
+/// as that value, and kendex.toml is edited in place, so writing it out
+/// would put a key in somebody's file that says nothing the file did not
+/// already say. What the file does spell is safe either way — a removal is
+/// decided by what the manifest read back out of that same file, never by
+/// what the serializer left out.
+///
+/// Two rules hold that. Every field serde gives a default carries a skip
+/// predicate beside it; a field that gains the one without the other
+/// falsifies ARCHITECTURE invariant 10, and the serde attributes on the
+/// model are where that is read off. And no predicate restates a default: each
+/// asks the same `default_*` or `Default` the field deserializes through,
+/// so changing a default moves the write with it instead of silently
+/// inverting the field.
+pub(super) fn is_default<T: Default + PartialEq>(value: &T) -> bool {
+    *value == T::default()
+}
+
+pub(super) fn is_true(value: &bool) -> bool {
+    *value == super::default_true()
+}
+
+/// Persist a manifest, in place. The file is written by hand, so the
+/// serialization below is not what lands: it is folded into the document
+/// already there ([`super::edit::merged`]), which touches only the keys
+/// that changed and the keys the manifest gained or dropped. A write that
+/// changes nothing writes nothing, the way a structured config edit does.
 pub fn save(path: &Path, manifest: &Manifest) -> Result<()> {
     // Stamped at the write, the way the lock stamps its version: the
     // schema is a fact about the build doing the writing, and two places
@@ -130,11 +160,48 @@ pub fn save(path: &Path, manifest: &Manifest) -> Result<()> {
         schema: MANIFEST_SCHEMA,
         ..manifest.clone()
     };
-    let text = toml::to_string_pretty(manifest).map_err(|e| CoreError::TomlParse {
+    let desired = toml::to_string_pretty(manifest).map_err(|e| CoreError::TomlParse {
         path: path.to_path_buf(),
         message: e.to_string(),
     })?;
+    let current = read_if_exists(path)?;
+    let text = match &current {
+        Some(current) => {
+            // What this file already gives the model, taken the same way
+            // the target was. A key outside it — a note somebody left
+            // inside a declaration — is not kendex's to drop, and the fold
+            // needs that to tell it from a key kendex really did drop.
+            let held = held_by_model(path, current)?;
+            super::edit::merged(current, &held, &desired).map_err(|e| CoreError::TomlParse {
+                path: path.to_path_buf(),
+                message: e.to_string(),
+            })?
+        }
+        None => desired,
+    };
+    if current.as_deref() == Some(text.as_str()) {
+        return Ok(());
+    }
     atomic_write(path, &text)
+}
+
+/// The keys this text gives the manifest model, as the same serializer
+/// spells them. Read back and written out again rather than diffed by
+/// hand, so the vocabulary can never drift from the one the target was
+/// written with. The plan read these exact bytes through [`parse_text`]
+/// and the write's precondition holds them, so a refusal here is a file
+/// that stopped being a manifest between the two, and it is refused
+/// rather than written over.
+fn held_by_model(path: &Path, current: &str) -> Result<String> {
+    let held: Manifest =
+        toml::from_str(current).map_err(|e: toml::de::Error| CoreError::TomlParse {
+            path: path.to_path_buf(),
+            message: e.to_string(),
+        })?;
+    toml::to_string_pretty(&held).map_err(|e| CoreError::TomlParse {
+        path: path.to_path_buf(),
+        message: e.to_string(),
+    })
 }
 
 /// Load for mutation. Only the current schema loads at all, so there is

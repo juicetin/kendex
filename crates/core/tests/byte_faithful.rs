@@ -5,10 +5,10 @@
 
 #[path = "../../test_util.rs"]
 mod test_util;
-use test_util::source_path;
+use test_util::{rooted, source_path};
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
 use kendex_core::apply;
 use kendex_core::configedit::ConfigEdit;
@@ -192,5 +192,286 @@ fn a_written_tree_keeps_shebang_files_executable() {
     assert!(
         doc.permissions().mode() & 0o100 == 0,
         "a plain document must not"
+    );
+}
+
+/// The manifest as somebody keeps it: a header comment, comments against
+/// the tables, a trailing comment on a value, a key order no serializer
+/// would choose, and `note`, a key the manifest model does not hold at
+/// all. Every key with a default is left out — `[install]` names only the
+/// harnesses, which pins the fan-out this fixture installs under and is
+/// not a default; the hooks name neither `agents` nor, for the second,
+/// `enabled`. So a write that lands any of them shows up here. Every case
+/// below asserts the whole file.
+fn kept_manifest(source: &std::path::Path) -> String {
+    format!(
+        "# what this project installs\nschema = 6\n\n# the catalog we read\n[sources.cat]\nenabled = true\n{}\n\n[install]\nharnesses = [\"claude\"]\n\n# the one we actually use\n[skills.gh]\nsource = \"cat\"   # from the catalog\nnote = \"why I keep this\"\nenabled = true\n\n# guards every bash call\n[[custom-hooks]]\nevent = \"PreToolUse\"\ncommand = \"./guard.sh\"\nenabled = true   # still on\n\n[[custom-hooks]]\nevent = \"Stop\"\ncommand = \"./done.sh\"\n",
+        source_path(source)
+    )
+}
+
+struct Kept {
+    _tmp: tempfile::TempDir,
+    env: Env,
+    scope: Scope,
+    project: std::path::PathBuf,
+    manifest: std::path::PathBuf,
+    original: String,
+}
+
+#[allow(clippy::unwrap_used)]
+fn kept() -> Kept {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = rooted(&tmp);
+    let env = Env::fake(&home, FakeOs::Linux);
+    let project = home.join("dev/app");
+    fs::create_dir_all(project.join(".claude")).unwrap();
+    let source = home.join("catalog");
+    for name in ["gh", "fmt"] {
+        fs::create_dir_all(source.join("skills").join(name)).unwrap();
+        fs::write(
+            source.join("skills").join(name).join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: about {name}\n---\nBody.\n"),
+        )
+        .unwrap();
+    }
+    let manifest = project.join("kendex.toml");
+    let original = kept_manifest(&source);
+    fs::write(&manifest, &original).unwrap();
+    let scope = Scope::Project {
+        root: project.clone(),
+    };
+    // Identity, not just content: `save` claims a write that changes
+    // nothing writes nothing, and content alone cannot tell that from a
+    // write that replaced the file with the same bytes. atomic_write
+    // renames a fresh file into place, so the inode moves and the mtime
+    // moves with it.
+    let before = fs::metadata(&manifest).unwrap();
+    let report = audit(&env, &scope).unwrap();
+    apply::execute(&env, &report.plan).unwrap();
+    let after = fs::metadata(&manifest).unwrap();
+    assert_eq!(
+        fs::read_to_string(&manifest).unwrap(),
+        original,
+        "installing what the file already declares writes nothing"
+    );
+    assert_eq!(
+        (before.ino(), before.modified().unwrap()),
+        (after.ino(), after.modified().unwrap()),
+        "the file itself is untouched, not rewritten with the same bytes"
+    );
+    Kept {
+        env,
+        scope,
+        project,
+        manifest,
+        original,
+        _tmp: tmp,
+    }
+}
+
+/// `add` declares one more skill and leaves every other byte where it was
+/// (invariant 10): the comments, the blank lines, the hand spacing, the
+/// key order inside `[sources.cat]`, and the trailing comment on the
+/// declaration it did not touch.
+#[test]
+#[allow(clippy::unwrap_used)]
+fn adding_a_skill_edits_kendex_toml_in_place() {
+    let k = kept();
+    let report = kendex_core::engine::ops::add(
+        &k.env,
+        &k.scope,
+        &kendex_core::engine::ops::AddRequest {
+            source: Some("cat".into()),
+            skills: vec!["fmt".into()],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    apply::execute(&k.env, &report.plan).unwrap();
+
+    assert_eq!(
+        fs::read_to_string(&k.manifest).unwrap(),
+        declaring(&k.original, "[skills.fmt]\nsource = \"cat\"\n")
+    );
+}
+
+/// `fork` rebinds the declaration it names and records the provenance.
+/// The value it rewrites keeps the comment that sat beside it.
+#[test]
+#[allow(clippy::unwrap_used)]
+fn forking_a_skill_edits_kendex_toml_in_place() {
+    let k = kept();
+    fs::write(
+        k.project.join(".agents/skills/gh/SKILL.md"),
+        "---\nname: gh\ndescription: about gh\n---\nMine now.\n",
+    )
+    .unwrap();
+    let plan = kendex_core::engine::fork::fork(
+        &k.env,
+        &k.scope,
+        kendex_core::model::ItemKind::Skill,
+        "gh",
+        kendex_core::model::HarnessId::Claude,
+    )
+    .unwrap();
+    apply::execute(&k.env, &plan).unwrap();
+
+    let written = fs::read_to_string(&k.manifest).unwrap();
+    assert_eq!(
+        written,
+        rebound(&k.original) + &forks_table(&written),
+        "{written}"
+    );
+}
+
+/// `adopt` takes an unmanaged skill into the manifest; the file it appends
+/// to is otherwise untouched.
+#[test]
+#[allow(clippy::unwrap_used)]
+fn adopting_a_skill_edits_kendex_toml_in_place() {
+    let k = kept();
+    let mine = k.project.join(".claude/skills/mine");
+    fs::create_dir_all(&mine).unwrap();
+    fs::write(
+        mine.join("SKILL.md"),
+        "---\nname: mine\ndescription: my own\n---\nMine.\n",
+    )
+    .unwrap();
+    let plan = kendex_core::engine::adopt::adopt(
+        &k.env,
+        &k.scope,
+        kendex_core::model::ItemKind::Skill,
+        "mine",
+        &[kendex_core::model::HarnessId::Claude],
+    )
+    .unwrap();
+    apply::execute(&k.env, &plan).unwrap();
+
+    assert_eq!(
+        fs::read_to_string(&k.manifest).unwrap(),
+        declaring(&k.original, "[skills.mine]\nsource = \"in-place\"\n")
+    );
+}
+
+/// `detach` drops the source declaration and rebinds what read from it.
+/// The comment written against the table that goes leaves with it, and
+/// nothing above or below it moves.
+#[test]
+#[allow(clippy::unwrap_used)]
+fn detaching_a_source_edits_kendex_toml_in_place() {
+    let k = kept();
+    let plan = kendex_core::engine::detach::source(&k.env, &k.scope, "cat").unwrap();
+    apply::execute(&k.env, &plan).unwrap();
+
+    let written = fs::read_to_string(&k.manifest).unwrap();
+    let source_block = &k.original[k
+        .original
+        .find("# the catalog we read")
+        .expect("the fixture comments its source table")
+        ..k.original
+            .find("[install]")
+            .expect("the fixture declares install defaults")];
+    assert_eq!(
+        written,
+        rebound(&k.original.replace(source_block, "")) + &forks_table(&written),
+        "{written}"
+    );
+}
+
+/// The fixture with one more declaration in it, where a gained table
+/// lands: under the last of its own kind, not at the end of the file where
+/// it would read as more of whatever table is last.
+fn declaring(manifest: &str, block: &str) -> String {
+    manifest.replace(HOOK_COMMENT, &format!("{block}\n{HOOK_COMMENT}"))
+}
+
+const HOOK_COMMENT: &str = "# guards every bash call";
+
+/// The declaration after a verb rebinds it to the person's own copy: the
+/// one value changed, the comment beside it untouched.
+fn rebound(manifest: &str) -> String {
+    manifest.replace(
+        "source = \"cat\"   # from the catalog",
+        "source = \"local\"   # from the catalog",
+    )
+}
+
+/// The `[forks.skill.gh]` block a fork records. Checked rather than
+/// copied: a case cannot transcribe a timestamp it does not know, but it
+/// can say what every other byte of the block is and that the file ends
+/// there. Returned so the caller can put it back into its own expectation.
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+fn forks_table(written: &str) -> String {
+    let at = written
+        .find("\n[forks.skill.gh]\n")
+        .expect("the fork is recorded");
+    let block = &written[at..];
+    let lines: Vec<&str> = block.split('\n').collect();
+    let stamp = lines
+        .get(3)
+        .and_then(|line| line.strip_prefix("forked-at = \""))
+        .and_then(|value| value.strip_suffix('"'))
+        .expect("the block records when the fork was made");
+    assert!(
+        stamp.parse::<toml::value::Datetime>().is_ok(),
+        "forked-at is a timestamp: {stamp}"
+    );
+    assert_eq!(
+        (lines.first(), lines.get(1), lines.get(2)),
+        (
+            Some(&""),
+            Some(&"[forks.skill.gh]"),
+            Some(&"source = \"cat\"")
+        ),
+        "{block}"
+    );
+    assert_eq!(
+        lines.get(4..),
+        Some([""].as_slice()),
+        "the block is the end of the file: {block}"
+    );
+    block.to_owned()
+}
+
+/// A planned write whose result is the file that is already there does not
+/// touch the file. Asking again for a skill this scope already declares
+/// plans a manifest write like any other mutation; what it would land is
+/// byte for byte what is on disk, and `save` stops before the write rather
+/// than replacing the file with its own contents.
+#[test]
+#[allow(clippy::unwrap_used)]
+fn a_write_that_changes_nothing_leaves_the_file_alone() {
+    let k = kept();
+    let before = fs::metadata(&k.manifest).unwrap();
+    let report = kendex_core::engine::ops::add(
+        &k.env,
+        &k.scope,
+        &kendex_core::engine::ops::AddRequest {
+            source: Some("cat".into()),
+            skills: vec!["gh".into()],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(
+        report
+            .plan
+            .ops
+            .iter()
+            .any(|op| matches!(op.op, apply::Op::WriteManifest { .. })),
+        "the case only means something while the plan really does carry a manifest write"
+    );
+    apply::execute(&k.env, &report.plan).unwrap();
+
+    let after = fs::metadata(&k.manifest).unwrap();
+    assert_eq!(fs::read_to_string(&k.manifest).unwrap(), k.original);
+    // Identity, not content: atomic_write renames a fresh file into place,
+    // so a write that landed the same bytes still moves the inode and the
+    // mtime, and only these can tell the two apart.
+    assert_eq!(
+        (before.ino(), before.modified().unwrap()),
+        (after.ino(), after.modified().unwrap()),
+        "the file itself is untouched, not rewritten with the same bytes"
     );
 }

@@ -5,6 +5,7 @@ use specta::Type;
 
 use crate::model::HarnessId;
 
+mod edit;
 mod file;
 mod validate;
 pub use file::{
@@ -66,7 +67,7 @@ pub struct SourceDecl {
     /// repository's default branch.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rev: Option<String>,
-    #[serde(default = "default_true")]
+    #[serde(default = "default_true", skip_serializing_if = "file::is_true")]
     pub enabled: bool,
 }
 
@@ -77,9 +78,9 @@ fn default_true() -> bool {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, Type)]
 #[serde(rename_all = "kebab-case")]
 pub struct InstallDefaults {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub harnesses: Vec<HarnessId>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "file::is_default")]
     pub method: Method,
 }
 
@@ -99,7 +100,7 @@ pub struct ItemDecl {
     /// follows the source.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rev: Option<String>,
-    #[serde(default = "default_true")]
+    #[serde(default = "default_true", skip_serializing_if = "file::is_true")]
     pub enabled: bool,
 }
 
@@ -158,18 +159,27 @@ pub struct FrontmatterOverrides {
 ///
 /// A declaration written before the harness was part of it belongs to Claude
 /// Code — the only tool whose plugin switch kendex ever wrote — so that is
-/// what an older manifest reads back as, and the next write records it.
+/// what an older manifest reads back as. A write leaves the omission where
+/// it found it: Claude is the default the key skips at, and spelling it out
+/// would put a key in the file that says what the file already said.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "kebab-case")]
 pub struct PluginDecl {
-    #[serde(default = "default_true")]
+    #[serde(default = "default_true", skip_serializing_if = "file::is_true")]
     pub enabled: bool,
-    #[serde(default = "default_plugin_harness")]
+    #[serde(
+        default = "default_plugin_harness",
+        skip_serializing_if = "is_default_plugin_harness"
+    )]
     pub harness: HarnessId,
 }
 
 fn default_plugin_harness() -> HarnessId {
     HarnessId::Claude
+}
+
+fn is_default_plugin_harness(value: &HarnessId) -> bool {
+    *value == default_plugin_harness()
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
@@ -193,9 +203,12 @@ pub struct CustomHook {
     /// Harness allowlist; `None` = every declared harness.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harnesses: Option<Vec<String>>,
-    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    #[serde(default = "default_true", skip_serializing_if = "file::is_true")]
     pub enabled: bool,
-    #[serde(default = "default_hook_agents")]
+    #[serde(
+        default = "default_hook_agents",
+        skip_serializing_if = "is_default_hook_agents"
+    )]
     pub agents: HookAgents,
 }
 
@@ -211,8 +224,8 @@ fn default_hook_agents() -> HookAgents {
     HookAgents::One("all".to_owned())
 }
 
-fn is_true(value: &bool) -> bool {
-    *value
+fn is_default_hook_agents(value: &HookAgents) -> bool {
+    *value == default_hook_agents()
 }
 
 /// Where a fork came from. A fork keeps the item's installed name — the
@@ -240,7 +253,7 @@ pub struct Manifest {
     pub schema: u32,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub sources: BTreeMap<String, SourceDecl>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "file::is_default")]
     pub install: InstallDefaults,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub agents: BTreeMap<String, ItemDecl>,

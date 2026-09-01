@@ -1007,7 +1007,7 @@ export type CustomHook_Serialize = {
 	/**  Harness allowlist; `None` = every declared harness. */
 	harnesses?: string[] | null,
 	enabled?: boolean,
-	agents: HookAgents,
+	agents?: HookAgents,
 };
 
 /**
@@ -1590,7 +1590,14 @@ export type InstallChannel =
  */
 { kind: "unknown" };
 
-export type InstallDefaults = {
+export type InstallDefaults = InstallDefaults_Serialize | InstallDefaults_Deserialize;
+
+export type InstallDefaults_Deserialize = {
+	harnesses?: HarnessId[],
+	method?: Method,
+};
+
+export type InstallDefaults_Serialize = {
 	harnesses?: HarnessId[],
 	method?: Method,
 };
@@ -1695,7 +1702,7 @@ export type ItemDecl_Serialize = {
 	 *  follows the source.
 	 */
 	rev?: string | null,
-	enabled: boolean,
+	enabled?: boolean,
 };
 
 export type ItemKind = "agent" | "skill" | "hook" | "command" | "mcp-server" | "plugin" | "pi-extension";
@@ -1868,7 +1875,7 @@ export type ManifestRead_Serialize = {
 export type Manifest_Deserialize = {
 	schema: number,
 	sources?: { [key in string]: SourceDecl_Deserialize },
-	install?: InstallDefaults,
+	install?: InstallDefaults_Deserialize,
 	agents?: { [key in string]: ItemDecl_Deserialize },
 	skills?: { [key in string]: ItemDecl_Deserialize },
 	hooks?: { [key in string]: ItemDecl_Deserialize },
@@ -1878,7 +1885,7 @@ export type Manifest_Deserialize = {
 	 *  Plugins are observe + enable/disable only; the key is
 	 *  `name@marketplace`, provenance lives in the lock.
 	 */
-	plugins?: { [key in string]: PluginDecl },
+	plugins?: { [key in string]: PluginDecl_Deserialize },
 	/**
 	 *  Installed bundles: a curated set the catalog offers under one name.
 	 *  What the set holds is the catalog's to say and derives on every plan;
@@ -1918,7 +1925,7 @@ export type Manifest_Deserialize = {
 export type Manifest_Serialize = {
 	schema: number,
 	sources?: { [key in string]: SourceDecl_Serialize },
-	install: InstallDefaults,
+	install?: InstallDefaults_Serialize,
 	agents?: { [key in string]: ItemDecl_Serialize },
 	skills?: { [key in string]: ItemDecl_Serialize },
 	hooks?: { [key in string]: ItemDecl_Serialize },
@@ -1928,7 +1935,7 @@ export type Manifest_Serialize = {
 	 *  Plugins are observe + enable/disable only; the key is
 	 *  `name@marketplace`, provenance lives in the lock.
 	 */
-	plugins?: { [key in string]: PluginDecl },
+	plugins?: { [key in string]: PluginDecl_Serialize },
 	/**
 	 *  Installed bundles: a curated set the catalog offers under one name.
 	 *  What the set holds is the catalog's to say and derives on every plan;
@@ -2368,9 +2375,42 @@ export type PackagesUpdate_Serialize = {
  * 
  *  A declaration written before the harness was part of it belongs to Claude
  *  Code — the only tool whose plugin switch kendex ever wrote — so that is
- *  what an older manifest reads back as, and the next write records it.
+ *  what an older manifest reads back as. A write leaves the omission where
+ *  it found it: Claude is the default the key skips at, and spelling it out
+ *  would put a key in the file that says what the file already said.
  */
-export type PluginDecl = {
+export type PluginDecl = PluginDecl_Serialize | PluginDecl_Deserialize;
+
+/**
+ *  One declared plugin. The harness is part of the declaration because more
+ *  than one tool reads an `enabledPlugins` map of its own: without it, a
+ *  plugin meant for one tool would be switched on in every tool's settings,
+ *  which is a claim about software the user never installed there.
+ * 
+ *  A declaration written before the harness was part of it belongs to Claude
+ *  Code — the only tool whose plugin switch kendex ever wrote — so that is
+ *  what an older manifest reads back as. A write leaves the omission where
+ *  it found it: Claude is the default the key skips at, and spelling it out
+ *  would put a key in the file that says what the file already said.
+ */
+export type PluginDecl_Deserialize = {
+	enabled?: boolean,
+	harness?: HarnessId,
+};
+
+/**
+ *  One declared plugin. The harness is part of the declaration because more
+ *  than one tool reads an `enabledPlugins` map of its own: without it, a
+ *  plugin meant for one tool would be switched on in every tool's settings,
+ *  which is a claim about software the user never installed there.
+ * 
+ *  A declaration written before the harness was part of it belongs to Claude
+ *  Code — the only tool whose plugin switch kendex ever wrote — so that is
+ *  what an older manifest reads back as. A write leaves the omission where
+ *  it found it: Claude is the default the key skips at, and spelling it out
+ *  would put a key in the file that says what the file already said.
+ */
+export type PluginDecl_Serialize = {
 	enabled?: boolean,
 	harness?: HarnessId,
 };
@@ -2689,7 +2729,7 @@ export type SourceDecl_Serialize = {
 	 *  repository's default branch.
 	 */
 	rev?: string | null,
-	enabled: boolean,
+	enabled?: boolean,
 };
 
 /**  Everything the Sources page shows for one declared source in one scope. */
