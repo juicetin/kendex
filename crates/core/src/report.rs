@@ -31,6 +31,13 @@ pub struct Route {
     /// The kind the report is about: the one the caller named, or the one
     /// the matching lock entries agree on when the caller named none.
     pub kind: Option<ItemKind>,
+    /// `<repo>@<commit7>` off the first matching lock entry, so a triager
+    /// can date a report against the fix that already landed. `None` where
+    /// nothing recorded a commit.
+    pub source: Option<String>,
+    /// The first seven characters of what the apply wrote, off that same
+    /// entry, where it recorded one.
+    pub rendered: Option<String>,
 }
 
 /// The routing label for a kendex-owned asset, by what it is.
@@ -61,13 +68,31 @@ pub fn route(lock: &Lock, name: &str, kind: Option<ItemKind>, upstream: &str) ->
             .iter()
             .all(|e| repo_identity(&e.source_repo) == wanted);
     let kind = kind.or_else(|| agreed_kind(&matching));
+    let recorded = matching.first();
     Route {
         kendex_owned: owned,
         repo: owned.then(|| filing_target(upstream)),
         label: (owned && wanted == repo_identity(DEFAULT_UPSTREAM))
             .then(|| derive_label(name, kind).to_owned()),
         kind,
+        source: recorded.and_then(|entry| {
+            let commit = entry.source_commit.as_deref()?;
+            Some(format!(
+                "{}@{}",
+                filing_target(&entry.source_repo),
+                short(commit)
+            ))
+        }),
+        rendered: recorded
+            .and_then(|entry| entry.rendered_hash.as_deref())
+            .map(short),
     }
+}
+
+/// A hash as the marker carries it: seven characters, cut on a character
+/// boundary because a lock is a file anyone can edit.
+fn short(hash: &str) -> String {
+    hash.chars().take(7).collect()
 }
 
 /// The upstream as something to file against: a GitHub reference folded to
