@@ -954,7 +954,7 @@ cache_get_initiative() {
 # =============================================================================
 
 cache_list_cycles() {
-    local cycle_type="" limit=50
+    local cycle_type="" team="" limit=50
     FORMAT="${DEFAULT_FORMAT}"
 
     while [[ $# -gt 0 ]]; do
@@ -963,9 +963,14 @@ cache_list_cycles() {
             cycle_type="$2"
             shift 2
             ;;
-        # sync scopes cycles to a team only when one is configured; with none
-        # configured the cache holds every team's cycles.
-        --team) shift 2 ;; # consume but ignore for cache
+        --team)
+            team="$2"
+            shift 2
+            ;;
+        --team=*)
+            team="${1#--team=}"
+            shift
+            ;;
         --limit)
             limit="$2"
             shift 2
@@ -984,6 +989,13 @@ cache_list_cycles() {
 
     local cycles
     cycles=$(cache_jq_file "$CACHE_DIR/cycles.json" "[]" '.') || return 1
+
+    # Team first. sync scopes cycles to a team only when one is configured, so
+    # with none configured the cache holds every team's, and the type selection
+    # below works off whatever set it is handed.
+    if [[ -n "$team" ]]; then
+        cycles=$(echo "$cycles" | jq --arg t "$team" '[.[] | select(.team.name == $t)]')
+    fi
 
     # Apply type filter (date-based: "current" = most recent started + incomplete)
     local today_iso
