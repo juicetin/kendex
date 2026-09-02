@@ -158,6 +158,12 @@ fn write_customize(
     // permission or an encoding, and offering it would hide what did.
     let (current, now) = manifest::read_for_mutation(&path).map_err(|e| e.to_string())?;
     let mut options = PlanOptions::default();
+    // The whole-file copies this save holds: the scope manifest, and the
+    // settings file where there is one. A rollback on either can reach the
+    // page as the reload the base checks give — `refused_write` decides,
+    // and wants an empty account with it. Every other op in the plan binds
+    // a `Pre` too, and a rollback there is a failure to say out loud
+    // rather than a copy to reload.
     let mut targets = Vec::new();
     // The manifest half. Without one, the scope is reconciled to the file
     // as it sits and no manifest write is added.
@@ -167,7 +173,7 @@ fn write_customize(
             if now != claimed {
                 // Before anything ran: the copy is refused on the base
                 // check, so there is no account to carry.
-                return Err(WriteRefused::Stale { undone: Vec::new() });
+                return Err(WriteRefused::Stale);
             }
             let mut manifest = match current.is_some() {
                 true => draft,
@@ -236,17 +242,12 @@ fn write_customize(
     // The bound preconditions refuse a file that moved between the checks
     // above and the write itself, and that refusal is the same answer the
     // checks give — so it reaches the editor as the same choice.
+    //
     // Through the one executor: a manifest saved with a package deleted out
     // of it takes that package away, and its declared uninstaller has to run
-    // while its scripts are still on disk.
-    //
-    // A stale precondition still reads as the same refusal, and it takes
-    // the account with it. The uninstaller ran before the plan wrote
-    // anything, so this is a refusal with a disarmed repository behind it —
-    // the one shape where "nothing happened, reload" is a lie. Which is
-    // also why nothing here reasons about whether this route can remove:
-    // it can, through a refused rendering, whatever the planning options
-    // say about orphans.
+    // while its scripts are still on disk. Nothing here reasons about
+    // whether this route can remove: it can, through a refused rendering,
+    // whatever the planning options say about orphans.
     let undone = crate::repo_effects::execute(env, &report)
         .map_err(|refused| refused_write(refused, &targets))?;
     Ok(AuditView {
@@ -257,19 +258,23 @@ fn write_customize(
 
 /// How a write the executor refused reaches the page.
 ///
-/// A precondition that moved is the reload choice the editor already
-/// draws, and it carries whatever the write had already done: the
-/// uninstaller of a leaving package runs before the plan writes anything,
-/// so a refusal landing after that point is a refusal with a disarmed
-/// repository behind it. A bare reload notice there says nothing happened,
-/// which is the one thing that is not true.
+/// The reload choice is for a refusal with nothing to report: one of the
+/// copies this save holds moved under it, and reading the file again is
+/// the whole of the way out. That is why the arm requires an empty
+/// account as well as a moved precondition — a plan speaks about the
+/// packages leaving before it writes, and "nothing happened, reload"
+/// would drop whatever it said, an uninstaller that has already run
+/// among the things it can say.
+///
+/// Everything else is a failure to say out loud, and `ExecuteError`'s own
+/// `Display` puts the account ahead of why the write stopped.
 ///
 /// Named rather than inlined so the mapping can be driven with a real
 /// stale error rather than inferred from the branch.
 pub(super) fn refused_write(refused: ExecuteError, targets: &[std::path::PathBuf]) -> WriteRefused {
     match refused {
-        ExecuteError::Apply { said, error } if stale_at(&error, targets) => {
-            WriteRefused::Stale { undone: said }
+        ExecuteError::Apply { said, error } if said.is_empty() && stale_at(&error, targets) => {
+            WriteRefused::Stale
         }
         other => WriteRefused::Failed {
             message: other.to_string(),

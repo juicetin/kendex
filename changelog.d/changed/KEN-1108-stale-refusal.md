@@ -1,0 +1,1 @@
+- A Customize save that refuses after a leaving package's uninstaller has already run now reports it as a failure naming what ran; the reload is offered where the refusal has nothing to report.

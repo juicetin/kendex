@@ -6,7 +6,6 @@ import {
   DELETE_LABEL,
   DELETE_PLACES_LABEL,
   REINSTALL_OWN,
-  REINSTALL_UNREAD,
   reinstallFrom,
 } from "@/lib/copy-projects";
 import { useAuditStore } from "@/stores/audit";
@@ -137,7 +136,7 @@ describe("the Delete dialog", () => {
 
     const said = await openDialog([VG]);
     expect(said).not.toContain(REINSTALL_OWN);
-    expect(said).not.toContain("install it again from");
+    expect(said).not.toContain(reinstallFrom(["acme"]));
   });
 });
 
@@ -158,50 +157,46 @@ describe("the read behind the note", () => {
     expect(said).not.toContain(REINSTALL_OWN);
   });
 
-  // Naming every marketplace is worth nothing over rows nobody could
-  // read, so the deletion is held rather than confirmed without its note.
-  it("holds Delete while the read has failed", async () => {
-    useProvenanceStore.setState({ rows: rowsFor([[VG, OWN]]), loaded: true });
+  // The generated wrapper rethrows a transport failure, which is the same
+  // failed read and must not come out as an unhandled rejection. The note
+  // is where to get the package again, not what the deletion does, so its
+  // absence leaves Delete live.
+  it("leaves Delete live when the read never answers", async () => {
+    vi.mocked(commands.libraryProvenance).mockRejectedValue(
+      new Error("the channel is gone"),
+    );
+
+    const said = await openDialog([VG]);
+    expect(said).not.toContain(reinstallFrom(["acme"]));
+    expect(deleteButton()?.disabled).toBe(false);
+  });
+
+  // A read that failed leaves the rows a previous one put in the store,
+  // and those may answer for a different installation. Naming a
+  // marketplace off them at the confirm step of a deletion sends the
+  // reader somewhere the package may no longer be installable from.
+  it("names nothing off rows this open's read did not land", async () => {
+    useProvenanceStore.setState({
+      rows: rowsFor([[VG, MARKET("acme")]]),
+      loaded: true,
+    });
     vi.mocked(commands.libraryProvenance).mockResolvedValue({
       status: "error",
       error: "the join did not read",
     });
 
     const said = await openDialog([VG]);
-    expect(said).toContain(REINSTALL_UNREAD);
-    expect(deleteButton()?.disabled).toBe(true);
+    expect(said).not.toContain(reinstallFrom(["acme"]));
+    expect(said).not.toContain(REINSTALL_OWN);
   });
 
-  // The generated wrapper rethrows a transport failure, which is the same
-  // failed read and must not come out as an unhandled rejection.
-  it("holds Delete when the read never answers", async () => {
+  it("names nothing off rows a rejected read left standing", async () => {
+    useProvenanceStore.setState({ rows: rowsFor([[VG, OWN]]), loaded: true });
     vi.mocked(commands.libraryProvenance).mockRejectedValue(
       new Error("the channel is gone"),
     );
 
     const said = await openDialog([VG]);
-    expect(said).toContain(REINSTALL_UNREAD);
-    expect(deleteButton()?.disabled).toBe(true);
-  });
-
-  it("offers Delete once the read lands", async () => {
-    from([VG, MARKET("acme")]);
-
-    await openDialog([VG]);
-    expect(deleteButton()?.disabled).toBe(false);
-  });
-
-  // Cancel is not held with it: a dialog whose premise could not be read
-  // still has to be closable.
-  it("leaves Cancel live while Delete is held", async () => {
-    vi.mocked(commands.libraryProvenance).mockRejectedValue(
-      new Error("the channel is gone"),
-    );
-
-    await openDialog([VG]);
-    const cancel = Array.from(document.querySelectorAll("button")).find(
-      (one) => one.textContent === "Cancel",
-    );
-    expect(cancel?.disabled).toBe(false);
+    expect(said).not.toContain(REINSTALL_OWN);
   });
 });

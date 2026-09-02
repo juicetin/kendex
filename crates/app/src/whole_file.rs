@@ -19,23 +19,17 @@ use specta::Type;
 #[derive(Debug, Serialize, Type)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum WriteRefused {
-    /// The file is no longer the one this copy was read from. Something
-    /// else wrote it — a fork, a hold, an install, another window — and
-    /// writing this copy would put that back.
-    ///
-    /// Carries whatever the write already did to the repository before it
-    /// refused. A plan runs a leaving package's uninstaller before it
-    /// touches the files, so a refusal landing after that point is a
-    /// refusal with a disarmed repository behind it — and a reload notice
-    /// on its own would send somebody away believing nothing happened.
-    /// Empty on the base check, which refuses before anything runs.
-    Stale {
-        #[serde(skip_serializing_if = "Vec::is_empty")]
-        undone: Vec<String>,
-    },
-    Failed {
-        message: String,
-    },
+    /// The file is no longer the one this copy was read from, and the
+    /// refusal carries no account with it. Something else wrote the file
+    /// — a fork, a hold, an install, another window — and writing this
+    /// copy would put that back, so reading the file again is the whole
+    /// of the way out.
+    Stale,
+    /// Anything else that stopped the write, in the words the person
+    /// gets — a stale file among them, where the write had something to
+    /// say about the packages leaving before it refused and a bare reload
+    /// would drop it.
+    Failed { message: String },
 }
 
 impl From<String> for WriteRefused {
@@ -53,18 +47,18 @@ impl From<String> for WriteRefused {
 /// went wrong.
 pub fn refusal(error: CoreError) -> WriteRefused {
     match error {
-        CoreError::PlanStale { .. } => WriteRefused::Stale { undone: Vec::new() },
+        CoreError::PlanStale { .. } => WriteRefused::Stale,
         other => WriteRefused::Failed {
             message: other.to_string(),
         },
     }
 }
 
-/// Whether an apply refused because this file moved under it. The write is
-/// bound to the file the copy on screen came from, so a rollback with that
-/// precondition underneath is the same answer the base check gives a
-/// moment earlier — and it reaches the person the same way, as a reload to
-/// take, rather than as an apply error they can do nothing with.
+/// Whether an apply refused because one of these files moved under it. The
+/// write is bound to the file the copy on screen came from, so a rollback
+/// with that precondition underneath is the same answer the base check
+/// gives a moment earlier — and it reaches the person the same way, as a
+/// reload to take, rather than as an apply error they can do nothing with.
 pub fn stale_at(error: &CoreError, targets: &[PathBuf]) -> bool {
     match error {
         CoreError::PlanStale { path: moved } => targets.contains(moved),
@@ -82,7 +76,7 @@ mod tests {
         let path = PathBuf::from("/w/app/kendex.toml");
         assert!(matches!(
             refusal(CoreError::PlanStale { path }),
-            WriteRefused::Stale { .. }
+            WriteRefused::Stale
         ));
         assert!(matches!(
             refusal(CoreError::LegacyManifest {
@@ -112,17 +106,16 @@ mod tests {
         ));
     }
 
-    /// A refusal can name only the path core lists for the scope — and
-    /// nothing else.
+    /// A refusal can name only a path this write bound — and nothing else.
     #[test]
-    fn a_refusal_matches_the_name_the_scope_manifest_answers_to() {
+    fn a_refusal_matches_only_a_file_this_write_bound() {
         let targets = [PathBuf::from("/w/app/kendex.toml")];
-        for name in &targets {
-            assert!(stale_at(
-                &CoreError::PlanStale { path: name.clone() },
-                &targets
-            ));
-        }
+        assert!(stale_at(
+            &CoreError::PlanStale {
+                path: targets[0].clone()
+            },
+            &targets
+        ));
         assert!(!stale_at(
             &CoreError::PlanStale {
                 path: "/w/app/.claude/settings.json".into()

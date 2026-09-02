@@ -10,7 +10,7 @@ import { type Draft, emptyDraft } from "@/lib/editor-draft";
 
 import { everyPlace, sameScope } from "@/lib/scope";
 import { settingsDraft, withEdit } from "@/lib/settings-rows";
-import { saying, sayUndone } from "@/lib/undone";
+import { saying } from "@/lib/undone";
 import { useAuditStore } from "./audit";
 import {
   mergedPlaces,
@@ -147,14 +147,11 @@ export const useEditorStore = create<EditorState>((set, get) => {
       // Stale is a refusal, not a failure: the file changed outside this
       // draft, and writing the draft would put the older file back. The
       // draft cannot be merged, so the page offers the reload as a choice
-      // rather than taking the person's edits on its own.
+      // rather than taking the person's edits on its own. A refusal with
+      // something to say about the packages leaving answers `failed`
+      // instead, so nothing it said is dropped for the reload.
       if (response.error.kind === "stale") {
         set({ stale: true, error: null });
-        // A refusal is not always "nothing happened". The plan runs a
-        // leaving package's uninstaller before it writes, so a save that
-        // refused after that point left the repository disarmed — and the
-        // reload notice on its own would say the opposite.
-        sayUndone(response.error.undone);
       } else {
         set({ error: response.error.message, stale: false });
       }
@@ -164,7 +161,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
     // Saving a manifest that takes a package away owes the same account a
     // removal does. Wired here rather than by the write the update commands
     // share: the editor answers a refusal shape of its own and never goes
-    // through it — which is also why the stale branch above says it too.
+    // through it.
     saying(response);
     await load();
     // Forced: a save rewrote the manifest this scope renders from, so an
