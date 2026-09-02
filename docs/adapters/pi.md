@@ -42,30 +42,49 @@ Pi executes nothing per hook itself: the `pi-hooks` carrier extension runs
 them, and hook content rides in the registry kendex renders beside it —
 `kendex/hooks/<name>.sh` plus `kendex/hooks.json`, keyed by Pi's own
 listener names (`pi_listener`: tool call, tool result, turn end, session
-start). An event outside that map installs nothing on Pi, said as a note. On
-a bash tool call the carrier spawns the rendered `block-bare-cd`,
-`block-repo-copy` and `pre-commit-check` scripts in that order with the
-payload Claude Code sends a `PreToolUse` hook, and stops at the first
-nonzero status. Exit 2 is the refusal, and its stderr is what the agent
-reads. Every other nonzero status blocks as well, under a reason the carrier
-writes itself: a script exiting 1, a spawn that failed, and a run past the
-hook budget (`hookTimeoutMs`, default 60s) are all a guard that reached no
-verdict, and a guard that did not run does not stand aside. Only exit 0
-reaches the next script, and stderr written beside it is an advisory for the
-person rather than the agent. So the three run the same bytes under Claude,
-Codex and Pi. It resolves the project with `discover.rs::project_root_from`,
+start). An event outside that map installs nothing on Pi, said as a note.
+
+The registry is the carrier's list, and `tool_call` is the only key it
+reads: a hook kendex maps onto `tool_result`, `turn_end` or `session_start`
+is registered and labelled enforced and does not fire. On a `tool_call` it
+runs every registration whose `matcher` covers the tool, in the order the
+file names them — so a catalog guard and a `[[custom-hooks]]` command of the
+person's own both fire, and the carrier knows no hook's name in advance. A
+custom hook has no file at all (`HookBody::Command` is registered verbatim),
+so the registry is the only place it exists; a carrier spelling out script
+names reported it enforced and ran nothing (KEN-941). Absent, empty and `*`
+matchers cover every tool; anything else is a whole-string regex over the
+tool said in Claude Code's words (`vocab.ts`, held by a test to
+`render::vocab::claude_tool_name`).
+
+Exit 2 is the refusal, and its stderr is what the agent reads. Every other
+nonzero status blocks as well, under a reason the carrier writes itself: a
+hook exiting 1, a spawn that failed, a run past its budget, a registry that
+exists and could not be read, and a rendered hook the registry names whose
+script no scope holds are all a guard that reached no verdict, and a guard
+that did not run does not stand aside. Only an absent registry allows,
+because that is kendex having installed nothing here. Only exit 0 reaches
+the next registration, and stderr written beside it is an advisory for the
+person rather than the agent.
+
+A hook kendex rendered is spawned at `<root>/kendex/hooks/<name>.sh` under
+the root whose registry named it, not through the command that names it, so
+the rendered guards run the same bytes under Claude, Codex and Pi. Any other
+command is the person's own and is run through a shell as written. The
+carrier resolves the project with `discover.rs::project_root_from`,
 not this adapter's two-marker row above: the lock file wherever it stands, home
 included, else the nearest ancestor carrying one of the seven `MARKER_DIRS`,
 and home itself is never a project otherwise. That is what kendex asks before
 it renders, so the carrier reads from where the renderer wrote, and `.git/` is
-in neither list so a vendored checkout does not stop the walk. A project script
-runs only where Pi reports the workspace trusted, since spawning it executes
-what the project ships; Pi saves that decision for the folder or any parent, so
-a session in a subdirectory gets the same guards as one at the root. Untrusted
-or outside any project, the project scope contributes nothing and the global
-root still answers, because it holds the person's own files.
-A script the carrier finds at neither scope is a hook this project has not
-installed, and nothing runs.
+in neither list so a vendored checkout does not stop the walk.
+
+The project's registry is read only where Pi reports the workspace trusted,
+since running what it names executes what the project ships; Pi saves that
+decision for the folder or any parent, so a session in a subdirectory gets
+the same hooks as one at the root. Untrusted or outside any project, the
+project scope contributes nothing and the global root still answers, because
+it holds the person's own files. A registry naming nothing for a call is a
+hook this project has not installed, and nothing runs.
 
 **The reserved names.** Pi warns on two directory names directly beside a
 root it loads and halts an interactive start until a keypress: `hooks/` on
@@ -83,10 +102,9 @@ beside the root is read by nothing, written by nothing, scanned by
 nothing, listed by nothing and removed by nothing, `kendex remove`
 included. A refresh renders the hook under `kendex/` and stops there, and
 what is beside the root stays exactly where it is. It does not go on
-running: `renderedHook` looks for `<root>/kendex/hooks/<name>.sh` and
-nowhere else, so a script left only in the older layout is not found, and
-a name neither root holds is a hook this project has not installed — the
-call is allowed. An install whose scripts sit only beside the root is
+running: the carrier reads `<root>/kendex/hooks.json` and nowhere else, so
+an installation left only in the older layout is named by no registry it
+reads — the call is allowed. An install whose scripts sit only beside the root is
 therefore unenforced until the item is installed fresh under `kendex/`.
 What becomes of the leftovers is the person's, by hand: `<root>/hooks.json`
 and the `<root>/hooks/` directory both. Nothing in this build reads there,

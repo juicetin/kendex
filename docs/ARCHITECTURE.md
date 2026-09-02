@@ -473,15 +473,19 @@ lives in one capability table read by core and UI.
   package hosts native listeners; hook content rides in the registry
   kendex renders beside them (`kendex/hooks/<name>.sh` plus
   `kendex/hooks.json`, keyed by Pi's listener names — tool call, tool
-  result, turn end, session start). Pi reserves `hooks/` beside every root
+  result, turn end, session start). That registry is the carrier's list:
+  it dispatches what the `tool_call` key names for the tool being called, so
+  a `[[custom-hooks]]` command — which has no file and exists nowhere else —
+  fires as a catalog guard does. The other three listener keys are rendered
+  and not dispatched, so only a `PreToolUse` hook runs. Pi reserves `hooks/` beside every root
   it loads, so storage sits under `kendex/` and nothing reads or writes a
   registry beside the root — [docs/adapters/pi.md](adapters/pi.md) carries
   the rules in full. The capability row says what the mechanism supports;
   labels read carrier reality (`pi_ext::carrier`), and Pi loads project and
   global settings both, so a project-installed hook with only a global carrier
-  is still enforced. The session-start drift report rides the same mechanism:
-  same script, same kill-switch, fire-and-forget into session start; a
-  reloaded or resumed session never repeats it.
+  is still enforced. The session-start drift report is not that mechanism:
+  the carrier hosts a native listener of its own running `kendex check
+  --quiet`, and no registry is read for it.
 - **A settings template applies once, when its skill arrives.**
   A skill's `# required` keys are written into `kendex.settings.toml` when it
   arrives, write-if-absent, and arrival is the consumer's `kendex.toml` gaining
