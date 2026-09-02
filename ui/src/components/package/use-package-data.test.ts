@@ -2,7 +2,8 @@ import { toast } from "sonner";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { commands, type VersionRow } from "@/bindings";
 import { VERSION_ERROR_TITLE } from "@/lib/copy";
-import { diffHarness, packageVersionActions } from "./use-package-data";
+import { packageVersionActions } from "./package-version-actions";
+import { diffHarness } from "./use-package-data";
 
 describe("diffHarness", () => {
   it("reads the rendering the comparison names, else the primary one", () => {

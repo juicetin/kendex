@@ -6,10 +6,10 @@ import { PackageActions } from "@/components/package/package-actions";
 import { PackageBody } from "@/components/package/package-body";
 import { PackageHeader } from "@/components/package/package-header";
 import { PackageTabs } from "@/components/package/package-tabs";
+import { packageVersionActions } from "@/components/package/package-version-actions";
 import {
   diffHarness,
   type PackageView,
-  packageVersionActions,
   useManifestBusy,
   usePackageData,
   usePackageDiff,
@@ -18,11 +18,17 @@ import { groupItems, groupScopes, installationAt } from "@/lib/derive";
 import { packageDisplayName } from "@/lib/labels";
 import { usePackageMark } from "@/lib/package-mark";
 import { vendorAt } from "@/lib/package-places";
-import { packageRequiredBy, packageUpdateNote } from "@/lib/updates-read-state";
+import { packageReadNote } from "@/lib/package-read-state";
 import {
-  canUpdatePackage,
+  packageRequiredBy,
+  packageUpdateNote,
+  updatesReadNote,
+} from "@/lib/updates-read-state";
+import {
+  hasNewer,
   installedRow,
   latestRow,
+  updateOffer,
   versionRowLabel,
 } from "@/lib/versions";
 import { useAuditStore } from "@/stores/audit";
@@ -79,7 +85,7 @@ export function PackagePage() {
     ...(ref ? [ref.scope] : []),
     ...(group ? groupScopes(group) : []),
   ]);
-  const { meta, files, versions, load: reload } = usePackageData(ref);
+  const { meta, files, versions, reads, load: reload } = usePackageData(ref);
   const diff = usePackageDiff(
     ref,
     view,
@@ -89,6 +95,10 @@ export function PackagePage() {
   // string, so this selector answers the same value on every render that
   // changes nothing.
   const withheld = useUpdatesStore((s) => packageUpdateNote(s, ref));
+  // How the update read itself is standing, which is about the machine rather
+  // than about this package, and silent where it has a row for this place. A
+  // string, for the same reason.
+  const standing = useUpdatesStore((s) => updatesReadNote(s, ref));
   // Why this package is installed when nobody asked for it: the package
   // that requires it, named. A string, so this selector answers the same
   // value on every render that changes nothing.
@@ -118,21 +128,17 @@ export function PackagePage() {
   const displayName = packageDisplayName(ref);
   const installed = installedRow(versions);
   const latest = latestRow(versions);
-  // The button and the note beside it come from the one string above, so
-  // wherever there is a newer version to move to, a reason the update read
-  // carries — its own state, or the row's — is always said where the
-  // button would have been. Update also waits for meta (held vs
-  // following), and takes its newness from this page's own version rows.
-  const canUpdate = canUpdatePackage({
+  // The button, the note where it would have been, and whether reading again
+  // can lift that note: one answer, ranked in `versions.ts`, so the three can
+  // never disagree.
+  const offer = updateOffer({
     latest,
     installed,
     metaLoaded: meta != null,
     withheld,
+    readNote: packageReadNote(reads),
+    standing,
   });
-  // A newer version to move to and an installed one to move from: what
-  // the read-only diff needs, and what the note below has to explain.
-  const newer = latest != null && !latest.installed;
-  const updateWithheld = newer ? withheld : null;
 
   // Every scope this package sits in, one at a time — each apply takes
   // that scope's writer lock — and stopping at the first that fails.
@@ -200,9 +206,11 @@ export function PackagePage() {
             kind={group.kind}
             name={group.name}
             primaryPath={primary.path}
-            updateAvailable={canUpdate}
-            previewAvailable={newer && installed != null}
-            withheldNote={updateWithheld}
+            updateAvailable={offer.can}
+            previewAvailable={hasNewer(latest) && installed != null}
+            withheldNote={offer.note}
+            onRetryRead={offer.retry ? reload : undefined}
+            retryRunning={reads.reading}
             busy={mutating}
             onUpdate={() => latest && updateToLatest(latest)}
             onPreview={() => latest && compare(latest)}

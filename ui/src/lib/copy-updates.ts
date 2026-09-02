@@ -1,6 +1,8 @@
-// Updates page copy: the table, the edited-copy row, and the toasts that
-// say what a bulk update did — kept apart from the rest so the wording is
-// reviewed in one place.
+// Update copy: the Updates page's table, the edited-copy row, the toasts
+// that say what a bulk update did, and every note the package page puts
+// where its own Update would have been — whichever of its two reads the
+// reason comes from. Kept apart from the rest so the wording is reviewed in
+// one place, and one slot's strings are read side by side.
 import { relativeTime } from "@/lib/relative-time";
 
 export const NEVER_CHECKED = "Not checked for updates yet";
@@ -51,6 +53,14 @@ export const heldByParentNote = (parent: string): string =>
 // no reason on it.
 export const NO_UPDATE_STANDING_NOTE =
   "The update check has not spoken for this package here";
+// The package page's own two reads: the record that says held or
+// following, and the timeline Update moves along. Neither is the update
+// check, so this sends nobody to press Check — it carries what the read
+// itself came back with, which is the whole difference between a package
+// with nothing to update and one the page could not read.
+export const PACKAGE_READ_FAILED = "Couldn't read this package here";
+export const packageReadFailedNote = (reason: string): string =>
+  `${PACKAGE_READ_FAILED} — ${reason}`;
 
 // An edited copy is the user's work: no update touches it. The newest
 // version can only land beside it, under the name it always had, with the

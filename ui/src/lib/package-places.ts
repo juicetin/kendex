@@ -80,6 +80,50 @@ const rowFor = (
       one.kind === kind && one.name === name && sameScope(one.scope, scope),
   ) ?? null;
 
+/** One place's identity for this package, as a string to key by. Scoped as
+ *  well as named: another package in the same project, or this one in another
+ *  project, is a different place. */
+export const placeKey = (kind: ItemKind, name: string, scope: Scope): string =>
+  `${kind}|${name}|${scopeKey(scope)}`;
+
+/** These counts with one more write recorded against every place in `rows`.
+ *
+ *  Handed every place a run ATTEMPTED, not only those whose command answered
+ *  ok. An error is not proof that nothing changed: `insert_manifest_save`
+ *  leads a plan with the manifest write, so an apply that fails after it
+ *  leaves the new hold on disk with nothing else moved, and a refusal ran a
+ *  plan led the same way. A refresh that was not needed costs one re-read of
+ *  a page already on screen; one that was needed and skipped is the stale
+ *  Overview this whole record exists to remove — so this deliberately
+ *  over-covers, and is not to be tightened back to what a plan moved. */
+export const countingWrites = (
+  writes: Record<string, number>,
+  rows: { kind: ItemKind; name: string; scope: Scope }[],
+): Record<string, number> => {
+  const counted = { ...writes };
+  for (const row of rows) {
+    const key = placeKey(row.kind, row.name, row.scope);
+    counted[key] = (counted[key] ?? 0) + 1;
+  }
+  return counted;
+};
+
+/** How many writes have landed in each place, as one string to watch — the
+ *  same shape as [`installedCommits`] and read beside it.
+ *
+ *  A write that commits and then cannot be read back leaves the rows on the
+ *  commit they had: nothing confirmed a new one, which is the truth about the
+ *  rows and not about the files under them. So a landed write moves this
+ *  whether or not the read behind it moved the commit, and a page about the
+ *  place reads its package again either way. */
+export const landedWrites = (
+  writes: Record<string, number>,
+  kind: ItemKind,
+  name: string,
+  scopes: Scope[],
+): string =>
+  scopes.map((scope) => writes[placeKey(kind, name, scope)] ?? 0).join("|");
+
 /** The commit each place has installed, as one string to watch. Core
  *  stamps a new install date whenever the source hash moves, so a landed
  *  update changes this while an unrelated store touch leaves it alone —

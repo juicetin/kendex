@@ -401,7 +401,31 @@ export const commands = {
 	content: string,
 	truncated: boolean,
 } | null, string>(__TAURI_INVOKE("package_readme", { scope, kind, name })),
-	packageMeta: (scope: Scope, kind: ItemKind, name: string) => typedError<PackageMeta_Serialize, string>(__TAURI_INVOKE("package_meta", { scope, kind, name })),
+	/**
+	 *  `None` where nothing is declared under this name — a derived bundle member
+	 *  or dependency, an unmanaged or vendor copy. That is this command's whole
+	 *  half of [`no_managed_package`]: `detail::package_meta` reads a source's
+	 *  repository off the manifest rather than binding to one, so the other
+	 *  variant cannot escape it; that half is [`package_versions`]'s, which does
+	 *  bind. The CLI's own `show` keeps core's refusal either way: it was asked
+	 *  about one package and has nothing else to draw.
+	 */
+	packageMeta: (scope: Scope, kind: ItemKind, name: string) => typedError<{
+	source: string,
+	/**  `owner/repo`, when the source is remote. */
+	repo: string | null,
+	/**  A safe https link to the repository, when one can be formed. */
+	repoUrl: string | null,
+	/**  The declaration's hold, when it has one. */
+	rev: string | null,
+	/**  The content revision installed now. */
+	current: VersionRef | null,
+	installedAt: string | null,
+	harnesses: HarnessId[],
+	enabled: boolean,
+	fork: ForkProvenance_Serialize | null,
+	catalog: CatalogGroupMeta | null,
+} | null, string>(__TAURI_INVOKE("package_meta", { scope, kind, name })),
 	/**
 	 *  Every scope's update standing in one query — the sidebar badge, the
 	 *  Updates page, and the Library's fork/edited flags all read this. Rows

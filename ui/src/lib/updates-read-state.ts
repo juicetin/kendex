@@ -65,40 +65,88 @@ export const rowUnsettled = (
   row: { scope: Scope },
 ): boolean => unsettled(state) || settlingIn(state, row);
 
-/** Why the package page has no Update for the place it names, or null when
- *  nothing withholds one.
- *
- *  The kind's refusal outranks the read, the way [`updateWithheld`] ranks
- *  it for the Updates table: core derives it from the kind alone, so it is
- *  why this place can never be updated one package at a time, where every
- *  other reason is why not right now. Told to check again instead, a
- *  person offline would retry something no successful check can win.
- *
- *  Then how the read went, which the row cannot say: a first read still on
- *  its way has not spoken for this place, and one that failed left the
- *  rows here last-known. A read merely running does not withhold a row
- *  that exists — the row is the last answer and still the truth about it.
- *
- *  Only a settled read may say the check never covered this place, which
- *  is [`unsettled`] and not the read status alone: a landed read with a
- *  focus reload or a Check in flight is a read about to speak, and calling
- *  its silence a fact is the blur `read-state.ts` forbids. */
-export const packageUpdateNote = (
-  state: PageState & { rows: UpdateRow[] },
-  place: { kind: ItemKind; name: string; scope: Scope } | null,
-): string | null => {
-  const row = state.rows.find(
+/** The package and place the page names. */
+type Place = { kind: ItemKind; name: string; scope: Scope };
+
+/** This package's row in the place the page names, or undefined where the
+ *  update read never covered it. One lookup behind both what that read says
+ *  about the package and whether it speaks for the place at all. */
+const rowFor = (
+  state: { rows: UpdateRow[] },
+  place: Place | null,
+): UpdateRow | undefined =>
+  state.rows.find(
     (one) =>
       place != null &&
       one.kind === place.kind &&
       one.name === place.name &&
       sameScope(one.scope, place.scope),
   );
+
+/** Whether a landed read left a row for this place. Private because it is not
+ *  a second answer for a caller to weigh: [`updatesReadNote`] is where it
+ *  decides anything. */
+const covers = (
+  state: PageState & { rows: UpdateRow[] },
+  place: Place | null,
+): boolean =>
+  state.read.status === "landed" && rowFor(state, place) !== undefined;
+
+/** Why the update read withholds an Update for the place the package page
+ *  names, as a fact about the package — or null where it has no such fact.
+ *
+ *  The kind's refusal outranks everything here, the way [`updateWithheld`]
+ *  ranks it for the Updates table: core derives it from the kind alone, so it
+ *  is why this place can never be updated one package at a time, where every
+ *  other reason is why not right now. Told to check again instead, a person
+ *  offline would retry something no successful check can win.
+ *
+ *  A read that has not landed says nothing here. A first read still on its
+ *  way has not spoken for this place, and one that failed left the rows here
+ *  last-known — neither is a fact about the package, and what the read itself
+ *  is doing is [`updatesReadNote`]'s to say. A read merely running does not
+ *  withhold a row that exists: the row is the last answer and still the truth
+ *  about it.
+ *
+ *  Only a settled read may say the check never covered this place, which is
+ *  [`unsettled`] and not the read status alone: a landed read with a focus
+ *  reload or a Check in flight is a read about to speak, and calling its
+ *  silence a fact is the blur `read-state.ts` forbids. */
+export const packageUpdateNote = (
+  state: PageState & { rows: UpdateRow[] },
+  place: Place | null,
+): string | null => {
+  const row = rowFor(state, place);
   if (row?.noPerPackageUpdate != null) return row.noPerPackageUpdate;
+  if (state.read.status !== "landed") return null;
+  if (row) return updateWithheld(row);
+  return unsettled(state) ? null : NO_UPDATE_STANDING_NOTE;
+};
+
+/** How the update read itself is standing, when that is all there is to say
+ *  about this place.
+ *
+ *  Kept apart from [`packageUpdateNote`] because it answers a different
+ *  question: this is the standing behind every package on the machine, not a
+ *  fact about the one on screen. `versions.ts` [`updateOffer`] ranks it last
+ *  for that reason — a check that has not finished must not stand in for a
+ *  read of this package that actually failed.
+ *
+ *  Silent where a landed read already left a row here. A check merely running
+ *  does not withhold a row that exists: the row is the last answer and still
+ *  the truth about it, and the page keeps its version-changing controls on
+ *  screen through a check, disabled by `use-package-data.ts`
+ *  [`useVersionsBusy`]. A read that has not landed is the other case — its
+ *  rows here are last-known and nothing has confirmed them — so this speaks
+ *  for the place instead. */
+export const updatesReadNote = (
+  state: PageState & { rows: UpdateRow[] },
+  place: Place | null,
+): string | null => {
+  if (covers(state, place)) return null;
   if (state.read.status === "pending") return UPDATES_CHECKING;
   if (state.read.status === "failed") return UPDATE_NEEDS_CHECK_HERE;
-  if (row) return updateWithheld(row);
-  return unsettled(state) ? UPDATES_CHECKING : NO_UPDATE_STANDING_NOTE;
+  return unsettled(state) ? UPDATES_CHECKING : null;
 };
 
 /** Every installed package that requires the one this place names, when
