@@ -13,6 +13,7 @@
 // everything per call.
 
 import { createHash } from "node:crypto";
+import { homedir } from "node:os";
 import {
 	mkdirSync,
 	renameSync,
@@ -121,8 +122,21 @@ export interface PersistenceDeps {
 	maxEntryBytes?: number;
 }
 
+/** Root-anchored as `crates/core/src/harness/pi.rs::pi_root_is_absolute_for`
+ * means it, which `isAbsolute` is not: it calls a driveless `\root` absolute
+ * where the renderer does not, putting the two on different roots. Hoisted, so
+ * a circular import cannot reach it inside a temporal dead zone. */
+function rootAnchored(path: string, windows: boolean): boolean { return windows ? /^(?:[A-Za-z]:[\\/]|[\\/]{2}[^\\/]+[\\/][^\\/]+)/.test(path) : path.startsWith("/"); }
+
+function expandHome(input: string): string {
+	if (input === "~") return homedir();
+	if (input.startsWith("~/")) return join(homedir(), input.slice(2));
+	return input;
+}
+
 export function piUserDir(): string {
-	return resolve(process.env.PI_CODING_AGENT_DIR?.trim() || `${process.env.HOME ?? ""}/.pi/agent`);
+	const override = expandHome(process.env.PI_CODING_AGENT_DIR?.trim() || "");
+	return resolve(rootAnchored(override, process.platform === "win32") ? override : join(homedir(), ".pi", "agent"));
 }
 
 export function safeFileName(value: string): string {

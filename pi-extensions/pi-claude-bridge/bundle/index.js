@@ -27053,8 +27053,12 @@ function expandHome(input) {
   if (input.startsWith("~/")) return join3(homedir(), input.slice(2));
   return input;
 }
+function rootAnchored(path, windows) {
+  return windows ? /^(?:[A-Za-z]:[\\/]|[\\/]{2}[^\\/]+[\\/][^\\/]+)/.test(path) : path.startsWith("/");
+}
 function piUserDir() {
-  return resolve2(expandHome(process.env.PI_CODING_AGENT_DIR?.trim() || "~/.pi/agent"));
+  const override = expandHome(process.env.PI_CODING_AGENT_DIR?.trim() || "");
+  return resolve2(rootAnchored(override, process.platform === "win32") ? override : expandHome("~/.pi/agent"));
 }
 function isolatedFromEnv() {
   const v2 = (process.env.CLAUDE_BRIDGE_ISOLATED ?? "").trim().toLowerCase();

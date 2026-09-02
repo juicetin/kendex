@@ -55,9 +55,15 @@ function projectSettingsTrusted(settingsPath: string): boolean {
 	return projectTrustRegistry().projectSettings?.get(settingsPath) === true;
 }
 
+/** Root-anchored as `crates/core/src/harness/pi.rs::pi_root_is_absolute_for`
+ * means it, which `isAbsolute` is not: it calls a driveless `\root` absolute
+ * where the renderer does not, putting the two on different roots. Hoisted, so
+ * a circular import cannot reach it inside a temporal dead zone. */
+function rootAnchored(path: string, windows: boolean): boolean { return windows ? /^(?:[A-Za-z]:[\\/]|[\\/]{2}[^\\/]+[\\/][^\\/]+)/.test(path) : path.startsWith("/"); }
 
 function piSettingsPaths(cwd = process.cwd()): string[] {
-	const userDir = resolve(expandHome(process.env.PI_CODING_AGENT_DIR?.trim() || "~/.pi/agent"));
+	const override = expandHome(process.env.PI_CODING_AGENT_DIR?.trim() || "");
+	const userDir = resolve(rootAnchored(override, process.platform === "win32") ? override : expandHome("~/.pi/agent"));
 	const user = join(userDir, "settings.json");
 	const project = projectSettingsPath(cwd);
 	return projectSettingsTrusted(project) ? [user, project] : [user];
@@ -119,9 +125,8 @@ export function logFilePath(id: string, now: number = Date.now()): string {
 }
 
 function piAgentDir(): string {
-	const configured = process.env.PI_CODING_AGENT_DIR?.trim();
-	if (configured) return resolve(configured.startsWith("~/") ? join(homedir(), configured.slice(2)) : configured);
-	return join(homedir(), ".pi", "agent");
+	const configured = expandHome(process.env.PI_CODING_AGENT_DIR?.trim() || "");
+	return rootAnchored(configured, process.platform === "win32") ? resolve(configured) : join(homedir(), ".pi", "agent");
 }
 
 export function taskEnv(): NodeJS.ProcessEnv {

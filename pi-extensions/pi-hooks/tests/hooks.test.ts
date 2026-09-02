@@ -1,10 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { runCargo } from "../extensions/cargo.ts";
-import piHooks, { runRenderedHook } from "../extensions/hooks.ts";
+import { PROJECT_LOCK_FILE, PROJECT_MARKER_DIRS, projectRoot, readConfig, recordProjectTrust, rootAnchored } from "../extensions/config.ts";
+import piHooks from "../extensions/hooks.ts";
 import {
 	CONFIG_ID,
 	initRustRepo,
@@ -12,6 +14,7 @@ import {
 	readLog,
 	renderedHookPath,
 	renderStub,
+	renderUserStub,
 	runGit,
 	trusted,
 	useIsolatedGitEnv,
@@ -105,6 +108,253 @@ function renderRealHook(project: string, name: string): void {
 	writeFileSync(renderedHookPath(project, name), readFileSync(source, "utf8"));
 	chmodSync(renderedHookPath(project, name), 0o755);
 }
+
+function runHandlerChild(home: string, workspace: string, agentDir: string, trusted: boolean): ReturnType<typeof spawnSync> {
+	const modulePath = join(import.meta.dir, "..", "extensions", "hooks.ts");
+	const program = `
+import piHooks from ${JSON.stringify(modulePath)};
+let handler;
+piHooks({ on(event, callback) { if (event === "tool_call") handler = callback; } });
+const result = await handler(
+	{ toolName: "bash", input: { command: "git commit -m x" } },
+	{ cwd: ${JSON.stringify(workspace)}, isProjectTrusted: () => ${trusted} },
+);
+process.stdout.write(JSON.stringify(result ?? null));
+`;
+	return spawnSync(process.execPath, ["-e", program], {
+		cwd: workspace,
+		encoding: "utf8",
+		env: { ...process.env, HOME: home, PI_CODING_AGENT_DIR: agentDir },
+	});
+}
+
+/** `projectRoot` under a given HOME, in a child because homedir() reads the
+ * process's own environment. */
+function projectRootUnder(home: string, cwd: string): string | null {
+	const child = spawnSync(process.execPath, ["-e", `
+import { projectRoot } from ${JSON.stringify(join(import.meta.dir, "..", "extensions", "config.ts"))};
+process.stdout.write(JSON.stringify(projectRoot(process.argv[1]) ?? null));
+`, cwd], { encoding: "utf8", env: { ...process.env, HOME: home } });
+	if (child.status !== 0) throw new Error(child.stderr);
+	return JSON.parse(child.stdout) as string | null;
+}
+
+describe("pi-hooks root selection", () => {
+	test("a subdirectory session runs the project's guard, and an untrusted one runs nothing of the project's", async () => {
+		const project = initRustRepo("pi-hooks-subdir-");
+		const nested = join(project, "crates", "core");
+		const log = join(project, "payload.log");
+		try {
+			mkdirSync(nested, { recursive: true });
+			renderStub(project, "pre-commit-check", { exitCode: 2, stderr: "pre-commit-check: refused", log });
+			const handler = installToolCallHandler();
+
+			// Pi saves a trust decision for the folder or any parent, so its
+			// answer covers this whole tree: the guard rendered at the root runs
+			// from a subdirectory exactly as it does from the root.
+			const refused = await handler({ toolName: "bash", input: { command: "git commit -m x" } }, trusted(nested)) as { block?: boolean; reason?: string };
+			expect(refused).toEqual({ block: true, reason: "pre-commit-check: refused" });
+			expect(readLog(log)).toContain("git commit -m x");
+
+			// Untrusted, the project contributes nothing and no global root
+			// holds this name, so the command passes with nothing spawned.
+			writeFileSync(log, "");
+			expect(await handler({ toolName: "bash", input: { command: "git commit -m x" } }, { cwd: nested, isProjectTrusted: () => false })).toBeUndefined();
+			expect(readLog(log)).toBe("");
+		} finally {
+			rmSync(project, { recursive: true, force: true });
+		}
+	});
+
+	// The renderer walks for these and this reads from where it wrote. The
+	// current-project rule is `project_root_from`, which consults the marker
+	// directories and the lock file, not `is_project`'s MARKER_FILES.
+	test("the project markers are the renderer's, case for case", () => {
+		const crates = join(import.meta.dir, "..", "..", "..", "crates", "core", "src");
+		const discover = readFileSync(join(crates, "discover.rs"), "utf8");
+		const dirs = discover.match(/const MARKER_DIRS: \[&str; \d+\] = \[([\s\S]*?)\n\];/);
+		expect(dirs, "MARKER_DIRS not found in crates/core/src/discover.rs").not.toBeNull();
+		expect([...dirs![1]!.matchAll(/"([^"]+)"/g)].map(([, marker]) => marker)).toEqual([...PROJECT_MARKER_DIRS]);
+
+		const lock = readFileSync(join(crates, "lock.rs"), "utf8").match(/const LOCK_FILE: &str = "([^"]+)";/);
+		expect(lock, "LOCK_FILE not found in crates/core/src/lock.rs").not.toBeNull();
+		expect(lock![1]).toBe(PROJECT_LOCK_FILE);
+
+		// The walk tests each marker in the shape the renderer tests it in.
+		expect(discover).toContain("MARKER_DIRS.iter().any(|m| dir.join(m).is_dir())");
+		expect(discover).toContain("dir.join(crate::lock::LOCK_FILE).is_file()");
+	});
+
+	test("a vendored checkout inside a project does not stop the walk", async () => {
+		const project = initRustRepo("pi-hooks-vendor-");
+		const nested = join(project, "vendor", "nested");
+		const log = join(project, "payload.log");
+		try {
+			// Were `.git/` a marker the walk would stop here, find no script, and
+			// allow the command with an empty spawn log: every guard off, silently.
+			mkdirSync(join(nested, ".git"), { recursive: true });
+			renderStub(project, "pre-commit-check", { exitCode: 2, stderr: "pre-commit-check: refused", log });
+			const handler = installToolCallHandler();
+			const result = await handler({ toolName: "bash", input: { command: "git commit -m x" } }, trusted(nested)) as { block?: boolean; reason?: string };
+			expect(result).toEqual({ block: true, reason: "pre-commit-check: refused" });
+			expect(readLog(log)).toContain("git commit -m x");
+		} finally {
+			rmSync(project, { recursive: true, force: true });
+		}
+	});
+
+	test("a `.pi` file is not a project, and a marked one below it still is", () => {
+		const outer = mkdtempSync(join(tmpdir(), "pi-hooks-shape-"));
+		try {
+			const inner = join(outer, "inner");
+			mkdirSync(join(inner, "deep"), { recursive: true });
+			writeFileSync(join(inner, ".pi"), "not a directory\n");
+			expect(projectRoot(join(inner, "deep"))).toBeUndefined();
+			mkdirSync(join(inner, ".claude"), { recursive: true });
+			expect(projectRoot(join(inner, "deep"))).toBe(realpathSync(inner));
+		} finally {
+			rmSync(outer, { recursive: true, force: true });
+		}
+	});
+
+	// Pi's global root lives under home, so a marker there must not make home the
+	// project: that would spawn ~/.pi/kendex/hooks/<name>.sh, which kendex never
+	// renders, and merge ~/.pi/settings.json over the kendex global scope. The
+	// lock file is the one exception, and the renderer's exception too.
+	test("home is not the project, spelled either way, and a session in it has none", () => {
+		const real = mkdtempSync(join(tmpdir(), "pi-hooks-home-"));
+		const link = join(mkdtempSync(join(tmpdir(), "pi-hooks-link-")), "home");
+		try {
+			symlinkSync(real, link, "dir");
+			mkdirSync(join(real, ".pi"), { recursive: true });
+			mkdirSync(join(real, "notes"), { recursive: true });
+
+			// Both spellings of one directory answer the same: `resolve` does not
+			// dereference symlinks, so a spelling comparison would miss on any
+			// machine whose home path carries one.
+			for (const home of [real, link]) {
+				expect(projectRootUnder(home, join(home, "notes"))).toBeNull();
+				expect(projectRootUnder(home, home)).toBeNull();
+			}
+
+			// The lock file wins wherever it stands, home included — the renderer's
+			// own rule, applied before it writes.
+			writeFileSync(join(real, PROJECT_LOCK_FILE), "{}\n");
+			for (const home of [real, link]) {
+				expect(projectRootUnder(home, join(home, "notes"))).toBe(realpathSync(real));
+			}
+		} finally {
+			rmSync(real, { recursive: true, force: true });
+			rmSync(dirname(link), { recursive: true, force: true });
+		}
+	});
+
+	test("a relative global override is refused, and an absolute or blank one answers", () => {
+		const home = mkdtempSync(join(tmpdir(), "pi-hooks-global-home-"));
+		const workspace = mkdtempSync(join(tmpdir(), "pi-hooks-global-workspace-"));
+		const absolute = mkdtempSync(join(tmpdir(), "pi-hooks-global-absolute-"));
+		try {
+			// A relative value would root the global scope at the session's own
+			// directory, where a checkout's script reaches the branch that never
+			// asks about trust. The default answers instead.
+			const cases = [
+				["relative/agent", join(home, ".pi", "agent")],
+				["   ", join(home, ".pi", "agent")],
+				[absolute, absolute],
+			] as const;
+			for (const [agentDir, root] of cases) {
+				const log = join(root, "payload.log");
+				renderUserStub(root, "pre-commit-check", { exitCode: 2, stderr: "global refused", log });
+				const child = runHandlerChild(home, workspace, agentDir, false);
+				expect(child.status, child.stderr).toBe(0);
+				expect(JSON.parse(child.stdout)).toEqual({ block: true, reason: "global refused" });
+				expect(readLog(log)).toContain("git commit -m x");
+				rmSync(join(root, "kendex"), { recursive: true, force: true });
+			}
+
+			// The control: the same relative value with a script planted where
+			// it would have pointed. Nothing is found, so nothing runs.
+			const planted = join(workspace, "relative", "agent");
+			const log = join(workspace, "planted.log");
+			renderUserStub(planted, "pre-commit-check", { exitCode: 2, stderr: "must not run", log });
+			const child = runHandlerChild(home, workspace, "relative/agent", false);
+			expect(child.status, child.stderr).toBe(0);
+			expect(JSON.parse(child.stdout)).toBeNull();
+			expect(readLog(log)).toBe("");
+		} finally {
+			for (const dir of [home, workspace, absolute]) rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	// The renderer decides where the guards are written and this decides where
+	// they are read. A value the two read differently is a guard rendered under
+	// one root and looked for under another, which is a silent allow.
+	test("the root-anchored rule agrees with the renderer case for case", () => {
+		const source = readFileSync(join(import.meta.dir, "..", "..", "..", "crates", "core", "src", "harness", "pi.rs"), "utf8");
+		const table = source.match(/PI_ROOT_ABSOLUTE_CASES: &\[\(&str, bool, bool\)\] = &\[([\s\S]*?)\n\];/);
+		expect(table, "PI_ROOT_ABSOLUTE_CASES not found in crates/core/src/harness/pi.rs").not.toBeNull();
+		const cases = [...table![1]!.matchAll(/\("((?:[^"\\]|\\.)*)",\s*(true|false),\s*(true|false)\)/g)]
+			.map(([, value, posix, windows]) => [JSON.parse(`"${value}"`) as string, posix === "true", windows === "true"] as const);
+		expect(cases.length).toBeGreaterThanOrEqual(7);
+		for (const [value, posix, windows] of cases) {
+			expect(rootAnchored(value, false), `POSIX ${JSON.stringify(value)}`).toBe(posix);
+			expect(rootAnchored(value, true), `Windows ${JSON.stringify(value)}`).toBe(windows);
+		}
+	});
+
+	// readConfig, not the guard: the same answer gates merging the project's own
+	// settings.json, and every default is on, so a read that should not have
+	// happened turns a guard off.
+	test("the project's settings are read only where Pi trusts the project", () => {
+		const project = initRustRepo("pi-hooks-config-");
+		const nested = join(project, "crates");
+		try {
+			mkdirSync(nested, { recursive: true });
+			writeFileSync(join(project, ".pi", "settings.json"), JSON.stringify({
+				kendex: { extensionManager: { config: { [CONFIG_ID]: { enabled: false } } } },
+			}));
+			recordProjectTrust({ cwd: nested, isProjectTrusted: () => false });
+			expect(readConfig(nested).enabled).toBeUndefined();
+			recordProjectTrust({ cwd: nested, isProjectTrusted: () => true });
+			expect(readConfig(nested).enabled).toBe(false);
+		} finally {
+			rmSync(project, { recursive: true, force: true });
+		}
+	});
+
+	// runCommandAsync sends SIGTERM at the budget and the child gets a grace
+	// period, so a hook that traps the signal settles as timedOut with exit 0 —
+	// the one status a cut-off run must never take.
+	test("a hook that traps the signal and exits 0 past its budget still refuses", async () => {
+		const project = initRustRepo("pi-hooks-budget-");
+		try {
+			writeFileSync(join(project, ".pi", "settings.json"), JSON.stringify({
+				kendex: { extensionManager: { config: { [CONFIG_ID]: { hookTimeoutMs: 200, blockBareCd: false, blockRepoCopy: false } } } },
+			}));
+			const script = renderedHookPath(project, "pre-commit-check");
+			mkdirSync(join(script, ".."), { recursive: true });
+			writeFileSync(script, [
+				"#!/usr/bin/env bash",
+				"trap 'exit 0' TERM",
+				"cat > /dev/null",
+				"sleep 5 &",
+				"wait $!",
+				"exit 0",
+			].join("\n") + "\n");
+			chmodSync(script, 0o755);
+			const handler = installToolCallHandler();
+			const result = await handler({ toolName: "bash", input: { command: "git commit -m x" } }, trusted(project)) as { block?: boolean; reason?: string };
+			expect(result.block).toBe(true);
+			expect(result.reason).toContain("timed out after 200ms");
+
+			// The control: the same budget, a hook that finishes inside it.
+			writeFileSync(script, ["#!/usr/bin/env bash", "cat > /dev/null", "exit 0"].join("\n") + "\n");
+			expect(await handler({ toolName: "bash", input: { command: "git commit -m x" } }, trusted(project))).toBeUndefined();
+		} finally {
+			rmSync(project, { recursive: true, force: true });
+		}
+	});
+});
 
 
 describe("pi-hooks pre-commit tool_call", () => {
@@ -221,54 +471,6 @@ describe("pi-hooks pre-commit tool_call", () => {
 				rmSync(unarmed, { recursive: true, force: true });
 			}
 		});
-	});
-});
-
-describe("pi-hooks hook budget", () => {
-	// A killed process still carries an exit code. runCommandAsync marks the run
-	// timed out and sends SIGTERM, then gives the child a grace period, so a hook
-	// that traps the signal and exits cleanly settles as timedOut with exitCode
-	// 0 — a run that judged nothing wearing the status of one that allowed. The
-	// budget has to be read before any exit code or that is an allow.
-	test("a hook killed at the budget blocks even when it exits 0", async () => {
-		const project = initRustRepo("pi-hooks-timeout-");
-		try {
-			mkdirSync(join(project, ".pi", "kendex", "hooks"), { recursive: true });
-			const script = renderedHookPath(project, "pre-commit-check");
-			// `sleep &` then `wait` so the trap runs at once: bash defers a trap
-			// until the foreground command returns, and a foreground sleep would
-			// make this a test of the SIGKILL escalation instead.
-			writeFileSync(script, [
-				"#!/usr/bin/env bash",
-				"trap 'exit 0' TERM",
-				"cat >/dev/null",
-				"sleep 30 &",
-				"wait $!",
-				"exit 0",
-			].join("\n") + "\n");
-			chmodSync(script, 0o755);
-
-			const verdict = await runRenderedHook("pre-commit-check", "git commit -m x", trusted(project) as never, 250) as { block?: boolean; reason?: string };
-			expect(verdict?.block).toBe(true);
-			expect(verdict?.reason).toContain("timed out after 250ms");
-			expect(verdict?.reason).toContain("a guard that did not run does not stand aside");
-		} finally {
-			rmSync(project, { recursive: true, force: true });
-		}
-	});
-
-	// The control, without which the assertion above passes for a carrier that
-	// blocks everything: the same short budget, a hook that finishes inside it.
-	test("a hook that finishes inside the budget still allows", async () => {
-		const project = initRustRepo("pi-hooks-inbudget-");
-		const log = join(project, "payload.log");
-		try {
-			renderStub(project, "pre-commit-check", { exitCode: 0, log });
-			expect(await runRenderedHook("pre-commit-check", "git commit -m x", trusted(project) as never, 5000)).toBeUndefined();
-			expect(readLog(log)).toContain("git commit -m x");
-		} finally {
-			rmSync(project, { recursive: true, force: true });
-		}
 	});
 });
 

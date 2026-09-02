@@ -193,9 +193,15 @@ function projectSettingsTrusted(settingsPath: string): boolean {
 	return projectTrustRegistry().projectSettings?.get(settingsPath) === true;
 }
 
+/** Root-anchored as `crates/core/src/harness/pi.rs::pi_root_is_absolute_for`
+ * means it, which `isAbsolute` is not: it calls a driveless `\root` absolute
+ * where the renderer does not, putting the two on different roots. Hoisted, so
+ * a circular import cannot reach it inside a temporal dead zone. */
+function rootAnchored(path: string, windows: boolean): boolean { return windows ? /^(?:[A-Za-z]:[\\/]|[\\/]{2}[^\\/]+[\\/][^\\/]+)/.test(path) : path.startsWith("/"); }
 
 function piSettingsPaths(cwd = process.cwd()): string[] {
-	const userDir = path.resolve(expandHome(process.env.PI_CODING_AGENT_DIR?.trim() || "~/.pi/agent"));
+	const override = expandHome(process.env.PI_CODING_AGENT_DIR?.trim() || "");
+	const userDir = path.resolve(rootAnchored(override, process.platform === "win32") ? override : expandHome("~/.pi/agent"));
 	const user = path.join(userDir, "settings.json");
 	const project = projectSettingsPath(cwd);
 	return projectSettingsTrusted(project) ? [user, project] : [user];

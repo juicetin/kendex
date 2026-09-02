@@ -1,52 +1,38 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { existsSync } from "node:fs";
-import { isAbsolute, join, resolve } from "node:path";
+import { isAbsolute, resolve } from "node:path";
 
-import { actionableUserDir, getBool, getNumber, projectRoot, projectTrusted, readConfig, recordProjectTrust } from "./config.js";
+import { getBool, getNumber, piUserDir, projectRoot, projectTrusted, readConfig, recordProjectTrust } from "./config.js";
 import { deliverDrift, runDriftCheck } from "./drift-check.js";
 import { workspaceClippyOutcome } from "./lint-hooks.js";
 import { runCommandAsync } from "./process.js";
 
 const INSTALL_SYMBOL = Symbol.for("kendex.pi-hooks.installed");
 
-/** How long a rendered hook may run before the command counts as unjudged. The
- * bash hooks declare `timeout: 60` in their own frontmatter. */
-const HOOK_BUDGET_MS = 60_000;
-
 /**
  * Where kendex renders a Pi hook: `<project>/.pi/kendex/hooks/<name>.sh`, then
- * the global `<PI_CODING_AGENT_DIR or ~/.pi/agent>/kendex/hooks/<name>.sh`
- * (docs/adapters/pi.md). Both roots come from the same helpers the rest of
- * these extensions use, so a session started in a subdirectory finds the same
- * project as one started at its root.
+ * the global `<root-anchored PI_CODING_AGENT_DIR or ~/.pi/agent>/kendex/hooks/<name>.sh`.
+ * The project is `projectRoot`, the renderer's own walk, so a session started
+ * in a subdirectory finds the guards rendered at the root above it, and a
+ * session in no project contributes no project scope at all.
  *
  * The project script is EXECUTED, so it is behind Pi's project trust: a clone
  * the person has not trusted must not get its own code run on the first bash
- * call of the session. Untrusted, the project root is skipped and the global
- * root still answers — the person's own scripts are not the project's.
+ * call of the session. Pi's answer covers the folder and its ancestors alike —
+ * a saved decision applies to the folder or any parent — so it is the answer
+ * for this tree, not for one directory in it. Untrusted, the project root is
+ * skipped and the global root still answers: the person's own scripts are not
+ * the project's.
  *
- * That last sentence is an assumption, and `actionableUserDir` is what makes it
- * true. The global branch never asks about trust, so it must not be able to
- * point back into the workspace: an empty or relative `PI_CODING_AGENT_DIR`
- * roots the global scope at the session's own cwd, and an untrusted clone's
- * `kendex/hooks/<name>.sh` would then be spawned through the branch that skips
- * the trust gate. Where the global root is not the person's own there is no
- * global root here at all, and an untrusted workspace contributes nothing.
- *
- * A name neither root holds is a hook this project has not installed, and the
+ * A name neither root holds is a hook kendex has not installed here, and the
  * caller allows the command. runRenderedHook says why that is the right answer.
  */
 function renderedHook(name: string, ctx: ExtensionContext): string | undefined {
-	const trusted = projectTrusted(ctx);
-	const global = actionableUserDir(ctx.cwd, trusted);
 	const roots: string[] = [];
-	if (trusted) roots.push(join(projectRoot(ctx.cwd), ".pi", "kendex"));
-	if (global !== undefined) roots.push(join(global, "kendex"));
-	for (const root of roots) {
-		const script = resolve(root, "hooks", `${name}.sh`);
-		if (existsSync(script)) return script;
-	}
-	return undefined;
+	const project = projectTrusted(ctx) ? projectRoot(ctx.cwd) : undefined;
+	if (project !== undefined) roots.push(resolve(project, ".pi", "kendex"));
+	roots.push(resolve(piUserDir(), "kendex"));
+	return roots.map((root) => resolve(root, "hooks", `${name}.sh`)).find(existsSync);
 }
 
 /** A `tool_call` verdict: `undefined` allows, `block` refuses with a reason. */
@@ -72,23 +58,16 @@ type Verdict = { block: true; reason: string } | undefined;
  * can exit 0 on its way out — which is a run that judged nothing wearing the
  * status of one that allowed.
  *
- * `budgetMs` exists so a suite can prove that path in milliseconds rather than
- * in a minute; nothing but a test passes it.
+ * No script at either scope allows the command, and that is deliberate: it
+ * means kendex has not installed this hook here. The package is installable
+ * from npm on its own, and refusing every bash call in a project that never
+ * asked for the guard would make it unusable.
  *
- * No script at either root allows the command, and that is deliberate. It means
- * kendex has not installed this hook here — the package is installable from npm
- * on its own, and refusing every bash call in a project that never asked for
- * the guard would make it unusable. The case that used to hide behind this
- * answer was a resolution failure rather than an absence, and that is fixed
- * above: the roots are now the adapter's own. What is left is a script kendex
- * rendered and something later deleted, which is drift in the render tree;
- * `kendex check` and this extension's own session-start report own that, and a
- * repository does not defend against edits to its own kendex renders. Reading
- * `.pi/kendex/hooks.json` to tell "not installed" from "installed and missing"
- * would put a second model of the install state in here, which is the mistake
- * this change removes.
+ * `budgetMs` is `hookTimeoutMs` from settings, the same route the clippy and
+ * drift budgets take; the bash hooks declare `timeout: 60` in their own
+ * frontmatter and DEFAULTS matches it.
  */
-export async function runRenderedHook(name: string, command: string, ctx: ExtensionContext, budgetMs: number = HOOK_BUDGET_MS): Promise<Verdict> {
+export async function runRenderedHook(name: string, command: string, ctx: ExtensionContext, budgetMs: number): Promise<Verdict> {
 	const script = renderedHook(name, ctx);
 	if (!script) return undefined;
 
@@ -179,7 +158,7 @@ export default function piHooks(pi: ExtensionAPI): void {
 			["preCommitCheck", "pre-commit-check"],
 		] as const) {
 			if (!getBool(cfg, setting)) continue;
-			const verdict = await runRenderedHook(name, command, ctx);
+			const verdict = await runRenderedHook(name, command, ctx, getNumber(cfg, "hookTimeoutMs"));
 			if (verdict) return verdict;
 		}
 
