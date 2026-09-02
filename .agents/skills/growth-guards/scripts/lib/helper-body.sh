@@ -32,14 +32,41 @@ gg_shell_quote() { # VALUE -> the value, safe inside single quotes
   printf '%s' "${1//$sq/$sq\\$sq$sq}"
 }
 
-# The helper is POSIX sh and self-contained. It runs this install's own
-# scripts directory first, then rediscovers one from the MAIN checkout (linked
-# worktrees share this hooks directory and may carry no skills of their own),
-# so a moved or re-installed checkout repairs itself.
+# The one baked value another checkout of the same project bakes
+# differently.
 #
-# Generating and VERIFYING both go through here, so a checker cannot drift
-# from a writer and start blessing a helper that only resembles one.
-helper_body() { # -> the helper this installer would write, on stdout
+# A linked worktree shares one hooks directory with the checkout that armed
+# it, and `installed_scripts` is where THAT install sits — so the helper a
+# worktree would write differs here and nowhere else while running exactly
+# the same program. Comparing it would call every worktree's armed helper
+# unverifiable forever, which is what this list exists to stop.
+#
+# `project_rel` is NOT on it and must not be. It names the project that
+# armed the repository, which is the only thing telling two kendex projects
+# in one repository apart: the helper is what licenses a session to run a
+# checkout-supplied installer, so a project whose own `project_rel` differs
+# from the armed one has not been armed and must not be served. Excusing it
+# hands project B the consent project A gave. `skill_roots` is the
+# package's own list and is not per-anything.
+#
+# Named as the variable the head interpolates, so the check blanks it and
+# compares what is left, rather than finding the assignment in the text.
+GG_PER_CHECKOUT_VAR='SCRIPT_DIR'
+
+# A token no baked value carries, standing where the per-checkout value
+# would. The head with it in place is a prefix and a suffix of fixed bytes,
+# which is what lets the value between them be lifted out whatever it holds.
+GG_PER_CHECKOUT_MARK='@@growth-guards-per-checkout@@'
+
+# The head this install would bake, with the per-checkout value blanked.
+helper_head_shape() { # -> the head around GG_PER_CHECKOUT_MARK, on stdout
+  local "$GG_PER_CHECKOUT_VAR=$GG_PER_CHECKOUT_MARK"
+  helper_head
+}
+
+# The head this install would bake. Split from the program below because
+# only the program is the same bytes everywhere.
+helper_head() { # -> the baked head, on stdout
   cat <<HELPER_HEAD
 #!/bin/sh
 # Scripts directory of the install that wrote this file.
@@ -52,6 +79,17 @@ skill_roots='$(gg_shell_quote "$GG_SKILL_ROOTS")'
 # different project sharing these shims is still served.
 project_rel='$(gg_shell_quote "$PROJECT_REL")'
 HELPER_HEAD
+}
+
+# The helper is POSIX sh and self-contained. It runs this install's own
+# scripts directory first, then rediscovers one from the MAIN checkout (linked
+# worktrees share this hooks directory and may carry no skills of their own),
+# so a moved or re-installed checkout repairs itself.
+#
+# Generating and VERIFYING both go through here, so a checker cannot drift
+# from a writer and start blessing a helper that only resembles one. These
+# bytes carry no per-checkout value, so they are compared exactly.
+helper_program() { # -> the part of the helper every checkout writes alike
   cat <<'HELPER'
 # kendex growth-guards git hooks. Managed by the growth-guards skill and
 # rewritten on every install — do not edit.
@@ -160,4 +198,9 @@ for root in ${main:+"$main/$project_rel"} "$top/$project_rel" ${main:+"$main/"} 
 done
 fail "no executable growth-guards $mode script at $installed_scripts, nor under $main or $top (project '$project_rel', roots $skill_roots)"
 HELPER
+}
+
+helper_body() { # -> the helper this installer would write, on stdout
+  helper_head
+  helper_program
 }

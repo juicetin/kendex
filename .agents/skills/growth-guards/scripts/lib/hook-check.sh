@@ -19,6 +19,107 @@ set -euo pipefail
 # the summary still learns what is wrong and where. The remedy is the other
 # stream's: a core.hooksPath stand-down puts git's report on stderr, because
 # it is as many lines as git gives and stdout stays one line.
+# Where a directory sits: which repository owns it, and where it stands
+# inside that repository's checkout.
+#
+# Both answers come from git with its redirects unset, because --check may
+# be running inside a hook, where GIT_DIR is exported and git honours it
+# over the directory it was asked about — every directory would then answer
+# with this repository's.
+gg_checkout_place() { # COMMONVAR RELVAR DIR -> 0 when both answers are had
+  local __c="$1" __r="$2" dir="$3" real="" common="" top=""
+  gg_path real gg_physical "$dir" || return 1
+  common="$(
+    unset GIT_DIR GIT_COMMON_DIR GIT_WORK_TREE GIT_INDEX_FILE
+    cd -- "$real" 2>/dev/null && git rev-parse --git-common-dir 2>/dev/null && printf x
+  )" || return 1
+  common="${common%x}"
+  common="${common%"$GG_NL"}"
+  [ -n "$common" ] || return 1
+  # git answers relative to the directory it was asked in, which lib/hooks-path.sh
+  # absolutizes the same way before resolving.
+  case "$common" in
+    /*) ;;
+    *) common="$real/$common" ;;
+  esac
+  gg_path common gg_physical "$common" || return 1
+  top="$(
+    unset GIT_DIR GIT_COMMON_DIR GIT_WORK_TREE GIT_INDEX_FILE
+    cd -- "$real" 2>/dev/null && git rev-parse --show-toplevel 2>/dev/null && printf x
+  )" || return 1
+  top="${top%x}"
+  top="${top%"$GG_NL"}"
+  gg_path top gg_physical "$top" || return 1
+  case "$real" in
+    "$top") eval "$__r=''" ;;
+    "$top"/*) eval "$__r=\${real#\"\$top/\"}" ;;
+    *) return 1 ;;
+  esac
+  eval "$__c=\$common"
+}
+
+# Whether a baked scripts directory is THIS project's, in another checkout of
+# this repository.
+#
+# That is the one difference a helper may carry: a linked worktree shares the
+# hooks directory of the checkout that armed it and holds its own render, so
+# the same project stands at the same place in a different checkout.
+#
+# Two other differences look the same at a glance and are not. A scripts
+# directory outside this repository would run another package's lanes as this
+# repository's gate. And a SECOND project inside this repository stands
+# somewhere else in the same checkout: one repository has one helper, so
+# arming project A would otherwise read to project B as consent B was never
+# given, and B would run its own checkout-supplied lanes under it. Both are
+# refused by asking where the directory stands rather than only which
+# repository holds it.
+gg_same_project_elsewhere() { # DIR -> 0 when it is this project's, elsewhere
+  local dir="$1" lane="" there_common="" there_rel="" here_common="" here_rel=""
+  [ -d "$dir" ] || return 1
+  for lane in pre-commit commit-msg; do
+    [ -x "$dir/$lane" ] || return 1
+  done
+  gg_checkout_place there_common there_rel "$dir" || return 1
+  gg_checkout_place here_common here_rel "$SCRIPT_DIR" || return 1
+  [ "$there_common" = "$here_common" ] || return 1
+  [ "$there_rel" = "$here_rel" ]
+}
+
+# Whether the head a helper carries is one this installer would bake.
+#
+# The head with the per-checkout value blanked is a prefix and a suffix of
+# fixed bytes, so a head that is ours is exactly those two around some
+# value. Taking the value as what lies between them asks nothing of its
+# contents, and the bytes on either side of it are still held exactly.
+#
+# The value is then held to two things. It has to be one this installer's
+# own quoter would have written, proved by unescaping and re-escaping it —
+# so a value that closes its quote and appends a command rebuilds
+# differently and is refused, rather than being blessed by a comparison
+# assembled out of the bytes it is judging. And it has to name this same
+# project's scripts directory in another checkout of this repository.
+check_helper_head() { # HEAD -> 0 ours, 1 not
+  local head="$1" shape="" prefix="" suffix="" inner="" value="" sq="'" esc
+  esc="'\\''"
+  shape="$(helper_head_shape)" || return 1
+  case "$shape" in
+    *"$GG_PER_CHECKOUT_MARK"*"$GG_PER_CHECKOUT_MARK"*) return 1 ;;
+    *"$GG_PER_CHECKOUT_MARK"*) ;;
+    *) return 1 ;;
+  esac
+  prefix="${shape%%"$GG_PER_CHECKOUT_MARK"*}"
+  suffix="${shape#*"$GG_PER_CHECKOUT_MARK"}"
+  case "$head" in
+    "$prefix"*"$suffix") ;;
+    *) return 1 ;;
+  esac
+  inner="${head#"$prefix"}"
+  inner="${inner%"$suffix"}"
+  value="${inner//"$esc"/"$sq"}"
+  [ "$(gg_shell_quote "$value")" = "$inner" ] || return 1
+  gg_same_project_elsewhere "$value"
+}
+
 CHECK_REASONS=""
 add_reason() { # MESSAGE
   if [ -n "$CHECK_REASONS" ]; then
@@ -56,7 +157,18 @@ check_helper() { # -> 0 armed, 1 not armed, 3 unverifiable
   # while bypassing every guard. `--check` is READ-ONLY, so "the installer
   # rewrites this file" is not something it gets to assume about the copy
   # sitting there right now. Only the bytes settle what the helper does.
-  if ! helper_body 2>/dev/null | cmp -s - "$helper"; then
+  #
+  # The program is those bytes exactly. The head is where one checkout of a
+  # project differs from another, so it is held to this checkout's own head
+  # around the one value that may differ — which is what lets a worktree
+  # recognize the helper the main checkout armed, and what refuses a second
+  # project in the same repository relaying under the first one's consent.
+  local head_lines="" head=""
+  head_lines="$(helper_head 2>/dev/null | wc -l | tr -d ' ')" || head_lines=""
+  if [ -z "$head_lines" ] \
+    || ! head="$(sed -e "$((head_lines + 1)),\$d" "$helper")" \
+    || ! check_helper_head "$head" 2>/dev/null \
+    || ! helper_program 2>/dev/null | cmp -s - <(sed -e "1,${head_lines}d" "$helper"); then
     add_reason "helper $HELPER_NAME is not the one this installer generates, so what it runs cannot be verified"
     return 3
   fi

@@ -50,16 +50,19 @@ pub struct Lock {
     pub version: u32,
     /// The project root this record was written under.
     ///
-    /// Containment answers whether a claimed path is under the root
-    /// reading the lock; it cannot answer whose record this is, because a
-    /// second checkout nested below that root sits inside it and so does
-    /// every path a lock carried out of it names. This says which root
-    /// wrote the record, and the read holds it against the root reading.
+    /// Every position an entry records is an absolute path under this
+    /// root, so this is what makes each one readable as a remainder — the
+    /// part of it that is about the installation rather than about the
+    /// checkout. The record travels with a copied tree, and into a linked
+    /// worktree wherever worktree tooling is set to copy it in; read from
+    /// another root, each position resolves onto the root reading it
+    /// instead.
     ///
     /// `None` on the global lock, which has no single root — each harness
     /// owns a directory of its own. `None` on a project lock is a record
     /// from a build that did not write it down: it parses so the read can
-    /// refuse it by name, never so a project can adopt it.
+    /// refuse it by name, because with no root there is no remainder to
+    /// read out of a position and nothing may guess one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub root: Option<PathBuf>,
     #[serde(default)]
@@ -262,6 +265,7 @@ pub fn skill_names(lock: &Lock) -> std::collections::BTreeSet<String> {
 }
 
 mod file;
+mod roots;
 pub use file::{LockFile, load, load_file, parse_text, save};
 
 /// Where this scope's lock lives. Off the canonical root, like every
