@@ -16,7 +16,7 @@ use crate::error::{CoreError, Result};
 use super::status::MineRow;
 
 /// Part of the golden contract: bump when any emitted byte changes shape.
-pub const SCAFFOLD_VERSION: u32 = 1;
+pub const SCAFFOLD_VERSION: u32 = 2;
 
 const MIT_TEXT: &str = include_str!("assets/mit.txt");
 const APACHE_TEXT: &str = include_str!("assets/apache-2.0.txt");
@@ -225,13 +225,19 @@ fn manifest_text(name: &str, description: &str, author: &str, license: License) 
     if let Some(spdx) = license.spdx() {
         text.push_str(&format!("license = {}\n", toml_string(spdx)));
     }
-    text.push_str(
+    // The `[bundles]` keys come from the list that reads them: a catalog
+    // author following a hand-written copy is how the shape shipped wrong.
+    text.push_str(&format!(
         "\n# Items live in agents/, skills/, hooks/, commands/ and mcp/.\n\
-         # Curated sets: [bundles.<name>] with description and members, e.g.\n\
+         # Curated sets: [bundles.<name>] with a description and one list of\n\
+         # bare names per kind: {}.\n\
          # [bundles.starter]\n\
-         # description = \"Everything a new project needs\"\n\
-         # members = [\"skill/my-skill\", \"agent/my-agent\"]\n",
-    );
+         # description = \"Everything a new project needs\"\n",
+        crate::source::bundles::member_list_keys()
+    ));
+    for line in crate::source::bundles::member_list_example().lines() {
+        text.push_str(&format!("# {line}\n"));
+    }
     text
 }
 

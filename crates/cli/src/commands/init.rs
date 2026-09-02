@@ -55,6 +55,21 @@ pub fn run(name: Option<String>, kind: Option<String>) -> CliResult {
     Ok(())
 }
 
+/// What a freshly declared catalog says about itself. The `[bundles]` keys
+/// come from the list that reads them rather than from a copy: a marker
+/// teaching a shape no reader looks at is how the four kendex bundles
+/// shipped installing nothing.
+fn catalog_marker() -> String {
+    format!(
+        "# This file marks the folder as a kendex catalog. Items live in\n\
+         # agents/, skills/, hooks/, commands/ and mcp/. Optional tables:\n\
+         # [marketplace] name, description, author, license, tags\n\
+         # [bundles.<name>] description, then one list of bare names per\n\
+         # kind: {}\n",
+        kendex_core::source::bundles::member_list_keys()
+    )
+}
+
 /// Executable kinds install only from a catalog that declared kendex's
 /// layout — a bare `hooks/` folder is repository tooling. Scaffolding
 /// therefore declares the folder, once, and never touches a declaration
@@ -64,13 +79,7 @@ fn declare_catalog(cwd: &Path) -> CliResult {
     if control.exists() {
         return Ok(());
     }
-    fs::write(
-        &control,
-        "# This file marks the folder as a kendex catalog. Items live in\n\
-         # agents/, skills/, hooks/, commands/ and mcp/. Optional tables:\n\
-         # [marketplace] name, description, author, license, tags\n\
-         # [bundles.<name>] description, members\n",
-    )?;
+    fs::write(&control, catalog_marker())?;
     say(&format!("declared the catalog ({})", control.display()));
     Ok(())
 }

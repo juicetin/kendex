@@ -27,6 +27,32 @@ const MEMBER_LISTS: [(&str, ItemKind); 5] = [
     ("mcp-servers", ItemKind::McpServer),
 ];
 
+/// The list keys a set's members are written under, in reading order.
+///
+/// The texts that teach catalog authors this shape are written elsewhere —
+/// the `kendex init` marker, the `kendex marketplace new` scaffold — and
+/// they build their sentence from this rather than spelling the keys again.
+/// A hand-written copy is how the shape shipped wrong, and a copy cannot be
+/// held to the original by searching it for words.
+pub fn member_list_keys() -> String {
+    MEMBER_LISTS
+        .iter()
+        .map(|(key, _)| *key)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// A set's member lists, one kind per line with a placeholder name, as the
+/// TOML a scaffold writes commented out. Generated for the same reason the
+/// sentence is, and it carries every kind so the round trip back through
+/// [`declared`] covers all of them.
+pub fn member_list_example() -> String {
+    MEMBER_LISTS
+        .iter()
+        .map(|(key, kind)| format!("{key} = [\"my-{}\"]\n", kind.name()))
+        .collect()
+}
+
 /// One item a set carries.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BundleMember {
@@ -130,3 +156,8 @@ fn from_plugin(sealed: &SealedSource, entry: &super::PluginEntry) -> Result<Cata
             .collect(),
     })
 }
+
+/// What this catalog says about itself, held to what this reader gets
+/// out of it. Its own file: the assertions outgrew this one.
+#[cfg(test)]
+mod own_catalog;

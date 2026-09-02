@@ -7,6 +7,10 @@ use std::path::{Path, PathBuf};
 use kendex_core::author::{self, CreateRequest, License};
 use kendex_core::env::{Env, FakeOs};
 
+#[path = "../../test_util.rs"]
+mod test_util;
+use test_util::rooted;
+
 #[allow(clippy::unwrap_used)]
 fn fake() -> (tempfile::TempDir, Env) {
     let tmp = tempfile::tempdir().unwrap();
@@ -139,6 +143,81 @@ fn the_scaffold_writes_the_licence_evidence() {
         .unwrap()
         .1;
     assert!(manifest.contains("license = \"MIT\""));
+}
+
+/// The scaffold teaches the `[bundles]` grammar in a commented-out example,
+/// and the only other check over it pins bytes. Bytes are happy to pin a
+/// shape no reader looks at, which is how kendex's own four sets shipped
+/// installing nothing. The example is generated from the reader's own list,
+/// so the question left is whether the round trip closes: uncomment what the
+/// scaffold wrote and the reader has to get every kind back out of it.
+#[test]
+#[allow(clippy::unwrap_used)]
+fn the_scaffolded_bundle_example_is_a_set_the_reader_accepts() {
+    let files = author::plan(&request(Path::new("/x"), License::Mit)).unwrap();
+    let manifest = &files
+        .iter()
+        .find(|(rel, _)| rel == "kendex.toml")
+        .unwrap()
+        .1;
+
+    let example: String = manifest
+        .lines()
+        .skip_while(|line| !line.starts_with("# [bundles."))
+        .map(|line| format!("{}\n", line.trim_start_matches('#').trim_start()))
+        .collect();
+    assert!(
+        !example.is_empty(),
+        "the scaffold writes no [bundles.<name>] example:\n{manifest}"
+    );
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = rooted(&tmp);
+    fs::write(root.join("kendex.toml"), &example).unwrap();
+    let sealed = kendex_core::source_read::SealedSource::open(&root).unwrap();
+    let config = kendex_core::source::source_config(&sealed, "scaffolded").unwrap();
+    let sets = kendex_core::source::bundles::offered(&sealed, &config).unwrap();
+
+    let members: Vec<String> = sets
+        .iter()
+        .flat_map(|set| set.members.iter())
+        .map(|member| format!("{} {}", member.kind.name(), member.name))
+        .collect();
+    // What the example is expected to yield is the example itself, read back
+    // through the reader: every kind, under the name the scaffold wrote for
+    // it. A kind added to the grammar extends both sides at once, and a kind
+    // the reader stops seeing shortens only one.
+    let expected: Vec<String> = kendex_core::source::bundles::member_list_example()
+        .lines()
+        .map(|line| {
+            let name = line
+                .split('"')
+                .nth(1)
+                .unwrap_or_else(|| panic!("the example line '{line}' names a member"));
+            format!("{} {name}", name.trim_start_matches("my-"))
+        })
+        .collect();
+    // Both sides come out of the same generator, so both go empty together
+    // and compare equal. The grammar sentence is the third party: one member
+    // per key it lists, or the example is not the example it describes.
+    let keys = kendex_core::source::bundles::member_list_keys();
+    let listed = keys.split(", ").count();
+    assert!(
+        !keys.is_empty(),
+        "the grammar sentence lists no keys at all"
+    );
+    assert_eq!(
+        expected.len(),
+        listed,
+        "the example carries {} member(s) and the grammar sentence lists {listed} \
+         key(s) ({keys})",
+        expected.len()
+    );
+    assert_eq!(
+        members, expected,
+        "the scaffolded example, uncommented, is not a set the reader gets every kind \
+         out of:\n{example}"
+    );
 }
 
 #[test]
@@ -497,19 +576,19 @@ fn only_a_github_url_is_a_candidate_to_submit() {
 #[test]
 #[allow(clippy::unwrap_used)]
 fn the_scaffold_matches_its_checked_in_golden_digest() {
-    assert_eq!(kendex_core::author::scaffold::SCAFFOLD_VERSION, 1);
+    assert_eq!(kendex_core::author::scaffold::SCAFFOLD_VERSION, 2);
     for (license, expected) in [
         (
             License::Mit,
-            "df65c4e972e7fcf85459c2030b2933ecf5d9af06f26f321f663d1843a6ea1ded",
+            "98a5e948dac921d6cba4cae5b07e514a9e6cba1a638fa6c45ce30ff45aa55f79",
         ),
         (
             License::Apache2,
-            "7f8703f6999631efc692e1bfe9db21dfa5636e96a930177f74ba1ecf957093e8",
+            "4e63fd7bba05248e94e5247a5749c9ff51d5cbfd791468bd2b0f0838b99c0deb",
         ),
         (
             License::NoneYet,
-            "f99f2b34f98f9a480b34e1b3b543d2ddf731dc27c783c61aaa109d61b5c1116e",
+            "171067bedea26065af8967fb445f306fb97e322c989325d2d97e52e404d19741",
         ),
     ] {
         let files: Vec<(std::path::PathBuf, Vec<u8>)> =
