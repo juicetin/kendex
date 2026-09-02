@@ -35,6 +35,7 @@ const row = (
   canTakeLatest: true,
   holdOwner: null,
   derived: false,
+  requiredBy: [],
   removedUpstream: false,
   noPerPackageUpdate: null,
   mixed: false,

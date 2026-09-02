@@ -22,12 +22,14 @@ use crate::names;
 use crate::tags::Tag;
 
 mod catalog;
+mod deps;
 mod opened;
 mod preview;
 mod safety;
 mod summary;
 pub use catalog::Catalog;
 use catalog::browsable;
+pub use deps::{PackageDependencies, PackageDependency};
 pub(crate) use opened::{Browsed, open, open_repo};
 pub use preview::{PackagePreview, package_file, package_preview};
 pub use safety::{PackageSafety, package_safety};
@@ -49,6 +51,11 @@ pub enum InstallState {
     /// derives it back. The row says it was their choice and offers Restore —
     /// installing it again clears the record (invariant 2 stays intact).
     RemovedByYou,
+    /// A bare dependency name the catalog offers under more than one
+    /// plugin. The engine refuses to guess between them and warns naming
+    /// what it found, so nothing installs — but the catalog does carry the
+    /// name, and saying it is not offered would be the opposite of true.
+    OfferedMoreThanOnce,
 }
 
 /// One package a subscription offers, as the Packages table lists it.
@@ -64,6 +71,8 @@ pub struct AvailablePackage {
     pub tags: Vec<Tag>,
     /// The curated sets of this catalog that carry it.
     pub bundles: Vec<String>,
+    /// What installing it takes along, and what it offers to take.
+    pub dependencies: PackageDependencies,
     pub state: InstallState,
     /// The source this name is already taken by, when that is a different
     /// one. Invariant 4's refusal stays in the engine — this only shows the
@@ -108,10 +117,30 @@ pub fn packages(env: &Env, catalog: &Catalog) -> Result<Vec<AvailablePackage>> {
                 .push(bundle.name.clone());
         }
     }
+    // The catalog is listed once per kind here anyway, so the bare-name
+    // index every dependency row resolves against is built from the
+    // listing this loop already holds rather than from a second walk.
+    let listed: Vec<(ItemKind, Vec<String>)> = ItemKind::ALL
+        .iter()
+        .map(|kind| {
+            (
+                *kind,
+                super::list_items(&browsed.sealed, &browsed.config, *kind),
+            )
+        })
+        .collect();
+    let offered = crate::engine::deps::OfferedSkills::from_listing(
+        listed
+            .iter()
+            .find(|(kind, _)| *kind == ItemKind::Skill)
+            .map(|(_, names)| names.as_slice())
+            .unwrap_or_default(),
+    );
     let mut out = Vec::new();
-    for kind in ItemKind::ALL {
-        for name in super::list_items(&browsed.sealed, &browsed.config, kind) {
-            let header = item_header(&browsed, kind, &name);
+    for (kind, names) in listed {
+        for name in names {
+            let text = item_text(&browsed, kind, &name);
+            let header = header_of(kind, text.as_deref());
             let carried_bundles = carried.remove(&(kind, name.clone())).unwrap_or_default();
             // Catalog-authored bundle names are shown with control and
             // deceptive characters escaped rather than acted on.
@@ -123,6 +152,18 @@ pub fn packages(env: &Env, catalog: &Catalog) -> Result<Vec<AvailablePackage>> {
                 summary: header.summary_or_description().map(names::shown),
                 tags: header.tags,
                 bundles,
+                dependencies: deps::dependencies(
+                    &browsed,
+                    &offered,
+                    &deps::Where {
+                        manifest: &browsed.manifest,
+                        lock: &browsed.lock,
+                        subscription: browsed.subscription(),
+                    },
+                    kind,
+                    &name,
+                    text.as_deref(),
+                ),
                 kind,
                 name,
             });
@@ -205,25 +246,30 @@ fn detail(browsed: &Browsed, found: &super::bundles::CatalogBundle) -> BundleDet
     }
 }
 
-/// The description, summary and tags an item writes in its own header, read
-/// through the sealed source with the same vocabulary reading the scanner
-/// uses.
-fn item_header(browsed: &Browsed, kind: ItemKind, name: &str) -> crate::scan::metadata::Metadata {
-    let Some(path) = super::find_item(&browsed.sealed, &browsed.config, kind, name) else {
-        return Default::default();
-    };
-    let text = match kind {
+/// The bytes an item's header and its dependency declaration are both read
+/// from — read once where a caller needs both, because the sealed read
+/// checks containment per path component and a whole listing pays for the
+/// second read of every package.
+fn item_text(browsed: &Browsed, kind: ItemKind, name: &str) -> Option<String> {
+    let path = super::find_item(&browsed.sealed, &browsed.config, kind, name)?;
+    match kind {
         ItemKind::Skill => browsed.sealed.read_to_string(&path.join("SKILL.md")),
         _ => browsed.sealed.read_to_string(&path),
-    };
-    let Ok(text) = text else {
+    }
+    .ok()
+}
+
+/// The description, summary and tags an item writes in its own header,
+/// read with the same vocabulary the scanner reads.
+fn header_of(kind: ItemKind, text: Option<&str>) -> crate::scan::metadata::Metadata {
+    let Some(text) = text else {
         return Default::default();
     };
     match kind {
         ItemKind::Skill | ItemKind::Agent | ItemKind::Command => {
-            crate::scan::metadata::from_markdown(&text)
+            crate::scan::metadata::from_markdown(text)
         }
-        ItemKind::McpServer => crate::scan::metadata::from_toml(&text),
+        ItemKind::McpServer => crate::scan::metadata::from_toml(text),
         // A hook script carries no header to read.
         _ => Default::default(),
     }

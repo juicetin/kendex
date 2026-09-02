@@ -10,6 +10,7 @@ import {
   DISCARD_EDITS_CONFIRM_LABEL,
   DISCARD_EDITS_CONFIRM_TITLE,
   DISCARD_EDITS_LABEL,
+  derivedForkNote,
   editedInToolsLabel,
   FORK_NOTICE_DETAIL,
   FORK_NOTICE_TITLE,
@@ -58,7 +59,11 @@ export function ForkNotice({
   const [confirmDiscard, setConfirmDiscard] = useState(false);
   const several = row.editedHarnesses.length > 1;
   const whyNoFork = row.derived
-    ? DERIVED_FORK_NOTE
+    ? // Named where the row knows which packages require this one; a
+      // bundle member has no requiring package to name.
+      row.requiredBy.length > 0
+      ? derivedForkNote(row.requiredBy)
+      : DERIVED_FORK_NOTE
     : several
       ? MULTI_TOOL_FORK_NOTE
       : row.editedHarnesses[0]

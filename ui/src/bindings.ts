@@ -246,7 +246,7 @@ export const commands = {
 	 *  what the marketplace page's Bundles tab lists.
 	 */
 	marketplaceBundles: (catalog: Catalog) => typedError<BundleDetail[], string>(__TAURI_INVOKE("marketplace_bundles", { catalog })),
-	marketplacePackagePreview: (catalog: Catalog, kind: ItemKind, name: string) => typedError<PackageView, string>(__TAURI_INVOKE("marketplace_package_preview", { catalog, kind, name })),
+	marketplacePackagePreview: (catalog: Catalog, kind: ItemKind, name: string, destination: { scope: "global" } | { scope: "project"; root: string } | null) => typedError<PackageView, string>(__TAURI_INVOKE("marketplace_package_preview", { catalog, kind, name, destination })),
 	/**
 	 *  One offered file's content before install — the same read an installed
 	 *  package's file gets, confined to the package inside the catalog.
@@ -259,8 +259,13 @@ export const commands = {
 	 *  there — every write lands in exactly one scope. `harnesses` and `method`
 	 *  carry the picker's answer; absent, the scope's own install defaults
 	 *  decide, brought up to date against this machine by the add itself.
+	 *  `optional` carries the optional dependencies the picker ticked, by the
+	 *  name their parent declares them under; the engine records the choice
+	 *  against every item that offers one by that name — a name no item this
+	 *  request touches, and no skill already installed from that source, offers
+	 *  is an error that writes nothing.
 	 */
-	marketplaceInstall: (scope: Scope, source: string, items: InstallItem[], bundle: string | null, destination: { scope: "global" } | { scope: "project"; root: string } | null, hold: boolean, harnesses: HarnessId[] | null, method: "symlink" | "copy" | null) => typedError<Installed_Serialize, string>(__TAURI_INVOKE("marketplace_install", { scope, source, items, bundle, destination, hold, harnesses, method })),
+	marketplaceInstall: (scope: Scope, source: string, items: InstallItem[], bundle: string | null, destination: { scope: "global" } | { scope: "project"; root: string } | null, hold: boolean, harnesses: HarnessId[] | null, method: "symlink" | "copy" | null, optional: string[]) => typedError<Installed_Serialize, string>(__TAURI_INVOKE("marketplace_install", { scope, source, items, bundle, destination, hold, harnesses, method, optional })),
 	/**
 	 *  Where an install of these kinds could land, for the picker the install
 	 *  flow draws. Two filters, both read from core: which tools can take the
@@ -666,6 +671,8 @@ export type AvailablePackage = {
 	tags: Tag[],
 	/**  The curated sets of this catalog that carry it. */
 	bundles: string[],
+	/**  What installing it takes along, and what it offers to take. */
+	dependencies: PackageDependencies,
 	state: InstallState,
 	/**
 	 *  The source this name is already taken by, when that is a different
@@ -1401,8 +1408,14 @@ export type HoldOwner =
 { kind: "package" } | 
 /**  The source is pinned as a whole; released where the source is declared. */
 { kind: "source"; name: string } | 
-/**  Propagated from the bundle or package that pulled this one in. */
-{ kind: "parent" };
+/**
+ *  Propagated from the bundle or package that pulled this one in.
+ *  `name` is that package where a requirement is what propagated it —
+ *  a bundle-propagated hold carries `None`, because it is released at
+ *  the bundle and naming a requiring skill would point the reader at a
+ *  declaration that does not hold the row.
+ */
+{ kind: "parent"; name: string | null };
 
 export type HookAgents = 
 /**  `"all"`, a role name, or a single agent name. */
@@ -1568,7 +1581,14 @@ export type InstallState =
  *  derives it back. The row says it was their choice and offers Restore —
  *  installing it again clears the record (invariant 2 stays intact).
  */
-"removed-by-you";
+"removed-by-you" | 
+/**
+ *  A bare dependency name the catalog offers under more than one
+ *  plugin. The engine refuses to guess between them and warns naming
+ *  what it found, so nothing installs — but the catalog does carry the
+ *  name, and saying it is not offered would be the opposite of true.
+ */
+"offered-more-than-once";
 
 /**
  *  One row of the install picker: a tool the scope can install to, whether
@@ -2058,6 +2078,34 @@ export type Origin =
 /**  On disk and observed, managed by nothing. */
 { origin: "unmanaged" };
 
+/**
+ *  A package's declared dependencies: what installs with it, and what it
+ *  offers to take along.
+ */
+export type PackageDependencies = {
+	/**  Installed with this package, whether or not anyone asks. */
+	required: PackageDependency[],
+	/**  Offered; taken only where the install says so. */
+	optional: PackageDependency[],
+};
+
+/**  One declared dependency, with where it stands in this scope. */
+export type PackageDependency = {
+	/**
+	 *  The bare name its parent declares, unescaped: the spelling an
+	 *  install's optional choice is matched with, because
+	 *  [`crate::engine::ops`] matches a choice against the declared list.
+	 *  Never rendered — `shown` is the value a surface displays.
+	 */
+	name: string,
+	/**
+	 *  `name` with any control or deceptive character escaped, for
+	 *  display. Catalog-authored text is shown, never acted on.
+	 */
+	shown: string,
+	state: InstallState,
+};
+
 export type PackageDiff = {
 	files: FileDiff[],
 	totalAdditions: number,
@@ -2163,6 +2211,8 @@ export type PackagePreview = {
 	files: PackageFile[],
 	/**  The curated sets of this catalog that carry it. */
 	bundles: string[],
+	/**  What installing it takes along, and what it offers to take. */
+	dependencies: PackageDependencies,
 	collision: string | null,
 };
 
@@ -2969,6 +3019,15 @@ export type UpdateRow = {
 	 *  needs a declaration to turn local.
 	 */
 	derived: boolean,
+	/**
+	 *  Every installed package that requires this one, when that is why it
+	 *  is here — the names behind `derived`, so the Library can say who
+	 *  brought it rather than that something did. Empty for a package
+	 *  declared outright and for a bundle member, whose set is named where
+	 *  sets are. All of them, never one: releasing the only package named
+	 *  would leave it installed for the rest.
+	 */
+	requiredBy: string[],
 	/**  This package is a local fork of a catalog item. */
 	forked: boolean,
 	/**  Installations of this package disagree on their source commit. */

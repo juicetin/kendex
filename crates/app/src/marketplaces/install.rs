@@ -88,6 +88,11 @@ pub struct Installed {
 /// there — every write lands in exactly one scope. `harnesses` and `method`
 /// carry the picker's answer; absent, the scope's own install defaults
 /// decide, brought up to date against this machine by the add itself.
+/// `optional` carries the optional dependencies the picker ticked, by the
+/// name their parent declares them under; the engine records the choice
+/// against every item that offers one by that name — a name no item this
+/// request touches, and no skill already installed from that source, offers
+/// is an error that writes nothing.
 #[tauri::command(async)]
 #[specta::specta]
 #[allow(clippy::too_many_arguments)]
@@ -100,6 +105,7 @@ pub fn marketplace_install(
     hold: bool,
     harnesses: Option<Vec<HarnessId>>,
     method: Option<Method>,
+    optional: Vec<String>,
 ) -> Result<Installed, String> {
     let env = env()?;
     install(
@@ -112,6 +118,7 @@ pub fn marketplace_install(
         hold,
         harnesses,
         method,
+        optional,
     )
 }
 
@@ -127,6 +134,7 @@ pub fn install(
     hold: bool,
     harnesses: Option<Vec<HarnessId>>,
     method: Option<Method>,
+    optional: Vec<String>,
 ) -> Result<Installed, String> {
     if items.is_empty() && bundle.is_none() {
         return Err("nothing selected to install".to_owned());
@@ -146,6 +154,7 @@ pub fn install(
         hold,
         harnesses,
         method,
+        optional,
         ..AddRequest::default()
     };
     request.bundles.extend(bundle);

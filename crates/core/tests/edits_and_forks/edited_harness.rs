@@ -189,7 +189,7 @@ fn a_held_bundle_member_with_newer_upstream_can_discard_but_not_move() {
         .find(|row| row.kind == ItemKind::Skill && row.name == "gh")
         .unwrap();
     assert!(row.derived && row.pinned && row.update_available, "{row:?}");
-    assert_eq!(row.hold_owner, Some(HoldOwner::Parent));
+    assert_eq!(row.hold_owner, Some(HoldOwner::Parent { name: None }));
     assert!(row.blocked_by_local_edit);
     assert!(row.can_discard, "the owner's held content can come back");
     assert!(!row.can_take_latest, "only the owner can move the hold");
@@ -412,4 +412,91 @@ fn a_pinned_package_gone_at_tip_keeps_its_timeline_under_a_symlinked_home() {
     assert!(!row.removed_upstream, "{row:?}");
     assert!(row.current.is_some(), "{row:?}");
     assert!(row.latest.is_some(), "{row:?}");
+}
+
+/// A dependency's row names every package that requires it — the line the
+/// Library shows instead of the unnamed "something brought this" — and a
+/// hold reaching it through a requirer that is itself derived names
+/// nobody: a bundle holds `dev`, `dev` requires `gh`, and `dev` has no
+/// declaration the person could open to release `gh`.
+#[test]
+#[allow(clippy::unwrap_used)]
+fn a_hold_through_a_derived_requirer_names_nobody() {
+    let w = world();
+    let dev = w.upstream.join("skills/dev");
+    fs::create_dir_all(&dev).unwrap();
+    fs::write(
+        dev.join("SKILL.md"),
+        "---\nname: dev\ndescription: about dev\ndependencies:\n  required: [gh]\n---\nDev.\n",
+    )
+    .unwrap();
+    write_skill(&w.upstream, "gh", "One.");
+    fs::write(
+        w.upstream.join("kendex.toml"),
+        "[bundles.starter]\ndescription = \"the set\"\nskills = [\"dev\"]\n",
+    )
+    .unwrap();
+    commit(&w.upstream, "one");
+    let one = head_commit(&w.upstream);
+    declare(
+        &w,
+        &format!("[bundles.starter]\nsource = \"cat\"\nrev = \"{one}\"\n"),
+    );
+    sync_and_apply(&w);
+
+    let report = kendex_core::package::updates::updates(&w.env, &w.scope).unwrap();
+    let row = report
+        .rows
+        .iter()
+        .find(|row| row.kind == ItemKind::Skill && row.name == "gh")
+        .unwrap();
+    assert!(row.derived && row.pinned, "{row:?}");
+    assert_eq!(
+        row.required_by,
+        vec!["dev".to_owned()],
+        "the Library still says which package requires it"
+    );
+    assert_eq!(
+        row.hold_owner,
+        Some(HoldOwner::Parent { name: None }),
+        "dev is itself derived, so there is no declaration to send anyone to"
+    );
+}
+
+/// The must-fail control beside it: with `dev` declared, the requirement is
+/// what propagated the hold and `dev` is a declaration the person can open,
+/// so the hold names it.
+#[test]
+#[allow(clippy::unwrap_used)]
+fn a_hold_through_a_declared_requirer_names_it() {
+    let w = world();
+    let dev = w.upstream.join("skills/dev");
+    fs::create_dir_all(&dev).unwrap();
+    fs::write(
+        dev.join("SKILL.md"),
+        "---\nname: dev\ndescription: about dev\ndependencies:\n  required: [gh]\n---\nDev.\n",
+    )
+    .unwrap();
+    write_skill(&w.upstream, "gh", "One.");
+    commit(&w.upstream, "one");
+    let one = head_commit(&w.upstream);
+    declare(
+        &w,
+        &format!("[skills.dev]\nsource = \"cat\"\nrev = \"{one}\"\n"),
+    );
+    sync_and_apply(&w);
+
+    let report = kendex_core::package::updates::updates(&w.env, &w.scope).unwrap();
+    let row = report
+        .rows
+        .iter()
+        .find(|row| row.kind == ItemKind::Skill && row.name == "gh")
+        .unwrap();
+    assert_eq!(row.required_by, vec!["dev".to_owned()]);
+    assert_eq!(
+        row.hold_owner,
+        Some(HoldOwner::Parent {
+            name: Some("dev".to_owned())
+        })
+    );
 }

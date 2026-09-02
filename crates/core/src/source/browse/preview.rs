@@ -13,7 +13,7 @@ use crate::names;
 use crate::package::detail::PackageFile;
 use crate::tags::Tag;
 
-use super::{Catalog, item_header};
+use super::Catalog;
 
 /// What the available-package page shows before anything installs.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
@@ -30,16 +30,26 @@ pub struct PackagePreview {
     pub files: Vec<PackageFile>,
     /// The curated sets of this catalog that carry it.
     pub bundles: Vec<String>,
+    /// What installing it takes along, and what it offers to take.
+    pub dependencies: super::PackageDependencies,
     pub collision: Option<String>,
 }
 
+/// `destination` redirects an install into a project. The package's bytes
+/// still come from the subscription; only the dependency state join moves,
+/// because what is already installed and what was kept removed are facts
+/// about the scope the install would land in.
 pub fn package_preview(
     env: &Env,
     catalog: &Catalog,
     kind: ItemKind,
     name: &str,
+    destination: Option<&crate::model::Scope>,
 ) -> Result<PackagePreview> {
     let browsed = super::open(env, catalog)?;
+    let redirected = destination
+        .map(|scope| super::opened::records_of(env, scope))
+        .transpose()?;
     let Some(path) = crate::source::find_item(&browsed.sealed, &browsed.config, kind, name) else {
         return Err(CoreError::ItemNotInSource {
             name: name.to_owned(),
@@ -75,7 +85,8 @@ pub fn package_preview(
             bundles.push(offered.name);
         }
     }
-    let header = item_header(&browsed, kind, name);
+    let text = super::item_text(&browsed, kind, name);
+    let header = super::header_of(kind, text.as_deref());
     Ok(PackagePreview {
         kind,
         name: name.to_owned(),
@@ -84,6 +95,20 @@ pub fn package_preview(
         readme: readme.map(|text| shown_text(&capped(text))),
         files,
         bundles,
+        // One package's read: the index behind it builds only if a bare
+        // name misses an exact offer, and then only once.
+        dependencies: super::deps::dependencies(
+            &browsed,
+            &crate::engine::deps::OfferedSkills::default(),
+            &super::deps::Where {
+                manifest: redirected.as_ref().map_or(&browsed.manifest, |r| &r.0),
+                lock: redirected.as_ref().map_or(&browsed.lock, |r| &r.1),
+                subscription: browsed.subscription(),
+            },
+            kind,
+            name,
+            text.as_deref(),
+        ),
         collision: browsed.collision(kind, name),
     })
 }

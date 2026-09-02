@@ -46,7 +46,9 @@ impl Eval<'_> {
             .is_some_and(crate::remote::store::is_pin);
         let hold_owner = if decl.rev.is_some() {
             Some(match planned.derived {
-                true => HoldOwner::Parent,
+                true => HoldOwner::Parent {
+                    name: planned.held_by_requirer.clone(),
+                },
                 false => HoldOwner::Package,
             })
         } else if source_pinned {
@@ -133,6 +135,7 @@ impl Eval<'_> {
                     can_discard: false,
                     can_take_latest: false,
                     derived: planned.derived,
+                    required_by: planned.required_by.clone(),
                     edited_harnesses,
                     forked,
                     mixed: false,
@@ -250,6 +253,7 @@ impl Eval<'_> {
             can_discard: true,
             can_take_latest: latest.is_some() && !(planned.derived && pinned),
             derived: planned.derived,
+            required_by: planned.required_by.clone(),
             edited_harnesses,
             forked,
             repo_identity: crate::source_ref::repo_identity(&package.repo),

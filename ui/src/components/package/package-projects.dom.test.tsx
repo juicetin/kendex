@@ -142,6 +142,7 @@ const row = (
   canDiscard: false,
   canTakeLatest: false,
   derived: false,
+  requiredBy: [],
   forked: false,
   mixed: false,
   removedUpstream: false,
