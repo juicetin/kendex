@@ -79,15 +79,14 @@ cmd_init() {
     local state_file
     state_file=$(get_state_file "$issue_id")
 
-    # Build JSON safely with jq --arg to handle special characters
     jq -n \
-      --arg issue_id "$issue_id" \
-      --arg agent "$agent" \
-      --arg worktree "$worktree" \
-      --arg branch "$branch" \
-      --argjson sub_issues "$sub_issues" \
-      --argjson qa_labels "$qa_labels" \
-      '{
+        --arg issue_id "$issue_id" \
+        --arg agent "$agent" \
+        --arg worktree "$worktree" \
+        --arg branch "$branch" \
+        --argjson sub_issues "$sub_issues" \
+        --argjson qa_labels "$qa_labels" \
+        '{
         issue_id: $issue_id,
         sub_issues: $sub_issues,
         agent: $agent,
@@ -115,9 +114,13 @@ cmd_init() {
           fixes: [],
           issues_created: [],
           skipped: []
-        }
+        },
+        post_pr_budgets: {
+          review_wait: null,
+          ci_fix: null
+        },
+        post_pr_stop: null
       }' > "$state_file"
-
     echo "$state_file"
 }
 
@@ -193,6 +196,8 @@ cmd_update() {
 cmd_update_report() {
     local issue_id="$1"
     local jq_expr="$2"
+    shift 2
+    local -a jq_args=("$@")
 
     local state_file
     state_file=$(get_state_file "$issue_id")
@@ -208,7 +213,7 @@ cmd_update_report() {
         flock -w 10 200 || { echo "Error: could not acquire lock on $lock_file" >&2; exit 1; }
 
         local combined
-        if ! combined=$(jq -c "$jq_expr" "$state_file" 2>&1); then
+        if ! combined=$(jq -c ${jq_args[@]+"${jq_args[@]}"} "$jq_expr" "$state_file" 2>&1); then
             echo "Error: jq expression failed: $jq_expr" >&2
             exit 1
         fi
@@ -222,6 +227,68 @@ cmd_update_report() {
         mv "$tmp_file" "$state_file"
         jq -c '.report' <<<"$combined"
     ) 200>"$lock_file"
+}
+
+cmd_post_pr_stop() {
+    local action="${1:-}" issue_id="${2:-}"
+    [[ -n "$action" && -n "$issue_id" ]] || { echo "Error: post-pr-stop needs an action and issue_id" >&2; return 2; }
+    case "$action" in
+        record|record-if-empty)
+            [[ $# -eq 6 ]] || { echo "Error: post-pr-stop $action needs issue_id, name, gate, remaining, and comment-file" >&2; return 2; }
+            local name="$3" gate="$4" remaining="$5" comment_file="$6" mode="replace"
+            [[ "$action" == "record-if-empty" ]] && mode="if-empty"
+            local report result tmp_comment
+            report=$(cmd_update_report "$issue_id" '
+              (.post_pr_stop // null) as $current |
+              if $mode == "if-empty" and $current != null then
+                {state: ., report: {result: "kept", stop: $current}}
+              else
+                {state: (.post_pr_stop = {name: $name, gate: $gate, remaining: [$remaining]}),
+                 report: {result: "recorded", stop: {name: $name, gate: $gate, remaining: [$remaining]}}}
+              end' --arg mode "$mode" --arg name "$name" --arg gate "$gate" --arg remaining "$remaining") || return 1
+            result=$(jq -r '.result' <<<"$report")
+            if [[ "$result" == "recorded" ]]; then
+                tmp_comment="${comment_file}.tmp"
+                printf '## Orchestration stopped\n\n- Stop: `%s`\n- Gate: `%s`\n- Remaining: %s\n' "$name" "$gate" "$remaining" > "$tmp_comment"
+                mv "$tmp_comment" "$comment_file"
+            fi
+            printf '%s\n' "$result"
+            ;;
+        *) echo "Error: unknown post-pr-stop action: $action" >&2; return 2 ;;
+    esac
+}
+
+cmd_head_budget() {
+    local action="${1:-}" issue_id="${2:-}" kind="${3:-}"
+    [[ -n "$action" && -n "$issue_id" && -n "$kind" ]] || { echo "Error: head-budget needs an action, issue_id, and kind" >&2; return 2; }
+    # review-wait resets on a changed head; ci-fix must not, which is what the
+    # flag exists for. Every ci-fix cycle pushes its fix, so the next take
+    # always sees a new head, and resetting there would give each retry a fresh
+    # count with CI_FIX_MAX_CYCLES bounding nothing. A passing CI run clears it.
+    local field setting head_keyed
+    case "$kind" in
+        review-wait) field=review_wait; setting=REVIEW_MAX_EXTERNAL_ROUNDS; head_keyed=true ;;
+        ci-fix) field=ci_fix; setting=CI_FIX_MAX_CYCLES; head_keyed=false ;;
+        *) echo "Error: unknown head budget: $kind" >&2; return 2 ;;
+    esac
+    case "$action" in
+        take)
+            [[ $# -eq 4 ]] || { echo "Error: head-budget take needs issue_id, kind, and head" >&2; return 2; }
+            local head="$4" limit report
+            limit=$(cap_limit "$setting") || return 1
+            report=$(cmd_update_report "$issue_id" '
+              (.post_pr_budgets[$field] // null) as $saved |
+              (if $head_keyed and (($saved.head // "") != $head) then 0 else ($saved.attempts // 0) end) as $used |
+              if $used >= $limit then
+                {state: ., report: {verdict: "at-cap", attempts: $used, limit: $limit}}
+              else
+                {state: (.post_pr_budgets[$field] = {head: $head, attempts: ($used + 1)}),
+                 report: {verdict: "continue", attempts: ($used + 1), limit: $limit}}
+              end' --arg field "$field" --arg head "$head" --argjson limit "$limit" --argjson head_keyed "$head_keyed") || return 1
+            jq -r '"\(.verdict) \(.attempts)/\(.limit)"' <<<"$report"
+            ;;
+        *) echo "Error: unknown head-budget action: $action" >&2; return 2 ;;
+    esac
 }
 
 cmd_append() {
@@ -523,6 +590,15 @@ Commands:
                                 and its evidence from the SAME locked step
                                 (a separate get after update can interleave
                                 with another writer)
+  post-pr-stop record <issue_id> <name> <gate> <remaining> <comment-file>
+  post-pr-stop record-if-empty <issue_id> <name> <gate> <remaining> <comment-file>
+                                Atomically record or preserve the stop and
+                                render its Markdown comment
+  head-budget take <issue_id> <review-wait|ci-fix> <head>
+                                Atomically spend an automatic retry budget.
+                                review-wait restarts its count on a changed
+                                head; ci-fix counts across heads, since every
+                                cycle pushes one. A continuing action clears it
   append <issue_id> <field> <value>   Append to array field
   append-file <issue_id> <field> <file>
                                 Append the one JSON value in <file> to the
@@ -658,6 +734,8 @@ case "$1" in
     get)       shift; cmd_get "$@" ;;
     update)    shift; cmd_update "$@" ;;
     update-report) shift; cmd_update_report "$@" ;;
+    post-pr-stop) shift; cmd_post_pr_stop "$@" ;;
+    head-budget) shift; cmd_head_budget "$@" ;;
     append)    shift; cmd_append "$@" ;;
     append-file) shift; cmd_append_file "$@" ;;
     cap)       shift; cmd_cap "$@" ;;

@@ -73,6 +73,28 @@ The full session from inside a worktree: implement → review → submit → fin
 
 ## 5. Finalize
 
+Before either summary, `MERGE_READY = false` preserves submit-pr's stop or creates `merge-gates-unmet`:
+
+```bash
+.agents/skills/orch/scripts/workflow-state post-pr-stop record-if-empty [ISSUE_ID] merge-gates-unmet merge "[UNMET_GATE_AND_REMAINING_WORK]" [WORKTREE_PATH]/tmp/post-pr-stop-[ISSUE_ID].md
+```
+
+`recorded` wrote that file, so post it:
+
+```bash
+.agents/skills/github/scripts/github.sh post-comment [PR_NUMBER] --body-file [WORKTREE_PATH]/tmp/post-pr-stop-[ISSUE_ID].md
+```
+
+`kept` posts nothing. The file at that path is the one submit-pr rendered for
+the stop it recorded, and submit-pr already posted it; posting again would put
+a byte-identical duplicate on the PR.
+
+Read the final stop before § 5.1. `MERGE_READY = true` clears it:
+
+```bash
+.agents/skills/orch/scripts/workflow-state update [ISSUE_ID] '.post_pr_stop = null'
+```
+
 ### 5.1 Post Summary
 
 **Run Workflow**: `⤵ workflows/post-summary.md § 1-3 → § 5.2` with context `worktree`, `lifecycle: "managed"`, `issue_id`, `pr_number` from § 4.
@@ -88,12 +110,12 @@ The full session from inside a worktree: implement → review → submit → fin
 ### 5.3 Session Summary
 
 ```bash
-.agents/skills/orch/scripts/workflow-state get [ISSUE_ID] '{cycles: .cycles, fixed_count: (.fixed_items | length), escalated_count: (.escalated_items | length), pr_iterations: .pr_comment_review.iterations, pr_fixes: (.pr_comment_review.fixes | length), pr_issues: (.pr_comment_review.issues_created | length), audit_issues: (.audit_issues_created | length)}'
+.agents/skills/orch/scripts/workflow-state get [ISSUE_ID] '{cycles: .cycles, fixed_count: (.fixed_items | length), escalated_count: (.escalated_items | length), pr_iterations: .pr_comment_review.iterations, pr_fixes: (.pr_comment_review.fixes | length), pr_issues: (.pr_comment_review.issues_created | length), audit_issues: (.audit_issues_created | length), post_pr_stop: .post_pr_stop}'
 ```
 
 <output_format>
 
-### ✅ SESSION COMPLETE — [ISSUE_ID]: [TITLE]
+### SESSION STATUS — [ISSUE_ID]: [TITLE]
 
 Sub-issues (tree):
 ↳ [SUB_ISSUE_1]: [TITLE] | blocks: [SUB_ISSUE_2]
@@ -114,6 +136,7 @@ Sub-issues (tree):
 | CI | ✅ passing |
 | Review gate | ✅ approved / ✅ reviewed / ⏳ pending / forced / off (no reviewer policy) |
 | Unresolved threads | 0 |
+| Stop | [POST_PR_STOP name: gate; remaining] |
 
 ### Issues Created
 
@@ -135,10 +158,12 @@ Terminate every still-active agent in `child_sessions`, then retire the records:
 
 ### 5.5 Merge
 
-**Skip if** no PR was created, CI is not passing, or `submit-pr.md` § 6.1 reported `MERGE_READY = false`.
+**Skip if** no PR was created. When CI is not passing or `submit-pr.md` § 6.1
+reported `MERGE_READY = false`, return the final stop already rendered in
+§ 5 before the summaries, then stop.
 
 ```bash
-.agents/skills/orch/scripts/orch-env ORCH_MERGE_AUTONOMY ask
+.agents/skills/orch/scripts/orch-env ORCH_MERGE_AUTONOMY auto
 ```
 
 `auto` → merge without asking: `⤵ workflows/merge-pr.md [PR_NUMBER] § 1-7 → end`. Anything else → ask: `orch merge-pr [PR_NUMBER]` | `Skip`, and on merge run the same workflows. A `MERGE_READY = false` state never auto-merges.

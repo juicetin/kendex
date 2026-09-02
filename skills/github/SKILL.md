@@ -30,7 +30,7 @@ tags: [git, integration]
 | `pr-list-failing [--all] [--format=safe\|table]` | List PRs with CI failures |
 | `pr-create [--title T] [--body B \| --body-file PATH] [--draft] [--dry-run] [--force]` | Create PR as bot. Safety checks: not main, has commits, pushed; `--force` skips them. |
 | `pr-edit-body <N> --body-file PATH` | Update an existing PR body through the sanitized router. |
-| `pr-merge <N> [--check\|--force\|--auto]` | Merge PR. `--check` reports readiness as JSON on stdout plus a one-word verdict and `head-run: <ids>` (the run scope of the CI classification) on stderr; `--auto` queues a currently-blocked PR. Three exit codes, the review-thread gate, and `--force` — see *PR Merge Outcomes*. |
+| `pr-merge <N> [--check\|--force\|--admin\|--auto]` | Merge PR. `--check` reports readiness as JSON on stdout plus a one-word verdict and `head-run: <ids>` (the run scope of the CI classification) on stderr; `--auto` queues a currently-blocked PR. Three exit codes, the review-thread gate, and `--force`/`--admin` — see *PR Merge Outcomes*. |
 | `ci-classify-refusal <N>` | Name the cause of a pr-merge refusal on one `cause:` line (`fetch_error`, `merge_conflict`, `changes_requested`, `threads`, `ci_failed`, `ci_pending`, `computing`, `merged`, `closed`, `none`; an issue prefix outside that vocabulary becomes the cause word itself, and `none` means the checks pass now); `ci_failed` adds `fail:` lines run-correlated to the authoritative run and `superseded:` lines naming runs whose checks were not counted. `--help` |
 | `pr-cross-check [N...] [--quick\|--verify]` | Cross-PR analysis. `--verify`: full build+test (auto-detects build system). |
 | `pr-issue <N> [--format=safe\|text]` | Extract issue ID from PR branch (configurable via `GH_ISSUE_PATTERN`) |
@@ -68,7 +68,7 @@ Contract: `git-diff-summary --help`.
 Full contract: `pr-merge --help`.
 Exit `75` is volatile, so keep a watcher running until `MERGED`.
 If `can_merge` is false with no `issues`, read `state`.
-The thread gate is **Policy, not mechanism.** `--force` is its only override.
+The thread gate is **Policy, not mechanism.** `--force` and the explicit-user-only `--admin` are its overrides.
 
 ### PR blocked with no visible conversations
 

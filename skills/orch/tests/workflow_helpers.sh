@@ -57,6 +57,39 @@ assert_eq "$(jq -r '.issue_id' <<<"$exists_json")" "issue-353" "workflow-state e
 missing_json="$(ORCH_STATE_DIR="$state_dir" "$WS" exists --json issue-404)"
 assert_eq "$(jq -r '.exists' <<<"$missing_json")" "false" "workflow-state exists --json reports missing state"
 
+ORCH_STATE_DIR="$state_dir" "$WS" init issue-404 --branch issue-404 >/dev/null
+stop_comment="$TMP_ROOT/post-pr-stop.md"
+assert_eq "$(ORCH_STATE_DIR="$state_dir" "$WS" post-pr-stop record issue-404 review-round-cap review 'one unresolved review thread' "$stop_comment")" "recorded" "post-pr-stop records and renders a named stop"
+assert_file_contains "$stop_comment" 'one unresolved review thread' "post-pr-stop renders stored remaining work"
+assert_eq "$(ORCH_STATE_DIR="$state_dir" "$WS" post-pr-stop record-if-empty issue-404 merge-gates-unmet merge 'CI pending' "$stop_comment")" "kept" "record-if-empty preserves a precise stop"
+assert_eq "$(ORCH_STATE_DIR="$state_dir" "$WS" get issue-404 '.post_pr_stop.name')" "review-round-cap" \
+  "record-if-empty keeps the precise stop name"
+ORCH_STATE_DIR="$state_dir" "$WS" update issue-404 '.post_pr_stop = null'
+assert_eq "$(ORCH_STATE_DIR="$state_dir" "$WS" get issue-404 '.post_pr_stop')" "null" "continuation clears the stop"
+ORCH_STATE_DIR="$state_dir" REVIEW_MAX_EXTERNAL_ROUNDS=2 "$WS" head-budget take issue-404 review-wait head-a >/dev/null
+assert_eq "$(ORCH_STATE_DIR="$state_dir" REVIEW_MAX_EXTERNAL_ROUNDS=2 "$WS" head-budget take issue-404 review-wait head-a)" "continue 2/2" "review budget increments atomically"
+assert_eq "$(ORCH_STATE_DIR="$state_dir" REVIEW_MAX_EXTERNAL_ROUNDS=2 "$WS" head-budget take issue-404 review-wait head-a)" "at-cap 2/2" "review budget persists its cap"
+assert_eq "$(ORCH_STATE_DIR="$state_dir" REVIEW_MAX_EXTERNAL_ROUNDS=2 "$WS" head-budget take issue-404 review-wait head-b)" "continue 1/2" \
+  "review-wait budget resets on a changed head"
+ORCH_STATE_DIR="$state_dir" "$WS" update issue-404 '.post_pr_budgets.review_wait = null'
+assert_eq "$(ORCH_STATE_DIR="$state_dir" "$WS" get issue-404 '.post_pr_budgets.review_wait')" "null" "accepted review evidence clears its budget"
+ORCH_STATE_DIR="$state_dir" CI_FIX_MAX_CYCLES=1 "$WS" head-budget take issue-404 ci-fix ci-head-a >/dev/null
+assert_eq "$(ORCH_STATE_DIR="$state_dir" CI_FIX_MAX_CYCLES=1 "$WS" head-budget take issue-404 ci-fix ci-head-a)" "at-cap 1/1" "ci-fix persists its cap"
+# Every ci-fix cycle pushes its fix, so the next take always presents a new head.
+# A head-keyed reset here would return continue forever and CI_FIX_MAX_CYCLES
+# would bound nothing; the cap must survive the changed head. The two takes below
+# are the two cycles of a cap of 2, each on the head its own push produced.
+ORCH_STATE_DIR="$state_dir" "$WS" update issue-404 '.post_pr_budgets.ci_fix = null'
+assert_eq "$(ORCH_STATE_DIR="$state_dir" CI_FIX_MAX_CYCLES=2 "$WS" head-budget take issue-404 ci-fix ci-head-a)" "continue 1/2" \
+  "ci-fix spends its first cycle"
+assert_eq "$(ORCH_STATE_DIR="$state_dir" CI_FIX_MAX_CYCLES=2 "$WS" head-budget take issue-404 ci-fix ci-head-b)" "continue 2/2" \
+  "ci-fix counts a cycle on the head its own push produced"
+assert_eq "$(ORCH_STATE_DIR="$state_dir" CI_FIX_MAX_CYCLES=2 "$WS" head-budget take issue-404 ci-fix ci-head-c)" "at-cap 2/2" \
+  "ci-fix reaches its cap across cycles that each push a new head"
+ORCH_STATE_DIR="$state_dir" "$WS" update issue-404 '.post_pr_budgets.ci_fix = null'
+assert_eq "$(ORCH_STATE_DIR="$state_dir" CI_FIX_MAX_CYCLES=2 "$WS" head-budget take issue-404 ci-fix ci-head-d)" "continue 1/2" \
+  "a passing CI run clearing ci_fix is what resets the ci-fix budget"
+
 # Round-id identity: the token is the ONLY thing binding an artifact to its
 # delegation, so rapid consecutive mints must all differ. A regression to a
 # non-injective form (e.g. concatenated $RANDOM$RANDOM) is caught here.
@@ -146,6 +179,9 @@ assert_file_contains "$merge_workflow" '| Base sync |' \
 # PR body cites commits that no longer exist; worktree-push owns that remap.
 assert_file_contains "$submit_workflow" 'scripts/worktree-push --worktree' \
   "submit-pr pushes through the SHA-reconciling worktree-push wrapper"
+start_workflow="$SKILL_DIR/workflows/start-worktree.md"
+assert_file_contains "$start_workflow" 'post_pr_stop: .post_pr_stop' \
+  "start-worktree reads the final stop into the session summary"
 # No check that submit-pr states the unreconciled pre-rebase SHA publication
 # ban. That rule lives only in prose and the wrapper pin above carries the
 # mechanism instead.

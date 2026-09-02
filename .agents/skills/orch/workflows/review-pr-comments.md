@@ -11,9 +11,23 @@ Route PR review comments to domain agents, fix the valid ones, reply to and reso
 
 **Caller context** (via `⤵`): `worktree`; `lifecycle` — `"managed"` (return at § 8) or `"self"` (default); `issue_id` — the workflow-state key, the normalized issue ID, never the bare GitHub issue number; `pr_number`.
 
-**Standalone init** (`lifecycle: "self"`): `git-context issue-from-branch .` and `gh pr view --json number -q .number` give `ISSUE_ID` and `PR_NUMBER`; when `workflow-state exists --json [ISSUE_ID]` reports false, resolve `WT_PATH`, read the branch with `git-context branch`, and run `workflow-state init`.
+Resolve `ORCH_DECISION_MODE` once for this post-PR workflow:
 
-On any `gh` or `github.sh` failure: halt, report the error, and ask `Retry` | `Skip step` | `Abort`.
+```bash
+.agents/skills/orch/scripts/orch-env ORCH_DECISION_MODE auto-recommended
+```
+
+**Standalone init** (`lifecycle: "self"`): `gh pr view --json number -q .number` gives `PR_NUMBER`, and `git-context issue-from-branch .` gives `ISSUE_ID` when the branch carries an issue id. When it does not, `ISSUE_ID` is `pr-[PR_NUMBER]`, the same repository-local fallback key [`ci-fix.md` § 1](ci-fix.md) and [`merge-pr.md` § 3](merge-pr.md) use; a branch with no issue id is ordinary, not a stop. Then, when `workflow-state exists --json [ISSUE_ID]` reports false, resolve `WT_PATH`, read the branch with `git-context branch`, and run `workflow-state init`.
+
+Both commands below write to that state, so the key must resolve and the state
+must exist before either runs. Except under `--dry-run`, this triage pass is a
+continuing action:
+
+```bash
+.agents/skills/orch/scripts/workflow-state update [ISSUE_ID] '.post_pr_stop = null'
+```
+
+On any `gh` or `github.sh` failure, report the error. `auto-recommended` retries once and logs `Retry`; a repeated failure records the named stop `github-read-failed` per [SKILL.md § The Cycle](../SKILL.md#the-cycle). `ask` presents `Retry` | `Skip step` | `Abort`, with `Retry` recommended.
 
 ## 1. Fetch And Parse
 
@@ -44,7 +58,7 @@ gh api user -q .login
 
 **Extract** per item: `thread_id`/`comment_id`, `author`, `body`, `path`, `line`, `url`, and `source` (`inline` or `pr-level`). Bot review summaries additionally get a `section` and a keyword-derived source type — architectural, documentation, security, testing, performance, or plain suggestion — plus `blocking: true` for security items and `false` when the text says non-blocking or optional. Skip anything the bot labels an inline comment: those are already captured as review threads, with the bot username as `author`. Never filter bot inline threads out.
 
-**Issue context.** `issue_id` from the caller, else `git-context issue-from-branch .`; ask the user if nothing matches. Resolve `WT_PATH` as `git-context repo-root "[DIR]"`, `[DIR]` being `worktree exists`/`worktree path` when they match and `.` otherwise.
+**Issue context.** `issue_id` from the caller, else the `ISSUE_ID` the standalone init above resolved, which falls back to `pr-[PR_NUMBER]` and so always has a value. Resolve `WT_PATH` as `git-context repo-root "[DIR]"`, `[DIR]` being `worktree exists`/`worktree path` when they match and `.` otherwise.
 
 Fill `Worktree:` from `git -C "[DIR]" rev-parse --show-toplevel`.
 
@@ -364,11 +378,14 @@ Auto-resolve every thread where a reply was posted; keep open only threads await
 
 (Empty if all items were addressed.)
 
-Awaiting your response — ask questions, override skipped items, or confirm done.
+Under `ask` only: awaiting your response to ask questions, override skipped items, or confirm done.
 
 </output_format>
 
-**Stop and wait for the user.** A request to fix a skipped item delegates that single item via § 6.1, pushes, and returns here. Confirmation goes to § 8.
+`auto-recommended` logs `Continue`, clears any stop, and goes to § 8 without a question, while `ask` stops here and a managed run returns the pending choice to its caller rather than continuing because its lifecycle is managed.
+
+A request to fix a skipped item delegates that single item via § 6.1, pushes,
+and returns here. Confirmation clears any stop and goes to § 8.
 
 **Standalone only**: post the cumulative summary as a PR comment when there were fixes or created issues, written to a file first, and on the Linear issue too when `TRACKER` is `linear`.
 
@@ -408,4 +425,4 @@ An issue id is not finding text and stays inline:
 .agents/skills/orch/scripts/workflow-state append [ISSUE_ID] pr_comment_review.issues_created "[CREATED_ISSUE_ID]"
 ```
 
-**Managed**: return to the parent workflow's next section. **Standalone**: session complete.
+**Managed**: return to the parent workflow's next section. **Standalone**: return `.post_pr_stop` when present; otherwise the triage session is complete.

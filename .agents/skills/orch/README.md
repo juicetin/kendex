@@ -41,17 +41,18 @@ Invoke through your AI coding harness (`/orch <command>`, `/skill:orch <command>
 |----------|---------|---------|
 | `ORCH_STATE_DIR` | State-file directory (the `--state-dir` flag wins when both are set). `oversee-watch` joins relative values to the project root and preserves absolute values | `tmp` |
 | `GH_ISSUE_PATTERN` | Regex for issue IDs in branch names (matched case-insensitively, then canonicalized: `issue-N` lowercase, Linear-style uppercase) | `([A-Z]+-[0-9]+\|issue-[0-9]+)` |
-| `CI_FIX_MAX_CYCLES` | Max automated ci-fix cycles per PR submission or merge recovery | `6` |
+| `CI_FIX_MAX_CYCLES` | Max automatic standalone ci-fix cycles for one PR; `workflow-state head-budget take` counts them across the heads the cycles push, and a passing or unconfigured CI run clears the count. Managed submission and merge recovery keep their own cycle caps | `6` |
 | `REVIEW_MAX_CYCLES` | Max internal re-review cycles per issue in review-pr § 4; the `rereview_panel` write raises `rereview_cycles` and refuses at it, so the number configured is the number of re-entries allowed | `4` |
-| `REVIEW_MAX_EXTERNAL_ROUNDS` | Max external review rounds on an open PR. At or past it a finding gets a disposition and no fix push, except a defect the diff introduces or arms | `4` |
+| `REVIEW_MAX_EXTERNAL_ROUNDS` | Max external comment-triage passes and automatic review-wait restarts on one PR head. Comment triage owns `pr_comment_review.iterations`; `workflow-state head-budget take` separately spends every automatic wait restart, starting the count over on a changed head, and accepted gate evidence clears it | `4` |
 | `REVIEWER_SLOT_BUDGET` | Total concurrent agent-session budget, counting the primary; `0` = unlimited. Reviews run in waves when the reviewer set exceeds the free slots. On Codex, set it to the cap `spawn-adapter slots` reports | `0` |
-| `ORCH_DECISION_MODE` | `ask` presents decision points; `auto-recommended` executes the recommended option without asking. Review findings disposition is by rule in EVERY mode — no mode presents a selection menu over findings. The always-ask set in [SKILL.md § The Cycle](SKILL.md#the-cycle) applies in every mode | `ask` |
-| `ORCH_MERGE_AUTONOMY` | `auto` merges without asking once every merge gate is green; `ask` presents the merge decision. A `MERGE_READY = false` state never auto-merges | `ask` |
+| `ORCH_DECISION_MODE` | `ask` presents decision points; `auto-recommended` executes the recommended option without asking. Review findings disposition is by rule in EVERY mode — no mode presents a selection menu over findings. The always-ask set in [SKILL.md § The Cycle](SKILL.md#the-cycle) applies in every mode | `auto-recommended` |
+| `ORCH_MERGE_AUTONOMY` | `auto` merges without asking once every merge gate is green; `ask` presents the merge decision. A `MERGE_READY = false` state never auto-merges | `auto` |
+| `PR_REVIEW_ON_TIMEOUT` | `proceed` advances only when no reviewer engaged and no review thread is open; `block` reports the timeout | `proceed` |
 | `ORCH_OVERSEER_LANES` | Max concurrent lanes `oversee` keeps in flight | `3` |
 | `QA_PERF_PATHS` | Space-separated path globs whose modification adds the `needs-perf-test` QA signal in `workflows/review-pr.md` § 5. Empty means the diff scan never raises it | empty |
 | `RECONCILE_STALE_HOURS` | Hours before an In Progress / In Review item counts as started-stale in `reconcile-work-items` sweeps | `24` |
 | `WORKTREE_CLI` | Path to the worktree CLI `open-terminal` drives; empty resolves the installed worktree skill's `scripts/worktree` | *(resolved)* |
-| Review-gate settings | `REVIEW_GATE_MODE`, `PR_REVIEW_GATE`, `PR_REVIEW_CHECK`, `PR_REVIEW_ON_TIMEOUT`, `PR_REVIEW_WAIT_SECS` — [references/gates.md](references/gates.md) | — |
+| Review-gate settings | `REVIEW_GATE_MODE`, `PR_REVIEW_GATE`, `PR_REVIEW_CHECK`, `PR_REVIEW_WAIT_SECS` — [references/gates.md](references/gates.md) | — |
 | Lane settings | `ORCH_LANE_DIRS`, `ORCH_LANE_ALIASES`, `ORCH_LANE_MAX_PCT`, `ORCH_TMUX_VERIFY_SECS` — `lanes --help`, `open-terminal --help` | — |
 
 ## Bundles
