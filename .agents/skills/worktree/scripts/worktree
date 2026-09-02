@@ -537,10 +537,25 @@ same_canonical_dir() {
   [[ "$a" == "$b" ]]
 }
 
-# Resolve PROJECT_ROOT via git (works at any depth, inside worktrees too)
-PROJECT_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)"
-if [[ -z "$PROJECT_ROOT" ]]; then
-  echo "Error: Not inside a git repository" >&2
+# Resolve PROJECT_ROOT via git (works at any depth, inside worktrees too).
+# The assignment sits in the condition on purpose (KEN-1166): under `set -e` a
+# bare assignment's nonzero status escapes before the test below can run, so
+# the refusal never printed. The failure branch re-runs the lookup for the
+# stderr the first call discarded, so the message carries git's cause.
+if ! PROJECT_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || [[ -z "$PROJECT_ROOT" ]]; then
+  GIT_LOOKUP_DIAG=""
+  if ! GIT_LOOKUP_DIAG="$(git rev-parse --show-toplevel 2>&1 >/dev/null)"; then
+    # Normalize a multi-line fatal to one line; "fatal: " is noise under a line
+    # that already says the lookup failed.
+    GIT_LOOKUP_DIAG="${GIT_LOOKUP_DIAG//$'\n'/ }"
+    GIT_LOOKUP_DIAG="${GIT_LOOKUP_DIAG#fatal: }"
+  fi
+  {
+    echo "Error: could not resolve a git repository from: $PWD"
+    if [[ -n "$GIT_LOOKUP_DIAG" ]]; then echo "  git said: $GIT_LOOKUP_DIAG"; fi
+    echo "  Run it from a checkout of the repository you mean:"
+    echo "    cd <main checkout> && .agents/skills/worktree/scripts/worktree <command>"
+  } >&2
   exit 1
 fi
 

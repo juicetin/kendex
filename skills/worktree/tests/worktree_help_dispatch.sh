@@ -8,7 +8,16 @@
 # the dispatcher routes. tools/tests/help-inert.test.sh holds the same
 # contract for the top-level forms, alongside the other CLIs that each
 # carried their own copy of it.
+#
+# The same boundary from the other side: a command that is not help does
+# reach the repository lookup, and outside a repository it refuses with a
+# diagnostic naming the cwd rather than dying at git's bare 128 (KEN-1166).
 set -euo pipefail
+
+# A pre-commit hook exports GIT_DIR and GIT_INDEX_FILE, which point every git
+# call in this file back at the real repository: the fixtures below would be
+# built in it, and the no-repository fixture would look like a repository.
+unset GIT_DIR GIT_COMMON_DIR GIT_WORK_TREE GIT_INDEX_FILE
 
 TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKTREE_SCRIPT="${WORKTREE_SCRIPT:-$(cd "$TEST_DIR/.." && pwd)/scripts/worktree}"
@@ -116,6 +125,45 @@ elif [[ "$norepo_status" -eq 128 && "$norepo_probe" == *"not a git repository"* 
     out=$(cd "$NOREPO" && "$WORKTREE_SCRIPT" "$cmd" --help) || status=$?
     assert_eq "$status" 0 "worktree $cmd --help exits 0 outside a git repository"
   done
+
+  # Past help, the repository lookup runs and has nothing to find. It refuses
+  # once, naming the cwd and the checkout to run from; `remove` is the form
+  # that gets run from the worktrees' parent, so it is held here too.
+  for cmd in "list" "remove ISSUE-GONE"; do
+    status=0
+    # shellcheck disable=SC2086
+    out=$(cd "$NOREPO" && "$WORKTREE_SCRIPT" $cmd 2>"$TMP_ROOT/norepo.err") || status=$?
+    err=$(cat "$TMP_ROOT/norepo.err")
+    assert_eq "$status" 1 "worktree $cmd exits 1 outside a git repository"
+    assert_contains "$err" "could not resolve a git repository from: $NOREPO" \
+      "worktree $cmd names the cwd it could not resolve a repository from"
+    assert_contains "$err" "Run it from a checkout of the repository you mean" \
+      "worktree $cmd names what to do instead"
+    # One refusal serves every non-help command, so its example names none: a
+    # subcommand baked in here is the wrong next step for the other callers,
+    # and `remove` deletes a worktree and a branch.
+    assert_contains "$err" "scripts/worktree <command>" \
+      "worktree $cmd offers a recovery example with no subcommand of its own"
+    assert_eq "$out" "" "worktree $cmd prints nothing on stdout outside a git repository"
+  done
+
+  # The cause is git's, not the script's guess at it. A repository with no git
+  # to read it is the case that separates the two: the cwd IS a checkout, and
+  # a message asserting otherwise sends the operator to a second one.
+  # LC_ALL=C like the probe above: the message under test is translated, so an
+  # unpinned locale reddens this on a workstation and nowhere else.
+  mkdir -p "$TMP_ROOT/empty-bin"
+  status=0
+  out=$(cd "$TEST_DIR" && LC_ALL=C PATH="$TMP_ROOT/empty-bin" "$WORKTREE_SCRIPT" list 2>"$TMP_ROOT/nogit.err") || status=$?
+  # Read the quoted line, not the whole stream: without the anchor the needle
+  # also matches the shell's own unredirected message, which is what stderr
+  # carries when the refusal quotes nothing at all.
+  said=""
+  if ! said=$(grep -F '  git said: ' "$TMP_ROOT/nogit.err"); then said=""; fi
+  assert_eq "$status" 1 "worktree list exits 1 when git is not on PATH"
+  assert_contains "$said" "git: command not found" \
+    "the refusal quotes git's own account rather than asserting a cause"
+  assert_eq "$out" "" "worktree list prints nothing on stdout when git is not on PATH"
 else
   FAIL=$((FAIL + 1))
   printf '  FAIL  %s\n        status:   %s\n        diagnostic: %s\n' \
