@@ -1,4 +1,8 @@
-import type { CandidateGroup, ImportCandidate } from "@/bindings";
+import type {
+  CandidateGroup,
+  CandidateOrigin,
+  ImportCandidate,
+} from "@/bindings";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import {
@@ -16,6 +20,17 @@ export interface RowChoice {
   destination: string;
   licenseConfirmed: boolean;
   licenseBasis: string;
+}
+
+/** Where each unselectable origin was and why. One line per origin and no
+ * dedup here: core's inventory folds a place refused for the same reason
+ * into one row, so the file claimed both as a marketplace's edited copy
+ * and by the unmanaged scan arrives already merged. */
+function refusals(origins: CandidateOrigin[]): string[] {
+  return origins.map((origin) => {
+    const place = origin.locations.join(" = ");
+    return origin.problem ? `${place} — ${origin.problem}` : place;
+  });
 }
 
 export function groupLabel(group: CandidateGroup): string {
@@ -37,7 +52,13 @@ export function groupLabel(group: CandidateGroup): string {
 
 /** One candidate: the checkbox, the origin picker when bytes differ, the
  * rename input when a harness would refuse the name, and the licence
- * evidence for marketplace-origin content. */
+ * evidence for marketplace-origin content.
+ *
+ * A candidate with nothing selectable lists where its bytes were and the
+ * reason core gave for each: a marketplace nobody fetched, an agent in a
+ * format a catalog cannot store. The label beside the name says only that
+ * nothing here can be imported, because "not readable" would be the wrong
+ * cause for a Codex agent, which reads fine. */
 export function MineImportRow({
   candidate,
   choice,
@@ -70,9 +91,21 @@ export function MineImportRow({
         <span className="font-medium">{candidate.name}</span>
         <span className="text-xs text-muted-foreground">
           {candidate.kind}
-          {chosen ? ` · ${groupLabel(chosen.group)}` : " · not readable now"}
+          {chosen
+            ? ` · ${groupLabel(chosen.group)}`
+            : " · nothing kendex can import"}
         </span>
       </div>
+      {/* Refusals only when nothing on the row is selectable: beside a
+          selectable origin the reason explains a copy the person cannot act
+          on, and the picker below already offers only what can be chosen. */}
+      {readable.length === 0 ? (
+        <ul className="pl-6 text-xs text-warning">
+          {refusals(candidate.origins).map((refusal) => (
+            <li key={refusal}>{refusal}</li>
+          ))}
+        </ul>
+      ) : null}
       {choice.checked && readable.length > 1 ? (
         <div className="pl-6">
           <Select

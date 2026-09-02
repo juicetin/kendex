@@ -791,8 +791,17 @@ export type CandidateOrigin = {
 	group: CandidateGroup,
 	/**  Every place these exact bytes were seen. */
 	locations: string[],
-	/**  Content identity — what apply revalidates before copying. */
+	/**
+	 *  Content identity — what apply revalidates before copying. Empty
+	 *  where there is nothing to select.
+	 */
 	hash: string,
+	/**
+	 *  Why these bytes are not on offer, when a catalog is what refused
+	 *  them: an agent in a format it cannot store. Null where the bytes
+	 *  were never read at all.
+	 */
+	problem: string | null,
 };
 
 export type CapabilityRow = {

@@ -14,6 +14,11 @@ use crate::source_read::SealedSource;
 
 use super::{Bytes, CandidateGroup, ImportSelection, ResolvedSelection, license_recognized};
 
+mod notices;
+mod offer;
+use notices::notice_files;
+use offer::offered;
+
 /// The observed on-disk path of every installation — provenance rows carry
 /// no path, so the scan is asked once and joined here. Managed installs
 /// are included: their observed bytes are what an "edited copy" is.
@@ -38,16 +43,42 @@ pub(super) fn unmanaged_paths(
     paths
 }
 
-/// Where one provenance row's bytes live — possibly two answers, when the
-/// installed copy of a marketplace package differs from the marketplace's
-/// own bytes. Empty for rows import cannot carry (config-entry kinds have
-/// no file of their own to copy).
-/// The `String` is where the bytes were read from, said the way kendex
-/// says a path: [`crate::paths::slashed`], because callers match on it
-/// (`.agents/skills/…`) and a `\` there matches nothing.
-type OriginRead = (CandidateGroup, Option<Bytes>, String, Option<PathBuf>);
+/// One place a provenance row's bytes were found, as the wizard may offer
+/// it.
+pub(super) struct OriginRead {
+    pub group: CandidateGroup,
+    /// The bytes, or `None` where there are none to offer: a marketplace
+    /// nobody fetched, or an origin [`offered`] refuses.
+    pub bytes: Option<Bytes>,
+    /// Where the bytes were read from, said the way kendex says a path:
+    /// [`crate::paths::slashed`], because callers match on it
+    /// (`.agents/skills/…`) and a `\` there matches nothing.
+    pub location: String,
+    /// Why these bytes are not on offer, when [`offered`] refuses them.
+    /// Its own field rather than prose folded into `location`, which every
+    /// reader takes for a place.
+    pub problem: Option<String>,
+    pub read_from: Option<PathBuf>,
+}
 
+/// Every origin one provenance row offers, each judged by [`offered`].
+///
+/// Possibly two, when the installed copy of a marketplace package differs
+/// from the marketplace's own bytes. Empty for rows import cannot carry
+/// (config-entry kinds have no file of their own to copy).
 pub(super) fn origins_of(
+    env: &Env,
+    row: &crate::library::ProvenanceRow,
+    observed: &BTreeMap<(Scope, ItemKind, String), PathBuf>,
+) -> Vec<OriginRead> {
+    reads(env, row, observed)
+        .into_iter()
+        .map(|read| offered(row.kind, read))
+        .collect()
+}
+
+/// Where the bytes are, before anything asks whether they may be copied.
+fn reads(
     env: &Env,
     row: &crate::library::ProvenanceRow,
     observed: &BTreeMap<(Scope, ItemKind, String), PathBuf>,
@@ -66,9 +97,13 @@ pub(super) fn origins_of(
                 crate::source::local_source_root(env, &row.scope)
             };
             match catalog_bytes(&root, source, row) {
-                Some((bytes, location, read_from)) => {
-                    vec![(CandidateGroup::Own, bytes, location, Some(read_from))]
-                }
+                Some((bytes, location, read_from)) => vec![OriginRead {
+                    group: CandidateGroup::Own,
+                    bytes: Some(bytes),
+                    location,
+                    problem: None,
+                    read_from: Some(read_from),
+                }],
                 None => Vec::new(),
             }
         }
@@ -92,12 +127,13 @@ pub(super) fn origins_of(
             else {
                 return Vec::new();
             };
-            vec![(
-                CandidateGroup::Unmanaged,
-                Some(bytes),
-                crate::paths::slashed(path),
-                Some(path.clone()),
-            )]
+            vec![OriginRead {
+                group: CandidateGroup::Unmanaged,
+                bytes: Some(bytes),
+                location: crate::paths::slashed(path),
+                problem: None,
+                read_from: Some(path.clone()),
+            }]
         }
     }
 }
@@ -105,7 +141,7 @@ pub(super) fn origins_of(
 /// A marketplace row's origins: the marketplace's own bytes, and — when
 /// the installed copy no longer matches them — the edited copy beside the
 /// original, so the choice pass 3 requires is a real choice.
-pub(super) fn marketplace_origins(
+fn marketplace_origins(
     env: &Env,
     row: &crate::library::ProvenanceRow,
     source: &str,
@@ -114,17 +150,18 @@ pub(super) fn marketplace_origins(
 ) -> Vec<OriginRead> {
     let manifest = scope_manifest(env, &row.scope);
     let unreachable = |license: Option<String>| {
-        vec![(
-            CandidateGroup::Marketplace {
+        vec![OriginRead {
+            group: CandidateGroup::Marketplace {
                 source: source.to_owned(),
                 repo: repo.to_owned(),
                 license_recognized: license.as_deref().is_some_and(license_recognized),
                 license,
             },
-            None,
-            format!("{repo} (not fetched)"),
-            None,
-        )]
+            bytes: None,
+            location: format!("{repo} (not fetched)"),
+            problem: None,
+            read_from: None,
+        }]
     };
     let resolved = match crate::source::resolve(env, &row.scope, source, &manifest) {
         Ok(crate::source::SourceState::Ready(resolved)) => resolved,
@@ -149,17 +186,18 @@ pub(super) fn marketplace_origins(
         return unreachable(license);
     };
     let source_hash = bytes.hash();
-    let mut origins = vec![(
-        CandidateGroup::Marketplace {
+    let mut origins = vec![OriginRead {
+        group: CandidateGroup::Marketplace {
             source: source.to_owned(),
             repo: repo.to_owned(),
             license: license.clone(),
             license_recognized: license.as_deref().is_some_and(license_recognized),
         },
-        Some(bytes),
-        format!("{repo}:{}", rel(&sealed, &path)),
-        Some(path.clone()),
-    )];
+        bytes: Some(bytes),
+        location: format!("{repo}:{}", rel(&sealed, &path)),
+        problem: None,
+        read_from: Some(path.clone()),
+    }];
     // The installed copy, when it diverged: read at its observed path.
     if let Some(installed) = observed.get(&(row.scope.clone(), row.kind, row.name.clone()))
         && let Some(edited) = installed
@@ -168,32 +206,37 @@ pub(super) fn marketplace_origins(
             .and_then(|sealed| read_bytes(&sealed, row.kind, installed))
         && edited.hash() != source_hash
     {
-        origins.push((
-            CandidateGroup::Edited {
+        // An agent installs as the file its harness reads, so the edited
+        // copy of a marketplace agent under Codex is the TOML rendering —
+        // the same bytes a catalog cannot store, reaching `offered` by the
+        // other door.
+        origins.push(OriginRead {
+            group: CandidateGroup::Edited {
                 source: source.to_owned(),
                 repo: repo.to_owned(),
                 license_recognized: license.as_deref().is_some_and(license_recognized),
                 license,
             },
-            Some(edited),
-            crate::paths::slashed(installed),
-            Some(installed.clone()),
-        ));
+            bytes: Some(edited),
+            location: crate::paths::slashed(installed),
+            problem: None,
+            read_from: Some(installed.clone()),
+        });
     }
     origins
 }
 
-pub(super) fn catalog_bytes(
+fn catalog_bytes(
     root: &Path,
     provenance: &str,
     row: &crate::library::ProvenanceRow,
-) -> Option<(Option<Bytes>, String, PathBuf)> {
+) -> Option<(Bytes, String, PathBuf)> {
     let sealed = SealedSource::open(root).ok()?;
     let config = crate::source::source_config_for(&sealed, provenance).ok()?;
     let path = crate::source::find_item(&sealed, &config, row.kind, &row.name)?;
     let bytes = read_bytes(&sealed, row.kind, &path)?;
     let location = crate::paths::slashed(&root.join(rel_path(&sealed, &path)));
-    Some((Some(bytes), location, path))
+    Some((bytes, location, path))
 }
 
 pub(super) fn read_bytes(sealed: &SealedSource, kind: ItemKind, path: &Path) -> Option<Bytes> {
@@ -244,26 +287,50 @@ pub(super) fn resolve_selection(
     selection: &ImportSelection,
 ) -> Result<ResolvedSelection> {
     let observed = unmanaged_paths(env, scopes);
+    // Where the bytes were, for a selection nothing matches, and whether
+    // any origin was selectable at all. `selectable` is what tells the two
+    // refusals apart: with a usable origin in the list, a hash matching
+    // none of them is a stale preview, and naming the other origins would
+    // name what was never the problem. `super::no_importable_bytes` writes
+    // the sentence; this caller takes the one-line layout, because a
+    // `CoreError` that does not own its breaks has them escaped where the
+    // CLI prints it.
+    let mut unusable: Vec<(String, Option<String>)> = Vec::new();
+    let mut selectable = false;
     for row in crate::library::provenance(env, scopes)? {
         if row.kind != selection.kind || row.name != selection.name {
             continue;
         }
-        for (group, bytes, _, read_from) in origins_of(env, &row, &observed) {
-            let Some(bytes) = bytes else { continue };
+        for read in origins_of(env, &row, &observed) {
+            let Some(bytes) = read.bytes else {
+                unusable.push((read.location, read.problem));
+                continue;
+            };
+            selectable = true;
             if bytes.hash() != selection.hash {
                 continue;
             }
-            let notices = match group.licensed_source() {
+            let notices = match read.group.licensed_source() {
                 Some((source, _, _)) => notice_files(env, &row.scope, source)?,
                 None => Vec::new(),
             };
             return Ok(ResolvedSelection {
                 bytes,
-                group,
+                group: read.group,
                 notices,
-                read_from,
+                read_from: read.read_from,
             });
         }
+    }
+    if !selectable && !unusable.is_empty() {
+        return Err(CoreError::Authoring {
+            message: super::no_importable_bytes(
+                selection.kind,
+                &selection.name,
+                &unusable,
+                super::Places::OneLine,
+            ),
+        });
     }
     Err(CoreError::Authoring {
         message: format!(
@@ -272,72 +339,4 @@ pub(super) fn resolve_selection(
             selection.name
         ),
     })
-}
-
-/// Root-level licence and attribution files of one catalog — the evidence
-/// that must travel with copied bytes.
-///
-/// Every read the source refuses is the refusal: the open, the listing,
-/// each entry's own nature, and each file's bytes. Other listings in this
-/// crate answer an unreadable directory by drawing no rows, which costs a
-/// surface some rows; here it would copy somebody's bytes with their
-/// licence left behind and say nothing. A source that is not resolvable at
-/// all is the one answer that is not a refusal: it has no root to carry
-/// evidence from, and the import's own provenance rules judge that.
-pub(super) fn notice_files(
-    env: &Env,
-    scope: &Scope,
-    source: &str,
-) -> Result<Vec<(String, Vec<u8>)>> {
-    let manifest = scope_manifest(env, scope);
-    let Ok(crate::source::SourceState::Ready(resolved)) =
-        crate::source::resolve(env, scope, source, &manifest)
-    else {
-        return Ok(Vec::new());
-    };
-    // Carried, not swallowed, though no deterministic case drives it:
-    // `resolve` hands back `Ready` only after finding the root a
-    // directory, so what is left here is the root going away or losing its
-    // permissions between that answer and this open. A refusal is the
-    // right default for a read whose absence would publish a package
-    // without its licence, whether or not a fixture can stage it.
-    let sealed = SealedSource::open(&resolved.root)?;
-    let mut notices = Vec::new();
-    for entry in sealed.entries(&resolved.root)? {
-        // The stem is read off the lossy spelling, so bytes no UTF-8
-        // decodes cannot hide a licence behind an ASCII name: on Linux a
-        // filename is bytes, and `LICENSE.<invalid>` has the stem this
-        // collects.
-        let Some(raw) = entry.file_name() else {
-            continue;
-        };
-        let shown = raw.to_string_lossy();
-        let stem = shown
-            .split('.')
-            .next()
-            .unwrap_or(&shown)
-            .to_ascii_uppercase();
-        if !matches!(stem.as_str(), "LICENSE" | "LICENCE" | "NOTICE" | "COPYING") {
-            continue;
-        }
-        // A name the copy could not reproduce is the refusal, not a skip:
-        // the notice is written under this name at the destination, and
-        // there is no name to write it under.
-        let Some(name) = raw.to_str() else {
-            return Err(CoreError::SourceEscape {
-                path: entry.clone(),
-                reason: "a licence file's name is not valid UTF-8, so the copy cannot carry it"
-                    .to_owned(),
-            });
-        };
-        // Asked through the sealed reader, which refuses a link rather
-        // than following it: read as a boolean, a symlinked LICENSE is
-        // skipped as though it were no file at all, and the copy goes out
-        // without the notice it was standing for.
-        if sealed.entry(&entry)?.is_some_and(|meta| meta.is_file()) {
-            notices.push((name.to_owned(), sealed.read(&entry)?));
-        }
-    }
-    notices.sort();
-    Ok(notices)
 }

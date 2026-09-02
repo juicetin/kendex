@@ -161,9 +161,21 @@ fn selection(
         .collect();
     let origin = match (&args.origin, readable.len()) {
         (_, 0) => {
-            return Err(format!(
-                "'{name}' has no readable bytes right now — refresh its marketplace first"
-            )
+            // Core owns the sentence and the escaping — the same refusal
+            // apply gives for the same condition; the layout is this
+            // verb's, one origin per line, which is what makes it a
+            // message that owns its breaks.
+            let places: Vec<(String, Option<String>)> = candidate
+                .origins
+                .iter()
+                .map(|origin| (origin.locations.join(" = "), origin.problem.clone()))
+                .collect();
+            return Err(Lines(author::import::no_importable_bytes(
+                kind,
+                name,
+                &places,
+                author::import::Places::PerLine,
+            ))
             .into());
         }
         (None, 1) => readable[0],
@@ -218,7 +230,7 @@ fn selection(
 fn list_candidates(candidates: &[author::ImportCandidate], json: bool) -> CliResult {
     if json {
         answer(&serde_json::to_string_pretty(&serde_json::json!({
-            "schema": 1,
+            "schema": author::import::IMPORT_SCHEMA,
             "candidates": candidates,
         }))?);
         return Ok(());
@@ -241,15 +253,22 @@ fn list_candidates(candidates: &[author::ImportCandidate], json: bool) -> CliRes
                 },
                 author::import::CandidateGroup::Unmanaged => "found on disk".to_owned(),
             };
+            // An origin with no hash has nothing to select, which is not
+            // always a read that failed: a Codex agent reads fine and is
+            // merely a format a catalog cannot store. The word says only
+            // that it cannot be taken; `problem` says why.
             let hash = match origin.hash.is_empty() {
-                true => "unreadable".to_owned(),
+                true => "unusable".to_owned(),
                 false => origin.hash[..12].to_owned(),
             };
+            let places = match &origin.problem {
+                Some(problem) => format!("{} — {problem}", origin.locations.join(" = ")),
+                None => origin.locations.join(" = "),
+            };
             out(&format!(
-                "{}  {}  [{group}]  {hash}  {}",
+                "{}  {}  [{group}]  {hash}  {places}",
                 candidate.kind.name(),
                 candidate.name,
-                origin.locations.join(" = "),
             ));
         }
     }
