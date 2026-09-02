@@ -10,6 +10,7 @@ import {
   HarnessSelect,
   isInstallable,
 } from "@/components/marketplaces/harness-select";
+import { RecordsUnreadableNote } from "@/components/marketplaces/packages-trouble";
 import { RepoAction } from "@/components/marketplaces/repo-action";
 import { useCatalog } from "@/components/marketplaces/use-catalog";
 import { PageHeader } from "@/components/page-header";
@@ -28,6 +29,10 @@ import { type BundleRef, useNavStore } from "@/stores/nav";
  * the normal preview, safety score in view and never a gate. From a
  * repository nobody subscribes to yet, the members are listed and
  * Subscribe is the one action. */
+/** Nothing answered yet. A destination decides which tools can take the
+ *  install and which extras it brings, so both reset with it. */
+const NO_CHOICE: Choice = { harnesses: null, method: null, optional: [] };
+
 export function BundleDetailPage() {
   const bundleRef = useNavStore((s) => s.bundleRef);
   if (!bundleRef) return null;
@@ -49,11 +54,7 @@ function BundleDetail({ bundleRef }: { bundleRef: BundleRef }) {
   const busy = useMarketplacesStore((s) => s.busy);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [destination, setDestination] = useState<Scope | null>(null);
-  const [choice, setChoice] = useState<Choice>({
-    harnesses: null,
-    method: null,
-    optional: [],
-  });
+  const [choice, setChoice] = useState<Choice>(NO_CHOICE);
 
   useEffect(() => {
     if (ready) void loadBundle(catalog, bundle);
@@ -103,6 +104,12 @@ function BundleDetail({ bundleRef }: { bundleRef: BundleRef }) {
     );
     if (items.length > 0) installItems(items);
   };
+  // This scope's lock could not be read, so no member's standing is known
+  // and every per-member box is already off. "Install all" asks about the
+  // set rather than a member, so it reads the scope's own answer off the
+  // payload: a member the catalog dropped says "no longer offered" with or
+  // without a lock, so no scan of the rows could tell.
+  const recordsUnknown = detail?.recordsUnreadable ?? false;
   // Which tools the picker may offer follows what is actually ticked; with
   // nothing ticked the set is every kind, which is what the whole bundle
   // would carry.
@@ -135,7 +142,10 @@ function BundleDetail({ bundleRef }: { bundleRef: BundleRef }) {
         }
         action={
           subscribed ? (
-            <Button disabled={busy || !detail} onClick={() => installItems([])}>
+            <Button
+              disabled={busy || !detail || recordsUnknown}
+              onClick={() => installItems([])}
+            >
               Install all
             </Button>
           ) : catalog.by === "repo" ? (
@@ -163,6 +173,11 @@ function BundleDetail({ bundleRef }: { bundleRef: BundleRef }) {
               </p>
             ) : (
               <>
+                {recordsUnknown && scope ? (
+                  <div className="mb-3">
+                    <RecordsUnreadableNote scope={scope} />
+                  </div>
+                ) : null}
                 <div className="divide-y rounded-lg border">
                   {detail.members.map((member) => (
                     <BundleMemberLine
@@ -187,11 +202,7 @@ function BundleDetail({ bundleRef }: { bundleRef: BundleRef }) {
                         // Which tools can take this is a fact about the
                         // destination, so a choice made against another one
                         // is not an answer here.
-                        setChoice({
-                          harnesses: null,
-                          method: null,
-                          optional: [],
-                        });
+                        setChoice(NO_CHOICE);
                         setDestination(next);
                       }}
                     />
