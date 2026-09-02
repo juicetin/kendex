@@ -71,6 +71,7 @@ LINEAR_SKIP_API_KEY_RESOLUTION=1
 source "$SCRIPT_DIR/../lib/common.sh"
 unset LINEAR_SKIP_API_KEY_RESOLUTION
 source "$SCRIPT_DIR/../lib/cache.sh"
+source "$SCRIPT_DIR/../lib/cache-dates.sh"
 source "$SCRIPT_DIR/../lib/attachments.sh"
 
 # =============================================================================
@@ -231,23 +232,25 @@ cache_list_issues() {
         local cycle_id=""
         case "$cycle" in
         current | previous | next)
-            local today_iso cycles_file="$CACHE_DIR/cycles.json"
-            today_iso=$(date -Iseconds)
+            local cycles_file="$CACHE_DIR/cycles.json"
             if [[ -f "$cycles_file" ]]; then
-                local working
-                working=$(cache_jq_file "$cycles_file" "null" --arg today "$today_iso" \
-                    '[.[] | select(.startsAt <= $today and .progress < 1)] | sort_by(.startsAt) | last // null')
+                local all_cycles working
+                all_cycles=$(cache_jq_file "$cycles_file" "[]" '.') || return 1
+                working=$(cache_working_cycle <<<"$all_cycles")
+                # The helpers answer with no cycle running too — they cut at
+                # today — so these arms hand `working` straight over rather than
+                # guarding on it. Guarding here gave one concept two answers:
+                # `cycles list --type past` named a cycle while `--cycle
+                # previous` refused, off the same cache.
                 case "$cycle" in
                 current)
                     cycle_id=$(echo "$working" | jq -r '.id // empty')
                     ;;
                 previous)
-                    cycle_id=$(cache_jq_file "$cycles_file" "null" -r --argjson w "$working" \
-                        'if $w then ([.[] | select(.startsAt < $w.startsAt)] | sort_by(.startsAt) | last | .id) // empty else empty end')
+                    cycle_id=$(cache_cycles_before "$working" <<<"$all_cycles" | jq -r 'first | .id // empty')
                     ;;
                 next)
-                    cycle_id=$(cache_jq_file "$cycles_file" "null" -r --argjson w "$working" \
-                        'if $w then ([.[] | select(.startsAt > $w.startsAt)] | sort_by(.startsAt) | first | .id) // empty else empty end')
+                    cycle_id=$(cache_cycles_after "$working" <<<"$all_cycles" | jq -r 'first | .id // empty')
                     ;;
                 esac
             fi
@@ -281,9 +284,8 @@ cache_list_issues() {
 
     # Filter by updated-since
     if [[ -n "$updated_since" ]]; then
-        local days="${updated_since%d}"
         local threshold
-        threshold=$(date -d "-$days days" -Iseconds 2>/dev/null || date -v-"${days}"d -Iseconds)
+        threshold=$(cache_utc_days_ago "${updated_since%d}")
         jq_filter="$jq_filter | [.[] | select(.updatedAt >= $(echo "$threshold" | jq -R '.'))]"
     fi
 
@@ -998,34 +1000,17 @@ cache_list_cycles() {
     fi
 
     # Apply type filter (date-based: "current" = most recent started + incomplete)
-    local today_iso
-    today_iso=$(date -Iseconds)
+    local working
+    working=$(cache_working_cycle <<<"$cycles")
     case "$cycle_type" in
     current)
-        cycles=$(echo "$cycles" | jq --arg today "$today_iso" \
-            '[.[] | select(.startsAt <= $today and .progress < 1)] | sort_by(.startsAt) | [last // empty]')
+        cycles=$(jq -n --argjson w "$working" '[$w // empty]')
         ;;
     upcoming | next)
-        local working
-        working=$(echo "$cycles" | jq --arg today "$today_iso" \
-            '[.[] | select(.startsAt <= $today and .progress < 1)] | sort_by(.startsAt) | last // null')
-        if [[ "$working" != "null" ]]; then
-            cycles=$(echo "$cycles" | jq --argjson w "$working" \
-                '[.[] | select(.startsAt > $w.startsAt)] | sort_by(.startsAt) | [first // empty]')
-        else
-            cycles=$(echo "$cycles" | jq 'sort_by(.startsAt) | [first // empty]')
-        fi
+        cycles=$(cache_cycles_after "$working" <<<"$cycles" | jq '[first // empty]')
         ;;
     past)
-        local working_start
-        working_start=$(echo "$cycles" | jq -r --arg today "$today_iso" \
-            '[.[] | select(.startsAt <= $today and .progress < 1)] | sort_by(.startsAt) | last // null | .startsAt // ""')
-        if [[ -n "$working_start" ]]; then
-            cycles=$(echo "$cycles" | jq --arg ws "$working_start" \
-                '[.[] | select(.startsAt < $ws)] | sort_by(.startsAt) | reverse')
-        else
-            cycles=$(echo "$cycles" | jq 'sort_by(.startsAt) | reverse')
-        fi
+        cycles=$(cache_cycles_before "$working" <<<"$cycles")
         ;;
     esac
 
