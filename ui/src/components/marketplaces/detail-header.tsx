@@ -13,18 +13,23 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Switch } from "@/components/ui/switch";
 import { TRY_AGAIN_LABEL } from "@/lib/copy";
-import { MARKETPLACES_UNCONFIRMED_TITLE } from "@/lib/copy-marketplaces";
+import {
+  FEATURED_MARKER,
+  MARKETPLACES_UNCONFIRMED_TITLE,
+} from "@/lib/copy-marketplaces";
+import { shortRevision } from "@/lib/labels";
 import { PAGE_BODY, WIDE_CONTENT_WIDTH } from "@/lib/layout";
 import { cn } from "@/lib/utils";
 import { useCommunityStore } from "@/stores/community";
 import { useMarketplacesStore } from "@/stores/marketplaces";
 
 /** The marketplace page's header for either kind of catalog: a
- * subscription's switch, refresh and unsubscribe, or a repository's one
- * Subscribe button. The words come from the catalog itself where it has
- * been read, and from the directory's listing until then. */
+ * subscription's refresh and unsubscribe, or a repository's one Subscribe
+ * button. The words come from the catalog itself where it has been read,
+ * and from the directory's listing until then. Whether a place offers this
+ * marketplace's packages is the Projects section's answer, not a switch
+ * up here with no place named beside it. */
 export function DetailHeader({
   requested,
   catalog,
@@ -37,7 +42,6 @@ export function DetailHeader({
   row: MarketplaceRow | undefined;
   summary: CatalogSummary | null;
 }) {
-  const toggle = useMarketplacesStore((s) => s.toggle);
   const checkForUpdates = useMarketplacesStore((s) => s.checkForUpdates);
   const busy = useMarketplacesStore((s) => s.busy);
   // A subscription row selected from rows a failed read left behind may
@@ -62,7 +66,7 @@ export function DetailHeader({
   const commit = row?.commit ?? summary?.commit ?? null;
   const metaLine = [
     row?.repo ?? row?.path ?? summary?.provenance ?? listing?.repo,
-    commit ? `@ ${commit.slice(0, 7)}` : null,
+    commit ? `@ ${shortRevision(commit)}` : null,
     meta?.license,
     meta?.author ? `by ${meta.author}` : null,
   ].filter(Boolean);
@@ -73,13 +77,6 @@ export function DetailHeader({
     const { scope, source } = catalog;
     action = (
       <>
-        {row ? (
-          <Switch
-            checked={row.enabled}
-            onCheckedChange={(enabled) => void toggle(scope, source, enabled)}
-            aria-label={row.enabled ? "Turn off" : "Turn on"}
-          />
-        ) : null}
         <Button
           size="sm"
           variant="outline"
@@ -132,9 +129,15 @@ export function DetailHeader({
           <span className="flex items-center gap-2.5">
             {title}
             {listing?.featured ? (
-              <Badge variant="secondary" className="gap-1">
-                <Star className="size-3" /> featured
+              <Badge variant="warning" className="gap-1">
+                <Star className="size-3" /> {FEATURED_MARKER}
               </Badge>
+            ) : null}
+            {/* The switch moved to Projects, so the page has to say by
+                itself that the place it opened as is not offering these
+                packages — otherwise the list reads as installable. */}
+            {row && !row.enabled ? (
+              <Badge variant="outline">Switched off here</Badge>
             ) : null}
           </span>
         }

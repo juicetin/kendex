@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { Scope } from "@/bindings";
 import { Button } from "@/components/ui/button";
 import {
@@ -18,6 +18,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { SUBSCRIBE_MEANS } from "@/lib/copy-marketplaces";
 import { scopeLabel } from "@/lib/derive";
 import { scopeName } from "@/lib/labels";
 import { everyPlace } from "@/lib/scope";
@@ -39,11 +40,31 @@ export function SubscribeDialog({
 }) {
   const subscribe = useMarketplacesStore((s) => s.subscribe);
   const busy = useMarketplacesStore((s) => s.busy);
-  const error = useMarketplacesStore((s) => s.error);
   const projects = useSettingsStore((s) => s.settings?.projects ?? []);
   const [reference, setReference] = useState(initialReference);
   const [name, setName] = useState("");
   const [where, setWhere] = useState("global");
+
+  // The refusal this dialog shows is its own, held here and set from what
+  // `subscribe` handed back. The store's shared `error` is written by every
+  // marketplaces action and cleared by `load` on each landing overview
+  // read, so rendering it meant a read finishing under an open dialog wiped
+  // the refusal off the screen — dialog open, input intact, no account of
+  // why nothing happened. UnsubscribeDialog already keeps its own for the
+  // same reason.
+  const [error, setError] = useState<string | null>(null);
+  // The page mounts this dialog permanently, so each opening starts clean
+  // rather than showing the refusal of an attempt the person cancelled.
+  // `clearError` empties the shared slot alongside it: nothing renders that
+  // slot any more, and leaving a stale message in it would mislead the next
+  // reader of the store.
+  const clearError = useMarketplacesStore((s) => s.clearError);
+  useEffect(() => {
+    if (open) {
+      setError(null);
+      clearError();
+    }
+  }, [open, clearError]);
 
   const scopes = everyPlace(projects);
 
@@ -52,14 +73,21 @@ export function SubscribeDialog({
     const target =
       scopes.find((s) => scopeLabel(s) === where) ??
       ({ scope: "global" } as Scope);
-    void subscribe(target, reference.trim(), name.trim() || null).then((ok) => {
-      // A refusal keeps the dialog open with the input intact — the
-      // error shows right here, never on another page.
-      if (!ok) return;
-      setReference("");
-      setName("");
-      onOpenChange(false);
-    });
+    void subscribe(target, reference.trim(), name.trim() || null).then(
+      (outcome) => {
+        // A refusal keeps the dialog open with the input intact — the
+        // error shows right here, never on another page, and from what the
+        // call answered rather than from a slot a concurrent read clears.
+        if ("error" in outcome) {
+          setError(outcome.error);
+          return;
+        }
+        setError(null);
+        setReference("");
+        setName("");
+        onOpenChange(false);
+      },
+    );
   };
 
   return (
@@ -68,8 +96,8 @@ export function SubscribeDialog({
         <DialogHeader>
           <DialogTitle>Subscribe to a marketplace</DialogTitle>
           <DialogDescription>
-            Any repository that holds skills works — paste a GitHub repo, a git
-            URL, a skills.sh link, or pick a local folder.
+            {SUBSCRIBE_MEANS} Any repository that holds skills works — paste a
+            GitHub repo, a git URL, a skills.sh link, or pick a local folder.
           </DialogDescription>
         </DialogHeader>
         <form

@@ -17,6 +17,7 @@ const kit: MarketplaceRow = {
   name: "kit",
   repo: "Acme/Kit",
   repoKey: "acme/kit",
+  repoIdentity: "github.com/acme/kit",
   path: null,
   rev: null,
   commit: null,
@@ -83,6 +84,73 @@ const listed = async (needle: string): Promise<string[]> => {
     (row) => row.querySelector("td")?.textContent ?? "",
   );
 };
+
+// Popularity would lead this list if anything the app receives carried
+// one; nothing does, so name is the order, and it holds across
+// marketplaces rather than restarting inside each one.
+describe("ordering the packages list", () => {
+  it("sorts by name, not by the order the catalog offered them", async () => {
+    useMarketplacesStore.setState({
+      packages: {
+        [marketKey(kit.scope, kit.name)]: [
+          skill("worktree", "", "Isolated working copies."),
+          skill("preflight", "", "Diff-scoped checks."),
+        ],
+      },
+    });
+    const rows = await listed("");
+    expect(rows[0]).toContain("preflight");
+    expect(rows[1]).toContain("worktree");
+  });
+
+  // The column shows a hook's trailing name, so the order has to be
+  // decided on that. Sorting the raw identifier put "PreToolUse:*:alpha"
+  // among the Ps while the reader saw "alpha" at the top.
+  it("orders a hook by the name the column shows, not its identifier", async () => {
+    useMarketplacesStore.setState({
+      packages: {
+        [marketKey(kit.scope, kit.name)]: [
+          skill("middle", "", "A plain package."),
+          {
+            ...skill("PreToolUse:*:alpha", "", "A hook."),
+            kind: "hook",
+          },
+        ],
+      },
+    });
+    const rows = await listed("");
+    expect(rows[0]).toContain("alpha");
+    expect(rows[1]).toContain("middle");
+  });
+
+  it("interleaves two marketplaces rather than listing one after the other", async () => {
+    const tools: MarketplaceRow = {
+      ...kit,
+      name: "tools",
+      repo: "Acme/Tools",
+      repoKey: "acme/tools",
+    };
+    useMarketplacesStore.setState({
+      rows: [kit, tools],
+      packages: {
+        [marketKey(kit.scope, kit.name)]: [
+          skill("alpha", "", "From kit."),
+          skill("gamma", "", "From kit."),
+        ],
+        [marketKey(tools.scope, tools.name)]: [
+          skill("beta", "", "From tools."),
+        ],
+      },
+    });
+    const rows = await listed("");
+    // The name cell carries the summary under the name, so the assertion
+    // is on what each row leads with.
+    expect(rows).toHaveLength(3);
+    expect(rows[0].startsWith("alpha")).toBe(true);
+    expect(rows[1].startsWith("beta")).toBe(true);
+    expect(rows[2].startsWith("gamma")).toBe(true);
+  });
+});
 
 describe("searching the packages list", () => {
   it("lists every package until something is typed", async () => {
@@ -164,5 +232,63 @@ describe("naming what could not be read", () => {
     expect(lines()).toEqual([
       `${unreadableRecordsLine("just-added")} ${SEE_PROBLEMS_LABEL}`,
     ]);
+  });
+});
+
+// The Packages tab is the one table that shows a Marketplace column, so it
+// is the only place the revision sub-line can be read. What the
+// subscription declares it reads goes on screen as it is, except a commit
+// id, which is shortened the way every git surface shortens one — a tag or
+// a branch cut to seven characters would spell a different ref.
+describe("the marketplace column's revision line", () => {
+  const COMMIT = "0123456789abcdef0123456789abcdef01234567";
+
+  const marketplaceCells = (rows: MarketplaceRow[]): string[] => {
+    useMarketplacesStore.setState({
+      rows,
+      packages: Object.fromEntries(
+        rows.map((row) => [
+          marketKey(row.scope, row.name),
+          offered.slice(0, 1),
+        ]),
+      ),
+    });
+    const host = mount(<PackagesTab />);
+    return [...host.querySelectorAll("tbody tr")].map(
+      (row) => row.querySelectorAll("td")[3]?.textContent ?? "",
+    );
+  };
+
+  it("names the marketplace and shortens the commit it is pinned to", () => {
+    const [cell] = marketplaceCells([{ ...kit, rev: null, commit: COMMIT }]);
+    expect(cell).toContain("kit");
+    expect(cell).toContain("@ 0123456");
+  });
+
+  // A manifest may pin an uppercase id, and rev keeps the spelling it was
+  // declared with. Core reads forty ASCII hex digits either way, so the
+  // column must too — otherwise all forty land where the helper promises a
+  // short revision.
+  it("shortens an uppercase pin, the way core reads one", () => {
+    const [cell] = marketplaceCells([
+      { ...kit, rev: COMMIT.toUpperCase(), commit: null },
+    ]);
+    expect(cell).toContain("@ 0123456");
+    expect(cell).not.toContain(COMMIT.toUpperCase());
+  });
+
+  // A tracked ref outranks the commit the cache happens to hold, and
+  // release/2026 shortened would read as an unrelated tag called release.
+  it("shows a tracked branch whole, over the commit behind it", () => {
+    const [cell] = marketplaceCells([
+      { ...kit, rev: "release/2026", commit: COMMIT },
+    ]);
+    expect(cell).toContain("@ release/2026");
+    expect(cell).not.toContain("0123456");
+  });
+
+  it("carries no revision line for a subscription that declares none", () => {
+    const [cell] = marketplaceCells([{ ...kit, rev: null, commit: null }]);
+    expect(cell).not.toContain("@");
   });
 });

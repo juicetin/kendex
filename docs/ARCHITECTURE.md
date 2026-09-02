@@ -251,6 +251,22 @@ lives in one capability table read by core and UI.
   marketplace's detail, a curated set, an available package — carry a
   breadcrumb. The Library's From column and the package page's From line
   read one provenance join.
+- **A marketplace is one thing however many places subscribe to it.**
+  Subscribed lists one card per marketplace, keyed by `MarketplaceRow`'s
+  `repoIdentity` — core's `source_ref::repo_identity`, one string per
+  repository on any host, the same value subscription dedup and update
+  grouping compare — else a folder source's path when that path is absolute,
+  and its path under the declaring scope when it is relative, since a
+  relative path resolves against each scope's own root and `./catalog` is a
+  different folder in every place — and only where a declaration has neither
+  by its alias. Never `repoKey`: that is the GitHub
+  `owner/repo` and is null on every other host, so it silently keys those on
+  the alias. `ui/src/components/marketplaces/subscribed-grouping.ts` spells
+  it once as `marketplaceIdentity`; the card grid, the Projects section and
+  the detail page all call it. Which places hold a marketplace and the
+  per-place switch belong to that marketplace's own Projects section, where
+  the place is named beside the switch. A list never carries a control whose
+  target it does not name.
 - Harnesses and Projects are two sidebar destinations. Where a harness
   keeps its files is edited on that harness's own row.
 - Content a tool ships with itself (Codex's and Claude Code's bundled

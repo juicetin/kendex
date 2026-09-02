@@ -1,12 +1,40 @@
 import { RefreshCw } from "lucide-react";
-import type { CatalogSummary } from "@/bindings";
+import type { CatalogSummary, MarketplaceRow, Scope } from "@/bindings";
 import { SubscribeFromRepo } from "@/components/marketplaces/subscribe-from-repo";
 import { Button } from "@/components/ui/button";
 import { TRY_AGAIN_LABEL } from "@/lib/copy";
 import { MARKETPLACES_CHECK_FAILED_TITLE } from "@/lib/copy-marketplaces";
+import { scopeLabel } from "@/lib/derive";
+import { scopeName, scopeNames } from "@/lib/labels";
 import { cn } from "@/lib/utils";
 import { useCommunityStore } from "@/stores/community";
 import { repoAction, useMarketplacesStore } from "@/stores/marketplaces";
+
+/** The canonical key for a bare repository, from core rather than from the
+ * spelling the page was opened with: the summary's once the fetch lands,
+ * the directory listing's until then. Every surface deciding what a bare
+ * repository offers reads it here — spelled twice, one of the two settles
+ * on a spelling of its own and offers a Subscribe the engine refuses. */
+export function useRepoKey(
+  repo: string,
+  summary: CatalogSummary | null,
+): string | null {
+  const listedKey = useCommunityStore(
+    (s) => s.directory?.rows.find((r) => r.repo === repo)?.repoKey ?? null,
+  );
+  return summary?.repoKey ?? listedKey;
+}
+
+/** What one place is called among every place the overview knows. The
+ * holder can be any of them, so a basename two of them share would name
+ * neither; [scopeNames] substitutes the full path exactly there. */
+function placeAmong(rows: MarketplaceRow[], scope: Scope): string {
+  const places = [
+    ...new Map(rows.map((row) => [scopeLabel(row.scope), row.scope])).values(),
+  ];
+  const at = places.findIndex((one) => scopeLabel(one) === scopeLabel(scope));
+  return scopeNames(places)[at] ?? scopeName(scope);
+}
 
 /** What a page browsing a bare repository offers. Subscribe only when no
  * subscription declares the repository; a declared one that is turned off
@@ -28,12 +56,7 @@ export function RepoAction({
   const checkForUpdates = useMarketplacesStore((s) => s.checkForUpdates);
   const busy = useMarketplacesStore((s) => s.busy);
   const load = useMarketplacesStore((s) => s.load);
-  // The canonical key comes from core — the directory row's from the first
-  // render, or the summary's once it lands — never from the spelling.
-  const listedKey = useCommunityStore(
-    (s) => s.directory?.rows.find((r) => r.repo === repo)?.repoKey ?? null,
-  );
-  const key = summary?.repoKey ?? listedKey;
+  const key = useRepoKey(repo, summary);
   const { kind, holder } = repoAction(rows, read, key);
 
   switch (kind) {
@@ -62,12 +85,17 @@ export function RepoAction({
     case "subscribe":
       return <SubscribeFromRepo repo={key ?? repo} label={subscribeLabel} />;
     case "turn-on":
+      // The place is in the label, not left to be guessed: the holder comes
+      // from declaredHolder, which can pick a project subscription while
+      // the page names only the repository — and named against every place
+      // the overview knows, so a basename two projects share does not name
+      // both on a button that turns one of them on.
       return (
         <Button
           size="sm"
           onClick={() => holder && void toggle(holder.scope, holder.name, true)}
         >
-          Turn on
+          {holder ? `Turn on in ${placeAmong(rows, holder.scope)}` : "Turn on"}
         </Button>
       );
     case "refresh":
