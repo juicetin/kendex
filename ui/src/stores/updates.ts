@@ -1,7 +1,7 @@
 import { toast } from "sonner";
 import { create } from "zustand";
 import { commands, type ItemWarning, type UpdateRow } from "@/bindings";
-import { UPDATE_ERROR_TITLE } from "@/lib/copy";
+import { UPDATE_ERROR_TITLE, updatedToastLabel } from "@/lib/copy";
 import {
   nothingToUpdateToastLabel,
   UPDATE_NEEDS_CHECK_NOTE,
@@ -11,17 +11,13 @@ import { READ_PENDING, type ReadState } from "@/lib/read-state";
 import { rescanEverything } from "@/lib/rescan";
 import { caught, settled } from "@/lib/settled";
 import {
+  packageCount,
   skippedPlaces,
   updatablePlaces,
-  visibleUpdates,
 } from "@/lib/update-groups";
-import {
-  showBulkOutcome,
-  showUpdateOutcome,
-  startBulk,
-} from "@/lib/update-outcome";
 import { rowUnsettled } from "@/lib/updates-read-state";
 import { useProblemsStore } from "./problems";
+import { bulkLine, noRun, sayApply } from "./updates-apply";
 import { followSwitch, type PendingFollow } from "./updates-follow";
 import { standingReads } from "./updates-standing";
 import { writeIgnored, writeRow, writeRows } from "./updates-writes";
@@ -165,7 +161,8 @@ export const useUpdatesStore = create<UpdatesState>((set, get) => {
           // Either command can come back held: the plan refuses to write
           // over a copy somebody changed, and saying "Updated" over that
           // is the whole point of asking the command what it did.
-          showUpdateOutcome(row.name, answer.data.update);
+          // One package's apply, so a removal it reports is that package's.
+          sayApply(updatedToastLabel(row.name), answer.data.update, 1);
           applied = true;
         }
         // Whatever it answered, the standing is read again: the work can
@@ -190,22 +187,35 @@ export const useUpdatesStore = create<UpdatesState>((set, get) => {
           toast.info(nothingToUpdateToastLabel(skipped));
           return;
         }
-        const outcome = startBulk(skipped);
-        const answer = await caught(writeRows(rows, reportUpdate, outcome));
-        // A rejection escapes the sequence without touching the outcome —
-        // only this catch saw it, and success must not be claimed over it.
-        if (answer.status === "error") {
-          reportUpdate(answer.error);
-          outcome.ok = false;
-        }
+        const what = noRun();
+        // Whether anything in this run failed. Every failure reaches the
+        // person through `report` — a place that refused, a package its
+        // place left out of the answer — so wrapping it is what tells a
+        // run that wrote nothing because it could not from one that wrote
+        // nothing because there was nothing left to write.
+        let failed = false;
+        const report = (error: string) => {
+          failed = true;
+          reportUpdate(error);
+        };
+        const answer = await caught(writeRows(rows, report, what));
+        // A rejection escapes the sequence without touching the record —
+        // only this catch saw it, and the places that did commit before it
+        // are still in there to be said.
+        if (answer.status === "error") report(answer.error);
         await reload();
-        // Counted off what the applies reported, never off the rows the
-        // click covered: a place the plan held back needs attention on its
-        // own row, it is not one more updated.
-        // Said whether or not a place failed: the error is its own toast,
-        // and what the rest of the run did to the person's packages is not
-        // the error's to swallow.
-        showBulkOutcome(outcome, visibleUpdates(get().rows));
+        // Said off what the applies answered, never off the rows the click
+        // covered: a place the plan held back needs attention on its own
+        // row, it is not one more updated. Said whether or not a place
+        // failed — the error is its own toast, and what the rest of the
+        // run did to the person's packages is not the error's to swallow.
+        // Counted off the rows that asked, through the one identity rule:
+        // two projects' `gh` from unrelated catalogs are two packages.
+        sayApply(
+          bulkLine(packageCount(what.wrote), failed),
+          what,
+          packageCount(what.lost),
+        );
         await rescanEverything();
       });
     },
