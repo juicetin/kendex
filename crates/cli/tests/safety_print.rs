@@ -9,7 +9,7 @@
 
 #[path = "../../test_util.rs"]
 mod test_util;
-use test_util::source_path;
+use test_util::{rooted, source_path};
 
 use std::fs;
 use std::path::Path;
@@ -259,7 +259,7 @@ fn no_verb_or_help_line_offers_a_review() {
     assert!(root.status.success(), "{root:?}");
     let root_help = String::from_utf8_lossy(&root.stdout).into_owned();
     // Every subcommand's own help, not just the top-level list.
-    let verbs: Vec<String> = root_help
+    let mut verbs: Vec<String> = root_help
         .lines()
         .skip_while(|line| !line.starts_with("Commands:"))
         .skip(1)
@@ -269,6 +269,8 @@ fn no_verb_or_help_line_offers_a_review() {
         .map(str::to_owned)
         .collect();
     assert!(verbs.len() > 10, "no verbs parsed out of: {root_help}");
+    // Hidden owner commands still belong in the retired-language sweep.
+    verbs.push("report".to_owned());
 
     // `kendex help <verb>` rather than `<verb> --help`: clap's own `help`
     // is in the verb list and takes no `--help` of its own.
@@ -291,6 +293,37 @@ fn no_verb_or_help_line_offers_a_review() {
             );
         }
     }
+}
+
+/// Report remains callable for owners who know it exists, but the general
+/// command list does not advertise it to package consumers.
+#[test]
+#[allow(clippy::unwrap_used)]
+fn report_is_hidden_from_root_help_but_keeps_its_own_help() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = rooted(&tmp);
+
+    let root = kendex(&home, &home, &["--help"]);
+    assert!(root.status.success(), "{root:?}");
+    let root_help = String::from_utf8_lossy(&root.stdout);
+    assert!(
+        !root_help
+            .lines()
+            .any(|line| line.trim_start().starts_with("report ")),
+        "root help still advertises report: {root_help}"
+    );
+
+    let report = kendex(&home, &home, &["report", "--help"]);
+    assert!(report.status.success(), "{report:?}");
+    let report_help = String::from_utf8_lossy(&report.stdout);
+    assert!(
+        report_help.contains("Usage: kendex report [OPTIONS] --title <TITLE>"),
+        "report --help printed another command's help: {report_help}"
+    );
+    assert!(
+        report_help.contains("--skill <SKILL>") && report_help.contains("--title <TITLE>"),
+        "report --help omitted its selector or required title: {report_help}"
+    );
 }
 
 /// A repository that is one skill has no path inside itself, so the score
