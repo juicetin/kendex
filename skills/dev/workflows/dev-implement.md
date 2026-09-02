@@ -154,6 +154,8 @@ Update docs when the implementation changes a documented API or architecture.
 
 ## 5. Validate
 
+Before deterministic validation, run `git grep -n -F --untracked --exclude-standard -e <callee> --` for every callee whose call the change deletes, then apply [code-quality § Cleanup](../../code-quality/SKILL.md#cleanup); the build and tests below validate every deletion.
+
 Deterministic gates first — every finding is fixed here, never carried into review. Preflight runs when installed (`test -x .agents/skills/preflight/scripts/preflight`); the size-ratchet gate runs in a repo where a baseline exists:
 
 ```bash
@@ -165,7 +167,7 @@ Deterministic gates first — every finding is fixed here, never carried into re
 
 Then the project's validation command — the one `.agents/skills/orch/scripts/orch-env DEV_VALIDATE_CMD ""` prints (empty → the project's documented build/test/lint command), run from the worktree root — plus the delegation's required verification commands in their § 2.4 normalized form. Failure handling and long-running runs: [dev SKILL.md § Validation](../SKILL.md#validation).
 
-Every check, guard, assertion, or test this change adds or modifies must have a must-fail control that runs red once ([code-quality § Prove Your Guards](../../code-quality/SKILL.md#prove-your-guards)).
+A script written only to produce a number for the issue is not committed; put its result in the PR body. Every check, guard, assertion, or test this change adds or modifies must have a must-fail control that runs red once ([code-quality § Prove Your Guards](../../code-quality/SKILL.md#prove-your-guards)); an uncommitted measurement is not a check the change adds or modifies.
 
 **Visual QA** — **skip if** the issue has no `design` label. Otherwise use the project's visual QA skills to confirm what your change affects renders correctly, not the full checklist. Do NOT capture golden baselines.
 
