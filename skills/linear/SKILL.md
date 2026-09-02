@@ -72,7 +72,7 @@ In a linked worktree whose `.cache` should be a `WORKTREE_SYMLINKS`-managed syml
 | `LINEAR_FORMAT` | Default output format | `safe` |
 | `LINEAR_TEAM_PREFIX` | Issue identifier prefix | `PROJ` |
 | `LINEAR_AGENT_LABELS` | Declared `agent:*` taxonomy; non-empty makes `issues create` refuse unrouted creates | — (unset = off) |
-| `LINEAR_REQUIRE_REACH` | Non-empty makes `issues create` refuse a body naming nothing that reaches the defect | — (unset = off) |
+| `LINEAR_REQUIRE_REACH` | Non-empty makes `issues create` refuse a body with no `Reached by:` line | — (unset = off) |
 
 `LINEAR_API_KEY` belongs in `.env.local`; non-secret defaults in committed `kendex.settings.toml` `[env]`. A key from project files beats one inherited from the environment, and `auth-check` warns (fingerprints only) when it shadows a differing inherited key.
 
@@ -82,7 +82,7 @@ Never create a tracked issue directly from an orchestration or review session �
 
 Where `LINEAR_AGENT_LABELS` declares a taxonomy, `issues create` refuses — before any API call — a create carrying no agent label from that set, including a typoed `agent:*` name. `--no-agent-label` permits a deliberate bare create.
 
-Where `LINEAR_REQUIRE_REACH` is set, `issues create` refuses — before any API call — a description whose `Reached by:` line is missing or names no producer, and, with `--review-born`, a `--priority 2` description with no `Symptom:` line. Each refusal states the rule it enforces; the rule itself is the project-management skill's SKILL.md § Disposition, **Name what reaches it**, which is also where a create decides whether it is review-born.
+Where `LINEAR_REQUIRE_REACH` is set, `issues create` refuses — before any API call — a description with no `Reached by:` line and, with `--review-born`, a `--priority 2` description with no `Symptom:` line. An unsubstituted placeholder (`[REACH]`) or a null token (`TBD`, `n/a`, `none`, `-`) counts as no line, so a refusal naming a missing line is what an author who typed one of those reads. What the lines say is the author's to judge; the guard checks that they are there. Each refusal states the rule it enforces; the rule itself is the project-management skill's SKILL.md § Disposition, **Name what reaches it**, which is also where a create decides whether it is review-born.
 
 ## Attachments
 
