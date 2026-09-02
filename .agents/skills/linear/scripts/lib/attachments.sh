@@ -20,19 +20,19 @@ linear_attach_canonical_existing_dir() {
     (cd "$path" && pwd -P)
 }
 
+# The attachment store sits inside the cache, so it takes the root cache.sh
+# already resolved rather than resolving one of its own. Every command script
+# sources lib/cache.sh immediately before this file, and cache.sh's top-level
+# assignment either aborts the process or leaves a non-empty root, so a second
+# copy of that resolution could only ever diverge from it. An unset value means
+# a command script sourced this library without cache.sh, which is a wiring
+# mistake to name rather than to paper over with a fallback.
 linear_attach_project_root() {
-    if [[ -n "${CACHE_PROJECT_ROOT:-}" ]]; then
-        linear_attach_canonical_existing_dir "$CACHE_PROJECT_ROOT"
-        return
+    if [[ -z "${CACHE_PROJECT_ROOT:-}" ]]; then
+        echo '{"error": "attachments.sh requires lib/cache.sh to be sourced first: CACHE_PROJECT_ROOT is unset"}' >&2
+        return 1
     fi
-    if [[ -n "${PROJECT_ROOT:-}" ]]; then
-        linear_attach_canonical_existing_dir "$PROJECT_ROOT"
-        return
-    fi
-
-    local root
-    root="$(git rev-parse --show-toplevel 2>/dev/null)"
-    linear_attach_canonical_existing_dir "$root"
+    linear_attach_canonical_existing_dir "$CACHE_PROJECT_ROOT"
 }
 
 ATTACH_CACHE_PROJECT_ROOT="$(linear_attach_project_root)"
@@ -119,15 +119,6 @@ attach_download_url() {
     existing=$(jq -r --arg url "$url" '.[$url].local_path // empty' "$ATTACH_MANIFEST" 2>/dev/null)
     if [[ -n "$existing" && -f "$existing" ]]; then
         return 2
-    fi
-
-    # Source API key from project config/secrets.
-    if [[ -z "${LINEAR_API_KEY:-}" ]]; then
-        local lib_dir
-        lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-        # shellcheck source=kendex-env.sh
-        source "$lib_dir/kendex-env.sh"
-        kendex_load_project_env "$ATTACH_CACHE_PROJECT_ROOT"
     fi
 
     if ! resolve_linear_api_key; then

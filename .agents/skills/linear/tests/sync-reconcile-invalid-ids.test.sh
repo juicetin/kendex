@@ -21,6 +21,10 @@ mkdir -p "$ROOT/.agents/skills" "$ROOT/bin" "$ROOT/.cache/linear/comments"
 cp -R "$SKILL_DIR" "$ROOT/.agents/skills/linear"
 git -C "$ROOT" init -q -b main
 
+# This root's own cache is the subject, so it replaces the assert lib's default
+# sandbox — still scratch, so the exit verdict's containment check holds.
+export LINEAR_CACHE_ROOT="$ROOT"
+
 VALID_UUID="11111111-1111-1111-1111-111111111111"
 
 printf '%s' "[
@@ -37,6 +41,16 @@ jq -n --arg synced "$(date -Iseconds)" \
   > "$ROOT/.cache/linear/meta.json"
 
 RECONCILE_LOG="$ROOT/reconcile-payload.json"
+
+# kendex#799: a pre-#799 cache carries one .lock beside every issue whose
+# comments were ever written, and the sync below is the shape that used to miss
+# them — an incremental run whose issues delta comes back empty, so
+# write_comments, where the sweep first lived, is never called at all. The
+# shared lock sits in the cache root rather than in comments/, so the sweep's
+# glob must not reach it.
+: >"$ROOT/.cache/linear/comments/PROJ-1.json.lock"
+: >"$ROOT/.cache/linear/comments/CC-558.json.lock"
+: >"$ROOT/.cache/linear/.comments.lock"
 
 cat >"$ROOT/bin/curl" <<SH
 #!/usr/bin/env bash
@@ -85,3 +99,8 @@ assert "the malformed cache entries are pruned" \
   jq -e '[.[] | select(.id == "child-uuid" or .id == "uuid-1")] | length == 0' "$ROOT/.cache/linear/issues.json"
 assert "the valid cache entry survives" \
   jq -e --arg id "$VALID_UUID" '[.[] | select(.id == $id)] | length == 1' "$ROOT/.cache/linear/issues.json"
+
+assert_eq "a sync whose delta is empty still sweeps the legacy per-issue locks" \
+  "$(find "$ROOT/.cache/linear/comments" -name '*.json.lock' | tr '\n' ' ')" ""
+assert "the sweep leaves the shared comment lock alone" \
+  test -f "$ROOT/.cache/linear/.comments.lock"
