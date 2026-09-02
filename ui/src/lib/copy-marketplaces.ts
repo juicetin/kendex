@@ -1,3 +1,4 @@
+import { listed } from "@/lib/listed";
 // Marketplaces copy: the Subscribed tab's read states and Home's tile
 // detail — kept apart from the rest so the wording is reviewed in one
 // place. A read that failed is said and retried where it failed; rows
@@ -98,3 +99,30 @@ export const FEATURED_MARKER = "Featured";
 // control's two choices.
 export const DIRECTORY_KENDEX_LABEL = "Kendex";
 export const DIRECTORY_SKILLSSH_LABEL = "Skills.sh";
+
+// The About tab's profile of one marketplace. Every line is the catalog's
+// own claim about itself or a fact about its repository — never a word
+// about how kendex read it, which is the catalog author's problem and not
+// something a person choosing a marketplace has any use for.
+export const ABOUT_AUTHOR_LABEL = "Author";
+export const ABOUT_LICENSE_LABEL = "License";
+export const ABOUT_HOMEPAGE_LABEL = "Homepage";
+export const ABOUT_UPDATED_LABEL = "Last updated";
+export const ABOUT_CONTAINS_LABEL = "Contains";
+// The heading over what the catalog's own configuration gets wrong. Absent
+// with nothing to list: a section that appears only to say it is empty is
+// a line about kendex's reading, not about the marketplace.
+export const ABOUT_FINDINGS_TITLE = "Things the catalog gets wrong";
+// A catalog with nothing in any of the tab's three parts, which is the
+// `empty` guard in about-section.tsx term for term: no description, no
+// profile row at all (no author, no license, no homepage, no history to
+// date it by, nothing counted), and nothing wrong with its own
+// configuration — findings get their own section rather than this line.
+// The tab has read it and has nothing to show.
+export const ABOUT_NOTHING_SAID = "This marketplace says nothing about itself.";
+
+/** What a catalog holds, as one line. The joining is the app's one list
+ *  rule; all this adds is that a catalog with nothing counted has no line
+ *  at all, so the row is left out rather than reading "nothing". */
+export const catalogContents = (counts: string[]): string | null =>
+  counts.length === 0 ? null : listed(counts);

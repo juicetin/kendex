@@ -11,6 +11,7 @@ import type {
   MarketplaceRow,
   PackageSafety,
 } from "@/bindings";
+import type { PackageEntry } from "@/components/marketplaces/package-row";
 import {
   PACKAGE_STATE_UNKNOWN,
   SUBSCRIBE_TO_INSTALL_LABEL,
@@ -26,6 +27,7 @@ import { useMarketplacesStore } from "@/stores/marketplaces";
 import { subscription } from "@/stores/marketplaces-shared";
 import { useNavStore } from "@/stores/nav";
 import { safetyKey } from "@/stores/preinstall-safety";
+import { useProvenanceStore } from "@/stores/provenance";
 import { mount as mountTree } from "@/test/dom";
 import { PackagesTable } from "./packages-table";
 
@@ -63,6 +65,7 @@ const row: AvailablePackage = {
   dependencies: { required: [], optional: [] },
   state: "available",
   collision: null,
+  updatedAt: null,
 };
 
 const FINDING: Finding = {
@@ -311,6 +314,7 @@ describe("the row action on a repository nobody subscribes to", () => {
     repo,
     repoKey: "acme/kit",
     repoIdentity: "github.com/acme/kit",
+    provenance: repo,
     path: null,
     rev: null,
     commit: null,
@@ -366,5 +370,169 @@ describe("the row action on a repository nobody subscribes to", () => {
     const { host } = draw([declared]);
     expect(action(host)).toBeUndefined();
     expect(host.textContent).toContain("Available");
+  });
+});
+
+// One column belongs to a marketplace's own page alone: where each of its
+// packages is installed from it. The Last updated column and the sorting
+// headers are drawn on both tables deliberately — the cross-marketplace
+// list wants them too.
+describe("a marketplace's own packages table", () => {
+  const dated = (name: string, updatedAt: string | null): PackageEntry => ({
+    catalog,
+    row: { ...row, name, updatedAt },
+    recordsUnreadable: false,
+  });
+
+  it("opens sorted by name whatever order the catalog listed in", () => {
+    stub.scores = {};
+    const html = renderToStaticMarkup(
+      <PackagesTable
+        entries={[dated("review", null), dated("apply", null)]}
+        showMarketplace={false}
+        subscription={{ catalog, repo: null }}
+      />,
+    );
+    expect(html.indexOf(">apply<")).toBeLessThan(html.indexOf(">review<"));
+  });
+
+  // Drawn without the places column: it renders the same dash for a package
+  // installed nowhere, so with both on the page an assertion on the dash is
+  // answered by the wrong cell and says nothing about the date.
+  it("dates each row, and says nothing where there is no date to say", () => {
+    stub.scores = {};
+    const html = renderToStaticMarkup(
+      <PackagesTable
+        entries={[dated("gh", "2026-08-30T12:00:00+00:00"), dated("zz", null)]}
+        showMarketplace={false}
+      />,
+    );
+    expect(html).toContain('title="2026-08-30T12:00:00+00:00"');
+    expect(html).toContain("—");
+  });
+
+  // A subscription is a (scope, source, repository), not a name: the same
+  // alias can be declared in the personal manifest and in a project's,
+  // pointing at different repositories.
+  it("names the places holding it, and only from this marketplace", () => {
+    stub.scores = {};
+    useProvenanceStore.setState({
+      loaded: true,
+      rows: [
+        {
+          scope: { scope: "project", root: "/home/me/hyprtrade" },
+          kind: "skill",
+          name: "gh",
+          harness: "claude",
+          origin: { origin: "marketplace", source: "kendex", repo: "a/b" },
+        },
+        // The same package, the same place, a second harness. One place.
+        {
+          scope: { scope: "project", root: "/home/me/hyprtrade" },
+          kind: "skill",
+          name: "gh",
+          harness: "codex",
+          origin: { origin: "marketplace", source: "kendex", repo: "a/b" },
+        },
+        // The alias this page carries, pointing somewhere else: another
+        // subscription's installation, not this marketplace's.
+        {
+          scope: { scope: "global" },
+          kind: "skill",
+          name: "gh",
+          harness: "claude",
+          origin: { origin: "marketplace", source: "kendex", repo: "z/other" },
+        },
+        // A different source entirely — a collision, which Status says.
+        {
+          scope: { scope: "project", root: "/home/me/vg" },
+          kind: "skill",
+          name: "gh",
+          harness: "claude",
+          origin: { origin: "marketplace", source: "other", repo: "c/d" },
+        },
+      ],
+    });
+    // Store state set by a test reaches the component only through a
+    // mounted tree: a static render serves the store's initial snapshot.
+    const host = mountTree(
+      <PackagesTable
+        entries={[dated("gh", null)]}
+        showMarketplace={false}
+        subscription={{ catalog, repo: "a/b" }}
+      />,
+    );
+    const text = host.textContent ?? "";
+    expect(text).toContain("hyprtrade");
+    expect(text).not.toContain("User level");
+    expect(text).not.toContain("vg");
+    expect(text.match(/hyprtrade/g)).toHaveLength(1);
+  });
+
+  // A path-backed subscription has no repository at all, so a join keyed on
+  // the declaration's own `repo` left this column empty for every row of
+  // one, always. Both sides carry what the subscription resolved to — a
+  // canonical path here — which is what the lock recorded.
+  it("names places for a subscription backed by a path", () => {
+    stub.scores = {};
+    useProvenanceStore.setState({
+      loaded: true,
+      rows: [
+        {
+          scope: { scope: "project", root: "/home/me/hyprtrade" },
+          kind: "skill",
+          name: "gh",
+          harness: "claude",
+          origin: {
+            origin: "marketplace",
+            source: "kendex",
+            repo: "/home/me/catalogs/kit",
+          },
+        },
+      ],
+    });
+    const host = mountTree(
+      <PackagesTable
+        entries={[dated("gh", null)]}
+        showMarketplace={false}
+        subscription={{ catalog, repo: "/home/me/catalogs/kit" }}
+      />,
+    );
+    expect(host.textContent ?? "").toContain("hyprtrade");
+  });
+});
+
+describe("re-sorting a marketplace's packages", () => {
+  it("turns the list around when the sorted column is pressed again", async () => {
+    stub.scores = {};
+    useProvenanceStore.setState({ loaded: true, rows: [] });
+    const host = mountTree(
+      <PackagesTable
+        entries={[
+          { catalog, row: { ...row, name: "apply" }, recordsUnreadable: false },
+          {
+            catalog,
+            row: { ...row, name: "review" },
+            recordsUnreadable: false,
+          },
+        ]}
+        showMarketplace={false}
+        subscription={{ catalog, repo: null }}
+      />,
+    );
+    const names = () =>
+      [...host.querySelectorAll("tbody .truncate.font-medium")].map(
+        (cell) => cell.textContent,
+      );
+    expect(names()).toEqual(["apply", "review"]);
+
+    const byName = host.querySelector<HTMLButtonElement>(
+      'button[aria-label^="Sorted by Name"]',
+    );
+    if (!byName) throw new Error("no name sort control rendered");
+    await act(async () => {
+      await userEvent.click(byName);
+    });
+    expect(names()).toEqual(["review", "apply"]);
   });
 });

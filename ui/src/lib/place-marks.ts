@@ -1,5 +1,6 @@
 import type { Scope } from "@/bindings";
 import type { PlaceStanding, Why } from "@/lib/customized-places";
+import { listed } from "@/lib/listed";
 import { placeName } from "@/lib/update-groups";
 
 /** What a mark says, and where it leads if anywhere. */
@@ -16,14 +17,6 @@ export interface PlaceMark {
 }
 
 const customized = (s: PlaceStanding) => s.standing === "customized";
-
-/** Names in a line, the way a person writes them: no serial comma, and
- *  the `and` only in front of the last one. Three places joined with two
- *  `and`s read as a chant rather than a list. */
-const listed = (names: string[]): string =>
-  names.length < 3
-    ? names.join(" and ")
-    : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
 
 /** What a counted set of places is called. Projects among themselves are
  *  projects; the personal scope makes the set a mixed one, and "places" is

@@ -1,11 +1,9 @@
 import { Search } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ItemKind, Tag } from "@/bindings";
+import type { PackageEntry } from "@/components/marketplaces/package-row";
 import { Filter } from "@/components/marketplaces/packages-filter";
-import {
-  type PackageEntry,
-  PackagesTable,
-} from "@/components/marketplaces/packages-table";
+import { PackagesTable } from "@/components/marketplaces/packages-table";
 import {
   TroubleLines,
   troubledScopes,
@@ -14,6 +12,7 @@ import { Input } from "@/components/ui/input";
 import { SelectItem } from "@/components/ui/select";
 import { scopeLabel } from "@/lib/derive";
 import {
+  KINDS,
   kindLabel,
   packageDisplayName,
   scopeName,
@@ -28,15 +27,6 @@ import {
 } from "@/stores/marketplaces";
 import { useNavStore } from "@/stores/nav";
 
-const KINDS: ItemKind[] = [
-  "agent",
-  "skill",
-  "hook",
-  "command",
-  "mcp-server",
-  "plugin",
-  "pi-extension",
-];
 const TAGS = Object.keys(TAG_LABELS) as Tag[];
 
 /** One searchable table across every subscribed marketplace. `Where` is the

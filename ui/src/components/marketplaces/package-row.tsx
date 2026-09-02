@@ -1,5 +1,6 @@
 import { type ComponentProps, type MouseEvent, useEffect } from "react";
 import type { AvailablePackage, Catalog } from "@/bindings";
+import { Ago } from "@/components/ago";
 import { ScoreTooltip } from "@/components/score-tooltip";
 import { StatusDot } from "@/components/status-dot";
 import { TagBadges } from "@/components/tag-badge";
@@ -38,22 +39,32 @@ export interface PackageEntry {
   /** What the subscription declares it reads — a pinned commit, or the tag
    * or branch it tracks — else the commit it currently reads, which the
    * cache holds and which moves as a tracked ref moves. Shown as-is unless
-   * it is a commit id, which is shortened; no source the app receives dates
-   * a package, so nothing here claims a last-updated day. */
+   * it is a commit id, which is shortened. */
   revision?: string | null;
 }
 
-/** One row of [PackagesTable]: the package, what it is, how it scored, and
+/** One row of [PackagesTable]: the package, what it is, when it last
+ * changed, how it scored, where it is installed from this marketplace, and
  * the one thing this table can do with it. Whether a bare repository's row
  * may subscribe is not its decision — the table settles that once, from the
  * same reading the page header uses. */
 export function PackageRow({
   entry,
   showMarketplace,
+  showPlaces,
+  places,
   offerSubscribe,
 }: {
   entry: PackageEntry;
   showMarketplace: boolean;
+  /** A marketplace's own page says where each of its packages landed; the
+   *  cross-marketplace list names the marketplace in that room instead. */
+  showPlaces: boolean;
+  /** Where this package is installed from this marketplace, already
+   *  worded. The table builds the whole index once — see
+   *  `lib/installed-places.ts` — so a row neither scans the provenance
+   *  join nor subscribes to it. */
+  places: string;
   /** Whether a bare repository's row may subscribe and install — decided
    * once for the table, never per row. */
   offerSubscribe: boolean;
@@ -79,6 +90,8 @@ export function PackageRow({
     if (!clickAsksToOpen(event)) return;
     goToAvailablePackage({ catalog, kind: row.kind, name: row.name });
   };
+
+  const updated = row.updatedAt ? Date.parse(row.updatedAt) : Number.NaN;
 
   return (
     <TableRow className="cursor-pointer" onClick={open}>
@@ -113,6 +126,15 @@ export function PackageRow({
           ) : null}
         </TableCell>
       ) : null}
+      <TableCell className="text-muted-foreground">
+        {Number.isNaN(updated) ? (
+          // A catalog kendex keeps no history for has no date to show, and
+          // a guess would be this machine's clock rather than the package's.
+          <span aria-hidden>—</span>
+        ) : (
+          <Ago at={updated} exact={row.updatedAt} />
+        )}
+      </TableCell>
       <TableCell>
         {safety ? (
           <SafetyDot
@@ -127,6 +149,11 @@ export function PackageRow({
           <SafetyDot tone="muted" words={SAFETY_DOT_UNCHECKED} />
         )}
       </TableCell>
+      {showPlaces ? (
+        <TableCell className="truncate text-muted-foreground">
+          {places || <span aria-hidden>—</span>}
+        </TableCell>
+      ) : null}
       <TableCell className="text-right">
         {row.state === "installed" ? (
           <span className="text-xs text-muted-foreground">Installed</span>

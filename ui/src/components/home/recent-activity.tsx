@@ -1,9 +1,9 @@
 import type { HarnessId } from "@/bindings";
+import { Ago } from "@/components/ago";
 import { RECENT_ACTIVITY_EMPTY } from "@/lib/copy";
 import type { RecentGroup } from "@/lib/derive";
 import { kindIcon } from "@/lib/kind-icon";
 import { harnessName, hookDisplayName, kindLabel } from "@/lib/labels";
-import { relativeTime } from "@/lib/relative-time";
 import { useNavStore } from "@/stores/nav";
 
 /** The last things to change on this machine. "Activity" said nothing about
@@ -39,9 +39,10 @@ export function RecentActivity({ groups }: { groups: RecentGroup[] }) {
             <span className="hidden shrink-0 truncate text-xs text-muted-foreground sm:inline">
               {kindLabel(group.kind)} · {tools}
             </span>
-            <span className="shrink-0 text-xs text-muted-foreground">
-              {relativeTime(group.modifiedAt * 1000, Date.now())}
-            </span>
+            <Ago
+              at={group.modifiedAt * 1000}
+              className="shrink-0 text-xs text-muted-foreground"
+            />
           </button>
         );
       })}

@@ -1,6 +1,7 @@
 import { MoreHorizontal, RefreshCw, Star } from "lucide-react";
-import { type ReactNode, useState } from "react";
+import { Fragment, type ReactNode, useState } from "react";
 import type { Catalog, CatalogSummary, MarketplaceRow } from "@/bindings";
+import { ExternalLink } from "@/components/external-link";
 import { RepoAction } from "@/components/marketplaces/repo-action";
 import { UnsubscribeDialog } from "@/components/marketplaces/unsubscribe-dialog";
 import { PageHeader } from "@/components/page-header";
@@ -64,12 +65,55 @@ export function DetailHeader({
       : (listing?.name ?? meta?.name ?? catalog.repo.split("/").at(-1));
   const description = meta?.description ?? listing?.description ?? null;
   const commit = row?.commit ?? summary?.commit ?? null;
-  const metaLine = [
-    row?.repo ?? row?.path ?? summary?.provenance ?? listing?.repo,
-    commit ? `@ ${shortRevision(commit)}` : null,
-    meta?.license,
-    meta?.author ? `by ${meta.author}` : null,
-  ].filter(Boolean);
+  // What the catalog came from, as text. A path source has a folder here.
+  const provenance =
+    row?.repo ?? row?.path ?? summary?.provenance ?? listing?.repo ?? null;
+  // The canonical `owner/repo` a GitHub reference folds to, which is the
+  // only thing a github.com URL may be built from. Every branch is a folded
+  // key — never the raw `listing.repo`, which is whatever the community
+  // index happened to hold: a full URL, a `.git` suffix, another host. The
+  // fold answers null for those, and null is the answer that leaves the
+  // provenance as plain text instead of a link that opens nothing.
+  const repoKey = row?.repoKey ?? summary?.repoKey ?? listing?.repoKey ?? null;
+  // One line, one separator. Each part is a node with its own name, and the
+  // interleaving is spelled once, so nothing re-derives whether anything
+  // precedes it and every gap is the same gap.
+  const metaParts: { key: string; node: ReactNode }[] = [
+    provenance
+      ? {
+          key: "provenance",
+          node: repoKey ? (
+            <ExternalLink url={`https://github.com/${repoKey}`}>
+              {provenance}
+            </ExternalLink>
+          ) : (
+            <span>{provenance}</span>
+          ),
+        }
+      : null,
+    meta?.homepage
+      ? {
+          key: "homepage",
+          node: (
+            <ExternalLink url={meta.homepage}>{meta.homepage}</ExternalLink>
+          ),
+        }
+      : null,
+    // Keyed by which field it is, never by the text: these are the
+    // catalog's own strings, and two fields carrying the same one — an
+    // author and a license naming the same party, say — would key two
+    // siblings alike and let reconciliation keep or drop the wrong one.
+    // Both still render; it is only the key that has to be distinct.
+    commit
+      ? { key: "commit", node: <span>{`@ ${shortRevision(commit)}`}</span> }
+      : null,
+    meta?.license
+      ? { key: "license", node: <span>{meta.license}</span> }
+      : null,
+    meta?.author
+      ? { key: "author", node: <span>{`by ${meta.author}`}</span> }
+      : null,
+  ].filter((part) => part !== null);
   const tags = [...new Set([...(meta?.tags ?? []), ...(listing?.tags ?? [])])];
 
   let action: ReactNode;
@@ -144,8 +188,15 @@ export function DetailHeader({
         subtitle={
           <>
             {description ? <p>{description}</p> : null}
-            {metaLine.length > 0 ? (
-              <p className="mt-1 font-mono text-xs">{metaLine.join(" · ")}</p>
+            {metaParts.length > 0 ? (
+              <p className="mt-1 flex flex-wrap items-center gap-x-1.5 font-mono text-xs">
+                {metaParts.map((part, index) => (
+                  <Fragment key={part.key}>
+                    {index > 0 ? <span aria-hidden>·</span> : null}
+                    {part.node}
+                  </Fragment>
+                ))}
+              </p>
             ) : null}
             {tags.length > 0 ? (
               <span className="mt-2 flex flex-wrap gap-1.5">

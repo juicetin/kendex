@@ -461,21 +461,27 @@ export const MANIFEST_SCHEMA = 6 as const;
 export const ZOOM = {"min":50,"max":200,"step":10,"default":100} as const;
 
 /* Types */
-/**  One About row: what was found under one root. */
-export type AboutFound = {
-	root: string,
-	kind: ItemKind,
-	count: number,
-};
-
 /**
- *  The About tab's report: how the catalog's items were decided, what was
- *  found where, and everything wrong with it.
+ *  What the About tab draws: everything the catalog's own configuration
+ *  gets wrong, and when the catalog last changed.
+ * 
+ *  The report `browse::about` answers with carries two more things — the
+ *  mode its layout was decided by, and what was found under each declared
+ *  root. Neither is on here: the tab is a profile of the marketplace, and
+ *  how kendex read it is the catalog author's business, which `kendex
+ *  index` prints for them. How many packages it offers reaches the tab
+ *  through the counts every marketplace surface already carries, deduped
+ *  across roots the way the Packages tab beside it counts.
  */
 export type AboutView = {
-	mode: CatalogMode,
-	found: AboutFound[],
 	findings: CatalogFinding[],
+	/**
+	 *  ISO-8601 committer date of the newest commit that touched anything
+	 *  the catalog offers, where kendex holds the history to read it from.
+	 *  Never older than the newest date on the Packages tab beside it: the
+	 *  two answer over the same items.
+	 */
+	updatedAt: string | null,
 };
 
 /**
@@ -704,6 +710,12 @@ export type AvailablePackage = {
 	 *  collision before the click.
 	 */
 	collision: string | null,
+	/**
+	 *  ISO-8601 committer date of the newest commit that touched this
+	 *  package. `None` where the catalog keeps no history kendex can read,
+	 *  or where the package's own commit lies past the history bound.
+	 */
+	updatedAt: string | null,
 };
 
 /**
@@ -836,7 +848,11 @@ export type CatalogGroupMeta = {
 export type CatalogMode = "plugin-registry" | "explicit" | "discovered" | "unusable";
 
 export type CatalogSummary = {
-	/**  `owner/repo`, a path, or `local` — what the catalog is. */
+	/**
+	 *  What the catalog is, as its declaration spelled it: `owner/repo`
+	 *  only where it was written that way, a full URL where it was not, a
+	 *  path, or `local`. Opaque — `repo_key` below is the folded form.
+	 */
 	provenance: string,
 	/**
 	 *  The canonical `owner/repo` the provenance folds to on GitHub — what
@@ -2023,6 +2039,23 @@ export type MarketplaceRow = {
 	 *  fetched and can be read.
 	 */
 	counts: { [key in string]: number } | null,
+	/**
+	 *  What this subscription resolved to, durably: the remote reference as
+	 *  the declaration spelled it for a git source — `owner/repo` where it
+	 *  was written that way, a full HTTPS or SSH URL where it was not — the
+	 *  canonical slashed path for a path source, `local` for the reserved
+	 *  one. Absent where the catalog could not be read.
+	 * 
+	 *  Opaque. It is the same string the lock records as an installation's
+	 *  `source_repo`, and a provenance join matches it VERBATIM, so a
+	 *  consumer must not fold, normalise or shorten it: folding a non-GitHub
+	 *  remote to something tidier breaks the match for every install from
+	 *  it, silently. [`Self::repo_key`] is the folded form, for the one
+	 *  question that wants it. The declaration's own `repo` and `path` are
+	 *  what the person typed, and a relative path never matches a canonical
+	 *  one, which is why neither is this.
+	 */
+	provenance: string | null,
 	/**  `[marketplace]` from the catalog's kendex.toml, where readable. */
 	meta: MarketplaceMeta | null,
 	/**  How the catalog's items were decided, where readable. */

@@ -18,6 +18,7 @@ const kit: MarketplaceRow = {
   repo: "Acme/Kit",
   repoKey: "acme/kit",
   repoIdentity: "github.com/acme/kit",
+  provenance: null,
   path: null,
   rev: null,
   commit: null,
@@ -42,6 +43,7 @@ const skill = (
   dependencies: { required: [], optional: [] },
   state: "available",
   collision: null,
+  updatedAt: null,
 });
 
 // The description is the agent's load trigger, so a word found there and

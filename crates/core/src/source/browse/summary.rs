@@ -26,7 +26,9 @@ pub struct SubscriptionRef {
 #[derive(Debug, Clone, PartialEq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct CatalogSummary {
-    /// `owner/repo`, a path, or `local` — what the catalog is.
+    /// What the catalog is, as its declaration spelled it: `owner/repo`
+    /// only where it was written that way, a full URL where it was not, a
+    /// path, or `local`. Opaque — `repo_key` below is the folded form.
     pub provenance: String,
     /// The canonical `owner/repo` the provenance folds to on GitHub — what
     /// a subscription's `repo_key` and a directory row are matched by,
@@ -115,11 +117,30 @@ fn open_held(env: &Env, held: &SubscriptionRef) -> Result<super::Browsed> {
     )
 }
 
+/// What the About tab reads: the catalog's own report, plus when its
+/// content last moved. The date is git's, so a catalog kendex keeps no
+/// history for has none — see [`super::updated`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct CatalogAbout {
+    pub report: AboutReport,
+    /// ISO-8601 committer date of the newest commit that touched anything
+    /// the catalog offers — never the commit it is read at, which moves for
+    /// work on nothing it offers. Where the catalog offers a repository-root
+    /// item, "anything it offers" is that item's whole tree: the repository
+    /// bar the folders a root skill leaves out, so a build-output commit
+    /// still moves nothing.
+    pub updated_at: Option<String>,
+}
+
 /// The About report for any catalog: how its items were decided, what was
-/// found where, and everything wrong with it.
-pub fn about(env: &Env, catalog: &Catalog) -> Result<AboutReport> {
+/// found where, everything wrong with it, and when it last changed.
+pub fn about(env: &Env, catalog: &Catalog) -> Result<CatalogAbout> {
     let browsed = super::open(env, catalog)?;
-    Ok(crate::source::about(&browsed.sealed, &browsed.config))
+    let offered = super::updated::offered(&browsed);
+    Ok(CatalogAbout {
+        report: crate::source::about(&browsed.sealed, &browsed.config),
+        updated_at: super::updated::catalog_date(env, &browsed, &offered),
+    })
 }
 
 /// The first subscription, personal scope first, that points at this

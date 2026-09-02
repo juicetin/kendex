@@ -36,7 +36,7 @@ fn open_catalog(
     env: &Env,
     scope: &Scope,
     source: &str,
-) -> Result<(SealedSource, SourceConfig), String> {
+) -> Result<(SealedSource, SourceConfig, String), String> {
     let manifest = manifest_for_reading(env, scope)?;
     let ready = kendex_core::source::require_ready(env, scope, source, &manifest)
         .map_err(|e| e.to_string())?;
@@ -46,7 +46,7 @@ fn open_catalog(
         kendex_core::source::repo_leaf(&ready.provenance),
     )
     .map_err(|e| e.to_string())?;
-    Ok((sealed, config))
+    Ok((sealed, config, ready.provenance))
 }
 
 /// One subscription as the Marketplaces page lists it: what it points at,
@@ -76,6 +76,21 @@ pub struct MarketplaceRow {
     /// Packages offered, by kind name — absent until the catalog has been
     /// fetched and can be read.
     pub counts: Option<std::collections::BTreeMap<String, u32>>,
+    /// What this subscription resolved to, durably: the remote reference as
+    /// the declaration spelled it for a git source — `owner/repo` where it
+    /// was written that way, a full HTTPS or SSH URL where it was not — the
+    /// canonical slashed path for a path source, `local` for the reserved
+    /// one. Absent where the catalog could not be read.
+    ///
+    /// Opaque. It is the same string the lock records as an installation's
+    /// `source_repo`, and a provenance join matches it VERBATIM, so a
+    /// consumer must not fold, normalise or shorten it: folding a non-GitHub
+    /// remote to something tidier breaks the match for every install from
+    /// it, silently. [`Self::repo_key`] is the folded form, for the one
+    /// question that wants it. The declaration's own `repo` and `path` are
+    /// what the person typed, and a relative path never matches a canonical
+    /// one, which is why neither is this.
+    pub provenance: Option<String>,
     /// `[marketplace]` from the catalog's kendex.toml, where readable.
     pub meta: Option<MarketplaceMeta>,
     /// How the catalog's items were decided, where readable.
@@ -106,7 +121,9 @@ pub fn rows(env: &Env, scopes: &[Scope]) -> Result<Vec<MarketplaceRow>, String> 
     for scope in scopes {
         let records_unreadable = browse::records_unreadable(env, scope);
         for row in source_ops::list_subscriptions(env, scope).map_err(|e| e.to_string())? {
-            let config = open_catalog(env, scope, &row.name).ok().map(|(_, c)| c);
+            let opened = open_catalog(env, scope, &row.name).ok();
+            let provenance = opened.as_ref().map(|(_, _, p)| p.clone());
+            let config = opened.map(|(_, c, _)| c);
             rows.push(MarketplaceRow {
                 scope: row.scope,
                 name: row.name,
@@ -129,6 +146,7 @@ pub fn rows(env: &Env, scopes: &[Scope]) -> Result<Vec<MarketplaceRow>, String> 
                         .map(|(kind, count)| (kind, count.min(u32::MAX as usize) as u32))
                         .collect()
                 }),
+                provenance,
                 meta: config.as_ref().and_then(|c| c.marketplace.clone()),
                 mode: config.as_ref().map(|c| c.mode),
                 records_unreadable,
@@ -269,23 +287,25 @@ pub fn marketplace_subscribe(
     })
 }
 
-/// One About row: what was found under one root.
-#[derive(Debug, Clone, PartialEq, Serialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct AboutFound {
-    pub root: String,
-    pub kind: ItemKind,
-    pub count: u32,
-}
-
-/// The About tab's report: how the catalog's items were decided, what was
-/// found where, and everything wrong with it.
+/// What the About tab draws: everything the catalog's own configuration
+/// gets wrong, and when the catalog last changed.
+///
+/// The report `browse::about` answers with carries two more things — the
+/// mode its layout was decided by, and what was found under each declared
+/// root. Neither is on here: the tab is a profile of the marketplace, and
+/// how kendex read it is the catalog author's business, which `kendex
+/// index` prints for them. How many packages it offers reaches the tab
+/// through the counts every marketplace surface already carries, deduped
+/// across roots the way the Packages tab beside it counts.
 #[derive(Debug, Clone, PartialEq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct AboutView {
-    pub mode: CatalogMode,
-    pub found: Vec<AboutFound>,
     pub findings: Vec<CatalogFinding>,
+    /// ISO-8601 committer date of the newest commit that touched anything
+    /// the catalog offers, where kendex holds the history to read it from.
+    /// Never older than the newest date on the Packages tab beside it: the
+    /// two answer over the same items.
+    pub updated_at: Option<String>,
 }
 
 #[tauri::command(async)]
@@ -294,17 +314,8 @@ pub fn marketplace_about(catalog: Catalog) -> Result<AboutView, String> {
     let env = env()?;
     let about = browse::about(&env, &catalog).map_err(|e| e.to_string())?;
     Ok(AboutView {
-        mode: about.mode,
-        found: about
-            .found
-            .into_iter()
-            .map(|row| AboutFound {
-                root: row.root,
-                kind: row.kind,
-                count: row.count.min(u32::MAX as usize) as u32,
-            })
-            .collect(),
-        findings: about.findings,
+        updated_at: about.updated_at,
+        findings: about.report.findings,
     })
 }
 
