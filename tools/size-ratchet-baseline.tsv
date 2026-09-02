@@ -80,12 +80,12 @@ skills/iced-rs/iced_wgpu/src/lib.rs	960
 skills/iced-rs/iced_wgpu/src/text.rs	649
 skills/iced-rs/iced_wgpu/src/triangle.rs	887
 skills/iced-rs/iced_wgpu/src/window/compositor.rs	427
-skills/linear/scripts/commands/cache-query.sh	1209
-skills/linear/scripts/commands/initiatives.sh	492
+skills/linear/scripts/commands/cache-query.sh	1210
+skills/linear/scripts/commands/initiatives.sh	494
 skills/linear/scripts/commands/issues.sh	3221
-skills/linear/scripts/commands/projects.sh	1364
-skills/linear/scripts/commands/session-status.sh	429
-skills/linear/scripts/commands/sync.sh	881
+skills/linear/scripts/commands/projects.sh	1366
+skills/linear/scripts/commands/session-status.sh	431
+skills/linear/scripts/commands/sync.sh	883
 skills/linear/scripts/lib/attachments.sh	499
 skills/linear/scripts/lib/cache.sh	553
 skills/linear/scripts/lib/common.sh	780

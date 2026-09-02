@@ -7,16 +7,7 @@
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "$SCRIPT_DIR/../lib/common.sh"
-
-strict=0
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-  --strict)
-    strict=1
-    shift
-    ;;
-  --help | -h)
+show_help() {
     cat <<'EOF'
 Auth + target preflight
 
@@ -38,6 +29,20 @@ Fields:
   writes_enabled    false when a mutation would be refused
   warnings          Configuration hazards found
 EOF
+}
+
+case "${1:-}" in help|--help|-h) show_help; exit 0 ;; esac
+source "$SCRIPT_DIR/../lib/common.sh"
+
+strict=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+  --strict)
+    strict=1
+    shift
+    ;;
+  --help | -h)
+    show_help
     exit 0
     ;;
   *)

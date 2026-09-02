@@ -6,8 +6,6 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "$SCRIPT_DIR/../lib/common.sh"
-source "$SCRIPT_DIR/../lib/cache.sh"
 
 show_help() {
     cat << 'EOF'
@@ -46,6 +44,10 @@ Examples:
   session-status.sh --research-days 14       # Look back 14 days for research
 EOF
 }
+case "${1:-}" in help|--help|-h) show_help; exit 0 ;; esac
+
+source "$SCRIPT_DIR/../lib/common.sh"
+source "$SCRIPT_DIR/../lib/cache.sh"
 
 get_session_status() {
     local research_days=7
