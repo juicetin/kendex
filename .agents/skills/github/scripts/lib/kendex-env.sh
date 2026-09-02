@@ -84,21 +84,34 @@ kendex_source_env_file() {
   source "$file"
 }
 
-kendex_trim() {
-  local value="$1"
-  value="${value#"${value%%[!$' \t\r\n']*}"}"
-  value="${value%"${value##*[!$' \t\r\n']}"}"
-  printf '%s' "$value"
+# Both helpers assign into a caller-named variable instead of printing.
+# kendex_load_settings_file reaches kendex_trim once for every line, and
+# three times on an assignment line — twice directly, for the line and for
+# the key, and once more inside kendex_decode_value. A helper that printed
+# could only be read back through a command substitution, so every one of
+# those was a fork, on every settings file every skill script loads.
+#
+# The assignment is a `printf -v` into a name the CALLER chose, so it is
+# lost to the helper's own local whenever the two spellings meet: never
+# pass a helper its own scratch name — `_kendex_trimmed` to kendex_trim,
+# `_kendex_decode_raw` or `_kendex_decode_regex` to kendex_decode_value.
+# Nothing enforces that; the two sets are spelled apart precisely so
+# kendex_decode_value can hand its own scratch to kendex_trim.
+kendex_trim() { # OUT_VAR RAW — RAW without leading or trailing whitespace, assigned to OUT_VAR
+  local _kendex_trimmed="$2"
+  _kendex_trimmed="${_kendex_trimmed#"${_kendex_trimmed%%[!$' \t\r\n']*}"}"
+  _kendex_trimmed="${_kendex_trimmed%"${_kendex_trimmed##*[!$' \t\r\n']}"}"
+  printf -v "$1" '%s' "$_kendex_trimmed"
 }
 
 # Decode one [env] value per the settings contract: a single-line basic
 # string containing no `"` and no `\`, optionally followed by a `#`
 # comment. Anything else is a shape the contract does not carry.
-kendex_decode_value() { # RAW — decoded value on stdout; 1 = not contract shape
-  local value regex='^"([^"\]*)"[[:space:]]*(#.*)?$'
-  value="$(kendex_trim "$1")"
-  [[ "$value" =~ $regex ]] || return 1
-  printf '%s' "${BASH_REMATCH[1]}"
+kendex_decode_value() { # OUT_VAR RAW — decoded value assigned to OUT_VAR; 1 = not contract shape, OUT_VAR untouched; overwrites the caller's BASH_REMATCH, since the match runs in the caller's shell rather than a subshell
+  local _kendex_decode_raw _kendex_decode_regex='^"([^"\]*)"[[:space:]]*(#.*)?$'
+  kendex_trim _kendex_decode_raw "$2"
+  [[ "$_kendex_decode_raw" =~ $_kendex_decode_regex ]] || return 1
+  printf -v "$1" '%s' "${BASH_REMATCH[1]}"
 }
 
 kendex_load_settings_file() {
@@ -111,7 +124,7 @@ kendex_load_settings_file() {
   while IFS= read -r line || [[ -n "$line" ]]; do
     lineno=$((lineno + 1))
     line="${line%$'\r'}"
-    line="$(kendex_trim "$line")"
+    kendex_trim line "$line"
     [[ -z "$line" || "$line" == \#* ]] && continue
 
     # A `[`-leading line is a header or an error, never content: `[env] # c`
@@ -128,7 +141,7 @@ kendex_load_settings_file() {
     fi
 
     [[ "$section" == "env" && "$line" == *=* ]] || continue
-    key="$(kendex_trim "${line%%=*}")"
+    kendex_trim key "${line%%=*}"
     [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
     # Which duplicate wins would be an accident of read order, so a re-assigned
     # key is a configuration error — the same ambiguity guard the settings.sh
@@ -139,7 +152,7 @@ kendex_load_settings_file() {
       return 1
     fi
     seen="$seen$key "
-    if ! value="$(kendex_decode_value "${line#*=}")"; then
+    if ! kendex_decode_value value "${line#*=}"; then
       echo "::error::$file: unsupported syntax for $key (expected a single-line basic string with no '\"' and no '\\': $key = \"value\")" >&2
       return 1
     fi
