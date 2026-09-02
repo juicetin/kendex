@@ -1,3 +1,12 @@
+/**
+ * Eager on the extension startup path: index.ts imports rate-limit-watchdog.ts
+ * statically, so every module in that transitive static closure loads at
+ * startup and none of them may take a node:* import. Pi 0.80.3's binary TS
+ * loader resolves transpiled TS through data: URLs and a large module with
+ * node:* imports trips Bun/JITI NameTooLong there. The provider fetch that
+ * needs node:fs is rate-limit-quota.ts, dynamically imported. Not enforced.
+ */
+
 export const RATE_LIMIT_CLOCK_RESET_PAST_TOLERANCE_MS = 10 * 60_000;
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
@@ -21,8 +30,9 @@ export function extractRetryAfterMs(event: unknown): number | null {
 				if (key === "retry_after_ms" || key === "retryAfterMs") return Math.floor(value);
 				return Math.floor(value * 1000);
 			}
-			if (typeof value === "string" && /^[0-9]+(?:\.[0-9]+)?$/.test(value)) {
+			if (typeof value === "string" && value.trim()) {
 				const parsed = Number(value);
+				if (!Number.isFinite(parsed) || parsed <= 0) continue;
 				if (key === "retry_after_ms" || key === "retryAfterMs") return Math.floor(parsed);
 				return Math.floor(parsed * 1000);
 			}
@@ -43,12 +53,6 @@ export function extractResetAtMs(event: unknown, now: number = Date.now()): numb
 	return extractResetAtMsFromText(extractAssistantErrorText(message), now);
 }
 
-export interface RateLimitScheduleBasis {
-	delayMs: number;
-	resetAtMs: number | null;
-	resetSource: RateLimitResetSource;
-	degradedResetSource: boolean;
-}
 
 export const RESET_AT_MS_KEYS = new Set(["resetAtMs", "reset_at_ms", "resetsAtMs", "resets_at_ms"]);
 export const RESET_AT_KEYS = new Set(["resetAt", "reset_at", "resetsAt", "resets_at"]);

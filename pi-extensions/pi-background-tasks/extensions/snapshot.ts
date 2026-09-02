@@ -139,11 +139,9 @@ export function defaultReadProcessIdentity(pid: number): ProcessIdentity | null 
 // starttime. Gating identity on comm would false-finalize a still-live
 // task (reviewer-error BLOCK, kendex#15 round 5).
 //
-// Absent identity on the snapshot (pre-1.2.2 upgrade) is treated as a
-// match because we have no pre-recorded token to compare against and
-// PID-only liveness is the documented degraded path. background-tasks.ts
-// emits a one-time legacy-fallback warning so operators can notice
-// long-lived pre-upgrade tasks.
+// A snapshot with no identity (the spawn-time probe failed) is treated
+// as a match because there is no pre-recorded token to compare against;
+// PID-only liveness is the documented degraded path.
 export function identityMatches(
 	recorded: ProcessIdentity | undefined,
 	current: ProcessIdentity | null,
@@ -190,9 +188,9 @@ export interface RestoreOptions {
 //    caller can re-attach output streams (or at minimum surface the
 //    orphan in the dashboard) instead of falsely announcing it exited.
 //
-// Already-terminal snapshots flow through unchanged. Pre-kendex#15
-// snapshots that lack exitNotified are treated as notified for terminal
-// states; only fresh running->stopped coercion produces exitNotified=false.
+// Everything else takes snapshot.exitNotified === true, so a terminal
+// snapshot that never carried the field is replay-eligible, as is a fresh
+// running->stopped coercion.
 export function restoredTaskFromSnapshot(snapshot: BackgroundTaskSnapshot, options: RestoreOptions = {}): ManagedTask {
 	const now = options.now ?? Date.now();
 	const probe = options.identityProbe ?? defaultReadProcessIdentity;
@@ -201,8 +199,8 @@ export function restoredTaskFromSnapshot(snapshot: BackgroundTaskSnapshot, optio
 		&& typeof snapshot.sessionId === "string"
 		&& snapshot.sessionId !== options.sessionId;
 	// PID-reuse safe: a non-null identity is required AND must match the
-	// snapshot's recorded procIdent (when present). Pre-1.2.2 snapshots
-	// with no procIdent degrade to PID-only liveness via identityMatches.
+	// snapshot's recorded procIdent (when present). A snapshot whose
+	// spawn-time probe failed degrades to PID-only via identityMatches.
 	let pidStillAlive = false;
 	if (wasRunning && !foreignSession) {
 		const unitName = snapshot.resourceControl?.mode === "systemd-run" ? snapshot.resourceControl.unitName : undefined;
@@ -218,21 +216,17 @@ export function restoredTaskFromSnapshot(snapshot: BackgroundTaskSnapshot, optio
 	}
 	const coercedFromRunning = wasRunning && !pidStillAlive;
 
-	// Backward-compat: snapshots from <=1.2.0 have no `exitNotified` field.
-	// Treat undefined as "already notified" for terminal states so an
-	// upgrade doesn't replay every historical task. Only the
-	// running->stopped coercion below produces a false (replay-eligible)
-	// value. Foreign-session snapshots are pinned to notified=true so
-	// cross-session leaks are impossible.
+	// A same-session snapshot is replay-eligible unless its persisted
+	// exitNotified is true: the running->stopped coercion forces false, and an
+	// absent or false flag stays false. Foreign-session snapshots are pinned
+	// true so cross-session leaks are impossible.
 	let exitNotified: boolean;
 	if (coercedFromRunning && !foreignSession) {
 		exitNotified = false;
 	} else if (foreignSession) {
 		exitNotified = true;
-	} else if (snapshot.status === "running") {
-		exitNotified = snapshot.exitNotified === true;
 	} else {
-		exitNotified = snapshot.exitNotified === undefined ? true : snapshot.exitNotified;
+		exitNotified = snapshot.exitNotified === true;
 	}
 
 	// kendex#97: annotate the running -> stopped coercion so callers can
@@ -279,10 +273,9 @@ export function restoredTaskFromSnapshot(snapshot: BackgroundTaskSnapshot, optio
 // recover from running->stopped coercion in restoredTaskFromSnapshot or
 // a session_shutdown that killed tasks without notifying the agent.
 //
-// Treats `exitNotified === undefined` as notified to preserve
-// backward-compatibility with snapshots persisted before this field
-// existed; restoredTaskFromSnapshot is the only path that flips this
-// to false (and only on a fresh running->stopped coercion).
+// A same-session snapshot is replay-eligible unless its persisted
+// exitNotified is true: the running->stopped coercion forces false, and an
+// absent or false flag stays false.
 export function selectMissedExits<T extends Pick<BackgroundTaskSnapshot, "status" | "notifyOnExit" | "exitNotified">>(
 	tasks: Iterable<T>,
 ): T[] {

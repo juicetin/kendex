@@ -1,14 +1,20 @@
+/**
+ * The package's one settings reader: trust registry, settings-file order and
+ * the kendex.extensionManager.config walk. A leaf module so glyphs.ts and the
+ * extension entry can both import it without importing each other.
+ */
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { CONFIG_ID } from "./constants.js";
-
-export type kendexConfig = Record<string, unknown>;
 
 export function expandHome(input: string): string {
 	if (input === "~") return homedir();
 	if (input.startsWith("~/")) return join(homedir(), input.slice(2));
 	return input;
+}
+
+export function piUserDir(): string {
+	return resolve(expandHome(process.env.PI_CODING_AGENT_DIR?.trim() || "~/.pi/agent"));
 }
 
 export function projectSettingsPath(cwd: string): string {
@@ -51,16 +57,14 @@ export function recordProjectTrust(ctx: { cwd?: string; isProjectTrusted?: () =>
 	registry.projectSettings.set(projectSettingsPath(ctx.cwd), trusted);
 }
 
-function projectSettingsTrusted(settingsPath: string): boolean {
-	return projectTrustRegistry().projectSettings?.get(settingsPath) === true;
+export function projectSettingsTrustedForCwd(cwd = process.cwd()): boolean {
+	return projectTrustRegistry().projectSettings?.get(projectSettingsPath(cwd)) === true;
 }
 
-
 export function piSettingsPaths(cwd = process.cwd()): string[] {
-	const userDir = resolve(expandHome(process.env.PI_CODING_AGENT_DIR?.trim() || "~/.pi/agent"));
-	const user = join(userDir, "settings.json");
+	const user = join(piUserDir(), "settings.json");
 	const project = projectSettingsPath(cwd);
-	return projectSettingsTrusted(project) ? [user, project] : [user];
+	return projectSettingsTrustedForCwd(cwd) ? [user, project] : [user];
 }
 
 export function readPackageConfig(packageId: string, cwd?: string): Record<string, unknown> {
@@ -76,38 +80,4 @@ export function readPackageConfig(packageId: string, cwd?: string): Record<strin
 		}
 	}
 	return merged;
-}
-
-export function readkendexConfig(cwd?: string): kendexConfig {
-	return readPackageConfig(CONFIG_ID, cwd) as kendexConfig;
-}
-
-export function settingBoolean(key: string, fallback: boolean, cwd?: string): boolean {
-	const value = readkendexConfig(cwd)[key];
-	return typeof value === "boolean" ? value : fallback;
-}
-
-export function settingString(key: string, fallback: string, cwd?: string): string {
-	const value = readkendexConfig(cwd)[key];
-	return typeof value === "string" && value.trim().length > 0 ? value.trim() : fallback;
-}
-
-export function settingStringAllowEmpty(key: string, fallback: string, cwd?: string): string {
-	const value = readkendexConfig(cwd)[key];
-	return typeof value === "string" ? value.trim() : fallback;
-}
-
-export function newlineFallbackKey(cwd?: string): "ctrl+j" | "none" {
-	const configured = settingString("newlineFallbackKey", "ctrl+j", cwd).toLowerCase();
-	return configured === "none" ? "none" : "ctrl+j";
-}
-
-export function settingNumber(key: string, fallback: number, cwd?: string): number {
-	const value = readkendexConfig(cwd)[key];
-	const parsed = typeof value === "number" ? value : typeof value === "string" ? Number(value) : Number.NaN;
-	return Number.isFinite(parsed) ? parsed : fallback;
-}
-
-export function boundedSettingNumber(key: string, fallback: number, min: number, max: number, cwd?: string): number {
-	return Math.max(min, Math.min(max, Math.floor(settingNumber(key, fallback, cwd))));
 }

@@ -3,10 +3,10 @@ import type { AgentToolResult, ExtensionAPI, ExtensionCommandContext, ExtensionC
 import { matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi, type AutocompleteItem } from "@earendil-works/pi-tui";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { Type } from "typebox";
 import { frameGlyphs, glyphs, glyphStyle, treeGlyph } from "./glyphs.js";
+import { piUserDir, readPackageConfig, recordProjectTrust } from "./settings.js";
 import { MINI_DASHBOARD_RANK, setMiniDashboardWidget } from "./stacked-widget.js";
 import {
 	applyTaskPanelContentVisibility,
@@ -85,7 +85,6 @@ function ansiGreen(text: string): string { return `${ANSI_GREEN_FG}${text}${ANSI
 function ansiYellow(text: string): string { return `${ANSI_YELLOW_FG}${text}${ANSI_FG_RESET}`; }
 
 type Status = "pending" | "in_progress" | "completed" | "abandoned";
-type kendexConfig = Record<string, unknown>;
 
 interface TaskItem {
 	id: string;
@@ -117,68 +116,6 @@ interface kendexModalLock {
 	depth: number;
 }
 
-function expandHome(input: string): string {
-	if (input === "~") return homedir();
-	if (input.startsWith("~/")) return join(homedir(), input.slice(2));
-	return input;
-}
-
-function projectSettingsPath(cwd: string): string {
-	let current = resolve(cwd);
-	while (true) {
-		const candidate = join(current, ".pi", "settings.json");
-		if (existsSync(candidate)) return candidate;
-		if (existsSync(join(current, ".pi")) || existsSync(join(current, ".git")) || existsSync(join(current, ".kendex-lock.json"))) return candidate;
-		const parent = dirname(current);
-		if (parent === current) return join(resolve(cwd), ".pi", "settings.json");
-		current = parent;
-	}
-}
-
-const PROJECT_TRUST_SYMBOL = Symbol.for("kendex.pi.project-trust");
-
-interface ProjectTrustRegistry {
-	projectSettings?: Map<string, boolean>;
-}
-
-function projectTrustRegistry(): ProjectTrustRegistry {
-	const host = globalThis as unknown as Record<PropertyKey, ProjectTrustRegistry | undefined>;
-	const existing = host[PROJECT_TRUST_SYMBOL];
-	if (existing) return existing;
-	const created: ProjectTrustRegistry = {};
-	host[PROJECT_TRUST_SYMBOL] = created;
-	return created;
-}
-
-export function recordProjectTrust(ctx: { cwd?: string; isProjectTrusted?: () => boolean }): void {
-	if (!ctx.cwd) return;
-	let trusted = true;
-	try {
-		trusted = ctx.isProjectTrusted?.() === true;
-	} catch {
-		trusted = false;
-	}
-	const registry = projectTrustRegistry();
-	if (!registry.projectSettings) registry.projectSettings = new Map();
-	registry.projectSettings.set(projectSettingsPath(ctx.cwd), trusted);
-}
-
-function projectSettingsTrusted(settingsPath: string): boolean {
-	return projectTrustRegistry().projectSettings?.get(settingsPath) === true;
-}
-
-
-function piSettingsPaths(cwd = process.cwd()): string[] {
-	const userDir = resolve(expandHome(process.env.PI_CODING_AGENT_DIR?.trim() || "~/.pi/agent"));
-	const user = join(userDir, "settings.json");
-	const project = projectSettingsPath(cwd);
-	return projectSettingsTrusted(project) ? [user, project] : [user];
-}
-
-function piUserDir(): string {
-	return resolve(expandHome(process.env.PI_CODING_AGENT_DIR?.trim() || "~/.pi/agent"));
-}
-
 function safeFileName(value: string): string {
 	return value.replace(/[^\w.-]+/g, "_");
 }
@@ -195,34 +132,20 @@ function sidecarStatePath(ctx: ExtensionContext): string {
 	return join(piUserDir(), "kendex", "sessions", safeFileName(sessionIdForContext(ctx)), "pi-task-panel", "state.json");
 }
 
-function readkendexConfig(cwd?: string): kendexConfig {
-	const merged: kendexConfig = {};
-	for (const path of piSettingsPaths(cwd)) {
-		if (!existsSync(path)) continue;
-		try {
-			const parsed = JSON.parse(readFileSync(path, "utf8"));
-			const config = parsed?.kendex?.extensionManager?.config?.[CONFIG_ID];
-			if (config && typeof config === "object" && !Array.isArray(config)) Object.assign(merged, config);
-		} catch {
-			// Ignore malformed optional manager config.
-		}
-	}
-	return merged;
-}
 
 function settingNumber(key: string, fallback: number, cwd?: string): number {
-	const value = readkendexConfig(cwd)[key];
+	const value = readPackageConfig(CONFIG_ID, cwd)[key];
 	const parsed = typeof value === "number" ? value : typeof value === "string" ? Number(value) : Number.NaN;
 	return Number.isFinite(parsed) ? parsed : fallback;
 }
 
 function settingBoolean(key: string, fallback: boolean, cwd?: string): boolean {
-	const value = readkendexConfig(cwd)[key];
+	const value = readPackageConfig(CONFIG_ID, cwd)[key];
 	return typeof value === "boolean" ? value : fallback;
 }
 
 function settingString(key: string, fallback: string, cwd?: string): string {
-	const value = readkendexConfig(cwd)[key];
+	const value = readPackageConfig(CONFIG_ID, cwd)[key];
 	return typeof value === "string" && value.trim().length > 0 ? value.trim() : fallback;
 }
 
