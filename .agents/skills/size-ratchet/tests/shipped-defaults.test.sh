@@ -715,21 +715,32 @@ run RATCHET_RAISE=1 SIZE_RATCHET_FROZEN_CLASSES=
 [ "$RC" -eq 0 ] && ok "control: with the frozen list emptied the same declared raise passes" \
   || bad "control: an empty frozen list allows the declared raise" "rc=$RC out=$OUT"
 
-echo "=== unit changes never compare unlike baseline quantities ==="
+echo "=== a frozen row crosses a unit change only up to HEAD's own measurement ==="
+# The adoption case: the row was written when the class counted lines, and the
+# class judging it counts bytes now. One --update carries it across.
 new_repo frozen-unit-change
-mklines doc.md 700
+mkbytes doc.md 70000
 mkdir -p "$R/tools"
-printf 'doc.md\t70000b\n' >"$R/$BASE"
+printf 'doc.md\t700\n' >"$R/$BASE"
 git -C "$R" add -A
-git -C "$R" commit -q -m bytes
-run 'SIZE_RATCHET_CLASSES=*.md=600' -- --update
-[ "$RC" -eq 1 ] && has "frozen baseline row unit changed: doc.md — row 70000b -> 700" \
-  && ok "a frozen byte-to-line migration refuses instead of comparing unlike numbers" \
-  || bad "a frozen unit migration fails closed" "rc=$RC out=$OUT"
-run RATCHET_RAISE=1 'SIZE_RATCHET_CLASSES=*.md=600'
-[ "$RC" -eq 1 ] && has "frozen baseline row unit changed" \
-  && ok "RATCHET_RAISE=1 cannot admit a frozen unit migration" \
-  || bad "a declared frozen unit migration fails closed" "rc=$RC out=$OUT"
+git -C "$R" commit -q -m lines
+run -- --update
+[ "$RC" -eq 0 ] && [ "$(cat "$R/$BASE")" = "$(printf 'doc.md\t70000b')" ] \
+  && ok "one --update re-measures a frozen line row into bytes and the commit is clean" \
+  || bad "a frozen line-to-byte re-measure passes" "rc=$RC row=$(cat "$R/$BASE") out=$OUT"
+# The bound, on the same fixture: a file grown since HEAD raises the frozen row
+# whatever unit it is written in, so it refuses at the number --update wrote.
+new_repo frozen-unit-change-raised
+mkbytes doc.md 70000
+mkdir -p "$R/tools"
+printf 'doc.md\t700\n' >"$R/$BASE"
+git -C "$R" add -A
+git -C "$R" commit -q -m lines
+mkbytes doc.md 210000
+run RATCHET_RAISE=1 -- --update
+[ "$RC" -eq 1 ] && has "frozen baseline row unit changed: doc.md — row 700 -> 210000b, but HEAD's copy measures 70000b in the new unit" \
+  && ok "a hand-raised byte row in a frozen class still refuses, RATCHET_RAISE or not" \
+  || bad "a raised frozen row across a unit change fails closed" "rc=$RC row=$(cat "$R/$BASE") out=$OUT"
 
 new_repo open-unit-change
 mklines big.rs 500

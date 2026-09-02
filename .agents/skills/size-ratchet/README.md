@@ -80,9 +80,10 @@ rather than reporting a clean raise check.
 
 For a candidate row in the same unit, the reference number is its ceiling. A
 larger open row or a first row beside an existing reference set needs
-`RATCHET_RAISE=1`; a frozen row never rises. When the units differ, the
-numbers are not compared: an open row needs the same declaration and a frozen
-row refuses until the file is below its new threshold. The gate reads no
+`RATCHET_RAISE=1`; a frozen row never rises. When the units differ, the numbers
+are not compared: an open row needs the same declaration, and a frozen row is
+admitted only at this run's measurement of the file, and only while that
+measurement sits at or below HEAD's blob in the same unit. The gate reads no
 commit message, so put the declaration's reason in the commit body.
 
 ## Baseline format

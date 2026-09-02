@@ -29,7 +29,9 @@ rather than degrading to a call per file), into the counts rows, and out
 again as a baseline row's `b` suffix. Nothing compares across units. A row
 whose unit no longer matches its class is reported as one to re-measure, and
 `--update` writes the current quantity in the new unit. `rows_raised` checks
-the unit tag before comparing numbers. The policy is
+the unit tag before comparing numbers, and where the tag changed on a frozen row
+it measures `HEAD:<path>` in the new unit, once per crossing row, so the
+admission has a like quantity to bound it. The policy is
 [README.md § Trusted HEAD baseline](README.md#trusted-head-baseline).
 
 ## Collection
