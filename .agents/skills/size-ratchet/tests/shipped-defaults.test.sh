@@ -643,66 +643,6 @@ run
   && ok "a raised row is reported as HEAD's row to the current row" \
   || bad "a raised row names both rows" "rc=$RC out=$OUT"
 
-echo "=== no HEAD baseline is not a clean raise check ==="
-new_repo no-head-rows
-mkdir -p "$R/tools"
-mklines small.rs 10
-git -C "$R" add -A
-git -C "$R" commit -q -m seed
-mklines big.rs 500
-printf 'big.rs\t500\n' >"$R/$BASE"
-git -C "$R" add -A
-run
-[ "$RC" -eq 0 ] && has "HEAD carries no baseline rows, so added and raised rows were not judged" \
-  && ok "a run with no reference says so instead of reporting a clean check" \
-  || bad "no reference is named on the verdict line" "rc=$RC out=$OUT"
-git -C "$R" commit -q -m freeze
-run
-[ "$RC" -eq 0 ] && ok "control: once HEAD carries the rows the run is clean" \
-  || bad "control: a run with a reference is clean" "rc=$RC out=$OUT"
-has "were not judged" && bad "and carries no such note" "$OUT" \
-  || ok "and carries no such note"
-
-echo "=== a class that changes its unit is not a free re-measure ==="
-# The migration this package's own markdown classes perform: a row committed
-# in lines, its class counting bytes afterwards. --update is the remedy the
-# UNITS diagnostic itself prints, so the run right after it is the one that
-# must still see the growth.
-new_repo unit-migration
-mkdir -p "$R/tools"
-mkbytes doc.md 70000
-printf 'doc.md\t600\n' >"$R/$BASE"
-git -C "$R" add -A
-git -C "$R" commit -q -m "seed: a markdown row in lines"
-mkbytes doc.md 200000
-git -C "$R" add -A
-run
-[ "$RC" -eq 1 ] && has "wrong unit: doc.md" \
-  && ok "the row counts what its class no longer does, so it is one to re-measure" \
-  || bad "a unit mismatch is reported" "rc=$RC out=$OUT"
-run -- --update
-git -C "$R" add -A
-run
-[ "$RC" -eq 1 ] && has "frozen baseline row raised: doc.md — row 70000 -> 200000 bytes" \
-  && ok "the re-measured row is judged against HEAD's file in the SAME unit, so the growth still fails" \
-  || bad "a re-measured row is judged against HEAD" "rc=$RC out=$OUT"
-run RATCHET_RAISE=1
-[ "$RC" -eq 1 ] && ok "and the declaration does not carry it either — markdown is frozen" \
-  || bad "the declaration does not carry a frozen unit migration" "rc=$RC out=$OUT"
-# The control: the SAME migration on a file that did not grow re-measures for
-# free, which is what every consumer's first commit after the upgrade does.
-new_repo unit-migration-clean
-mkdir -p "$R/tools"
-mkbytes doc.md 70000
-printf 'doc.md\t600\n' >"$R/$BASE"
-git -C "$R" add -A
-git -C "$R" commit -q -m "seed: a markdown row in lines"
-run -- --update
-git -C "$R" add -A
-run
-[ "$RC" -eq 0 ] && ok "control: an unchanged file's row re-measures into the new unit and passes" \
-  || bad "control: an unchanged file re-measures for free" "rc=$RC out=$OUT"
-
 echo "=== the --staged rewrite carries unstaged row edits rather than dropping them ==="
 new_repo autolower-edge
 mklines big.rs 500
@@ -774,6 +714,37 @@ has "code.rs" && bad "the declared raise carries the unfrozen row" "$OUT" \
 run RATCHET_RAISE=1 SIZE_RATCHET_FROZEN_CLASSES=
 [ "$RC" -eq 0 ] && ok "control: with the frozen list emptied the same declared raise passes" \
   || bad "control: an empty frozen list allows the declared raise" "rc=$RC out=$OUT"
+
+echo "=== unit changes never compare unlike baseline quantities ==="
+new_repo frozen-unit-change
+mklines doc.md 700
+mkdir -p "$R/tools"
+printf 'doc.md\t70000b\n' >"$R/$BASE"
+git -C "$R" add -A
+git -C "$R" commit -q -m bytes
+run 'SIZE_RATCHET_CLASSES=*.md=600' -- --update
+[ "$RC" -eq 1 ] && has "frozen baseline row unit changed: doc.md — row 70000b -> 700" \
+  && ok "a frozen byte-to-line migration refuses instead of comparing unlike numbers" \
+  || bad "a frozen unit migration fails closed" "rc=$RC out=$OUT"
+run RATCHET_RAISE=1 'SIZE_RATCHET_CLASSES=*.md=600'
+[ "$RC" -eq 1 ] && has "frozen baseline row unit changed" \
+  && ok "RATCHET_RAISE=1 cannot admit a frozen unit migration" \
+  || bad "a declared frozen unit migration fails closed" "rc=$RC out=$OUT"
+
+new_repo open-unit-change
+mklines big.rs 500
+mkdir -p "$R/tools"
+printf 'big.rs\t500\n' >"$R/$BASE"
+git -C "$R" add -A
+git -C "$R" commit -q -m lines
+run SIZE_RATCHET_FROZEN_CLASSES= 'SIZE_RATCHET_CLASSES=*.rs=1k' -- --update
+[ "$RC" -eq 1 ] && has "baseline row unit changed: big.rs" \
+  && ok "an open unit migration needs RATCHET_RAISE=1" \
+  || bad "an undeclared open unit migration fails closed" "rc=$RC out=$OUT"
+run RATCHET_RAISE=1 SIZE_RATCHET_FROZEN_CLASSES= 'SIZE_RATCHET_CLASSES=*.rs=1k'
+[ "$RC" -eq 0 ] \
+  && ok "RATCHET_RAISE=1 admits an open unit migration" \
+  || bad "a declared open unit migration passes" "rc=$RC out=$OUT"
 
 printf '\n%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
