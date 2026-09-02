@@ -623,6 +623,13 @@ linear_guard_write_action() {
 
 # Resolve project name or UUID to UUID
 # Usage: resolve_project_id "Phase 1" or resolve_project_id "uuid-here"
+#
+# Linear keeps a canceled project under the name a live one reuses, and the
+# name query returns both in no fixed order, so nodes[0] handed writes the
+# canceled one at random and `issues create --project` reported success on an
+# issue nobody could find (KEN-1022). A canceled match loses to every live one;
+# an all-canceled match set is refused, naming its UUIDs so a deliberate read
+# can pass one.
 resolve_project_id() {
     local project_ref="$1"
 
@@ -632,21 +639,53 @@ resolve_project_id() {
         return 0
     fi
 
-    # Look up by name
-    local query='query GetProject($name: String!) { projects(filter: {name: {eq: $name}}) { nodes { id } } }'
+    # `state` is selected, not filtered on: the server-side `state` filter is
+    # broken (see list_projects), and the whole match set is what separates
+    # "no such project" from "only canceled ones".
+    local query='query GetProject($name: String!) { projects(filter: {name: {eq: $name}}) { nodes { id state } } }'
     local variables
     variables=$(jq -nc --arg name "$project_ref" '{name: $name}')
     local result
-    result=$(graphql_query "$query" "$variables")
-    local project_id
-    project_id=$(echo "$result" | jq -r '.projects.nodes[0].id // empty')
-
-    if [ -z "$project_id" ]; then
-        jq -nc --arg message "Project not found: $project_ref" '{error: $message}' >&2
+    # A FAILED query is an API failure (rate limit, outage); "Project not
+    # found" is only true of a lookup that succeeded and matched nothing.
+    if ! result=$(graphql_query "$query" "$variables"); then
+        jq -nc --arg name "$project_ref" \
+            '{error: ("Could not resolve project \"" + $name + "\": Linear API request failed (see previous error)")}' >&2
         return 1
     fi
 
-    echo "$project_id"
+    # One pass, so the rejected list is the selection's complement rather than
+    # a second predicate that can drift from it: line 1 is the chosen id, line 2
+    # the rejected ones with the state that rejected each. A widened predicate
+    # keeps the message true without being edited.
+    local selection project_id rejected
+    selection=$(echo "$result" | jq -r '
+        (.projects.nodes // []) as $all
+        | ($all | map(select((.state // "" | ascii_downcase) != "canceled"))) as $live
+        | ($live[0].id // ""),
+          ($all - $live | map(.id + " (" + .state + ")") | join(", "))')
+    # Command substitution strips the trailing newline, so with nothing
+    # rejected — one live project, the everyday case — the second read hits EOF
+    # and returns 1. Under this file's errexit that status ends the function
+    # before it can print the id it just resolved. Every call site in the skill
+    # spells the call var=$(resolve_project_id ...), where bash does not apply
+    # errexit, so the abort shows up only in a bare call or in a command
+    # substitution under shopt -s inherit_errexit, which sync.sh sets.
+    { IFS= read -r project_id; IFS= read -r rejected; } <<<"$selection" || true
+
+    if [ -n "$project_id" ]; then
+        echo "$project_id"
+        return 0
+    fi
+
+    if [ -n "$rejected" ]; then
+        jq -nc --arg name "$project_ref" --arg matches "$rejected" \
+            '{error: ("Project not found: " + $name + " (no live project has this name; matches: " + $matches + "; pass a project UUID to target one)")}' >&2
+        return 1
+    fi
+
+    jq -nc --arg message "Project not found: $project_ref" '{error: $message}' >&2
+    return 1
 }
 
 # Resolve team name to UUID
