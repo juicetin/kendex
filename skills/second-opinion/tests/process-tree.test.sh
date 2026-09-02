@@ -67,8 +67,7 @@ RUNTIME="$TMP_ROOT/proj/skills/second-opinion/scripts/second-opinion-runtime"
 
 cat > "$TMP_ROOT/psbin/ps" <<'SH'
 #!/usr/bin/env bash
-# Ancestry only; the runtime's `-o pgid=,lstart=` identity check must reach the
-# real ps or it reads as "cannot verify" and stops being exercised at all.
+# Ancestry only. Other queries reach the host ps.
 args=("$@")
 mode=""; while [[ $# -gt 0 ]]; do case "$1" in -o) mode="$2"; shift 2 ;; *) shift ;; esac; done
 case "$mode" in
@@ -276,8 +275,7 @@ echo "=== the detached deadline takes the CLI tree with it ==="
 : > "$TMP_ROOT/dl.ready"; : > "$TMP_ROOT/dl.kid"
 mkdir "$TMP_ROOT/dl-runtime"
 CLI_READY_FILE="$TMP_ROOT/dl.ready" CLI_KID_FILE="$TMP_ROOT/dl.kid" \
-  SECOND_OPINION_LAUNCH_MODEL=claude SECOND_OPINION_LAUNCH_SOURCE=detected \
-  SECOND_OPINION_LAUNCH_IN_CALLER_ENV=false SECOND_OPINION_LAUNCH_SESSION_SCOPED=false \
+  SECOND_OPINION_LAUNCH_MODEL=claude \
   SECOND_OPINION_CODEX_CMD=treeish-codex \
   "$RUNTIME" launch "$SECOND_OPINION" "$TMP_ROOT/dl-answer" "$TMP_ROOT/dl-runtime" \
   6 false 10 quick question --target=codex --cwd "$TMP_ROOT/work" --timeout 600 \
@@ -302,314 +300,183 @@ await_gone "$dl_kid" \
   || fail "the deadline reported 124 and left the CLI's child $dl_kid running"
 ok "the deadline takes the CLI tree with it"
 
-echo "=== a signal inside the fork window still stops the child ==="
-# Between the fork and the assignment that records its pid there is nothing for
-# a handler to act on. The window is microseconds wide, so it is not raced: a
-# copy of the runtime blocks there on a FIFO, and the signal is delivered while
-# it is blocked. The logic under test — defer, then honour after assignment —
-# is the shipped logic; only the width of the window is staged.
-widen_fork_window() { # OUT ANCHOR — insert a FIFO block right after the fork
-  local out="$1" anchor="$2"
-  awk -v anchor="$anchor" '
-    { print }
-    index($0, anchor) > 0 && !done { print "  cat < \"$WINDOW_FIFO\" > /dev/null"; done = 1 }
-  ' "$RUNTIME" > "$out"
-  chmod +x "$out"
-  grep -q 'WINDOW_FIFO' "$out" || fail "the window widener matched nothing in $out"
-}
-# run_in_window <runtime> <label>: start group-run so it blocks in the widened
-# window, signal it there, release it, and report the exit status.
-run_in_window() { # RUNTIME LABEL -> "rc"
-  local runtime="$1" label="$2" rc=0 job
-  : > "$TMP_ROOT/$label.ready"; : > "$TMP_ROOT/$label.kid"
-  mkfifo "$TMP_ROOT/$label.fifo"
-  CLI_READY_FILE="$TMP_ROOT/$label.ready" CLI_KID_FILE="$TMP_ROOT/$label.kid" \
-    WINDOW_FIFO="$TMP_ROOT/$label.fifo" \
-    "$runtime" group-run "$TMP_ROOT/$label.stderr" orphan-codex \
-    < /dev/null > /dev/null 2>&1 &
-  job=$!
-  # The CLI's own ready file proves the fork happened, so the process is now
-  # blocked in the window rather than approaching it.
-  await_file "$TMP_ROOT/$label.ready" || fail "$label never reached the fork window"
-  kill -TERM "$job" 2>/dev/null || true
-  printf 'go\n' > "$TMP_ROOT/$label.fifo"
-  wait "$job" 2>/dev/null || rc=$?
-  printf '%s' "$rc"
-}
-WINDOW_RUNTIME="$TMP_ROOT/window-runtime"
-widen_fork_window "$WINDOW_RUNTIME" '2>"$stderr_file" &'
-window_rc="$(run_in_window "$WINDOW_RUNTIME" fw)"
-window_kid="$(read_pid "$TMP_ROOT/fw.kid" "the fork-window CLI")"
-STRAYS+=("$window_kid")
-assert_rc "$window_rc" 143 "a signal in the fork window still ends the run"
-await_gone "$window_kid" \
-  || fail "a signal in the fork window abandoned the live child $window_kid"
-ok "the child forked in that window is still stopped"
-
-echo "=== control: the same window against a handler that exits in it ==="
-# The pre-fix shape: exit from the handler instead of recording. With no pid
-# assigned yet there is nothing to stop, so the child must survive — which is
-# what says the deferral is doing the work above.
-EXIT_MUTANT="$TMP_ROOT/exit-in-window-runtime"
-sed 's|^  request_cancel() { cancel_rc="\$1"; }$|  request_cancel() { exit "$1"; }|' \
-  "$WINDOW_RUNTIME" > "$EXIT_MUTANT"
-chmod +x "$EXIT_MUTANT"
-cmp -s "$WINDOW_RUNTIME" "$EXIT_MUTANT" && fail "the exit-in-window control mutated nothing"
-grep -q 'request_cancel() { exit "$1"; }' "$EXIT_MUTANT" \
-  || fail "the exit-in-window control did not replace the deferral"
-ok "the exit-in-window control exits from the handler instead of recording"
-ctl_window_rc="$(run_in_window "$EXIT_MUTANT" ctlwin)"
-ctl_window_kid="$(read_pid "$TMP_ROOT/ctlwin.kid" "the exit-in-window control CLI")"
-STRAYS+=("$ctl_window_kid")
-if gone "$ctl_window_kid"; then
-  fail "the exit-in-window control stopped the child too — the case above proves nothing"
-fi
-ok "the control abandons the child, so the deferral is what saves it (rc=$ctl_window_rc)"
-kill -KILL "$ctl_window_kid" 2>/dev/null || true
-
-echo "=== a launch cancelled before it publishes takes its worker with it ==="
-# Between the fork and the last protocol line the worker exists but nothing can
-# reach it: the pid, the identity and the wait command are not all out yet. A
-# launch that dies there would strand a run nobody can wait on or stop.
-#
-# STAGED BY BLOCKING THE PUBLISH, not by timing. `worker-id` is pre-created as a
-# FIFO, so the launcher blocks writing it with the worker already running —
-# provably inside the window. The signal is then delivered and the FIFO drained,
-# so the trap runs at a point this case chose rather than one it raced for.
-mkdir "$TMP_ROOT/win-runtime"
-mkfifo "$TMP_ROOT/win-runtime/worker-id"
-: > "$TMP_ROOT/win.ready"; : > "$TMP_ROOT/win.kid"
-CLI_READY_FILE="$TMP_ROOT/win.ready" CLI_KID_FILE="$TMP_ROOT/win.kid" \
-  SECOND_OPINION_LAUNCH_MODEL=claude SECOND_OPINION_LAUNCH_SOURCE=detected \
-  SECOND_OPINION_LAUNCH_IN_CALLER_ENV=false SECOND_OPINION_LAUNCH_SESSION_SCOPED=false \
-  SECOND_OPINION_CODEX_CMD=treeish-codex \
-  "$RUNTIME" launch "$SECOND_OPINION" "$TMP_ROOT/win-answer" "$TMP_ROOT/win-runtime" \
-  120 false 10 quick question --target=codex --cwd "$TMP_ROOT/work" --timeout 600 \
-  > "$TMP_ROOT/win-launch.stdout" 2> "$TMP_ROOT/win-launch.stderr" &
-win_launcher=$!
-# The pid file is written before worker-id, so its arrival proves the launcher
-# is past the fork and blocked on the FIFO.
-await_file "$TMP_ROOT/win-runtime/pid" || fail "the launcher never reached the publish window"
-win_pid="$(read_pid "$TMP_ROOT/win-runtime/pid" "the publish-window launcher")"
-STRAYS+=("$win_pid")
-await_file "$TMP_ROOT/win.ready" || fail "the worker never started"
-win_kid="$(read_pid "$TMP_ROOT/win.kid" "the publish-window CLI")"
-STRAYS+=("$win_kid")
-grep -q '^wait:' "$TMP_ROOT/win-launch.stdout" \
-  && fail "the launcher published its wait command before the window closed"
-ok "the launcher is inside the window: worker running, protocol unpublished"
-kill -TERM "$win_launcher" 2>/dev/null || true
-# Draining the FIFO lets the blocked write finish; bash then runs the signal it
-# has been holding, before any further command.
-cat < "$TMP_ROOT/win-runtime/worker-id" > /dev/null 2>&1 || true
-win_rc=0
-wait "$win_launcher" 2>/dev/null || win_rc=$?
-[[ $win_rc -ne 0 ]] || fail "a cancelled launch reported success"
-ok "the cancelled launch exits non-zero (rc=$win_rc)"
-grep -q '^wait:' "$TMP_ROOT/win-launch.stdout" \
-  && fail "a cancelled launch still published a wait command"
-ok "no wait command was published for a run that was cancelled"
-await_gone "$win_pid" || fail "the cancelled launch left its worker $win_pid running"
-ok "the cancelled launch stopped its worker"
-[[ -z "$win_kid" ]] || await_gone "$win_kid" \
-  || fail "the cancelled launch left the CLI's child $win_kid running"
-ok "and the CLI tree under it"
-[[ -e "$TMP_ROOT/win-runtime" ]] && fail "the cancelled launch left its runtime state behind"
-ok "the cancelled launch removed its runtime directory"
-
-echo "=== and the launcher's own fork window behaves the same way ==="
-# The same defect and the same fix one level up, tested separately because
-# launch's cleanup does more than group_run's: it must also reclaim the runtime
-# directory, and a signal caught before the pid was owned would leave both the
-# worker and that state behind.
-LAUNCH_WINDOW_RUNTIME="$TMP_ROOT/launch-window-runtime"
-widen_fork_window "$LAUNCH_WINDOW_RUNTIME" '< /dev/null > "$log" 2>&1 &'
-mkdir "$TMP_ROOT/lw-runtime"
-mkfifo "$TMP_ROOT/lw.fifo"
-: > "$TMP_ROOT/lw.ready"; : > "$TMP_ROOT/lw.kid"
-CLI_READY_FILE="$TMP_ROOT/lw.ready" CLI_KID_FILE="$TMP_ROOT/lw.kid" \
-  WINDOW_FIFO="$TMP_ROOT/lw.fifo" \
-  SECOND_OPINION_LAUNCH_MODEL=claude SECOND_OPINION_LAUNCH_SOURCE=detected \
-  SECOND_OPINION_LAUNCH_IN_CALLER_ENV=false SECOND_OPINION_LAUNCH_SESSION_SCOPED=false \
-  SECOND_OPINION_CODEX_CMD=treeish-codex \
-  "$LAUNCH_WINDOW_RUNTIME" launch "$SECOND_OPINION" "$TMP_ROOT/lw-answer" \
-  "$TMP_ROOT/lw-runtime" 120 false 10 quick question --target=codex \
-  --cwd "$TMP_ROOT/work" --timeout 600 \
-  > "$TMP_ROOT/lw-launch.stdout" 2> "$TMP_ROOT/lw-launch.stderr" &
-lw_launcher=$!
-await_file "$TMP_ROOT/lw.ready" || fail "the launcher never reached its fork window"
-lw_kid="$(read_pid "$TMP_ROOT/lw.kid" "the launch fork-window CLI")"
-STRAYS+=("$lw_kid")
-kill -TERM "$lw_launcher" 2>/dev/null || true
-printf 'go\n' > "$TMP_ROOT/lw.fifo"
-lw_rc=0
-wait "$lw_launcher" 2>/dev/null || lw_rc=$?
-assert_rc "$lw_rc" 143 "a signal in the launcher's fork window ends the launch"
-grep -q '^wait:' "$TMP_ROOT/lw-launch.stdout" \
-  && fail "a launch cancelled in its fork window still published a wait command"
-ok "no wait command was published"
-await_gone "$lw_kid" \
-  || fail "the launcher abandoned the CLI child $lw_kid forked in that window"
-ok "the worker's whole tree is stopped"
-[[ -e "$TMP_ROOT/lw-runtime" ]] && fail "the cancelled launch left its runtime state behind"
-ok "and its runtime directory is reclaimed"
-
-echo "=== wait never signals a pid it cannot verify ==="
-# A pid is a number, not an identity. Staged directly: an unrelated live
-# process whose pid sits in the runtime dir is what a reused pid looks like
-# from here.
-# The bystander LEADS ITS OWN GROUP, which is the dangerous shape: teardown
-# aims at a process group, so a reused pid that leads no group is out of reach
-# anyway and would let this case pass without any identity check at all.
-BYSTANDER=""
-spawn_bystander() { # sets BYSTANDER to a process leading a group of its own
-  # Assigns a global and sends the process's output to /dev/null. Printing the
-  # pid through a command substitution would hang instead: the background
-  # process inherits the substitution's pipe and holds it open — defect A's
-  # exact shape, reproduced inside the suite that exists to catch it.
-  set -m
-  sleep 600 > /dev/null 2>&1 &
-  BYSTANDER=$!
-  disown %% 2>/dev/null || true
-  set +m
-}
-spawn_bystander
-bystander="$BYSTANDER"
-STRAYS+=("$bystander")
-[[ "$(ps -o pgid= -p "$bystander" 2>/dev/null | tr -d ' ')" == "$bystander" ]] \
-  || fail "the bystander is not a group leader — the case would pass vacuously"
-ok "the bystander leads its own group, so teardown could reach it"
-mkdir "$TMP_ROOT/by-runtime"
-printf 'stagedtoken\n' > "$TMP_ROOT/by-runtime/token"
-: > "$TMP_ROOT/by-runtime/worker.log"
-printf '%s\n' "$bystander" > "$TMP_ROOT/by-runtime/pid"
-# Recorded when the real worker started; the bystander cannot match it.
-printf '%s Thu Jan  1 00:00:00 1970\n' "$bystander" > "$TMP_ROOT/by-runtime/worker-id"
-printf 'kept\n' > "$TMP_ROOT/by-answer"
+echo "=== process-group cleanup failures stay loud and recoverable ==="
 rc=0
-"$RUNTIME" wait "$TMP_ROOT/by-answer" "$TMP_ROOT/by-runtime" \
-  "$(($(date +%s) - 1))" stagedtoken 1 \
-  > "$TMP_ROOT/by.stdout" 2> "$TMP_ROOT/by.stderr" || rc=$?
-assert_rc "$rc" 124 "an elapsed deadline is still terminal"
-kill -0 "$bystander" 2>/dev/null \
-  || fail "wait KILLED a process it never verified as its own worker"
-ok "the unverifiable pid was not signalled"
-# Sparing the pid is right, and doing it in silence is not: the wait is about
-# to delete the runtime state and return 124, so this line is the only record
-# that something may still be running.
-assert_contains "$TMP_ROOT/by.stderr" "its processes could not be" \
-  "the decline says so on stderr instead of returning quietly"
+RUNTIME_PATH="$RUNTIME" bash -c '
+  source "$RUNTIME_PATH"
+  process_group_alive() { return 0; }
+  kill() { return 1; }
+  stop_process_group 4242 1
+' > "$TMP_ROOT/term-fail.stdout" 2> "$TMP_ROOT/term-fail.stderr" || rc=$?
+assert_rc "$rc" 1 "a TERM failure is reported"
+assert_contains "$TMP_ROOT/term-fail.stderr" "could not send TERM to process group 4242" \
+  "the TERM failure names the signal and group"
 
-echo "=== an unverifiable pid does not read as a running worker either ==="
-# The same root cause on the read path: believing a live-but-unverified pid
-# leaves the wait reporting "still running" for a run that is over, spending
-# the whole slice each time until the deadline.
-mkdir "$TMP_ROOT/read-runtime"
-printf 'stagedtoken\n' > "$TMP_ROOT/read-runtime/token"
-: > "$TMP_ROOT/read-runtime/worker.log"
-printf '%s\n' "$bystander" > "$TMP_ROOT/read-runtime/pid"
-printf '%s Thu Jan  1 00:00:00 1970\n' "$bystander" > "$TMP_ROOT/read-runtime/worker-id"
-printf 'kept\n' > "$TMP_ROOT/read-answer"
-start=$(date +%s)
+printf '100\n' > "$TMP_ROOT/kill-fail.clock"
 rc=0
-"$RUNTIME" wait "$TMP_ROOT/read-answer" "$TMP_ROOT/read-runtime" \
-  "$(($(date +%s) + 3600))" stagedtoken 5 \
-  > "$TMP_ROOT/read.stdout" 2> "$TMP_ROOT/read.stderr" || rc=$?
-elapsed=$(( $(date +%s) - start ))
-assert_rc "$rc" 75 "an unverifiable pid is reported as gone"
-assert_contains "$TMP_ROOT/read.stderr" "the detached worker is gone" \
-  "the 75 names a gone worker"
-[[ $elapsed -lt 4 ]] \
-  || fail "the wait spent its whole ${elapsed}s slice believing an unverified pid"
-ok "it answers promptly (${elapsed}s) instead of spending the slice"
-kill -KILL "$bystander" 2>/dev/null || true
+RUNTIME_PATH="$RUNTIME" TEST_CLOCK="$TMP_ROOT/kill-fail.clock" bash -c '
+  source "$RUNTIME_PATH"
+  process_group_alive() { return 0; }
+  kill() { [[ "$1" != -KILL ]]; }
+  sleep() { :; }
+  date() {
+    local now
+    IFS= read -r now < "$TEST_CLOCK"
+    now=$((now + 1))
+    printf "%s\n" "$now" > "$TEST_CLOCK"
+    printf "%s\n" "$now"
+  }
+  stop_process_group 4292 1
+' > "$TMP_ROOT/kill-fail.stdout" 2> "$TMP_ROOT/kill-fail.stderr" || rc=$?
+assert_rc "$rc" 1 "a KILL failure after TERM is reported"
+assert_contains "$TMP_ROOT/kill-fail.stderr" "could not send KILL to process group 4292" \
+  "the KILL failure names the signal and group"
 
-echo "=== a reaped worker is not a running one, however well it matches ==="
-# THE HARD CASE, and the one the recorded identity alone gets wrong. A zombie
-# keeps the pgid and start time it was launched with, and `kill -0` still
-# succeeds on it, so its record matches EXACTLY. Only the process state says
-# the run is over. On a PID 1 that does not reap — a container without an init
-# — this is every run that ends without publishing its marker, not a rare shape.
-ZOMBIE=""
-spawn_leader_zombie() { # sets ZOMBIE to a reaped process leading its own group
-  # The parent execs into `sleep` so that nothing is left which could reap the
-  # child; a shell parent collects it and there is no zombie to stage. The
-  # child outlives that exec by a second for the same reason. No python here:
-  # this suite's whole point is the host it runs on, and it may not have one.
-  local pidfile="$TMP_ROOT/zombie.pid" _
-  rm -f "$pidfile"
-  bash -c 'set -m; sleep 1 & printf "%s\n" "$!" > "$1"; set +m; exec sleep 60' \
-    _ "$pidfile" > /dev/null 2>&1 &
-  STRAYS+=("$!")
-  # Disowned for the same reason the bystander is: cleanup kills it, and the
-  # 3.2 bash macOS ships announces a killed job it still tracks. `Killed: 9`
-  # in a suite about processes outliving their run reads as a failure to
-  # anyone scanning the output. Killing by pid does not need the job table.
-  disown %% 2>/dev/null || true
-  await_file "$pidfile" || fail "the zombie fixture never reported its pid"
-  ZOMBIE="$(read_pid "$pidfile" "the zombie fixture")"
-  STRAYS+=("$ZOMBIE")
-  for _ in $(seq 1 100); do
-    [[ "$(ps -o state= -p "$ZOMBIE" 2>/dev/null | tr -d ' ')" == Z* ]] && return 0
-    sleep 0.1
-  done
+KILL_FAILURE_MUTANT="$TMP_ROOT/kill-failure-mutant-runtime"
+awk '
+  /could not send KILL to process group/ {
+    print
+    if (getline <= 0 || $0 !~ /return 1/) exit 8
+    sub(/return 1/, "return 0")
+    print
+    changed++
+    next
+  }
+  { print }
+  END { if (changed != 1) exit 9 }
+' "$RUNTIME" > "$KILL_FAILURE_MUTANT" \
+  || fail "KILL-failure mutant did not replace exactly one refusal"
+chmod +x "$KILL_FAILURE_MUTANT"
+bash -n "$KILL_FAILURE_MUTANT" || fail "KILL-failure mutant is not valid shell"
+printf '100\n' > "$TMP_ROOT/kill-fail-mutant.clock"
+rc=0
+RUNTIME_PATH="$KILL_FAILURE_MUTANT" TEST_CLOCK="$TMP_ROOT/kill-fail-mutant.clock" bash -c '
+  source "$RUNTIME_PATH"
+  process_group_alive() { return 0; }
+  kill() { [[ "$1" != -KILL ]]; }
+  sleep() { :; }
+  date() {
+    local now
+    IFS= read -r now < "$TEST_CLOCK"
+    now=$((now + 1))
+    printf "%s\n" "$now" > "$TEST_CLOCK"
+    printf "%s\n" "$now"
+  }
+  stop_process_group 4292 1
+' > "$TMP_ROOT/kill-fail-mutant.stdout" 2> "$TMP_ROOT/kill-fail-mutant.stderr" || rc=$?
+assert_rc "$rc" 0 "the KILL-failure mutant hides the cleanup failure"
+ok "the mutant proves KILL-send failure must return nonzero"
+
+printf '100\n' > "$TMP_ROOT/final-live.clock"
+rc=0
+RUNTIME_PATH="$RUNTIME" TEST_CLOCK="$TMP_ROOT/final-live.clock" \
+  WAIT_CALLED="$TMP_ROOT/final-live.wait-called" bash -c '
+  source "$RUNTIME_PATH"
+  process_group_alive() { return 0; }
+  kill() { return 0; }
+  wait() { touch "$WAIT_CALLED"; return 0; }
+  sleep() { :; }
+  date() {
+    local now
+    IFS= read -r now < "$TEST_CLOCK"
+    now=$((now + 1))
+    printf "%s\n" "$now" > "$TEST_CLOCK"
+    printf "%s\n" "$now"
+  }
+  stop_process_group 4343 1
+' > "$TMP_ROOT/final-live.stdout" 2> "$TMP_ROOT/final-live.stderr" || rc=$?
+assert_rc "$rc" 1 "a process group still alive after KILL is reported"
+assert_contains "$TMP_ROOT/final-live.stderr" "process group 4343 is still alive after KILL" \
+  "the final-liveness failure names the group and signal"
+[[ ! -e "$TMP_ROOT/final-live.wait-called" ]] \
+  || fail "post-KILL cleanup entered wait while the group was still alive"
+ok "post-KILL cleanup stays inside its bounded liveness loop"
+
+mkdir "$TMP_ROOT/cleanup-fail-runtime"
+: > "$TMP_ROOT/cleanup-fail-runtime/worker.log"
+: > "$TMP_ROOT/cleanup-fail-runtime/worker.status"
+printf '4444\n' > "$TMP_ROOT/cleanup-fail-runtime/pid"
+printf 'kept\n' > "$TMP_ROOT/cleanup-fail-answer"
+rc=0
+RUNTIME_PATH="$RUNTIME" FAIL_ROOT="$TMP_ROOT" bash -c '
+  source "$RUNTIME_PATH"
+  stop_process_group() {
+    echo "second-opinion-runtime: injected cleanup refusal" >&2
+    return 1
+  }
+  wait_for_run "$FAIL_ROOT/cleanup-fail-answer" "$FAIL_ROOT/cleanup-fail-runtime" \
+    "$(($(date +%s) - 1))" 1
+' > "$TMP_ROOT/cleanup-fail.stdout" 2> "$TMP_ROOT/cleanup-fail.stderr" || rc=$?
+assert_rc "$rc" 75 "deadline cleanup failure remains recoverable"
+assert_contains "$TMP_ROOT/cleanup-fail.stderr" "injected cleanup refusal" \
+  "the cleanup cause reaches the caller"
+assert_contains "$TMP_ROOT/cleanup-fail.stderr" "runtime state preserved" \
+  "the wait names the preserved recovery state"
+[[ -d "$TMP_ROOT/cleanup-fail-runtime" ]] \
+  || fail "cleanup failure deleted the runtime state needed to retry"
+ok "cleanup failure preserves the runtime directory"
+
+run_launch_cleanup_failure() { # RUNTIME LABEL
+  local runtime="$1" label="$2" root rc=0
+  root="$TMP_ROOT/$label"
+  mkdir "$root-runtime"
+  : > "$root-runtime/pid"
+  RUNTIME_PATH="$runtime" SECOND_OPINION_PATH="$SECOND_OPINION" CASE_ROOT="$TMP_ROOT" \
+    CASE_LABEL="$label" STOP_CAPTURE="$root.stop-pid" \
+    SECOND_OPINION_LAUNCH_MODEL=claude SECOND_OPINION_CODEX_CMD=treeish-codex \
+    CLI_READY_FILE="$root.ready" CLI_KID_FILE="$root.kid" bash -c '
+      source "$RUNTIME_PATH"
+      stop_process_group() {
+        printf "%s\n" "$1" > "$STOP_CAPTURE"
+        echo "second-opinion-runtime: injected launch cleanup refusal" >&2
+        return 1
+      }
+      launch "$SECOND_OPINION_PATH" "$CASE_ROOT/$CASE_LABEL-answer" \
+        "$CASE_ROOT/$CASE_LABEL-runtime" 120 false 10 quick question \
+        --target=codex --cwd "$CASE_ROOT/work" --timeout 600
+    ' > "$root.stdout" 2> "$root.stderr" || rc=$?
+  printf '%s\n' "$rc"
+}
+cleanup_captured_launch() { # LABEL
+  local label="$1" pid
+  pid=$(cat < "$TMP_ROOT/$label.stop-pid")
+  kill -KILL -- "-$pid" 2>/dev/null || true
+  for _ in $(seq 1 200); do gone "$pid" && return 0; sleep 0.05; done
   return 1
 }
-spawn_leader_zombie || fail "the fixture never became a zombie — nothing to test"
-[[ "$(ps -o pgid= -p "$ZOMBIE" 2>/dev/null | tr -d ' ')" == "$ZOMBIE" ]] \
-  || fail "the zombie does not lead its own group, so it is not worker-shaped"
-kill -0 "$ZOMBIE" 2>/dev/null \
-  || fail "kill -0 already rejects the zombie — the case would prove nothing"
-ok "the staged zombie is worker-shaped: leads its group, kill -0 accepts it"
-mkdir "$TMP_ROOT/z-runtime"
-printf 'stagedtoken\n' > "$TMP_ROOT/z-runtime/token"
-: > "$TMP_ROOT/z-runtime/worker.log"
-printf '%s\n' "$ZOMBIE" > "$TMP_ROOT/z-runtime/pid"
-# Its REAL identity, read the way the launcher records it, so the record
-# matches and the state is the only thing left that can reject it.
-ps -o pgid=,lstart= -p "$ZOMBIE" | tr -s '[:space:]' ' ' \
-  | sed 's/^ //; s/ $//' > "$TMP_ROOT/z-runtime/worker-id"
-[[ -s "$TMP_ROOT/z-runtime/worker-id" ]] \
-  || fail "the zombie's identity did not record — the case would pass vacuously"
-printf 'kept\n' > "$TMP_ROOT/z-answer"
-start=$(date +%s)
-rc=0
-"$RUNTIME" wait "$TMP_ROOT/z-answer" "$TMP_ROOT/z-runtime" \
-  "$(($(date +%s) + 3600))" stagedtoken 5 \
-  > "$TMP_ROOT/z.stdout" 2> "$TMP_ROOT/z.stderr" || rc=$?
-elapsed=$(( $(date +%s) - start ))
-assert_rc "$rc" 75 "a reaped worker is reported as gone"
-assert_contains "$TMP_ROOT/z.stderr" "the detached worker is gone" \
-  "the 75 names a gone worker instead of one still running"
-[[ $elapsed -lt 4 ]] \
-  || fail "the wait spent its whole ${elapsed}s slice waiting on a zombie"
-ok "it answers promptly (${elapsed}s) instead of spending the slice"
 
-echo "=== control: the same states against a runtime that trusts a bare pid ==="
-# Without this the two cases above cannot say WHICH check spared the bystander
-# — an identity check that never ran would pass them both the same way.
-MUTANT="$TMP_ROOT/bare-pid-runtime"
-sed 's/^worker_is_ours() { # PID RUNTIME_DIR.*/worker_is_ours() { kill -0 "$1" 2>\/dev\/null; return; }\nunused_is_ours() {/' \
-  "$RUNTIME" > "$MUTANT"
-chmod +x "$MUTANT"
-cmp -s "$RUNTIME" "$MUTANT" && fail "the bare-pid control mutated nothing"
-bash -n "$MUTANT" || fail "the bare-pid control is not valid shell"
-ok "the bare-pid control replaces the identity check with kill -0"
-spawn_bystander
-control_bystander="$BYSTANDER"
-STRAYS+=("$control_bystander")
-mkdir "$TMP_ROOT/ctl-runtime"
-printf 'stagedtoken\n' > "$TMP_ROOT/ctl-runtime/token"
-: > "$TMP_ROOT/ctl-runtime/worker.log"
-printf '%s\n' "$control_bystander" > "$TMP_ROOT/ctl-runtime/pid"
-printf '%s Thu Jan  1 00:00:00 1970\n' "$control_bystander" > "$TMP_ROOT/ctl-runtime/worker-id"
-printf 'kept\n' > "$TMP_ROOT/ctl-answer"
-rc=0
-"$MUTANT" wait "$TMP_ROOT/ctl-answer" "$TMP_ROOT/ctl-runtime" \
-  "$(($(date +%s) - 1))" stagedtoken 1 \
-  > "$TMP_ROOT/ctl.stdout" 2> "$TMP_ROOT/ctl.stderr" || rc=$?
-if kill -0 "$control_bystander" 2>/dev/null; then
-  kill -KILL "$control_bystander" 2>/dev/null || true
-  fail "the bare-pid control spared the bystander — the case proves nothing"
-fi
-ok "the bare-pid control kills the bystander, so the check is what spares it"
+rc="$(run_launch_cleanup_failure "$RUNTIME" launch-cleanup)"
+assert_rc "$rc" 1 "a publication failure with failed cleanup exits nonzero"
+assert_contains "$TMP_ROOT/launch-cleanup.stderr" "injected launch cleanup refusal" \
+  "launch cleanup reports the stop failure"
+assert_contains "$TMP_ROOT/launch-cleanup.stderr" "runtime state preserved" \
+  "launch cleanup names the preserved state"
+[[ -d "$TMP_ROOT/launch-cleanup-runtime" ]] \
+  || fail "launch cleanup failure deleted its recovery state"
+ok "launch cleanup failure preserves the runtime directory"
+cleanup_captured_launch launch-cleanup || fail "launch cleanup control left its worker running"
+
+LAUNCH_CLEANUP_MUTANT="$TMP_ROOT/launch-cleanup-mutant-runtime-script"
+awk '
+  /launch cleanup failed; runtime state preserved/ {
+    print
+    if (getline <= 0 || $0 !~ /return 1/) exit 8
+    sub(/return 1/, ":")
+    print
+    changed++
+    next
+  }
+  { print }
+  END { if (changed != 1) exit 9 }
+' "$RUNTIME" > "$LAUNCH_CLEANUP_MUTANT" \
+  || fail "launch-cleanup mutant did not replace exactly one refusal"
+chmod +x "$LAUNCH_CLEANUP_MUTANT"
+bash -n "$LAUNCH_CLEANUP_MUTANT" || fail "launch-cleanup mutant is not valid shell"
+ok "the launch-cleanup mutant removes the preserve-state return"
+rc="$(run_launch_cleanup_failure "$LAUNCH_CLEANUP_MUTANT" launch-cleanup-mutant)"
+assert_rc "$rc" 1 "the launch-cleanup mutant still reports publication failure"
+[[ ! -e "$TMP_ROOT/launch-cleanup-mutant-runtime" ]] \
+  || fail "the launch-cleanup mutant did not delete recovery state"
+ok "the mutant proves the return preserves launch recovery state"
+cleanup_captured_launch launch-cleanup-mutant \
+  || fail "launch-cleanup mutant left its worker running"
