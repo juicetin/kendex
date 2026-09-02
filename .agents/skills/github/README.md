@@ -68,8 +68,24 @@ It is also policy, not mechanism — the gate binds only merges routed through
 
 ## Exit 75 recovery
 
-Use [orch](../orch/SKILL.md) § Detached merge boundary before `pr-merge --auto`; it prepares the exact-head watcher.
-If `pr-merge --auto` exits 75, the orch workflow launches that prepared watcher.
+`pr-merge --auto` exits 75 when the PR is queued or auto-merge is armed. That
+state is volatile — an ejection or a failed protection check disarms it
+silently — so the caller arms one exact head and then waits on that head. The
+helpers live in sibling skills (install orch and review-gate beside this one):
+
+- `.agents/skills/orch/scripts/queue-wait <N> <poll> <budget> --json` blocks on
+  the queue and prints one verdict object. Size the poll and budget as orch
+  `merge-pr.md` § 5 step 1 does: the default budget outlives any foreground
+  call an agent harness will hold, so a call that leaves them out is killed
+  before the verdict.
+- `GH_REPO=<owner/repo> .agents/skills/review-gate/scripts/pr-watch.sh` is one
+  pass that prints `disarmed … (re-arm)` lines.
+
+`queue-wait --help` § Verdicts owns the growing producer set;
+`.agents/skills/orch/workflows/merge-pr.md` § 5 step 1 maps each verdict to a
+route. An unrecognized verdict is never re-armed. Repair what the `cause` names
+first.
+
 Branch rebasing and publication belong to [worktree](../worktree/SKILL.md) § Commands.
 
 Where branch protection *is* enabled, the opposite problem appears: after a

@@ -290,8 +290,18 @@ assert_eq "$status" "75" "active mergeQueueEntry is success-pending"
 assert_contains "$out" "QUEUED IN MERGE QUEUE PR #123" "merge-queue outcome is explicit"
 assert_contains "$out" "queueState=QUEUED" "merge-queue state is preserved"
 assert_contains "$out" "VOLATILE" "queued exit 75 states the state is volatile"
-assert_contains "$out" ".agents/skills/orch/scripts/merge-queue-watch once" "queued exit 75 names the durable lifecycle by installed path"
+assert_contains "$out" ".agents/skills/orch/scripts/queue-wait 123 --json once, with a poll interval and budget" "queued exit 75 names the verdict producer by installed path, budgeted"
 assert_contains "$out" ".agents/skills/github/scripts/github.sh pr-merge 123 --auto" "queued exit 75 names the re-arm by runnable path"
+
+# show_help carries the same exit-75 handoff as volatile_note above, and only
+# the stderr half was pinned. A revert of the help text alone put an agent
+# reading --help on queue-wait's own budget, which no harness holds long enough
+# to reach a verdict.
+help_out=$("$PR_MERGE" --help 2>&1)
+assert_contains "$help_out" ".agents/skills/orch/scripts/queue-wait <N> <poll> <budget> --json" \
+    "--help gives the exit-75 handoff a poll and budget"
+assert_contains "$help_out" "Size the poll and budget as orch merge-pr.md" \
+    "--help delegates the sizing rather than restating it"
 
 set +e
 out=$(STUB_CHECKS="$checks" \
@@ -305,7 +315,7 @@ set -e
 assert_eq "$status" "75" "classic auto-merge remains success-pending"
 assert_contains "$out" "AUTO-MERGE ENABLED PR #123" "classic auto-merge outcome is distinct"
 assert_contains "$out" "VOLATILE" "auto-merge exit 75 states the state is volatile"
-assert_contains "$out" ".agents/skills/orch/scripts/merge-queue-watch once" "auto-merge exit 75 names the durable lifecycle by installed path"
+assert_contains "$out" ".agents/skills/orch/scripts/queue-wait 123 --json once, with a poll interval and budget" "auto-merge exit 75 names the verdict producer by installed path, budgeted"
 
 set +e
 out=$(STUB_CHECKS="$checks" \
