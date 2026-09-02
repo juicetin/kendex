@@ -102,7 +102,14 @@ sync_issues() {
 
         page_count=$((page_count + 1))
 
-        if [[ "$has_next" != "true" ]] || (( page_count >= max_pages )); then
+        if [[ "$has_next" != "true" ]]; then
+            break
+        fi
+
+        if (( page_count >= max_pages )); then
+            local issue_count
+            issue_count=$(echo "$all_nodes" | jq 'length')
+            echo "Sync warning: issues stopped at the $max_pages-page safety cap after fetching $issue_count issues; more pages remain, so this pull is incomplete." >&2
             break
         fi
 
