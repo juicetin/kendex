@@ -182,7 +182,7 @@ pub fn plan_scope(
     )?;
 
     stale::stale_instruction_rows(env, scope, lock, &new_lock, &mut config_edits)?;
-    plan_config_edits(env, scope, config_edits, &mut ops)?;
+    plan_config_edits(config_edits, &mut ops)?;
     let set_changes = set_changes(lock, &new_lock);
     let kept = kept_members(lock, &new_lock, &options.uninstalled_bundles);
     let repo_effects_leaving = repo_effects::leaving(env, scope, lock, &new_lock)?;
@@ -270,21 +270,6 @@ fn fresh_lock(manifest: &Manifest, lock: &Lock, state: &desired::DesiredState) -
 /// than with an empty report.
 pub fn audit(env: &Env, scope: &Scope) -> Result<EngineReport> {
     plan_apply(env, scope, &PlanOptions::default())
-}
-
-/// What a refresh would do: regenerate everything declared, and re-derive
-/// the closure in both directions — a dependency that appeared upstream is
-/// an addition, one that went away leaves an installation nothing needs. The
-/// caller previews the set changes before any of it is applied.
-pub fn plan_refresh(env: &Env, scope: &Scope) -> Result<EngineReport> {
-    plan_apply(
-        env,
-        scope,
-        &PlanOptions {
-            sweep_unneeded: true,
-            ..PlanOptions::default()
-        },
-    )
 }
 
 /// Plan what disk needs to match declaration, from the manifest as it sits

@@ -253,11 +253,9 @@ fn compute(
     // manifest keeps holding only what was chosen.
     let expansion = super::expansion::expand(env, scope, manifest, held, &mut state);
     let collisions = super::catalog::Collisions::find(&expansion, &mut state);
-    // What this scope can supply, read once from the closure above: an
-    // agent's skill assignment resolves against the whole scope, and
-    // reading it per agent would open every catalog again for each one.
-    let scope_skills =
-        super::ScopeSkills::planned(env, scope, manifest, &expansion, &state.rev_conflicts, &[])?;
+    // What the sources' current checkouts offer, read once. Item-level pins
+    // do not widen this inventory.
+    let scope_skills = super::ScopeSkills::of(env, scope, manifest)?;
 
     for kind in super::expansion::PLANNED_KINDS {
         for (name, planned) in expansion.of(kind) {
@@ -349,10 +347,8 @@ pub(super) struct ItemCtx<'a> {
     pub(super) hold_upstream_skills: bool,
     pub(super) config: &'a crate::source::SourceConfig,
     pub(super) sealed: &'a SealedSource,
-    /// Every skill this scope can supply — what its sources offer, plus
-    /// what the plan installs from a pinned revision. An agent's declared
-    /// assignment resolves against this, so a fork keeps rendering skills
-    /// its own source never held.
+    /// Skills offered by the current checkout of each source. Item-level
+    /// pins do not widen this inventory.
     pub(super) scope_skills: &'a super::ScopeSkills,
     pub(super) name: &'a str,
     pub(super) decl: &'a ItemDecl,
