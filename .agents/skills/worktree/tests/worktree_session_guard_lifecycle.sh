@@ -15,10 +15,11 @@
 #     its OWN lease, `create --reuse` refuses a foreign one and refreshes its
 #     own.
 #
-# The `worktree` script's own per-issue claim lock still requires flock(1)
-# (`create` refuses to run without it), so this integration suite can only run
-# where flock exists. The guard itself no longer needs flock — its mkdir-mutex
-# fallback is covered directly in worktree_session_guard.sh.
+# The `worktree` script's own per-issue claim lock requires flock(1) (`create`
+# refuses to run without it), so this integration suite can only run where
+# flock exists. The guard itself does not: its mutation mutex falls back to a
+# mkdir mutex on hosts with no flock, reached here by running the guard on a
+# PATH built without flock.
 set -euo pipefail
 
 TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -421,6 +422,160 @@ fi
 # claimed_at and momentarily drop the lock, which is what this pins against.
 assert_eq "$after_claimed" "$before_claimed" \
   "reuse refreshes in place rather than re-claiming (lock never drops)"
+
+echo "=== list and sweep ==="
+
+list_out="$("$GUARD_SCRIPT" list --repo "$REUSE_ROOT/main")"
+assert_contains "$list_out" "\"path\":\"$REUSE_WT\"" "list includes the linked worktree"
+assert_contains "$list_out" '"owner":"ISSUE-R"' "list includes the lease owner"
+
+dry_sweep_out="$("$GUARD_SCRIPT" sweep --repo "$REUSE_ROOT/main" --ttl-minutes 0 --dry-run)"
+assert_contains "$dry_sweep_out" "would release $REUSE_WT" "sweep dry-run reports the stale lease"
+assert_eq "$(guard_status_code "$REUSE_WT" "$REUSE_ROOT/main" --owner ISSUE-R)" "0" \
+  "sweep dry-run leaves the lease in place"
+
+sweep_out="$("$GUARD_SCRIPT" sweep --repo "$REUSE_ROOT/main" --ttl-minutes 0)"
+assert_contains "$sweep_out" "released $REUSE_WT" "sweep releases the stale lease"
+assert_eq "$(guard_status_code "$REUSE_WT" "$REUSE_ROOT/main")" "3" \
+  "sweep leaves the worktree unlocked"
+
+echo "=== claim serializes on the guard mutex ==="
+
+# Two owners racing `claim` both reading "no lease", both writing, and both
+# exiting 0 is the incident this guard exists to stop, so claim's whole
+# read-decide-write runs under the common-dir mutex. Holding that lock the way
+# a mid-claim guard process holds it proves a second owner cannot get behind it.
+MUTEX_ROOT="$TMP_ROOT/mutex"
+make_repo "$MUTEX_ROOT"
+add_merged_tree "$MUTEX_ROOT" "issue-m"
+MUTEX_WT="$MUTEX_ROOT/trees/issue-m"
+exec 8>"$MUTEX_ROOT/main/.git/kendex-worktree-session-guard.lock"
+flock -x 8
+set +e
+timeout 3 "$GUARD_SCRIPT" claim "$MUTEX_WT" --owner OWNER-B >/dev/null 2>&1
+mutex_code=$?
+set -e
+assert_eq "$mutex_code" "124" "claim blocks while another mutation holds the guard mutex"
+assert_eq "$(guard_status_code "$MUTEX_WT" "$MUTEX_ROOT/main")" "3" \
+  "the blocked claim wrote no lease"
+exec 8>&-
+"$GUARD_SCRIPT" claim "$MUTEX_WT" --owner OWNER-A >/dev/null
+set +e
+"$GUARD_SCRIPT" claim "$MUTEX_WT" --owner OWNER-B >/dev/null 2>&1
+second_code=$?
+set -e
+assert_eq "$second_code" "75" "with the mutex free only the first owner holds the lease"
+
+echo "=== release refuses a flag it does not implement ==="
+
+# --dry-run promises to preserve. release never implemented it, so accepting
+# and ignoring the flag deleted the very lease the caller asked to keep.
+set +e
+dry_err=$("$GUARD_SCRIPT" release "$MUTEX_WT" --owner OWNER-A --dry-run 2>&1 >/dev/null)
+dry_code=$?
+set -e
+assert_eq "$dry_code" "1" "release --dry-run is a usage failure"
+assert_contains "$dry_err" "--dry-run does not apply to release" \
+  "the refusal names the flag and the command"
+assert_eq "$(guard_status_code "$MUTEX_WT" "$MUTEX_ROOT/main" --owner OWNER-A)" "0" \
+  "the lease --dry-run promised to preserve is still held"
+
+echo "=== registrations resolve without a cwd or a directory ==="
+
+REG_ROOT="$TMP_ROOT/registration"
+make_repo "$REG_ROOT"
+add_merged_tree "$REG_ROOT" "issue-rel"
+REL_WT="$REG_ROOT/trees/issue-rel"
+"$GUARD_SCRIPT" claim "$REL_WT" --owner REL-OWNER >/dev/null
+# git accepts a relative gitdir registration, and it is relative to the
+# registration directory — never to whatever cwd the guard runs from.
+printf '../../../../trees/issue-rel/.git\n' >"$REG_ROOT/main/.git/worktrees/issue-rel/gitdir"
+assert_eq "$(guard_status_code "$REL_WT" "$REG_ROOT/main" --owner REL-OWNER)" "0" \
+  "a relative gitdir registration resolves to its worktree"
+assert_contains "$("$GUARD_SCRIPT" list --repo "$REG_ROOT/main")" "\"path\":\"$REL_WT\"" \
+  "list resolves a relative gitdir registration"
+
+# A worktree whose directory tree was destroyed is precisely what sweep exists
+# to clean up, so its lease must stay visible to list and collectable by sweep.
+rm -rf -- "${REG_ROOT:?}/trees"
+gone_list="$("$GUARD_SCRIPT" list --repo "$REG_ROOT/main")"
+assert_contains "$gone_list" "\"path\":\"$REL_WT\"" "list still reports a destroyed worktree"
+assert_contains "$gone_list" '"directory_present":false' "list marks the directory gone"
+assert_contains "$("$GUARD_SCRIPT" sweep --repo "$REG_ROOT/main" --ttl-minutes 0)" \
+  "released $REL_WT" "sweep releases a destroyed worktree's lease"
+
+echo "=== a newline in a worktree path ==="
+
+# A registration records its worktree path with a trailing newline, so reading
+# only the file's first line truncates a path that contains one (kendex#911).
+NL_ROOT="$TMP_ROOT/newline"
+make_repo "$NL_ROOT"
+NL_WT="$NL_ROOT/trees/issue"$'\n'"nl"
+git -C "$NL_ROOT/main" worktree add -q -b issue-nl "$NL_WT" main
+"$GUARD_SCRIPT" claim "$NL_WT" --owner NL-OWNER >/dev/null
+assert_eq "$(guard_status_code "$NL_WT" "$NL_ROOT/main" --owner NL-OWNER)" "0" \
+  "a worktree path containing a newline resolves for status"
+assert_contains "$("$GUARD_SCRIPT" list --repo "$NL_ROOT/main")" \
+  "\"path\":\"${NL_WT//$'\n'/\\n}\"" \
+  "list reports the newline path as one escaped JSON object"
+
+echo "=== the mkdir mutex serializes claims on a flock-less host ==="
+
+# Stock macOS ships no flock(1), so there the mkdir mutex is not a fallback:
+# it is the only thing serializing a claim, and a regression makes concurrent
+# claims fail open unnoticed. The probe PATH is derived from the real one
+# minus flock rather than naming the tools the guard uses, so it stays true as
+# the guard changes.
+NOFLOCK_BIN="$TMP_ROOT/noflock-bin"
+mkdir -p "$NOFLOCK_BIN"
+saved_ifs="$IFS"
+IFS=:
+for path_dir in $PATH; do
+  IFS="$saved_ifs"
+  if [[ -d "$path_dir" ]]; then
+    for path_exe in "$path_dir"/*; do
+      exe_name="${path_exe##*/}"
+      if [[ "$exe_name" != flock && ! -e "$NOFLOCK_BIN/$exe_name" ]]; then
+        ln -s "$path_exe" "$NOFLOCK_BIN/$exe_name" 2>/dev/null || true
+      fi
+    done
+  fi
+  IFS=:
+done
+IFS="$saved_ifs"
+# Without this the whole control passes vacuously through the flock branch.
+if PATH="$NOFLOCK_BIN" bash -c 'command -v flock' >/dev/null 2>&1; then
+  fail "the probe PATH resolves no flock"
+else
+  pass "the probe PATH resolves no flock"
+fi
+
+RACE_ROOT="$TMP_ROOT/mkdir-race"
+make_repo "$RACE_ROOT"
+add_merged_tree "$RACE_ROOT" "issue-race"
+RACE_WT="$RACE_ROOT/trees/issue-race"
+RACE_GO="$RACE_ROOT/go"
+RACE_OUT="$RACE_ROOT/out"
+mkdir -p "$RACE_OUT"
+# Both claimants spin on one file so they enter the guard together; starting
+# them in sequence would let the first finish before the second reads.
+for racer in 1 2; do
+  (
+    until [[ -e "$RACE_GO" ]]; do :; done
+    race_rc=0
+    PATH="$NOFLOCK_BIN" "$GUARD_SCRIPT" claim "$RACE_WT" --owner "RACER-$racer" \
+      >/dev/null 2>&1 || race_rc=$?
+    printf '%s\n' "$race_rc" >"$RACE_OUT/$racer"
+  ) &
+done
+sleep 0.4
+: >"$RACE_GO"
+wait
+race_codes="$(cat "$RACE_OUT/1" "$RACE_OUT/2")"
+assert_eq "$(printf '%s\n' "$race_codes" | grep -cx 0 || true)" "1" \
+  "exactly one of two racing claimants takes the lease"
+assert_eq "$(printf '%s\n' "$race_codes" | grep -cx 75 || true)" "1" \
+  "the loser is refused rather than overwriting the winner"
 
 echo
 printf 'pass: %d   fail: %d\n' "$PASS" "$FAIL"
