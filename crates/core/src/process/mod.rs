@@ -166,15 +166,16 @@ impl Hardened {
     }
 
     pub fn run(mut self) -> Result<Output> {
+        // Only a failed spawn never ran; missing pipes are a broken invariant.
         let mut child = match self.command.spawn() {
             Ok(child) => child,
-            Err(error) => return Err(CoreError::io(&self.label, error)),
+            Err(error) => return Err(CoreError::not_started(&self.label, error)),
         };
         let (Some(mut stdout), Some(mut stderr)) = (child.stdout.take(), child.stderr.take())
         else {
             return Err(CoreError::io(
                 &self.label,
-                io::Error::other("child was spawned without pipes"),
+                io::Error::other("spawned without pipes"),
             ));
         };
         // Drained on threads: a child that fills a pipe buffer would block

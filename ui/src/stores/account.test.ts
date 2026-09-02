@@ -113,14 +113,30 @@ describe("the account state a read settles on", () => {
 
 // A read that failed knows nothing new, so it takes nothing away.
 describe("a read that could not be made", () => {
-  it("becomes offline when a name is already in hand", async () => {
+  it("becomes offline when the directory was asked and a name is in hand", async () => {
+    useAccountStore.setState({
+      account: { kind: "signed-in", identity: ADA },
+    });
+    unreadable("no route to kendex.ai", "unreachable");
+    await load();
+    expect(account()).toEqual({
+      kind: "offline",
+      identity: ADA,
+    });
+    expect(useAccountStore.getState().readError).toBe("no route to kendex.ai");
+  });
+
+  // Offline says kendex.ai was reached on some date and not since. A
+  // refusal on this machine never asked it anything, so the state stands
+  // as the last read left it and the reason is all this one adds.
+  it("leaves the name it had alone when the machine refused", async () => {
     useAccountStore.setState({
       account: { kind: "signed-in", identity: ADA },
     });
     unreadable();
     await load();
     expect(account()).toEqual({
-      kind: "offline",
+      kind: "signed-in",
       identity: ADA,
     });
     expect(useAccountStore.getState().readError).toBe("keychain locked");
@@ -171,6 +187,10 @@ describe("a read that could not be made", () => {
   // their type promises. A reader that throws instead would otherwise leave
   // the read with nothing recorded, nothing to retry from, and a rejection
   // nobody catches: every caller of load says `void load()`.
+  //
+  // A throw is also a read that never reached kendex.ai, whatever failed
+  // behind it, so it must leave a name already in hand where it is rather
+  // than aging the account into offline.
   it("records any reader that threw rather than answered", async () => {
     setAccountReader(async () => {
       throw new Error("the harness reader threw");
@@ -181,6 +201,12 @@ describe("a read that could not be made", () => {
       "the harness reader threw",
     );
     expect(useAccountStore.getState().reading).toBe(false);
+
+    useAccountStore.setState({
+      account: { kind: "signed-in", identity: ADA },
+    });
+    await load();
+    expect(account()).toEqual({ kind: "signed-in", identity: ADA });
   });
 });
 

@@ -7,7 +7,7 @@
 //! is a `cmp` away.
 
 use std::cell::{Cell, RefCell};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[path = "../../../test_util.rs"]
 mod test_util;
@@ -16,7 +16,7 @@ use test_util::rooted;
 use kendex_core::env::{Env, FakeOs};
 use kendex_core::error::{CoreError, Result};
 use kendex_core::registry::credentials::{Credential, CredentialRefreshGuard, CredentialStore};
-use kendex_core::registry::me::{self, AccountState};
+use kendex_core::registry::me::{self, AccountState, AccountUnread};
 use kendex_core::registry::{Fetch, FetchResponse};
 
 const FIXTURE: &str = include_str!("../fixtures/api-v1-me.json");
@@ -90,12 +90,29 @@ fn away() -> Result<FetchResponse> {
     })
 }
 
+/// The transport refusing to send at all — a curl config file it could not
+/// write, a curl it could not spawn. `registry.rs` raises exactly this
+/// shape, and only for a request that never went out.
+fn never_sent() -> Result<FetchResponse> {
+    Err(CoreError::CommandNotStarted {
+        label: "curl".to_owned(),
+        why: "No space left on device".to_owned(),
+    })
+}
+
 struct MemoryStore {
     credential: RefCell<Option<Credential>>,
     /// Which read starts refusing, counting from one: a keychain that locks
     /// after `load` has taken the sign-in and before the authenticated call
     /// takes it again.
     refuses_from: Option<u32>,
+    /// What `refresh_guard` answers instead of a guard, standing in for
+    /// the local failures `KeyringStore::refresh_guard` raises.
+    guard_refusal: Option<fn() -> CoreError>,
+    /// What `save` answers instead of storing the rotated credential,
+    /// standing in for a keychain that takes the read and refuses the
+    /// write.
+    save_refusal: Option<fn() -> CoreError>,
     reads: Cell<u32>,
 }
 
@@ -104,6 +121,8 @@ impl MemoryStore {
         MemoryStore {
             credential: RefCell::new(credential),
             refuses_from: None,
+            guard_refusal: None,
+            save_refusal: None,
             reads: Cell::new(0),
         }
     }
@@ -128,10 +147,27 @@ impl MemoryStore {
             ..MemoryStore::signed_in()
         }
     }
+
+    fn refusing_the_guard(refusal: fn() -> CoreError) -> MemoryStore {
+        MemoryStore {
+            guard_refusal: Some(refusal),
+            ..MemoryStore::signed_in()
+        }
+    }
+
+    fn refusing_the_save(refusal: fn() -> CoreError) -> MemoryStore {
+        MemoryStore {
+            save_refusal: Some(refusal),
+            ..MemoryStore::signed_in()
+        }
+    }
 }
 
 impl CredentialStore for MemoryStore {
     fn save(&self, credential: &Credential) -> Result<()> {
+        if let Some(refusal) = self.save_refusal {
+            return Err(refusal());
+        }
         *self.credential.borrow_mut() = Some(credential.clone());
         Ok(())
     }
@@ -152,7 +188,10 @@ impl CredentialStore for MemoryStore {
         Ok(())
     }
     fn refresh_guard(&self) -> Result<Box<dyn CredentialRefreshGuard + '_>> {
-        Ok(Box::new(MemoryGuard))
+        match self.guard_refusal {
+            Some(refusal) => Err(refusal()),
+            None => Ok(Box::new(MemoryGuard)),
+        }
     }
 }
 
@@ -302,14 +341,161 @@ fn a_refusing_keychain_is_not_served_as_offline() {
     let refused = me::load(&env, &unused, &store).expect_err("a refusing keychain errors");
 
     assert!(
-        matches!(refused, CoreError::CredentialStoreUnavailable { .. }),
+        matches!(
+            refused,
+            AccountUnread::Local(CoreError::CredentialStoreUnavailable { .. })
+        ),
         "the cache stood in for the keychain: {refused:?}"
     );
     assert!(
-        !refused.to_string().contains("community directory"),
-        "the user is sent to check a working network: {refused}"
+        !refused.error().to_string().contains("community directory"),
+        "the user is sent to check a working network: {}",
+        refused.error()
     );
     assert_eq!(*unused.calls.borrow(), 0, "the directory was never asked");
+}
+
+/// The rest of the rotation branch's local failures, which the variant
+/// list this replaced never named: the transaction lock's parent could not
+/// be created or the lock itself could not be taken (`Io` — a read-only or
+/// full home, wrong permissions, a symlink at the path), a second kendex
+/// process held the lock past the deadline (`CredentialRefreshBusy`), and
+/// the keychain that gave the credential up would not store the rotated
+/// one (`CredentialStoreUnavailable`). Each is this machine refusing, and
+/// a warm cache must answer for none of them.
+#[test]
+fn a_local_failure_in_rotation_is_never_served_as_offline() {
+    const LOCK: &str = "/kendex/credentials.lock";
+    const REJECTED: &str = r#"{"error":"invalid_token"}"#;
+    const ROTATED: &str =
+        r#"{"access_token":"kxa_new","refresh_token":"kxr_new","capabilities":[]}"#;
+    // The store that refuses, paired with the answers the call needs to
+    // reach it: a 401 is what sends it into the rotation branch, and a
+    // refused save is reached only once the refresh has come back.
+    type Case = (fn() -> MemoryStore, fn() -> Vec<Result<FetchResponse>>);
+    let cases: [Case; 3] = [
+        (
+            || {
+                MemoryStore::refusing_the_guard(|| {
+                    CoreError::io(LOCK, std::io::Error::other("read-only file system"))
+                })
+            },
+            || vec![ok(401, None, REJECTED)],
+        ),
+        (
+            || {
+                MemoryStore::refusing_the_guard(|| CoreError::CredentialRefreshBusy {
+                    lock: PathBuf::from(LOCK),
+                })
+            },
+            || vec![ok(401, None, REJECTED)],
+        ),
+        (
+            || {
+                MemoryStore::refusing_the_save(|| CoreError::CredentialStoreUnavailable {
+                    why: "the rotated sign-in could not be stored".to_owned(),
+                })
+            },
+            || vec![ok(401, None, REJECTED), ok(200, None, ROTATED)],
+        ),
+    ];
+    for (refusing, answers) in cases {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = rooted(&dir);
+        let env = env_in(&root);
+        let warm = MemoryStore::signed_in();
+        let first = Canned::new(vec![ok(200, None, &fixture_body(&["success", "body"]))]);
+        me::load(&env, &first, &warm).expect("first load");
+
+        let store = refusing();
+        let rejected = Canned::new(answers());
+        let refused = me::load(&env, &rejected, &store).expect_err("a local refusal errors");
+        assert!(
+            matches!(refused, AccountUnread::Local(_)),
+            "the cache stood in for a failure on this machine: {refused:?}"
+        );
+    }
+}
+
+/// A request the machine could not put out is not the directory going
+/// quiet, at either of the two places a read sends one: the authenticated
+/// request every read makes, and the rotation POST behind a 401. The
+/// transport names it at the raising site rather than leaving the seam to
+/// guess from where in the sequence it happened.
+#[test]
+fn a_request_that_never_went_out_is_not_served_as_offline() {
+    // `Canned` serves one queue to both verbs, so the second answer is
+    // what the refresh POST gets.
+    let scripts: [fn() -> Vec<Result<FetchResponse>>; 2] = [
+        || vec![never_sent()],
+        || vec![ok(401, None, r#"{"error":"invalid_token"}"#), never_sent()],
+    ];
+    for script in scripts {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = rooted(&dir);
+        let env = env_in(&root);
+        let store = MemoryStore::signed_in();
+        let first = Canned::new(vec![ok(200, None, &fixture_body(&["success", "body"]))]);
+        me::load(&env, &first, &store).expect("first load");
+
+        let unsent = Canned::new(script());
+        let refused = me::load(&env, &unsent, &store).expect_err("an unsent request errors");
+        assert!(
+            matches!(
+                refused,
+                AccountUnread::Local(CoreError::CommandNotStarted { .. })
+            ),
+            "the cache stood in for a request that never went out: {refused:?}"
+        );
+    }
+}
+
+/// The cache is how the next read avoids asking, never the answer itself.
+/// A machine that cannot write it has still been told who is signed in, and
+/// reporting that as a read that did not land would serve the identity it
+/// just parsed back as `Offline` — the same lie, from the far side of the
+/// call. The cache directory's path is taken by a regular file here, which
+/// `create_dir_all` refuses whatever the process's euid.
+#[test]
+fn a_cache_that_cannot_be_written_still_answers_the_fresh_name() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = rooted(&dir);
+    let env = env_in(&root);
+    let cache_dir = env.registry_cache_dir();
+    if let Some(parent) = cache_dir.parent() {
+        std::fs::create_dir_all(parent).expect("mkdir");
+    }
+    std::fs::write(&cache_dir, "not a directory").expect("plant");
+
+    let fetch = Canned::new(vec![ok(200, None, &fixture_body(&["success", "body"]))]);
+    let state = me::load(&env, &fetch, &MemoryStore::signed_in()).expect("the read landed");
+    match state {
+        AccountState::SignedIn { identity } => assert_eq!(identity.name, "Ada Lovelace"),
+        other => panic!("an unwritable cache lost the answer the server gave: {other:?}"),
+    }
+}
+
+/// The same rule on the other side of the same file: the expiry is what
+/// this read learned, and a machine that will not let the cached identity
+/// go must not turn that into a refused unlink, leaving the surface naming
+/// someone as signed in under a credential the server has ended.
+#[test]
+fn an_expiry_survives_a_cache_that_cannot_be_dropped() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = rooted(&dir);
+    let env = env_in(&root);
+    let cache_dir = env.registry_cache_dir();
+    if let Some(parent) = cache_dir.parent() {
+        std::fs::create_dir_all(parent).expect("mkdir");
+    }
+    std::fs::write(&cache_dir, "not a directory").expect("plant");
+
+    let dead = Canned::new(vec![
+        ok(401, None, r#"{"error":"invalid_token"}"#),
+        ok(400, None, r#"{"error":"invalid_grant"}"#),
+    ]);
+    let state = me::load(&env, &dead, &MemoryStore::signed_in()).expect("expiry is the answer");
+    assert_eq!(state, AccountState::Expired);
 }
 
 #[test]
@@ -548,7 +734,9 @@ fn a_304_with_nothing_cached_is_refused() {
     assert!(
         matches!(
             me::load(&env_in(dir.path()), &unchanged, &MemoryStore::signed_in()),
-            Err(CoreError::RegistryMalformed { .. })
+            Err(AccountUnread::Unreachable(
+                CoreError::RegistryMalformed { .. }
+            ))
         ),
         "an identity cannot be fabricated from 'unchanged'"
     );

@@ -16,6 +16,14 @@ pub enum CoreError {
         source: std::io::Error,
     },
 
+    /// A command that never ran: it could not be spawned, or what it needed
+    /// to run could not be written. Nothing a command that did start can
+    /// fail with belongs here — not a timeout, not a non-zero exit —
+    /// because callers read this as proof the work was never attempted,
+    /// which is what decides whether a cached answer may stand in.
+    #[error("{label} could not be started: {why}")]
+    CommandNotStarted { label: String, why: String },
+
     #[error("{}: invalid TOML: {message}", crate::names::shown(&path.display().to_string()))]
     TomlParse { path: PathBuf, message: String },
 
@@ -494,6 +502,14 @@ impl CoreError {
         CoreError::Io {
             path: path.into(),
             source,
+        }
+    }
+
+    /// A command that never ran; `why` says what stopped it.
+    pub fn not_started(label: &str, why: impl std::fmt::Display) -> Self {
+        CoreError::CommandNotStarted {
+            label: label.to_owned(),
+            why: why.to_string(),
         }
     }
 }

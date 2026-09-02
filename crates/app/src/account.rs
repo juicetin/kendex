@@ -10,7 +10,7 @@ use kendex_core::env::Env;
 use kendex_core::error::CoreError;
 use kendex_core::registry::credentials::{Credential, KeyringStore};
 use kendex_core::registry::login::{self, Poll};
-use kendex_core::registry::me::{self, AccountState};
+use kendex_core::registry::me::{self, AccountState, AccountUnread};
 use kendex_core::registry::submit::{self, SubmissionRow};
 use kendex_core::registry::{CurlFetch, base_url};
 use serde::{Deserialize, Serialize};
@@ -23,11 +23,45 @@ pub struct AccountStatus {
     pub endpoint: String,
 }
 
+/// Why the account could not be read.
+///
+/// The two are one question the surface has to answer: may the name from
+/// the last read stand as the last one kendex.ai confirmed? Only a read
+/// whose request went out and came back with nothing leaves it standing —
+/// a network with no route to kendex.ai included, since the machine did
+/// ask. One this machine stopped never asked, so it learned nothing, and
+/// showing the name as offline would name the wrong cause and send the
+/// person to check a working network.
+///
+/// Each carries the whole sentence, because the surface that shows it has
+/// nothing else to say. It is named here rather than on the variants
+/// because specta hoists a variant's doc above the whole union.
+#[derive(Debug, Serialize, Type)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum AccountReadFailed {
+    Local { message: String },
+    Unreachable { message: String },
+}
+
+impl From<AccountUnread> for AccountReadFailed {
+    fn from(unread: AccountUnread) -> AccountReadFailed {
+        let message = unread.error().to_string();
+        match unread {
+            AccountUnread::Local(_) => AccountReadFailed::Local { message },
+            AccountUnread::Unreachable(_) => AccountReadFailed::Unreachable { message },
+        }
+    }
+}
+
 #[tauri::command(async)]
 #[specta::specta]
-pub fn account_status() -> Result<AccountStatus, String> {
-    let env = Env::detect().map_err(|e| e.to_string())?;
-    let state = me::load(&env, &CurlFetch, &KeyringStore).map_err(|e| e.to_string())?;
+pub fn account_status() -> Result<AccountStatus, AccountReadFailed> {
+    // A machine with no home directory to read from has asked kendex.ai
+    // nothing, so this is local like any other refusal ahead of the call.
+    let env = Env::detect().map_err(|error| AccountReadFailed::Local {
+        message: error.to_string(),
+    })?;
+    let state = me::load(&env, &CurlFetch, &KeyringStore)?;
     Ok(AccountStatus {
         state,
         endpoint: base_url(),
@@ -197,6 +231,35 @@ mod tests {
             refused(CoreError::NotSignedIn),
             AccountCallRefused::Failed { .. }
         ));
+    }
+
+    /// The seam the account fix crosses: which half of the read failed is
+    /// decided in core, and this carries that across unchanged. Swapping
+    /// the arms would put "Offline — signed in when kendex.ai was last
+    /// reached" back in front of someone whose keychain is locked, and the
+    /// sentence is the producer's, so a rewrite here would lose the cause
+    /// the surface shows beside the retry.
+    #[test]
+    fn the_read_failure_reaches_the_surface_as_the_half_that_failed() {
+        let locked = "the credential store on this machine could not be used";
+        let refusal = AccountReadFailed::from(AccountUnread::Local(
+            CoreError::CredentialStoreUnavailable {
+                why: "the keyring is locked".to_owned(),
+            },
+        ));
+        let AccountReadFailed::Local { message } = refusal else {
+            panic!("a store this machine refused is local");
+        };
+        assert!(message.starts_with(locked), "{message}");
+
+        let away =
+            AccountReadFailed::from(AccountUnread::Unreachable(CoreError::RegistryUnavailable {
+                why: "no route".to_owned(),
+            }));
+        let AccountReadFailed::Unreachable { message } = away else {
+            panic!("a directory that did not answer is unreachable");
+        };
+        assert!(message.contains("no route"), "{message}");
     }
 
     /// The expired refusal is all the surface has to show, and the whole

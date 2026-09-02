@@ -113,7 +113,9 @@ impl<'e> GenerationFile<'e> {
     /// a 304 re-dates the cached one, and any failure — transport error,
     /// refused status, unparseable body — serves the cached value as
     /// stale, erring only with nothing to serve. `refused` words the
-    /// error for a status that is neither 200 nor 304.
+    /// error for a status that is neither 200 nor 304. Every error out of
+    /// this call is the fetch not landing, which is what lets a caller
+    /// holding one judgment about the network read them all the same way.
     pub fn settle<T>(
         &self,
         cached: Option<(Generation, T)>,
@@ -135,7 +137,7 @@ impl<'e> GenerationFile<'e> {
                         etag: response.etag,
                         fetched_at: now,
                         body: String::from_utf8_lossy(&response.body).into_owned(),
-                    })?;
+                    });
                     Ok(Loaded {
                         value,
                         fetched_at: now,
@@ -152,7 +154,7 @@ impl<'e> GenerationFile<'e> {
                     fetched_at: now,
                     credential: self.credential.clone(),
                     ..generation
-                })?;
+                });
                 Ok(Loaded {
                     value,
                     fetched_at: now,
@@ -163,14 +165,25 @@ impl<'e> GenerationFile<'e> {
         }
     }
 
-    fn write(&self, generation: &Generation) -> Result<()> {
+    /// Leave this fetch where the next read will find it, or leave nothing.
+    ///
+    /// A generation that could not be written — a full or read-only home, a
+    /// cache path taken by something else — is never the caller's failure.
+    /// The answer is what the server sent and the caller parsed; this file
+    /// is only how the next read avoids asking for it again. Raising here
+    /// would report a refusal by this machine as the fetch not landing,
+    /// which is what every error out of [`GenerationFile::settle`] means.
+    /// The cost of swallowing is one re-fetch, which is what an unwritten
+    /// cache is for.
+    fn write(&self, generation: &Generation) {
         let dir = self.env.registry_cache_dir();
-        std::fs::create_dir_all(&dir).map_err(|error| CoreError::io(&dir, error))?;
-        let json =
-            serde_json::to_string(generation).map_err(|error| CoreError::RegistryMalformed {
-                why: error.to_string(),
-            })?;
-        atomic_write_no_follow(&dir.join(self.file), &json)
+        if std::fs::create_dir_all(&dir).is_err() {
+            return;
+        }
+        let Ok(json) = serde_json::to_string(generation) else {
+            return;
+        };
+        let _ = atomic_write_no_follow(&dir.join(self.file), &json);
     }
 }
 
