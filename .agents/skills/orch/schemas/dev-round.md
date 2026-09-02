@@ -48,7 +48,7 @@ What the writer itself refuses is a short list, not a scanner: an empty or white
 
 The `Adds:` delegation line and `--adds` carry the same blank-separated path list. A blank or tab separates, so a path containing whitespace is read as two paths and cannot be authorized as one. The writer rejects absolute paths, leading or trailing empty components, double slashes, `.` and `..` components, and duplicates. The reader refuses a recorded path beginning with `-` or carrying a space, tab, newline, carriage return, form feed or vertical tab. Omit the line and flag when no additions are allowed.
 
-**Immutable per round**: `dev-round-write --help` carries the contract. Mint a new round and never fall back to an unbound item list. While the ACTIVE round's record — the one whose token equals workflow state `dev_round_id` — has no matching `dev-return` receipt, `worktree-push` refuses to push: a rebase would move the branch off the base that record pins. Two things end that: the receipt landing, or a fresh `dev_round_id` whose token names no stamped record.
+**Immutable per round**: `dev-round-write --help` carries the contract. Mint a new round and never fall back to an unbound item list. While the ACTIVE round's record — the one whose token equals workflow state `dev_round_id` — has no matching `dev-return` receipt, `worktree-push` refuses to push and `worktree-push --check-live-round` refuses the restack: a rebase moves the branch off the commit that round is working from. Two things end that: the receipt landing, or a fresh `dev_round_id` whose token names no stamped record.
 
 ## Declared cuts
 
@@ -69,6 +69,8 @@ The record is input, never receipt: it proves what was delegated, not that anyth
 ## Protected additions
 
 The gate checks additions only. Git rename detection keeps moves and renames outside it.
+
+`base_sha` is the reference, and the only one: a file already in that tree is not this round's, which is what keeps a later round from re-refusing an addition an earlier one authorized. A rebase orphans it, and the orphaned tree reads every file the base branch advanced by as an addition this round made. Once `base_sha` is no longer an ancestor of `HEAD` the gate cannot run at all, and `dev-artifact-check` refuses the round with `reason: "additions_unattributable"` and an empty `files`: it names no path, because after a rebase no comparison can say which additions were this round's. The refusal is not a deferral. `dev-round-write` stamps the next round's `base_sha` at the worktree's current `HEAD`, so a round stamped after the rebase starts from a tree that already contains whatever this round added, and no later round can gate it. What the additions were is settled by reading that round's own commits against the scope below, and recorded where every other authorization is: the orchestrator mints a fresh round, names each deliberate path in its `Adds:` line, and cuts the rest before delegating it. Here that line is the authorization rather than something the fresh round's gate re-derives, because its base already carries those paths.
 
 Protected additions are:
 

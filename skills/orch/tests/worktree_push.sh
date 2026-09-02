@@ -260,11 +260,11 @@ mutant_root="$TMP_ROOT/live-refusal-mutant"
 mkdir -p "$mutant_root"
 cp -R "$REPO_ROOT/skills/orch/scripts" "$mutant_root/"
 live_mutant="$mutant_root/scripts/worktree-push"
-assert_eq "$(grep -c 'fail "fix round .active_round is live' "$live_mutant")" "1" \
+assert_eq "$(grep -c 'refuse_live_round "\$active_round"' "$live_mutant")" "1" \
   "control finds exactly one live-round refusal to remove"
-sed -i.bak 's/fail "fix round .active_round is live/: "fix round is live/' "$live_mutant"
+sed -i.bak 's/refuse_live_round "\$active_round"/: "no refusal"/' "$live_mutant"
 chmod +x "$live_mutant"
-assert_eq "$(grep -c 'fail "fix round .active_round is live' "$live_mutant")" "0" \
+assert_eq "$(grep -c 'refuse_live_round "\$active_round"' "$live_mutant")" "0" \
   "control removes the refusal only from its private copy"
 rm -f "$live_wt/tmp/dev-return-KEN-LIVE-1-1.json"
 : > "$live_args"
@@ -274,6 +274,96 @@ mutant_rc=0
 assert_eq "$mutant_rc" "0" "control: the mutant pushes the live round"
 assert_eq "$([[ -s "$live_args" ]] && echo ran || echo no)" "ran" \
   "control: the mutant reached the push the refusal blocks"
+
+echo
+echo "=== --check-live-round answers the question alone, for the restack path ==="
+
+# merge-pr's restack cycle rebases without reaching the push, so it asks here.
+# Exit 0 permits the rebase, 3 is a live round, and anything else is a question
+# left unanswered — which is not permission (kendex#944).
+check_args="$TMP_ROOT/check-args.log"
+: > "$check_args"
+# The must-fail control above left round 1-1 live; land its receipt again so
+# this block starts from a branch that may be rebased.
+"$RETURN_WRITE" --worktree "$live_wt" --kind fix --issue KEN-LIVE --round-id 1-1 \
+  --branch main --commit "$live_head" --validate pass --item 1 Applied done >/dev/null
+STUB_ARGS_LOG="$check_args" run_push "$live_state" --check-live-round \
+  --worktree "$live_wt" --issue KEN-LIVE
+assert_eq "$RUN_RC" "0" "with no live round the check permits the rebase"
+assert_eq "$([[ -s "$check_args" ]] && echo ran || echo no)" "no" \
+  "the check pushes nothing, whatever its answer"
+(cd "$live_state" && "$STATE" set KEN-LIVE dev_round_id 1-1)
+rm -f "$live_wt/tmp/dev-return-KEN-LIVE-1-1.json"
+STUB_ARGS_LOG="$check_args" run_push "$live_state" --check-live-round \
+  --worktree "$live_wt" --issue KEN-LIVE
+assert_eq "$RUN_RC" "3" "a live round answers 3, distinct from every other refusal"
+assert_contains "$(cat "$run_err")" "is live in" "the check names the live round"
+assert_eq "$([[ -s "$check_args" ]] && echo ran || echo no)" "no" \
+  "the live answer still pushes nothing"
+
+# A state that cannot be read is not a state with no round. Each arm stubs one
+# answer, and the honest stub above is the control that they are the cause.
+check_stub_root="$TMP_ROOT/check-stub"
+mkdir -p "$check_stub_root"
+cp -R "$REPO_ROOT/skills/orch/scripts" "$check_stub_root/"
+check_stub="$check_stub_root/scripts/worktree-push"
+cat > "$check_stub_root/scripts/workflow-state" <<'EOF'
+#!/usr/bin/env bash
+# Answers the two state reads worktree-push makes, honestly unless told
+# otherwise: the identity reads must pass so each case fails for its own
+# reason, and only the named answer is broken.
+mode=""
+for arg in "$@"; do
+  case "$arg" in
+  exists) mode=exists ;;
+  get) mode=get ;;
+  *issue_id*) [[ "$mode" == get ]] && { printf 'KEN-LIVE\n'; exit 0; } ;;
+  *dev_round_id*)
+    [[ "$mode" == get ]] || continue
+    [[ "${STUB_GET:-}" == fail ]] && exit 5
+    printf '\n'
+    exit 0
+    ;;
+  esac
+done
+if [[ "$mode" == exists ]]; then
+  [[ "${STUB_EXISTS:-}" == fail ]] && exit 7
+  printf '%s\n' "${STUB_EXISTS_JSON:-{\"path\":\"/x\",\"exists\":true\}}"
+fi
+exit 0
+EOF
+chmod +x "$check_stub_root/scripts/workflow-state" "$check_stub"
+# Every refusal in this script exits 1, so the exit code alone cannot tell one
+# arm from the one below it: each case asserts the message its own arm prints.
+check_err="$TMP_ROOT/check-stub.err"
+check_rc() {
+  local rc=0
+  (cd "$live_state" && "$@" --check-live-round --worktree "$live_wt" --issue KEN-LIVE) \
+    >/dev/null 2>"$check_err" || rc=$?
+  printf '%s' "$rc"
+}
+assert_eq "$(check_rc env "$check_stub")" "0" \
+  "control: an honest stub answering no round permits the rebase"
+assert_eq "$(check_rc env STUB_EXISTS=fail "$check_stub")" "1" \
+  "an exists that fails hands back rather than permitting"
+assert_contains "$(cat "$check_err")" "could not resolve the workflow state" \
+  "and hands back through the arm that names the failed exists"
+assert_eq "$(check_rc env STUB_EXISTS_JSON='{"path":"/x","exists":"maybe"}' "$check_stub")" "1" \
+  "an answer that is neither yes nor no hands back"
+assert_contains "$(cat "$check_err")" "unexpected exists --json answer" \
+  "and hands back through the arm that names the malformed answer"
+assert_eq "$(check_rc env STUB_GET=fail "$check_stub")" "1" \
+  "a round read that fails hands back rather than permitting"
+assert_contains "$(cat "$check_err")" "could not read the active dev round" \
+  "and hands back through the arm that names the failed round read"
+
+# Check mode forwards nothing to the push, so an argument it cannot honour
+# would vanish and the answer would be about a state the caller never asked
+# for. A mistyped --state-dir is the case: refuse instead of permitting.
+assert_eq "$(check_rc "$REPO_ROOT/skills/orch/scripts/worktree-push" --sate-dir=/nowhere)" "1" \
+  "an argument check mode cannot honour refuses rather than permits"
+assert_contains "$(cat "$check_err")" "'--sate-dir=/nowhere' would be ignored rather than honoured" \
+  "and the refusal names the argument it could not honour"
 
 echo
 echo "=== a failed push still applies its map (rebase precedes the push) ==="

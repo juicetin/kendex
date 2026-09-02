@@ -424,23 +424,8 @@ move_head="$(git -C "$adds_wt" rev-parse HEAD)"
   --validate pass --item 1 Applied done >/dev/null
 assert_eq "$(reason --worktree "$adds_wt" --issue issue-826 --round-id 3-3 --expect-items-from-round)" "valid" \
   "a moved file is not treated as an addition"
-diverge_wt="$TMP_ROOT/diverge"
-mkdir -p "$diverge_wt"
-git -C "$diverge_wt" init -q -b main
-git -C "$diverge_wt" config user.email test@example.com
-git -C "$diverge_wt" config user.name Test
-git -C "$diverge_wt" config commit.gpgsign false
-git -C "$diverge_wt" commit -q --allow-empty -m base
-init_growth_state "$STATE" "$diverge_wt" issue-826 seed 1000000
-"$ROUND_WRITE" --worktree "$diverge_wt" --issue issue-826 --round-id 4-4 --item 1 compare "tools/guard on a staged render" >/dev/null
-git -C "$diverge_wt" checkout -q --orphan divergent
-git -C "$diverge_wt" commit -q --allow-empty -m divergent
-diverge_head="$(git -C "$diverge_wt" rev-parse HEAD)"
-"$WRITE" --worktree "$diverge_wt" --kind fix --issue issue-826 --round-id 4-4 --branch divergent \
-  --commit "$diverge_head" --validate pass --item 1 Applied done >/dev/null
-diverge_out="$("$CHECK" --worktree "$diverge_wt" --issue issue-826 --round-id 4-4 --expect-items-from-round)"
-assert_eq "$(jq -r '.reason' <<<"$diverge_out")" "valid" \
-  "direct snapshot comparison accepts histories with no merge base"
+# A probe git cannot run is its own refusal, never a file list; the shim fails
+# every `git diff`, on the live-base round above so the probe is reached.
 git_shim_dir="$TMP_ROOT/git-shim"
 mkdir -p "$git_shim_dir"
 cat > "$git_shim_dir/git" <<'EOF'
@@ -454,23 +439,93 @@ chmod +x "$git_shim_dir/git"
 real_git="$(command -v git)"
 set +e
 comparison_out="$(REAL_GIT="$real_git" PATH="$git_shim_dir:$PATH" "$CHECK" \
-  --worktree "$diverge_wt" --issue issue-826 --round-id 4-4 --expect-items-from-round 2>/dev/null)"
+  --worktree "$adds_wt" --issue issue-826 --round-id 3-3 --expect-items-from-round 2>/dev/null)"
 comparison_rc=$?
 set -e
-assert_eq "$comparison_rc" "1" "a failed direct snapshot probe refuses acceptance"
+assert_eq "$comparison_rc" "1" "a failed snapshot probe refuses acceptance"
 assert_eq "$(jq -r '.reason' <<<"$comparison_out")" "comparison_failed" \
-  "failed direct snapshot probe keeps the distinct reason"
-routing_mutant="$(copy_scripts routing-mutant)/dev-artifact-check"
+  "a failed snapshot probe keeps the distinct reason"
+# A mutant takes the whole scripts directory: the check sources a sibling lib.
+mutant_scripts="$TMP_ROOT/mutant-scripts"
+mkdir -p "$mutant_scripts"
+cp -R "$REPO_ROOT/skills/orch/scripts" "$mutant_scripts/"
+routing_mutant="$mutant_scripts/scripts/dev-artifact-check"
 sed -i.bak 's/emit false "$file" "comparison_failed"/emit false "$file" "unapproved_additions"/' "$routing_mutant"
 chmod +x "$routing_mutant"
 set +e
 routing_mutant_out="$(REAL_GIT="$real_git" PATH="$git_shim_dir:$PATH" "$routing_mutant" \
-  --worktree "$diverge_wt" --issue issue-826 --round-id 4-4 --expect-items-from-round 2>/dev/null)"
+  --worktree "$adds_wt" --issue issue-826 --round-id 3-3 --expect-items-from-round 2>/dev/null)"
 set -e
 # The misroute must show as the reason the mutation names. Asserting only
 # "not comparison_failed" would also pass for a mutant that never ran.
 assert_eq "$(jq -r '.reason' <<<"$routing_mutant_out")" "unapproved_additions" \
   "routing control detects a comparison-failure misroute"
+
+# --- kendex#944: a rebase stops the gate rather than misattributing to it ---
+# base_sha still resolves after a restack, so comparing against it would read
+# the base branch's whole advance as this round's own additions.
+rebase_wt="$TMP_ROOT/rebase"
+mkdir -p "$rebase_wt"
+git -C "$rebase_wt" init -q -b main
+git -C "$rebase_wt" config user.email test@example.com
+git -C "$rebase_wt" config user.name Test
+git -C "$rebase_wt" config commit.gpgsign false
+git -C "$rebase_wt" commit -q --allow-empty -m base
+init_growth_state "$STATE" "$rebase_wt" issue-944 seed 1000000
+git -C "$rebase_wt" checkout -q -b feature
+printf 'branch work\n' > "$rebase_wt/branch.md"
+git -C "$rebase_wt" add branch.md
+git -C "$rebase_wt" commit -q -m branch-work
+"$ROUND_WRITE" --worktree "$rebase_wt" --issue issue-944 --round-id 1-1 --item 1 "fix finding" "tools/guard on a staged render" >/dev/null
+git -C "$rebase_wt" checkout -q main
+mkdir -p "$rebase_wt/crates/upstream"
+printf 'upstream\n' > "$rebase_wt/crates/upstream/lib.rs"
+git -C "$rebase_wt" add crates/upstream/lib.rs
+git -C "$rebase_wt" commit -q -m upstream-advance
+git -C "$rebase_wt" checkout -q feature
+git -C "$rebase_wt" rebase -q main >/dev/null
+"$WRITE" --worktree "$rebase_wt" --kind fix --issue issue-944 --round-id 1-1 --branch feature \
+  --commit "$(git -C "$rebase_wt" rev-parse HEAD)" --validate pass --item 1 Applied done >/dev/null
+set +e
+rebase_out="$("$CHECK" --worktree "$rebase_wt" --issue issue-944 --round-id 1-1 --expect-items-from-round 2>"$TMP_ROOT/rebase.err")"
+set -e
+# Refused, and naming nothing: an accept would lose the gate rather than defer
+# it, and a file list would accuse the round of what it cannot be shown to own.
+assert_eq "$(jq -c '[.ok, .verdict, .reason, .files]' <<<"$rebase_out")" '[false,"retry","additions_unattributable",[]]' \
+  "an orphaned base refuses the round and names no file"
+assert_eq "$(grep -cF 'no comparison can attribute an addition to this round' "$TMP_ROOT/rebase.err")" "1" \
+  "and says on stderr why it could not compare"
+
+# Must-fail control: without the stop, the round is billed the file main merged,
+# which also proves the fixture still orphans that base. Pristine copy first.
+stop_mutant="$mutant_scripts/scripts/dev-artifact-check"
+cp "$CHECK" "$stop_mutant"
+assert_eq "$(grep -cF 'if ! git -C "$repo" merge-base --is-ancestor "$base_sha" HEAD >/dev/null 2>&1; then' "$stop_mutant")" "1" \
+  "control finds exactly one orphaned-base stop to remove"
+sed -i.bak 's/if ! git -C "\$repo" merge-base --is-ancestor "\$base_sha" HEAD >\/dev\/null 2>&1; then/if false; then/' "$stop_mutant"
+chmod +x "$stop_mutant"
+set +e
+stop_mutant_out="$("$stop_mutant" --worktree "$rebase_wt" --issue issue-944 --round-id 1-1 --expect-items-from-round 2>/dev/null)"
+set -e
+assert_eq "$(jq -c '.files' <<<"$stop_mutant_out")" '["crates/upstream/lib.rs"]' \
+  "control: without the stop, the round is billed main's addition"
+
+# The stop is for the orphaned base alone: a round delegated after the restack
+# has a live base, and an unlisted protected file it adds is refused.
+"$ROUND_WRITE" --worktree "$rebase_wt" --issue issue-944 --round-id 2-2 --item 1 "fix finding" "tools/guard on a staged render" >/dev/null
+mkdir -p "$rebase_wt/tools"
+printf 'round machinery\n' > "$rebase_wt/tools/round-tool"
+git -C "$rebase_wt" add tools/round-tool
+git -C "$rebase_wt" commit -q -m round-addition
+rebase_head2="$(git -C "$rebase_wt" rev-parse HEAD)"
+"$WRITE" --worktree "$rebase_wt" --kind fix --issue issue-944 --round-id 2-2 --branch feature \
+  --commit "$rebase_head2" --validate pass --item 1 Applied done >/dev/null
+set +e
+rebase_bites="$("$CHECK" --worktree "$rebase_wt" --issue issue-944 --round-id 2-2 --expect-items-from-round 2>/dev/null)"
+set -e
+assert_eq "$(jq -c '[.reason, .files]' <<<"$rebase_bites")" '["unapproved_additions",["tools/round-tool"]]' \
+  "a round whose base survived the restack is still gated, and named its addition alone"
+
 # --- kendex#994: the recorded commit must name a real object in the worktree's repo ---
 gitwt="$TMP_ROOT/gitwt"
 mkdir -p "$gitwt/tmp"
@@ -594,6 +649,12 @@ assert_file_contains "$ci_fix" "$ROUND_STAMP" "ci-fix § 3.2 mints a fresh dev_r
 # token alone is the fail-closed guarantee: a prior round's leftover receipt
 # carries the previous token and can never be mistaken for this round's.
 assert_file_not_contains "$ci_fix" "$LEGACY_CHECK" "ci-fix § 3.2 no longer uses the legacy positional dev-artifact-check call"
+
+# kendex#944: the restack cycle asks the owner of the live-round predicate.
+# The pin is the call site; the arms are worktree_push.sh's to prove.
+restack="$REPO_ROOT/skills/orch/workflows/merge-pr-restack.md"
+assert_file_contains "$restack" "worktree-push --check-live-round --worktree [WT_PATH] --issue [ISSUE]" \
+  "merge-pr-restack § 2 asks worktree-push before the restack"
 
 # The removed legacy positional call must not survive in any orch workflow.
 for wf in dev-start dev-fix review-pr-comments ci-fix; do

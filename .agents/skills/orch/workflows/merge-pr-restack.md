@@ -9,11 +9,23 @@ not a CI failure.
    re-read both fields. Either still set means hand back without pushing. This
    order prevents an armed PR from re-entering the queue while it is dequeued.
 
-2. Resolve the managed worktree and start its guarded restack:
+2. Resolve the managed worktree, then ask whether a fix round is in flight
+   before rebasing anything:
 
    ```bash
    [MAIN_REPO_ROOT]/.agents/skills/worktree/scripts/worktree path [ISSUE]
    ```
+   ```bash
+   [MAIN_REPO_ROOT]/.agents/skills/orch/scripts/worktree-push --check-live-round --worktree [WT_PATH] --issue [ISSUE]
+   ```
+
+   It pushes nothing. Exit 0 is the only answer that permits the restack; any
+   other exit hands back, and the command says which it was (`worktree-push
+   --help`). `worktree create [ISSUE] --reuse` rebases outside this check too,
+   and carries no live-round refusal of its own.
+
+   Then start the guarded restack:
+
    ```bash
    [MAIN_REPO_ROOT]/.agents/skills/worktree/scripts/worktree create [ISSUE] --restack
    ```

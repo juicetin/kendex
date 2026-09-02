@@ -36,6 +36,10 @@
 # orphans the SHAs of previously accepted rounds, so this is a signal for the
 # orchestrator, not a failure). Exact-commit binding (.commit == the observed
 # HEAD) and tracker corroboration stay in the orch workflow.
+#
+# The same rebase orphans the round record's base_sha, and there the answer is
+# to stop: the protected-additions gate does not run, says so on stderr, and
+# names no file (kendex#944).
 
 set -euo pipefail
 
@@ -111,21 +115,23 @@ that runs while the branch is over its size tripwire. Its receipt is accepted
 only when the branch came back to twice workflow state pr.baseline_lines: over
 that cap is reason=cut_not_shrunk, and a cap that cannot be measured at all is
 reason=cut_unmeasurable. Every other gate applies unchanged.
-Protected-addition scope: skills/orch/schemas/dev-round.md § Protected additions.
+Protected-addition scope, and what the gate does once a rebase orphans base_sha:
+skills/orch/schemas/dev-round.md § Protected additions.
 
 Prints JSON: {ok: bool, verdict: "accept"|"wait"|"retry", path: string|null,
               reason: "valid"|"missing"|"invalid"|"commit_unresolvable"|
                       "comparison_failed"|"classifier_failed"|
-                      "unapproved_additions"|"cut_not_shrunk"|
-                      "cut_unmeasurable"|"incomplete",
+                      "unapproved_additions"|"additions_unattributable"|
+                      "cut_not_shrunk"|"cut_unmeasurable"|"incomplete",
               warning: "commit_unreachable"|null,
               hint: usage diagnosis (count-vs-set --expect-items misuse)|null,
               files: [repo-relative paths]}
 
 Gates ordered: missing → (round_id mismatch → invalid) → scalars → invalid →
 commit object → commit_unresolvable → additions probe → comparison_failed or
-classifier_failed or unapproved_additions → cut size (declared cuts only) →
-cut_not_shrunk or cut_unmeasurable → items → incomplete → valid.
+classifier_failed or unapproved_additions or additions_unattributable → cut
+size (declared cuts only) → cut_not_shrunk or cut_unmeasurable → items →
+incomplete → valid.
 
 Exit status reflects artifact validity only: a valid artifact whose recorded
 validation is failing exits 0 with verdict "retry". Acceptance keys on the
@@ -146,7 +152,17 @@ reason meanings when ok=false:
   unapproved_additions
               a fix round added a protected file since the round record's
               base_sha without naming that exact file in adds. The files field
-              names every refused path. Renames and moves do not count.
+              names every refused path. Renames and moves do not count. This
+              gate runs only while base_sha is an ancestor of HEAD.
+  additions_unattributable
+              a rebase moved base_sha off the branch, so the additions gate
+              could not run and no file was classified either way; files is
+              empty, because naming one would accuse the round of an addition
+              the comparison cannot honestly attribute (kendex#944). This
+              refuses rather than accepts: the next round's base_sha is stamped
+              at the rebased HEAD, which already contains anything this round
+              added, so an accepted skip loses the gate rather than deferring
+              it.
   comparison_failed
               Git could not compare the round record's base_sha to HEAD. No file
               classification is inferred from a failed comparison.
@@ -348,10 +364,32 @@ is_protected_addition() {
 # git does stop option parsing there, but everything after `--` is a pathspec,
 # so the separator cannot carry the base_sha HEAD revision pair at all and the
 # probe would compare nothing — fail-open in the same direction.
+#
+# base_sha is HEAD at delegation, and a rebase orphans it exactly as it orphans
+# the artifact's .commit (kendex#944). The orphaned sha still resolves, so the
+# comparison succeeds across the base branch's whole advance and names files
+# another author merged as this round's additions. No comparison recovers the
+# round's real starting tree once it is off the branch, so the gate does not
+# run: it says that on stderr and names no file. Three approximations of "did
+# this round add this path" were tried and each excused something real.
 collect_unapproved_additions() {
   local repo="$1" round_record="$2" result="$3" base_sha path probe
   local additions=()
   base_sha="$(jq -r '.base_sha' "$round_record")"
+  # 40 hex naming no object here is not an orphaned base, it is a base this
+  # repository cannot answer for: refuse the comparison rather than take the
+  # stop below, which would clear the round on a record nobody can check.
+  if [[ "$(git -C "$repo" cat-file -t "$base_sha" 2>/dev/null)" != "commit" ]]; then
+    return 2
+  fi
+  if ! git -C "$repo" merge-base --is-ancestor "$base_sha" HEAD >/dev/null 2>&1; then
+    printf '%s: round base %s is not an ancestor of HEAD in %s (orphaned by a rebase?); no comparison can attribute an addition to this round once its base is off the branch\n' \
+      "$PROG" "$base_sha" "$repo" >&2
+    printf '[]\n' > "$result" || return 3
+    # 4, not 0: a gate that did not run and a gate that cleared the round are
+    # the same empty file, and only the caller can refuse on the difference.
+    return 4
+  fi
   probe="$(mktemp "$repo/tmp/.dev-artifact-additions.XXXXXX")" \
     || return 3
   scratch_files+=("$probe")
@@ -436,6 +474,16 @@ validate_artifact() {
       scratch_files+=("$refused_file")
       collect_unapproved_additions "$repo" "$round_record" "$refused_file" \
         || additions_rc=$?
+    fi
+    # 4 is the orphaned-base stop. Accepting it would not defer the gate, it
+    # would lose it: dev-round-write stamps the next round's base_sha at the
+    # rebased HEAD, which already contains whatever this round added, so no
+    # later round can ever see it as an addition. Gate code fails closed, so
+    # this refuses and names no file.
+    if (( additions_rc == 4 )); then
+      [[ -n "$refused_file" ]] && rm -f -- "$refused_file"
+      emit false "$file" "additions_unattributable"
+      return 1
     fi
     if (( additions_rc == 2 )); then
       [[ -n "$refused_file" ]] && rm -f -- "$refused_file"
