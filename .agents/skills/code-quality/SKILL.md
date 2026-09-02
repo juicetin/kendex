@@ -31,6 +31,7 @@ A loud failure beats a silent wrong answer. Handle every error, check invariants
 
 - No workarounds or quick hacks. If the correct fix is larger than expected, say so.
 - **Never fail open.** A dependency failure (command, file, network, parse) must not leave the caller in a passing or default state: no validator degrading to "no findings", no probe failure read as "not applicable", no unchecked `$(mktemp)`.
+- A gate, guard or scanner change adds no enumerated exemption list; a refusal is one rule at the point the code cannot judge.
 - A branch that "shouldn't happen" is never an empty or silently-ignored `else`: assert it, return an explicit internal error, or mark it unreachable — with a message naming the violated invariant. Use plain conditionals only when both branches are expected paths.
 - An error path must name the actual cause, not a neighbouring dependency.
 - Handle edge cases: empty input, boundary values, junk prefixes/suffixes, interrupted-then-retried flows.
@@ -52,6 +53,8 @@ A new or modified check, guard, assertion, or test ships with a must-fail contro
 
 - **Rust**: make illegal states unrepresentable; exhaustive matches (no `_ =>` over enums you own); enums over strings/sentinels/booleans-with-meaning. A test that hands a temporary path to code that may resolve symlinks binds its canonical root at creation and passes that binding, never the raw path; platform-only test APIs carry a `cfg` and, when the property is portable, a portable twin.
 - **Bash**: `set -euo pipefail` in every new script; check the result of every effectful substitution; `--` before path arguments sourced from configuration, argv, or the environment (not paths the script built itself, e.g. `mktemp -d`); no `[A-Za-z]`-class assumptions under arbitrary locales.
+- In a `pipefail` suite, never leave a pipeline unguarded when an early-closing `head` or `grep -q` can stop reading while its producer still writes; SIGPIPE can return 141 and exit the suite.
+- Measure a commit header with growth-guards' locale-stable `gg_chars`, never raw `awk length` or `wc -c`.
 - **TypeScript/JS**: distinguish missing from present-but-falsy (`""`, `0`) at every guard; no `any` at module boundaries.
 
 ## Comments and Prose
@@ -72,7 +75,7 @@ Don't:
 Markdown placement rules:
 
 - Never state a rule twice within or across package files; make later statements point to the first.
-- Never put mechanics, rationale, or history in `SKILL.md` or agent files; keep rules and commands there.
+- Never write `SKILL.md` or agent Markdown for anyone but agents; keep rules and commands there, not mechanics, rationale, or history.
 - Never put internal explanations, rationale, invariant details, or test mechanics outside `DEVELOPMENT.md`; keep actionable rules and commands loaded.
 - Never put anything but purpose, high-level behavior, features, user settings, and installation in a package `README.md`.
 - Never keep content in `references/*.md` unless a named workflow loads it on demand.
