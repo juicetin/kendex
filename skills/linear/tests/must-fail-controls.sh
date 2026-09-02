@@ -18,8 +18,23 @@ SKILL_DIR="$(cd "$TESTS_DIR/.." && pwd)"
 CONTROLS_DIR="$TESTS_DIR/controls"
 SUITE_TIMEOUT="${CONTROL_TIMEOUT:-60}"
 
+# Controls run concurrently: each one mutates its own copy of the skill and
+# runs the suite out of that copy, so no two of them share anything writable.
+CONTROL_JOBS="${CONTROL_JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)}"
+
 WORK="$(mktemp -d)"
 trap 'rm -rf -- "${WORK:?}"' EXIT
+# An interrupted run signals the control jobs it launched, and only the pids
+# it recorded when it launched them: every lane on this machine runs these
+# same suites out of its own worktree, so an argv match would reach theirs
+# too. Bash ignores INT in the async children of a shell without job control,
+# so Ctrl-C never reaches them on its own; TERM does. The `timeout` child each
+# control spawned is a grandchild this does not reach; it retires itself
+# within SUITE_TIMEOUT.
+# One trap each, so the code a wrapper reads says which signal arrived: an
+# interrupt and a kill are the same cleanup but not the same event.
+trap 'kill -TERM ${PIDS[@]+"${PIDS[@]}"} 2>/dev/null; exit 130' INT
+trap 'kill -TERM ${PIDS[@]+"${PIDS[@]}"} 2>/dev/null; exit 143' TERM
 
 # --- control vocabulary -----------------------------------------------------
 # A control script runs with CONTROL_ROOT pointing at its own copy of the
@@ -31,6 +46,15 @@ die() {
 	printf 'must-fail-controls: %s\n' "$*" >&2
 	exit 2
 }
+
+# A junk width otherwise reaches the batching predicate, where Bash 4.4 and
+# newer abort on the unbound name mid-roster and 4.0 through 4.2 read it as 0
+# and run every control one at a time. The digit count is part of the grammar:
+# 19 digits or more is past what signed 64-bit shell arithmetic holds, and the
+# predicate compares against the wrap, which reaps every iteration when it
+# lands at or below zero.
+[[ "$CONTROL_JOBS" =~ ^[1-9][0-9]{0,17}$ ]] ||
+	die "CONTROL_JOBS must be a positive integer, got: $CONTROL_JOBS"
 
 control_die() {
 	printf 'control %s: %s\n' "$CONTROL_NAME" "$*" >&2
@@ -83,6 +107,31 @@ control_write() {
 }
 
 # --- runner -----------------------------------------------------------------
+
+PIDS=()
+BATCH=()
+FAILURES=0
+
+# Wait out the launched batch, score one failure per control that reported
+# one, then print what that batch found. `wait -n` would keep the pipe full
+# instead of draining it in batches, but this skill supports Bash 4.0 and
+# newer (README § Setup) and `wait -n` arrived in 4.3.
+#
+# Printing here rather than after the last batch is what a run killed by CI,
+# a wrapper timeout or Ctrl-C leaves behind: the verdicts already reached.
+# A batch's pids are in roster order and the batches are too, so incremental
+# output is the same order the whole run would have printed.
+reap() {
+	local pid stem
+	for pid in ${PIDS[@]+"${PIDS[@]}"}; do
+		wait "$pid" || FAILURES=$((FAILURES + 1))
+	done
+	for stem in ${BATCH[@]+"${BATCH[@]}"}; do
+		cat "$WORK/$stem.log"
+	done
+	PIDS=()
+	BATCH=()
+}
 
 run_one() {
 	local suite="$1" stem="$2"
@@ -156,7 +205,7 @@ run_one() {
 
 main() {
 	local -a wanted=("$@") stems=()
-	local suite_path control_path suite stem want failures=0 total=0 orphans=0
+	local suite_path control_path suite stem want total=0 orphans=0
 
 	for suite_path in "$TESTS_DIR"/*.test.sh; do
 		stems+=("$(basename "$suite_path" .test.sh)")
@@ -189,14 +238,18 @@ main() {
 			continue
 		fi
 		total=$((total + 1))
-		run_one "$suite" "$stem" || failures=$((failures + 1))
+		run_one "$suite" "$stem" >"$WORK/$stem.log" 2>&1 &
+		PIDS+=("$!")
+		BATCH+=("$stem")
+		[[ ${#PIDS[@]} -lt "$CONTROL_JOBS" ]] || reap
 	done
+	reap
 
 	[[ "$total" -gt 0 ]] || die "selection matched no suites"
 
 	printf '\n%d controls, %d failing, %d orphaned\n' \
-		"$total" "$failures" "$orphans"
-	[[ "$failures" -eq 0 && "$orphans" -eq 0 ]]
+		"$total" "$FAILURES" "$orphans"
+	[[ "$FAILURES" -eq 0 && "$orphans" -eq 0 ]]
 }
 
 main "$@"

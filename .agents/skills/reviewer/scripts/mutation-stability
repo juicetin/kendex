@@ -29,6 +29,10 @@ usage: mutation-stability --worktree PATH --sha SHA --test CMD --build CMD
                    given it in TEST, e.g. --test 'cargo test -- --test-threads $THREADS'
   --timeout S      deadline for each build or test command (default 300)
   --keep           print the temp dirs instead of deleting them
+
+  MUTATION_STABILITY_SETTLE  seconds each write to a copy waits so a shared
+                   mtime-keyed build cache cannot answer it with the previous
+                   run's binary (default 1; 0 when BUILD shares no cache)
 USAGE
 }
 
@@ -69,6 +73,24 @@ positive_integer() {
 positive_integer --stability "$N"
 positive_integer --threads "$THREADS"
 positive_integer --timeout "$TIMEOUT"
+
+# Bounded on width as well as grammar: 19 digits or more is outside what the
+# shell's arithmetic holds, so every test below it reads the figure as an
+# error rather than a count. The run then prints the skipped-boundary warning
+# it has no business printing and hands the same figure to sleep, which waits
+# out the run on the first write to a copy.
+SETTLE="${MUTATION_STABILITY_SETTLE:-1}"
+if ! [[ "$SETTLE" =~ ^[0-9]{1,18}$ ]]; then
+  echo "MUTATION_STABILITY_SETTLE wants a whole number of seconds" >&2
+  exit 2
+fi
+# The precondition for skipping the boundary — that BUILD keeps no cache the
+# copies could share — is the caller's to know and this script cannot check
+# it. When it does not hold the mutant reuses the clean run's binary and reads
+# as survived, and nothing about that verdict looks wrong afterwards. Say it
+# once, so a transcript shows which verdicts were produced without it.
+[ "$SETTLE" -ne 0 ] ||
+  echo "settle: 0 — copies are not mtime-separated; verdicts assume BUILD shares no cache" >&2
 
 ROOT=$(mktemp -d "${TMPDIR:-/tmp}/mutation-stability.XXXXXX") || exit 2
 ACTIVE_PID="" ACTIVE_GROUP=""
@@ -146,7 +168,11 @@ trap 'exit 143' TERM
 # a source tree waits that boundary out first, so what it wrote always outranks
 # the build before it. Without that, the cache the caller shares — usually
 # CARGO_TARGET_DIR — answers the next run with the last run's test binary.
-outrank_last_build() { sleep 1; }
+#
+# A caller whose --build shares no cache has nothing to outrank, and
+# tests/mutation-stability.test.sh is one: it drives every case with a stub
+# build. MUTATION_STABILITY_SETTLE=0 is how such a caller says so.
+outrank_last_build() { [ "$SETTLE" -eq 0 ] || sleep "$SETTLE"; }
 
 extract() { # extract SHA into $1, stamped past the build before it
   mkdir -p "$1" || return 1

@@ -63,7 +63,7 @@ case "${1:-}" in
   auth)
     if [[ "${2:-}" == "status" ]]; then
       if [[ "${STUB_AUTH_SLEEP:-0}" == "1" ]]; then
-        sleep 5
+        sleep 2
       fi
       if [[ "${STUB_AUTH_STATUS_FAIL:-0}" == "1" ]]; then
         echo "keyring default failed" >&2
@@ -80,7 +80,7 @@ case "${1:-}" in
   api)
     if [[ "${2:-}" == "user" ]]; then
       if [[ "${STUB_API_USER_SLEEP:-0}" == "1" ]]; then
-        sleep 5
+        sleep 2
       fi
       _auth_ok || { echo "HTTP 401: Bad credentials" >&2; exit 1; }
       echo "test-user"
@@ -100,7 +100,7 @@ case "${1:-}" in
           exit 1
           ;;
         hang)
-          sleep 5
+          sleep 2
           ;;
         *)
           echo '{"number":42,"state":"OPEN"}'
@@ -121,7 +121,7 @@ set -euo pipefail
 printf 'op called: %s\n' "$*" >>"${STUB_OP_CALLS:?}"
 case "${STUB_OP_MODE:-fail}" in
   slow)
-    sleep 5
+    sleep 2
     ;;
   ok)
     echo "ghs_VALIDBOT123"
@@ -223,7 +223,7 @@ assert_contains "$(jq -r .detail <<<"$output")" "no pull requests found" "no PR 
 
 stderr="$TMP_ROOT/auth-timeout.err"
 set +e
-output=$(run_pr_view STUB_AUTH_SLEEP=1 KENDEX_GITHUB_AUTH_TIMEOUT=1 2>"$stderr")
+output=$(run_pr_view STUB_AUTH_SLEEP=1 KENDEX_GITHUB_AUTH_TIMEOUT=0.2 2>"$stderr")
 rc=$?
 set -e
 assert_eq "$rc" "124" "auth preflight timeout exits 124" "$stderr"
@@ -232,7 +232,7 @@ assert_eq "$(jq -r .status <<<"$output")" "auth_timeout" "auth timeout emits str
 stderr="$TMP_ROOT/auth-timeout-no-utility.err"
 set +e
 output=$(without_timeout_utility run_pr_view \
-  STUB_AUTH_SLEEP=1 KENDEX_GITHUB_AUTH_TIMEOUT=1 2>"$stderr")
+  STUB_AUTH_SLEEP=1 KENDEX_GITHUB_AUTH_TIMEOUT=0.2 2>"$stderr")
 rc=$?
 set -e
 assert_eq "$rc" "124" "auth timeout works without the timeout utility" "$stderr"
@@ -251,7 +251,7 @@ assert_eq "$(jq -r .number <<<"$output")" "42" \
 
 stderr="$TMP_ROOT/api-user-auth-timeout.err"
 set +e
-output=$(run_pr_view GH_TOKEN=ghs_VALIDBOT123 STUB_API_USER_SLEEP=1 KENDEX_GITHUB_AUTH_TIMEOUT=1 2>"$stderr")
+output=$(run_pr_view GH_TOKEN=ghs_VALIDBOT123 STUB_API_USER_SLEEP=1 KENDEX_GITHUB_AUTH_TIMEOUT=0.2 2>"$stderr")
 rc=$?
 set -e
 assert_eq "$rc" "124" "env-token auth preflight timeout exits 124" "$stderr"
@@ -267,7 +267,7 @@ assert_eq "$(jq -r .number <<<"$output")" "42" "valid selected token preserves g
 
 stderr="$TMP_ROOT/pr-view-timeout.err"
 set +e
-output=$(run_pr_view STUB_PR_MODE=hang KENDEX_GITHUB_PR_VIEW_TIMEOUT=1 2>"$stderr")
+output=$(run_pr_view STUB_PR_MODE=hang KENDEX_GITHUB_PR_VIEW_TIMEOUT=0.2 2>"$stderr")
 rc=$?
 set -e
 assert_eq "$rc" "124" "gh pr view timeout exits 124" "$stderr"
@@ -276,7 +276,7 @@ assert_eq "$(jq -r .status <<<"$output")" "gh_timeout" "gh timeout emits structu
 stderr="$TMP_ROOT/pr-view-timeout-no-utility.err"
 set +e
 output=$(without_timeout_utility run_pr_view \
-  STUB_PR_MODE=hang KENDEX_GITHUB_PR_VIEW_TIMEOUT=1 2>"$stderr")
+  STUB_PR_MODE=hang KENDEX_GITHUB_PR_VIEW_TIMEOUT=0.2 2>"$stderr")
 rc=$?
 set -e
 assert_eq "$rc" "124" "gh pr view timeout works without the timeout utility" "$stderr"
@@ -292,6 +292,32 @@ set -e
 assert_eq "$rc" "0" "gh timeout accepts a leading-zero decimal" "$stderr"
 assert_eq "$(jq -r .number <<<"$output")" "42" \
   "leading-zero gh bound returns PR JSON" "$stderr"
+
+# A bound outside the grammar the help advertises. The runner refuses it with
+# 125 having run nothing, so without a mapping here the caller reads a
+# configuration typo as a GitHub auth failure or as gh itself failing — the
+# one surface an operator debugging their own setting actually sees. Every
+# name the loop checks is driven, because a name dropped from it would fail
+# exactly this way again.
+for bound in KENDEX_GITHUB_AUTH_TIMEOUT KENDEX_GITHUB_OP_TIMEOUT \
+  KENDEX_GITHUB_PR_VIEW_TIMEOUT; do
+  stderr="$TMP_ROOT/bad-bound-$bound.err"
+  calls="$TMP_ROOT/bad-bound-$bound.calls"
+  : >"$calls"
+  set +e
+  output=$(run_pr_view "$bound=2.55" STUB_GH_CALLS="$calls" 2>"$stderr")
+  rc=$?
+  set -e
+  assert_eq "$rc" "2" "an unreadable $bound exits 2" "$stderr"
+  assert_eq "$(jq -r .status <<<"$output")" "bad_timeout" \
+    "an unreadable $bound emits the configuration status" "$stderr"
+  assert_contains "$(jq -r .error <<<"$output")" "$bound" \
+    "the refusal names $bound" "$stderr"
+  assert_eq "$(jq -r .detail <<<"$output")" "2.55" \
+    "the refusal carries the value it rejected for $bound" "$stderr"
+  assert_eq "$(wc -c <"$calls")" "0" \
+    "an unreadable $bound reaches no gh call" "$stderr"
+done
 
 rm -f "$TMP_ROOT/op.calls"
 stderr="$TMP_ROOT/inherited-gh-token-op.err"
@@ -337,7 +363,7 @@ assert_eq "$(jq -r .status <<<"$output")" "token_resolution_failed" "token failu
 
 stderr="$TMP_ROOT/op-timeout.err"
 set +e
-output=$(run_pr_view STUB_AUTH_OK=0 STUB_OP_MODE=slow KENDEX_GITHUB_OP_TIMEOUT=1 2>"$stderr")
+output=$(run_pr_view STUB_AUTH_OK=0 STUB_OP_MODE=slow KENDEX_GITHUB_OP_TIMEOUT=0.2 2>"$stderr")
 rc=$?
 set -e
 assert_eq "$rc" "3" "token resolution timeout exits auth code" "$stderr"
@@ -346,7 +372,7 @@ assert_eq "$(jq -r .status <<<"$output")" "token_resolution_timeout" "token time
 stderr="$TMP_ROOT/op-timeout-no-utility.err"
 set +e
 output=$(without_timeout_utility run_pr_view \
-  STUB_AUTH_OK=0 STUB_OP_MODE=slow KENDEX_GITHUB_OP_TIMEOUT=1 2>"$stderr")
+  STUB_AUTH_OK=0 STUB_OP_MODE=slow KENDEX_GITHUB_OP_TIMEOUT=0.2 2>"$stderr")
 rc=$?
 set -e
 assert_eq "$rc" "3" "op timeout works without the timeout utility" "$stderr"

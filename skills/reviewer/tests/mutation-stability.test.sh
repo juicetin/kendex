@@ -28,6 +28,12 @@ stopped() {
   ! kill -0 "$pid" 2>/dev/null
 }
 
+# Every case up to the shared-cache block below builds with `true` or a `test`
+# — nothing that keeps a cache, so nothing the copy's mtime has to outrank.
+# The two blocks that DO put a whole-second cache behind the build clear this
+# again and spend the real wait.
+export MUTATION_STABILITY_SETTLE=0
+
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/ms-test.XXXXXX") || exit 2
 trap 'rm -rf "$TMP"' EXIT
 REPO="$TMP/repo"
@@ -70,7 +76,10 @@ run_ms "$SHA" --test 'bash check.sh' --build 'true' \
   --mutate 'sed -i.bak "s/+/-/" lib.sh && rm -f lib.sh.bak' \
   --stability 2 --threads 2
 is_rc 0 "killed mutant exits 0"
-if [ "$out" = "mutation: killed 1/1; stability: 2/2 at 2 threads" ]; then ok "summary line is the exact format"; else bad "summary line is the exact format" "$out"; fi
+# The LAST line, not the whole stream: the run may say something on stderr
+# first — a skipped settle boundary does — and the claim here is the shape of
+# the verdict this script ends on.
+if [ "${out##*$'\n'}" = "mutation: killed 1/1; stability: 2/2 at 2 threads" ]; then ok "summary line is the exact format"; else bad "summary line is the exact format" "$out"; fi
 
 run_ms "$SHA" --test 'bash check.sh' --build 'true' \
   --mutate 'echo "# decoy: still says +" >> lib.sh' --stability 1
@@ -97,6 +106,61 @@ lacks "killed" "a non-compiling mutant is never killed"
 # One invalid input proves the shared positive-integer validator.
 run_ms "$SHA" --test 'true' --build 'true' --mutate 'true' --timeout 0
 is_rc 2 "the numeric validator rejects zero"
+
+# The settle has its own validator: it admits the 0 the shared one refuses,
+# and refuses everything that is not a count of seconds.
+rc=0
+out=$(MUTATION_STABILITY_SETTLE=soon "$MS" --worktree "$REPO" --sha "$SHA" \
+  --test 'true' --build 'true' --mutate 'true' --stability 1 2>&1) || rc=$?
+is_rc 2 "a settle that is not a number of seconds exits 2"
+has "MUTATION_STABILITY_SETTLE wants a whole number of seconds" "the rejected settle is named"
+
+# Width is part of that grammar: unrefused, this figure is one the shell's
+# tests read as an error and sleep waits out, so the run hangs on its first
+# write to a copy instead of reporting the setting.
+rc=0
+out=$(MUTATION_STABILITY_SETTLE=18446744073709551616 "$MS" --worktree "$REPO" --sha "$SHA" \
+  --test 'true' --build 'true' --mutate 'true' --stability 1 2>&1) || rc=$?
+is_rc 2 "a settle too wide for the arithmetic exits 2"
+has "MUTATION_STABILITY_SETTLE wants a whole number of seconds" "the over-wide settle is named"
+
+# And 0 really skips the wait rather than merely shortening it. What the run
+# asked for is read off a sleep stub: the settle is the only whole-second
+# sleeper in the script, and the sub-second waits are its own polls, which the
+# stub still performs so the run behaves normally.
+mkdir -p "$TMP/sleepbin"
+cat >"$TMP/sleepbin/sleep" <<SH
+#!/bin/sh
+printf '%s\n' "\$1" >>"$TMP/slept"
+case "\$1" in *.*) exec $(command -v sleep) "\$@" ;; esac
+SH
+chmod +x "$TMP/sleepbin/sleep"
+# WANT is the number of seconds the run should have asked for, or `absent` for
+# no whole-second wait at all. The figure and not just its shape: a default
+# silently changed from 1 to 30 is still a whole number, and would read green.
+settle_arm() { # DESC EXPECTATION(seconds|absent) env-argument...
+  desc="$1"; want="$2"; shift 2
+  : >"$TMP/slept"
+  rc=0
+  out=$(env "$@" PATH="$TMP/sleepbin:$PATH" "$MS" \
+    --worktree "$REPO" --sha "$SHA" --test 'bash check.sh' --build 'true' \
+    --mutate 'sed -i.bak "s/+/-/" lib.sh && rm -f lib.sh.bak' \
+    --stability 1 --threads 2 2>&1) || rc=$?
+  is_rc 0 "control: $desc still reaches its verdict"
+  found="$(grep -xE '[0-9]+' "$TMP/slept" | head -1 || true)"
+  [ -n "$found" ] || found=absent
+  if [ "$found" = "$want" ]; then ok "$desc"; else
+    bad "$desc" "whole-second wait $found; slept: $(tr '\n' ' ' <"$TMP/slept")"
+  fi
+}
+settle_arm "the default settle waits one whole second" 1 -u MUTATION_STABILITY_SETTLE
+lacks "settle: 0" "the default run says nothing about a skipped boundary"
+settle_arm "a zero settle asks for no wait at all" absent MUTATION_STABILITY_SETTLE=0
+# A verdict reached without the boundary has to be identifiable afterwards:
+# where BUILD does share a cache, a reused binary reads as a survivor and
+# nothing else in the output says why.
+has "settle: 0 — copies are not mtime-separated" \
+  "a skipped boundary is named in the run's own output"
 
 # KEN-999: one timeout control also checks adoption under a non-reaping PID 1.
 export HANG_PID_FILE="$TMP/timeout-child.pid"
@@ -178,7 +242,9 @@ run_ms "$SHA2" --test 'bash check.sh' --build 'true' \
 is_rc 1 "stability failure exits 1 even with the mutant killed"
 has "stability: 1/3 at 2 threads" "partial stability is reported as Y/N"
 
-# Shared whole-second caches must rebuild for mutant and clean copies.
+# Shared whole-second caches must rebuild for mutant and clean copies. This is
+# the wait's whole reason, so from here the default settle is what runs.
+unset MUTATION_STABILITY_SETTLE
 export CACHE="$TMP/build-cache"
 mkdir -p "$CACHE"
 cat > "$REPO/check.sh" <<'T'

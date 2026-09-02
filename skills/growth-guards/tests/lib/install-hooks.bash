@@ -9,6 +9,10 @@
 
 SKILL_DIR="$(cd "$TEST_DIR/.." && pwd)"
 INSTALL="$SKILL_DIR/scripts/install-git-hooks"
+# Outside the namespace new_repo allocates fixtures from: a fixture named for
+# the template would satisfy the build guard below and be copied into the skill
+# slot as a git repository, with nothing checking the shape.
+GG_SKILL_TEMPLATE="$TMP/.templates/growth-guards"
 
 unset GROWTH_GUARDS_CHECKS GROWTH_GUARDS_PRE_COMMIT_LOCAL GROWTH_GUARDS_SETTINGS_FILE \
   GROWTH_GUARDS_COMMIT_TYPES SIZE_RATCHET_THRESHOLD 2>/dev/null || true
@@ -34,7 +38,16 @@ new_repo() { # NAME -> repo path on stdout
   git -C "$r" config user.name test
   # A real directory, the shape a project install has: path resolution and
   # the shared-worktree check both key on where the copy physically is.
-  cp -R "$SKILL_DIR" "$r/.agents/skills/growth-guards"
+  #
+  # The copy is cloned from a template built once per suite, with tests/ cut:
+  # that subtree is more than half the skill and nothing a consumer install
+  # reaches, and these suites build dozens of fixtures.
+  if [ ! -d "$GG_SKILL_TEMPLATE" ]; then
+    mkdir -p "$(dirname "$GG_SKILL_TEMPLATE")"
+    cp -R "$SKILL_DIR" "$GG_SKILL_TEMPLATE"
+    rm -rf -- "${GG_SKILL_TEMPLATE:?}/tests"
+  fi
+  cp -R "$GG_SKILL_TEMPLATE" "$r/.agents/skills/growth-guards"
   ln -s "$SKILL_DIR/../size-ratchet" "$r/.agents/skills/size-ratchet"
   printf '%s' "$r"
 }

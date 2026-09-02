@@ -63,20 +63,51 @@ _kendex_github_forward_bounded_signal() {
   case "$signal" in HUP) return 129 ;; INT) return 130 ;; TERM) return 143 ;; esac
 }
 
+# The one reading of the bound grammar. The bound is polled on a 0.1s tick
+# below, so it is read to one decimal place and no finer: a figure the poll
+# could not honour is junk, not a tighter bound. A leading zero is decimal,
+# never octal.
+#
+# Separate from the runner because a caller has to be able to tell a bound it
+# cannot read from a command that failed, and it may not ask by running the
+# command: 125 arrives after the command did not run, so there is no output to
+# explain it. Asking here keeps one judge of the grammar.
+kendex_github_bound_ticks() { # SECONDS — tenths on stdout; 1 when unreadable
+  local seconds="$1" whole frac
+  case "$seconds" in
+    *.*) whole="${seconds%.*}" frac="${seconds#*.}" ;;
+    *) whole="$seconds" frac=0 ;;
+  esac
+  case "$whole" in '' | *[!0-9]*) return 1 ;; esac
+  # Ten times an 18-digit whole part is past what signed 64-bit shell
+  # arithmetic holds, and the wrap lands on 0 for one such value in ten, which
+  # the runner below reads as "no bound" and then waits on forever. Refused on
+  # width here, before the multiply, so no call site inherits the wrap.
+  [ "${#whole}" -le 17 ] || return 1
+  case "$frac" in [0-9]) ;; *) return 1 ;; esac
+  printf '%s' "$(((10#$whole) * 10 + frac))"
+}
+
 kendex_github_run_bounded() {
   local seconds="$1"
   shift
 
-  case "$seconds" in
-    ''|*[!0-9]*) return 125 ;;
-  esac
-  seconds=$((10#$seconds))
-  if [ "$seconds" -eq 0 ]; then
+  local restore_monitor=0 pid="" ticks=0 max_ticks status=0 target=""
+  if ! max_ticks="$(kendex_github_bound_ticks "$seconds")"; then
+    # 125 arrives having run nothing, so there is no output to explain it and
+    # most callers can only pass it upward — an auth check that never ran, a
+    # token that never resolved, and no name for the setting behind either.
+    # Said once, here, where the grammar is read: no call site can go quiet
+    # again by forgetting to say it.
+    printf "bounded: '%s' is not a number of seconds to one decimal place; nothing ran\n" \
+      "$seconds" >&2
+    return 125
+  fi
+  if [ "$max_ticks" -eq 0 ]; then
     "$@"
     return
   fi
 
-  local restore_monitor=0 pid="" ticks=0 max_ticks status=0 target=""
   local old_hup old_int old_term
   old_hup="$(trap -p HUP)"
   old_int="$(trap -p INT)"
@@ -96,7 +127,6 @@ kendex_github_run_bounded() {
   if ! kill -0 -- "$target" 2>/dev/null; then
     target="$pid"
   fi
-  max_ticks=$((seconds * 10))
 
   while kill -0 "$pid" 2>/dev/null; do
     if [ "$ticks" -ge "$max_ticks" ]; then

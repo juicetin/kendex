@@ -65,6 +65,24 @@ _CALLER_LINEAR_TEAM="${LINEAR_TEAM:-}"
 source "$_LIB_DIR/kendex-env.sh"
 kendex_load_project_env "$PROJECT_ROOT"
 
+# Seconds before the first retry of a rate-limited or failed GraphQL call;
+# each further attempt doubles it. Overridable so a suite driving the retry
+# path against a stubbed curl does not spend the real backoff — the wait is
+# for Linear's benefit, and there is no Linear on the other end of a stub.
+#
+# Below the project load, where every LINEAR_* value resolves:
+# kendex_load_project_env snapshots only EXPORTED names, so a default assigned
+# above it is a plain variable the settings files overwrite unvalidated. Base
+# ten at the seed, so a leading zero is decimal and not the octal 08 rejects.
+# Bounded on width too, and 18 digits survives all three doublings: past that
+# the arithmetic wraps and the backoff is a negative sleep, not a refusal.
+LINEAR_RETRY_BASE_DELAY="${LINEAR_RETRY_BASE_DELAY:-1}"
+if ! [[ "$LINEAR_RETRY_BASE_DELAY" =~ ^[0-9]{1,18}$ ]]; then
+    echo '{"error": "LINEAR_RETRY_BASE_DELAY must be a whole number of seconds"}' >&2
+    exit 1
+fi
+LINEAR_RETRY_BASE_DELAY=$((10#$LINEAR_RETRY_BASE_DELAY))
+
 # Where each target-selecting value came from: override (LINEAR_API_KEY_OVERRIDE),
 # project-config (kendex.settings.toml / .env.local), environment (process
 # env, used because the project files provided nothing), or unset. auth-check
@@ -232,7 +250,7 @@ graphql_query() {
         variables='{}'
     fi
     local max_retries=3
-    local retry_delay=1
+    local retry_delay="$LINEAR_RETRY_BASE_DELAY"
     local attempt=1
 
     # Single choke point for writes: no mutation leaves this process without a

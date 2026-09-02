@@ -144,7 +144,66 @@ sr_settings_head_absence_real() { # NORMALIZED-PATH — 0 = the sentinel is earn
     return 1
   done
 }
+# A flat, reversible name for a repo-relative path, so a snapshot directory
+# holds one entry per source. Parameter expansion rather than sed: this runs
+# for every source of every key read, and a fork here is most of what a small
+# repository spends resolving its settings.
+sr_settings_slug() { # PATH — sets SR_SETTINGS_SLUG
+  local s="$1"
+  s="${s//%/%25}"
+  s="${s//\//%2F}"
+  s="${s//./%2E}"
+  SR_SETTINGS_SLUG="$s"
+}
+
+SR_SETTINGS_NL='
+'
+
+# Resolution against a snapshot is a pure function of the snapshot and the
+# path: nothing in a run rewrites the index or moves HEAD under it. Each key
+# read re-asks for the same two settings files and .env.local, and each ask
+# costs several git probes, so the answer is recorded beside the snapshot it
+# came from. It has to be ON DISK: every caller wraps this in a command
+# substitution, and a shell variable would not survive that subshell.
 sr_settings_source() { # FILE — the path to actually read; nonzero + ::error on failure
+  local dir="" memo="" resolved=""
+  if [ "${SR_SETTINGS_FROM_HEAD:-0}" = "1" ]; then
+    dir="${SR_SETTINGS_HEAD_DIR:-}"
+  elif [ "${SR_SETTINGS_FROM_INDEX:-0}" = "1" ]; then
+    dir="${SR_SETTINGS_INDEX_DIR:-}"
+  fi
+  # No snapshot: nothing to memoize, and nowhere to put it.
+  [ -n "$dir" ] || { sr_settings_resolve "$1"; return; }
+  sr_settings_slug "$1"
+  memo="$dir/settings.resolved.$SR_SETTINGS_SLUG"
+  if [ -f "$memo" ]; then
+    IFS= read -r resolved <"$memo" || resolved=""
+    # A resolution is always a path, so an empty read is a torn or unreadable
+    # memo, never a recorded answer: fall through and resolve it again.
+    if [ -n "$resolved" ]; then
+      printf '%s' "$resolved"
+      return 0
+    fi
+  fi
+  resolved="$(sr_settings_resolve "$1")" || return 1
+  # A memo holds one line, so a resolution carrying a newline cannot come back
+  # out: the read above would return its first line, which names no file, and
+  # the key would fall back to its default with nothing said. Guarded on the
+  # value, not on what built it, so a new return path cannot reopen this.
+  case "$resolved" in
+    *"$SR_SETTINGS_NL"*)
+      printf '%s' "$resolved"
+      return 0
+      ;;
+  esac
+  # The memo is only a cache, and a slug spends three characters on `/` and
+  # `.`, so a legal path can encode past NAME_MAX. A write that cannot land
+  # costs a re-resolve, not an answer; stderr first silences bash's error.
+  printf '%s\n' "$resolved" 2>/dev/null >"$memo" || :
+  printf '%s' "$resolved"
+}
+
+sr_settings_resolve() { # FILE — the path to actually read; nonzero + ::error on failure
   local file="$1" copy="" status=0 entry="" norm="" head_status=0 tree_status=0 target="" base="" depth=0
   if [ "${SR_SETTINGS_FROM_HEAD:-0}" = "1" ]; then
     if [ -z "${SR_SETTINGS_HEAD_DIR:-}" ]; then
@@ -208,7 +267,8 @@ sr_settings_source() { # FILE — the path to actually read; nonzero + ::error o
           ;;
       esac
     done
-    copy="$SR_SETTINGS_HEAD_DIR/settings.file.$(printf '%s' "$file" | sed -e 's/%/%25/g' -e 's|/|%2F|g' -e 's/[.]/%2E/g')"
+    sr_settings_slug "$file"
+    copy="$SR_SETTINGS_HEAD_DIR/settings.file.$SR_SETTINGS_SLUG"
     if [ ! -f "$copy" ] && ! git show "HEAD:$file" >"$copy" 2>/dev/null; then
       rm -f -- "$copy"
       echo "::error::$file: could not read its HEAD settings content" >&2
@@ -281,7 +341,8 @@ sr_settings_source() { # FILE — the path to actually read; nonzero + ::error o
       return 1
       ;;
   esac
-  copy="$SR_SETTINGS_INDEX_DIR/settings.file.$(printf '%s' "$file" | sed -e 's/%/%25/g' -e 's|/|%2F|g' -e 's/[.]/%2E/g')"
+  sr_settings_slug "$file"
+  copy="$SR_SETTINGS_INDEX_DIR/settings.file.$SR_SETTINGS_SLUG"
   if [ ! -f "$copy" ]; then
     if ! git show ":$file" >"$copy" 2>/dev/null; then
       rm -f -- "$copy"

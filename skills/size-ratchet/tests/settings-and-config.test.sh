@@ -294,6 +294,39 @@ run_raw SIZE_RATCHET_SETTINGS_FILE=absent.settings.toml || true
   && ok "an ABSENT plain file still falls back to the built-in default (control)" \
   || bad "an ABSENT plain file still falls back to the built-in default (control)" "rc=$RC out=$OUT"
 
+echo "=== a resolved source carrying a newline is never memoized ==="
+# Under --staged the library resolves against a snapshot and records each
+# answer in a one-line memo. A resolution with a newline in it cannot come
+# back out of one: the read returns its first line, which names no file, so
+# every key after the first falls to its default with nothing said. The memo
+# is what makes this reachable, and a settings path is the resolution, so an
+# untracked file whose name carries a newline is the whole condition.
+new_repo memo
+mkfile notes.md 40
+git -C "$R" add -A
+NL_SETTINGS="$(printf 'two\nlines.settings.toml')"
+printf '[env]\nSIZE_RATCHET_THRESHOLD = "12"\nSIZE_RATCHET_CLASSES = "*.md=5"\n' >"$R/$NL_SETTINGS"
+run_raw SIZE_RATCHET_SETTINGS_FILE="$NL_SETTINGS" -- --staged || true
+case "$OUT" in *"threshold 12"*"*.md=5"*) true ;; *) false ;; esac \
+  && ok "the configured threshold and classes still decide a --staged run" \
+  || bad "a newline in the resolved source falls back to the defaults" "rc=$RC out=$OUT"
+
+echo "=== a source whose memo name will not fit is resolved uncached ==="
+# The memo name flattens the whole settings path into one basename, and the
+# slug spends three characters on every `/` and `.`, so a path every component
+# of which sits far inside NAME_MAX can encode past that limit. The memo is a
+# cache: such a path resolves the pre-memo way rather than refusing the run.
+new_repo longmemo
+mkfile notes.md 40
+git -C "$R" add -A
+DEEP="$(awk 'BEGIN { for (i = 0; i < 60; i++) printf "d/" }')kendex.settings.toml"
+mkdir -p "$R/$(dirname "$DEEP")"
+printf '[env]\nSIZE_RATCHET_THRESHOLD = "12"\nSIZE_RATCHET_CLASSES = "*.md=5"\n' >"$R/$DEEP"
+run_raw SIZE_RATCHET_SETTINGS_FILE="$DEEP" -- --staged || true
+case "$OUT" in *"threshold 12"*"*.md=5"*) true ;; *) false ;; esac \
+  && ok "a settings path too long to memoize still decides a --staged run" \
+  || bad "an unmemoizable settings path refuses the run" "rc=$RC out=$OUT"
+
 echo "=== the /dev/null sentinel selects NO settings source, the dotenv layer included ==="
 # It named only the settings file, so .env.local (read before it) kept
 # deciding: a caller asking for built-in defaults got whatever the

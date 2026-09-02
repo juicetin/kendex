@@ -29,8 +29,29 @@ skipped() {
   printf '  skip  %s (%s)\n' "$1" "$2"
 }
 
+SEED_TEMPLATE="$TMP/.seed-template"
+
+# Every fixture below starts from the same committed baseline, so it is built
+# once and copied. Rebuilding it per case costs a git init, a commit, a bare
+# clone and a fetch each, and there are dozens of cases.
 seed() { # NAME — fixture in $R: committed baseline, origin/main, feature branch
+  if [ ! -d "$SEED_TEMPLATE" ]; then
+    build_seed_template
+  fi
   R="$TMP/$1"
+  cp -a "$SEED_TEMPLATE" "$R"
+  cp -a "$SEED_TEMPLATE.git" "$R.git"
+  # The origin URL the template recorded points at the template's own bare
+  # copy; every fixture must fetch from its own.
+  git -C "$R" remote set-url origin "$R.git"
+}
+
+# Local R: this builds the template and nothing else, and run_pf cd's into
+# whatever R holds. Left global it would be an out-parameter no signature
+# names, and any call from outside seed would run the next case against the
+# shared template.
+build_seed_template() {
+  local R="$SEED_TEMPLATE"
   mkdir -p "$R/docs" "$R/scripts" "$R/hooks" "$R/tests" "$R/data" "$R/store/migrations" \
     "$R/src/main/resources/db/migration"
   git -C "$R" -c init.defaultBranch=main init -q
