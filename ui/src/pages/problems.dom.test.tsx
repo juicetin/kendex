@@ -6,10 +6,11 @@ import { commands } from "@/bindings";
 import { ADOPTABLE } from "@/lib/adoptable";
 import { AUDIT_ATTENTION_TITLE } from "@/lib/copy";
 import {
-  KEEP_FILES_CONFIRM_BODY,
-  KEEP_FILES_CONFIRM_LABEL,
   KEEP_FILES_LABEL,
+  MANAGE_CONFIRM_BODY,
   MOVE_FILES_YOURSELF,
+  manageConfirmTitle,
+  PROCEED_LABEL,
   REPLACE_FILES_CONFIRM_LABEL,
   REPLACE_FILES_LABEL,
 } from "@/lib/copy-in-the-way";
@@ -329,11 +330,24 @@ describe("a declared item whose place already holds files", () => {
     await press(button(host, KEEP_FILES_LABEL));
     expect(dialog().textContent).toContain("Claude Code and Codex");
 
-    await press(button(dialog(), KEEP_FILES_CONFIRM_LABEL));
+    await press(button(dialog(), PROCEED_LABEL));
     expect(commands.adoptItem).toHaveBeenCalledWith(ACME, "skill", "browser", [
       "claude",
       "codex",
     ]);
+  });
+
+  // The heading is half of what the dialog says, and the old one asked
+  // whether to keep files — a choice the button under it does not run.
+  it("heads the confirm with the action rather than with keeping files", async () => {
+    stage([oneBlocked(ACME, "deploy")]);
+    const host = mount(<ProblemsPage />);
+    await settle();
+
+    await press(button(host, KEEP_FILES_LABEL));
+    const said = dialog().textContent ?? "";
+    expect(said).toContain(manageConfirmTitle("deploy"));
+    expect(said).not.toContain("Keep deploy's files?");
   });
 
   // The shared words answer for the shared installations alone: a group can
@@ -350,7 +364,9 @@ describe("a declared item whose place already holds files", () => {
     await settle();
 
     await press(button(host, KEEP_FILES_LABEL));
-    expect(dialog().textContent).toContain(KEEP_FILES_CONFIRM_BODY);
+    expect(dialog().textContent).toContain(MANAGE_CONFIRM_BODY);
+    // Read off the export: the line above compares it to its own words.
+    expect(MANAGE_CONFIRM_BODY).toContain("Nothing is deleted");
     expect(dialog().textContent).not.toContain("read this skill from");
   });
 });
