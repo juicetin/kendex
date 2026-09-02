@@ -63,7 +63,9 @@ pw_prefix() { awk -v repo="$1" '{ print repo "\t" $0 }' <<<"$2"; }
 
 # One baseline file per repo, loaded before the first pass.
 pw_init_state() {
-  [[ -n "$PR_WATCH" ]] || return 0
+  # Lanes count: their asking fingerprints are rows in the first repository's
+  # baseline, so a lane-only run still loads and writes it.
+  [[ -n "$PR_WATCH" || "${TRIAGE_ENABLED:-0}" -eq 1 || ${#LANES[@]} -gt 0 ]] || return 0
   local i state_file
   mkdir -p "$PW_STATE_DIR" \
     || die "could not create the pr-watch state directory $PW_STATE_DIR (set OVERSEE_WATCH_STATE_DIR)"
@@ -91,7 +93,7 @@ pr_watch_context() {
 # when nothing needs the overseer.
 check_pr_watch() {
   [[ -n "$PR_WATCH" ]] || return 0
-  local errf="$WORK_DIR/pr-watch.err" i repo out err rc keys new_keys key
+  local errf="$WORK_DIR/pr-watch.err" i repo out err rc keys carried new_keys key
   local rc_max=0 out_all="" err_all="" event=0
   # This pass's keys per repo. The reduction touches no baseline: a die below
   # would otherwise leave a repo's rising edge recorded as seen with no event
@@ -109,7 +111,11 @@ check_pr_watch() {
     [[ "$rc" -le "$rc_max" ]] || rc_max="$rc"
     [[ -z "$out" ]] || out_all+="$(pw_prefix "$repo" "$out")"$'\n'
     [[ -z "$err" ]] || err_all+="$(pw_prefix "$repo" "$err")"$'\n'
-    pass_keys[$i]=""
+    # Rows this pass does not own: triage verdict keys and lane-asking
+    # fingerprints share the file, and a rewrite that dropped them would make
+    # every acknowledged item and every standing prompt news again.
+    carried="$(awk -F'\t' '($1 == "triage" && NF == 2) || ($1 == "lane-asking" && NF == 3) { print }' <<<"${PW_SEEN[$i]}")"
+    pass_keys[$i]="$carried"
     [[ "$rc" -ne 0 ]] || continue
     # Non-zero with no per-PR lines is pr-watch's GLOBAL failure shape
     # (pr-watch.sh --help): it reports on stderr only, and nothing here can be
@@ -127,7 +133,11 @@ check_pr_watch() {
       [[ -n "$key" ]] || continue
       grep -qxF -- "$key" <<<"${PW_SEEN[$i]}" || new_keys+="$key"$'\n'
     done <<<"$keys"
-    pass_keys[$i]="$keys"
+    if [[ -n "$carried" && -n "$keys" ]]; then
+      pass_keys[$i]="$carried"$'\n'"$keys"
+    else
+      pass_keys[$i]="$carried$keys"
+    fi
     [[ -n "$new_keys" ]] || continue
     # Rising edge against this repo's previous pass only: a line that clears
     # and later recurs is news again. Pass 1 compares against the persisted

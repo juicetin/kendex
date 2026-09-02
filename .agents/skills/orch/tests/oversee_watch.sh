@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # Regression tests for the GitHub side of orch/scripts/oversee-watch, and for
 # the failures that take the whole process down. The pane side — window-gone,
-# lane-exited, usage-limit, question, idle-after-return — is
-# oversee_watch_lanes.sh; both build their sandbox from
-# lib/oversee-watch-harness.sh.
+# lane-exited, usage-limit, lane-asking, idle-after-return — is in the two
+# lane suites. Tracker events are in oversee_watch_triage.sh. All use the
+# shared lib/oversee-watch-harness.sh sandbox.
 #
 # oversee-watch is the overseer's single blocking watch: it loops until the
-# fleet needs a hand and prints ONE `EVENT <kind> ...` line. Covered here:
+# fleet needs a hand and prints one wake, with one EVENT line or one line per
+# merged or triage item. Covered here:
 #   1.  pr-watch: on the fleet's first run attention present at start is a
 #       baseline (no event, one stderr note, context on the next event); that
 #       baseline persists, so a line appearing between two runs is the next
@@ -35,12 +36,12 @@
 #       match branches case-insensitively; no --since means no floor; no
 #       --item skips the check with a note; gh stderr noise on success does
 #       not break the JSON parse
-#   5.  heartbeat after --max-loops with the open PR list
-#   6.  gh auth failure exits 2; a stale env token falls through to the
+#   3.  heartbeat after --max-loops with the open PR list
+#   4.  gh auth failure exits 2; a stale env token falls through to the
 #       project GH_BOT_TOKEN; a failing pr list exits 2 (never a quiet 0)
-#   7.  lanes given outside tmux exit 2
-#   8.  a missing pr-watch.sh is a stderr note, not a failure
-#   9.  --help exits 0, names the probe it runs, and states both liveness
+#   5.  lanes given outside tmux exit 2
+#   6.  a missing pr-watch.sh is a stderr note, not a failure
+#   7.  --help exits 0, names the probe it runs, and states both liveness
 #       rules including the unusable-probe path
 set -euo pipefail
 
@@ -199,7 +200,7 @@ printf '1' > "$STUB_DIR/prwatch.rc"
 printf 'Do you want to proceed?\n   ❯ 1. Yes\n     2. No\n' > "$STUB_DIR/pane-gh-2.txt"
 err="$TMP_ROOT/e1f"
 out="$(run_watch -- gh-1 gh-2 2>"$err")" && rc=0 || rc=$?
-assert_eq "$(head -1 <<<"$out")" "EVENT question gh-2" "a lane question is seen despite standing pr-watch attention" "$err"
+assert_eq "$(head -1 <<<"$out")" "EVENT lane-asking gh-2" "a lane question is seen despite standing pr-watch attention" "$err"
 assert_contains "$out" "pr-watch rc=1" "the question event still carries the pr-watch context" "$err"
 
 # 1g. the baseline persists across runs of the same fleet: the overseer exits
@@ -597,7 +598,7 @@ assert_eq "$(cat "$STUB_DIR/prwatch.repo")" "vanillagreencom/kendex" \
 assert_eq "$([[ -f "$STATE_DIR/vanillagreencom_kendex__2026-08-15T09_00_00Z" ]] && echo yes || echo no)" "yes" \
   "and keys its baseline on that same spelling" "$err"
 
-# --- 2. merged, with item, since, and case controls -------------------------
+# --- 3. merged, with item, since, and case controls -------------------------
 new_case merged
 cat > "$STUB_DIR/merged.json" <<'EOF'
 [
@@ -735,7 +736,7 @@ assert_eq "$(grep -c 'pr-watch.sh not found' "$err")" "1" "note printed exactly 
 err="$TMP_ROOT/e9"
 out="$(run_watch -- --help 2>"$err")" && rc=0 || rc=$?
 assert_eq "$rc" "0" "--help exits 0" "$err"
-assert_contains "$out" "EVENT question" "--help documents the event kinds" "$err"
+assert_contains "$out" "EVENT lane-asking" "--help documents the event kinds" "$err"
 assert_contains "$out" "reports no" \
   "--help states the probe that keeps a wrapped lane out of lane-exited" "$err"
 assert_contains "$out" "pgrep -P" \
@@ -744,6 +745,10 @@ assert_contains "$out" "not an answer" \
   "--help states that an unusable probe keeps the lane watched" "$err"
 assert_contains "$out" "last user turn on its screen" \
   "--help states where a limit banner has to sit to count" "$err"
+assert_contains "$out" "earlier repository baselines may already have advanced" \
+  "--help documents a partial multi-repo state commit" "$err"
+assert_contains "$out" "Only baselines that did not advance repeat" \
+  "--help does not promise every event repeats after a write failure" "$err"
 
 echo
 printf 'pass: %d   fail: %d\n' "$PASS" "$FAIL"

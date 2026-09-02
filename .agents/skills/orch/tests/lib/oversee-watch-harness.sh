@@ -1,11 +1,10 @@
 # Shared sandbox for the oversee-watch suites: the stub binaries every case
 # drives, the assertion helpers, and one `run_watch` entry point.
 #
-# oversee-watch reads two independent surfaces — GitHub (pr-watch, `gh pr
-# list`) and the tmux panes of the lane windows — and each has its own suite:
-# oversee_watch.sh covers the GitHub side and the process-wide failures,
-# oversee_watch_lanes.sh the pane side. Both build the same sandbox, so it
-# lives here rather than in either of them.
+# oversee-watch reads GitHub (pr-watch, `gh pr list`), Linear, and the tmux
+# panes of the lane windows. oversee_watch.sh covers GitHub and process-wide
+# failures; oversee_watch_triage.sh covers the tracker; the two lane suites
+# cover pane behavior and prompt state. They share this sandbox.
 #
 # Sourced, never run: the runners glob tests/*.sh, so nothing here executes on
 # its own. Sourcing it sets the shell options, builds $TMP_ROOT and the stub
@@ -16,11 +15,15 @@
 # suite that forgot it must not get a sandbox built without it.
 set -euo pipefail
 
-# Resolved from this file, not from the sourcing suite: four levels up from
-# skills/<skill>/tests/lib is the repo root.
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+# Four levels selects the repository for source tests and .agents for renders.
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd -P)" \
+  || { echo "oversee-watch harness: test root not found" >&2; exit 1; }
 TMP_ROOT="$(mktemp -d)" || { echo "oversee-watch harness: mktemp -d failed" >&2; exit 1; }
 trap 'rm -rf "$TMP_ROOT"' EXIT
+OVERSEE_TEST_REAL_DATE="$(command -v date)" \
+  || { echo "oversee-watch harness: date not found before PATH shadowing" >&2; exit 1; }
+[[ -x "$OVERSEE_TEST_REAL_DATE" ]] \
+  || { echo "oversee-watch harness: resolved date is not executable: $OVERSEE_TEST_REAL_DATE" >&2; exit 1; }
 
 PASS=0
 FAIL=0
@@ -70,7 +73,12 @@ assert_not_contains() {
 
 mkdir -p "$TMP_ROOT/repo/.agents/skills" "$TMP_ROOT/bin" "$TMP_ROOT/cases"
 ln -s "$REPO_ROOT/skills/orch" "$TMP_ROOT/repo/.agents/skills/orch"
-git -C "$TMP_ROOT/repo" init -q
+# `-C` does not neutralize the caller's git environment, so a suite run from
+# inside a git hook would init into the real repository and resolve a root
+# outside the sandbox. Both calls clear the four variables together.
+env -u GIT_DIR -u GIT_COMMON_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE git -C "$TMP_ROOT/repo" init -q
+CASE_REPO_ROOT="$(env -u GIT_DIR -u GIT_COMMON_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE git -C "$TMP_ROOT/repo" rev-parse --show-toplevel)" \
+  || { echo "oversee-watch harness: case repository root not found" >&2; exit 1; }
 
 # gh stub, driven by files in $STUB_DIR:
 #   merged.json   body for `pr list --state merged` (default: [])
@@ -133,7 +141,9 @@ EOF
 # id>` lines, the lane-claim liveness key). pane-<lane>.<N>.txt and
 # cmd-<lane>.<N>.txt override the plain file on the Nth read of that lane, so a
 # case can change a screen between passes; obs-<lane>.txt replaces the whole
-# liveness reply, for a case that needs a malformed one.
+# liveness reply, for a case that needs a malformed one. pane-key-<lane>.txt
+# overrides pane identity; pane-key-fail-<lane> and capture-fail-<lane> make
+# their probes fail.
 cat > "$TMP_ROOT/bin/tmux" <<'EOF'
 #!/usr/bin/env bash
 set -uo pipefail
@@ -148,6 +158,7 @@ case "${1:-}" in
     while [[ $# -gt 0 ]]; do [[ "$1" == "-t" ]] && lane="$2"; shift; done
     n=0; [[ -f "$STUB_DIR/pane-$lane.calls" ]] && n="$(cat "$STUB_DIR/pane-$lane.calls")"
     n=$((n + 1)); printf '%s' "$n" > "$STUB_DIR/pane-$lane.calls"
+    [[ -f "$STUB_DIR/capture-fail-$lane" ]] && { echo "capture failed: $lane" >&2; exit 1; }
     src="$STUB_DIR/pane-$lane.$n.txt"; [[ -f "$src" ]] || src="$STUB_DIR/pane-$lane.txt"
     [[ -f "$src" ]] || { echo "can't find window: $lane" >&2; exit 1; }
     cat "$src"; exit 0 ;;
@@ -157,8 +168,12 @@ case "${1:-}" in
       [[ "$a" == *'#{pane_id}'* ]] || continue
       lane=""
       for x in "$@"; do [[ "$prev" == "-t" ]] && lane="$x"; prev="$x"; done
+      if [[ -f "$STUB_DIR/pane-key-fail-$lane" ]]; then
+        cat "$STUB_DIR/pane-key-fail-$lane" >&2
+        exit 1
+      fi
       key="$STUB_DIR/pane-key-$lane.txt"
-      [[ -f "$key" ]] && cat "$key"
+      if [[ -f "$key" ]]; then cat "$key"; else printf '7000 %%%s\n' "$lane"; fi
       exit 0
     done
     lane=""
@@ -238,7 +253,68 @@ rcf="$(pick prwatch.rc || true)"
 rc=0; [[ -n "$rcf" ]] && rc="$(cat "$rcf")"
 exit "$rc"
 EOF
-chmod +x "$TMP_ROOT/bin/gh" "$TMP_ROOT/bin/tmux" "$TMP_ROOT/bin/pgrep" "$TMP_ROOT/bin/pr-watch-stub.sh"
+
+# Fake live tracker list. tracker.out is the safe-format issue array (default
+# empty), tracker.err is stderr, and tracker.rc is the exit status. Every argv
+# reaches tracker.args so cases can pin the live-list contract.
+cat > "$TMP_ROOT/bin/linear-stub.sh" <<'EOF'
+#!/usr/bin/env bash
+set -uo pipefail
+printf '%s\n' "$*" > "$STUB_DIR/tracker.args"
+if [[ -f "$STUB_DIR/tracker.want-created-since" ]]; then
+  want="$(cat "$STUB_DIR/tracker.want-created-since")"
+  [[ " $* " == *" --created-since ${want}d "* ]] || {
+    printf 'expected --created-since %sd, got: %s\n' "$want" "$*" >&2
+    exit 9
+  }
+fi
+[[ -f "$STUB_DIR/tracker.err" ]] && cat "$STUB_DIR/tracker.err" >&2
+rc=0; [[ -f "$STUB_DIR/tracker.rc" ]] && rc="$(cat "$STUB_DIR/tracker.rc")"
+[[ "$rc" -eq 0 ]] || exit "$rc"
+if [[ -f "$STUB_DIR/tracker.out" ]]; then
+  cat "$STUB_DIR/tracker.out"
+else
+  printf '[]\n'
+fi
+EOF
+
+# Current-time stub for lookback rounding. Timestamp parsing still reaches the
+# host date; now.epoch overrides only `date -u +%s`.
+cat > "$TMP_ROOT/bin/date" <<'EOF'
+#!/usr/bin/env bash
+set -uo pipefail
+if [[ "$*" == "-u +%s" && -f "$STUB_DIR/now.epoch" ]]; then
+  cat "$STUB_DIR/now.epoch"
+  exit 0
+fi
+real="${OVERSEE_TEST_REAL_DATE:-}"
+if [[ ! -x "$real" ]]; then
+  for candidate in /usr/bin/date /bin/date; do
+    if [[ -x "$candidate" ]]; then real="$candidate"; break; fi
+  done
+fi
+[[ -x "$real" ]] || { echo "date stub: no executable system date found" >&2; exit 127; }
+exec "$real" "$@"
+EOF
+
+# Fleet verdict-log reader. It executes the watcher's jq filter against the
+# case's oversee-state.json while preserving explicit failure fixtures.
+cat > "$TMP_ROOT/bin/workflow-state-stub.sh" <<'EOF'
+#!/usr/bin/env bash
+set -uo pipefail
+printf '%s\n' "$*" > "$STUB_DIR/workflow-state.args"
+[[ -f "$STUB_DIR/workflow-state.err" ]] && cat "$STUB_DIR/workflow-state.err" >&2
+rc=0; [[ -f "$STUB_DIR/workflow-state.rc" ]] && rc="$(cat "$STUB_DIR/workflow-state.rc")"
+[[ "$rc" -eq 0 ]] || exit "$rc"
+expr=""
+for arg in "$@"; do expr="$arg"; done
+[[ -n "$expr" ]] || { echo "workflow-state stub: missing jq expression" >&2; exit 2; }
+jq -r "$expr" "$STUB_DIR/oversee-state.json"
+EOF
+
+chmod +x "$TMP_ROOT/bin/gh" "$TMP_ROOT/bin/tmux" "$TMP_ROOT/bin/pgrep" \
+  "$TMP_ROOT/bin/pr-watch-stub.sh" "$TMP_ROOT/bin/linear-stub.sh" "$TMP_ROOT/bin/date" \
+  "$TMP_ROOT/bin/workflow-state-stub.sh"
 
 STUB_DIR=""
 STATE_DIR=""
@@ -260,6 +336,7 @@ new_case() {
   # kids-<pid>.txt.
   printf '9001\n' > "$STUB_DIR/panepid-gh-1.txt"
   printf '9002\n' > "$STUB_DIR/panepid-gh-2.txt"
+  printf '{"triaged":[]}\n' > "$STUB_DIR/oversee-state.json"
 }
 
 # run_watch [ENV=VAL ...] -- ARGS...   (fast cadence; TMUX set unless NO_TMUX=1)
@@ -281,9 +358,13 @@ run_watch() {
   done
   (cd "$TMP_ROOT/repo" \
     && PATH="$TMP_ROOT/bin:$PATH" \
-       env -u GH_TOKEN -u GITHUB_TOKEN -u GH_BOT_TOKEN \
-           STUB_DIR="$STUB_DIR" TMUX="fake" \
+       env -u GH_TOKEN -u GITHUB_TOKEN -u GH_BOT_TOKEN -u ORCH_STATE_DIR \
+           -u GIT_DIR -u GIT_COMMON_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE \
+           STUB_DIR="$STUB_DIR" TMUX="fake" OVERSEE_TEST_REAL_DATE="$OVERSEE_TEST_REAL_DATE" \
+           LINEAR_TEAM="kendex" \
            OVERSEE_WATCH_PR_WATCH="$TMP_ROOT/bin/pr-watch-stub.sh" \
+           OVERSEE_WATCH_TRACKER="$TMP_ROOT/bin/linear-stub.sh" \
+           OVERSEE_WATCH_WORKFLOW_STATE="$TMP_ROOT/bin/workflow-state-stub.sh" \
            OVERSEE_WATCH_STATE_DIR="$STATE_DIR" \
            ${env_args[@]+"${env_args[@]}"} \
            .agents/skills/orch/scripts/oversee-watch --interval 0 --max-loops 2 \

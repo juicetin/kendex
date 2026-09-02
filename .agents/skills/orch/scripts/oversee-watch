@@ -1,86 +1,13 @@
 #!/usr/bin/env bash
-# oversee-watch — block until the fleet needs the overseer, then report ONE
-# event and exit. The overseer handles the event and re-runs this command.
+# oversee-watch blocks until the fleet needs the overseer, reports one wake,
+# and exits. The workflow handles every EVENT line and re-runs it.
 #
-# Each pass, in order:
-#   1. pr-watch   the review-gate reducer over every open PR of every --repo
-#                 (when installed; absent → one stderr note at start, step
-#                 skipped). An event when a `<pr> <kind>` line is NEW against
-#                 the previous pass — and on pass 1, against the baseline this
-#                 fleet's previous run persisted (one state file per repo +
-#                 --since under $OVERSEE_WATCH_STATE_DIR), so attention that
-#                 arrives between two runs is still an event. No state file
-#                 (the fleet's first run) → attention present at start is a
-#                 baseline (one stderr note), not an event, so a PR sitting at
-#                 threads-open cannot starve the lane checks; an `error` line
-#                 preempts even there. The reducer runs with --heal for every
-#                 repo, so a gate-stale line dispatches the review gate writer
-#                 itself; the heal-dispatched line that reports that dispatch
-#                 is the tool's own note, not per-PR attention, and is never a
-#                 key. Every repo is reduced on every pass, and the latest
-#                 output of each — each line prefixed with its repo — is
-#                 appended to every event.
-#   2. merged     an --item's PR (head branch = the item id, lowercased, in
-#                 the first --repo — never a fork's same-named branch; one --head
-#                 query per item — no listing window to miss) merged at or
-#                 after --since
-#   3. window-gone a listed tmux lane window no longer exists
-#   4. lane-exited a listed lane's window is alive but its pane holds a bare
-#                 shell that `pgrep -P` reports NO child under, on two
-#                 consecutive passes — the harness under it exited (session
-#                 limit, crash, quit) and the slot is free. A lane resumed by
-#                 typing the wrapper at an interactive prompt keeps the shell
-#                 as the pane process and the harness as its child, so the
-#                 child is what tells them apart. A probe that cannot run at
-#                 all is not an answer: that lane stays watched, noted once on
-#                 stderr
-#   5. usage-limit a listed lane whose harness has not exited shows the
-#                 account's limit banner on its screen — one pass, and the
-#                 claimed config dir when a live lane claim names the window
-#   6. question   a question/selection prompt
-#   7. idle-after-return a listed lane whose harness has not exited sits at its
-#                 composer with no work in flight on two consecutive passes
-#   8. heartbeat  after --max-loops passes with no event
-# Every pane check reads only the lines below the last user turn, 5-7 and any
-# added later: above it is scrollback the lane has already worked past.
-#
-# Output on the first event: `EVENT <kind> ...` on stdout — one line, except
-# `merged`, which prints one `EVENT merged` line per merged item so the
-# overseer advances every finished lane in one wake — followed by supporting
-# lines (the pane tail, or the open PR list for a heartbeat), then the latest
-# pr-watch attention lines when there are any.
-# Silence on stdout never means "fine": every exit path prints an EVENT line
-# or a stderr error.
-#
-# Usage: oversee-watch [--interval SECS] [--max-loops N] [--since ISO8601]
-#                      [--item ISSUE_ID]... [--repo OWNER/REPO]...
-#                      [LANE_WINDOW...]
-#
-# Exit codes:
-#   0  an EVENT line was printed
-#   2  usage error, or a global failure (gh not authenticated, repo
-#      unresolvable, PR listing failed, pr-watch failed with no per-PR lines,
-#      the pr-watch state directory or file unusable, lanes given outside
-#      tmux). A state file that cannot be written is judged AFTER the event it
-#      would have consumed is printed and before any baseline moves, so this
-#      status can follow an EVENT line on stdout: the next run repeats it
-#
-# The pr-watch step WRITES to the repository: --heal dispatches the writer
-# workflow on a gate-stale line, so the resolved credential needs actions:write
-# and the PR_WATCH_WRITER_WORKFLOW workflow must exist in every --repo, or that
-# repo's gate-stale yields a `writer dispatch failed` error line and no heal.
-#
-# Environment:
-#   OVERSEE_WATCH_PR_WATCH   path to the pr-watch reducer (default:
-#                            $PROJECT_ROOT/.agents/skills/review-gate/scripts/pr-watch.sh)
-#   PR_WATCH_WRITER_WORKFLOW the workflow --heal dispatches, read by pr-watch.sh
-#                            (default: "Review gate writer")
-#   OVERSEE_WATCH_STATE_DIR  directory holding the persisted pr-watch baselines,
-#                            one file per repo, rewritten after every pass,
-#                            and open-terminal's lane claims under claims/
-#                            (default: $PROJECT_ROOT/tmp/oversee-watch); a
-#                            directory that cannot be created or written is a
-#                            hard failure, never a silent fallback
+# Pass order: one lane snapshot, pr-watch, merged items, team triage, lane
+# classification, heartbeat. Every event carries the
+# latest pr-watch context. Live tracker and pane reads remain authoritative;
+# persisted state holds only edge keys. Usage, event details, configuration,
+# and failure contracts live in usage().
+
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -89,130 +16,74 @@ export SCRIPT_DIR
 usage() {
   cat <<'USAGE'
 Usage: oversee-watch [--interval SECS] [--max-loops N] [--since ISO8601]
-                     [--item ISSUE_ID]... [--repo OWNER/REPO]...
+                     [--no-triage] [--item ISSUE_ID]... [--repo OWNER/REPO]...
                      [LANE_WINDOW...]
 
-Blocks until the fleet needs the overseer, prints one event — an `EVENT
-<kind> ...` line, or for `merged` one `EVENT merged` line per merged item —
-plus supporting lines, and exits 0. Re-run it after handling the event, with
-the lanes still live: drop a merged item and a dead lane's window, keep
---since as the fleet's start.
+Blocks until the fleet needs the overseer, then prints one event or one line per
+merged and triage item. Re-run after handling it with the live fleet in scope.
 
 Events, checked in this order every pass:
-  EVENT pr-watch rc=N        the review-gate reducer reported a `<pr> <kind>`
-                             attention line that is NEW against the previous
-                             pass, in any --repo — on pass 1, against the
-                             baseline this fleet's previous run persisted for
-                             that repo, so attention that arrived between two
-                             runs is an event (its output follows). On the
-                             fleet's first run, attention already present is a
-                             baseline (one stderr note per repo) that cannot
-                             preempt the checks below — an `error` line excepted;
-                             skipped with a note when pr-watch.sh is absent.
-                             Run with --heal in every repo, so gate-stale
-                             self-heals; the heal-dispatched line reporting
-                             that dispatch is never itself an event.
-                             rc is the highest status the reducer returned
-                             across the repos (2 read failure, 1 attention,
-                             0 clear)
-  EVENT merged <PR> <branch> an --item's PR merged at or after --since (one
-                             line per PR; the item's head branch is its id,
-                             lowercased, in the first --repo — a fork's PR on
-                             the same branch name is not the item's)
-  EVENT window-gone <lane>   a listed tmux window no longer exists
-  EVENT lane-exited <lane>   the window is alive but the pane's current
-                             command is a bare shell (bash/zsh/fish/sh/dash,
-                             login spellings too) AND `pgrep -P` reports no
-                             child of its `#{pane_pid}`, on two consecutive
-                             passes: the harness under it exited — session
-                             limit, crash, quit — and the lane's slot is free
-                             (last 40 non-empty pane lines follow, carrying
-                             why). A lane resumed by typing the wrapper at a
-                             shell prompt keeps that shell as the pane
-                             process, so a bare shell WITH a child is a live
-                             lane. A pgrep that cannot run is not an answer:
-                             the lane stays watched, noted once on stderr
+  EVENT pr-watch rc=N        new review-gate attention; reducer output follows
+  EVENT merged <PR> <branch> an --item PR merged at or after --since
+  EVENT triage <item>        an item created at or after --since that is absent
+                             from the first repository's persisted baseline
+  EVENT window-gone <lane>   the tmux window no longer exists
+  EVENT lane-exited <lane>   `pgrep -P` reports no child under a bare shell on
+                             two passes; pane tail follows. An unusable probe
+                             is not an answer and keeps the lane watched
   EVENT usage-limit <lane> [<config-dir>]
-                             the harness has not exited and the pane shows the
-                             account's limit banner
-                             (`You've hit your … limit`, `/usage-credits`,
-                             `Usage limit reached`, out of credits) below the
-                             last user turn on its screen: the account is
-                             spent and every lane on it follows. One pass — a
-                             banner is terminal for that account window — and
-                             only below that turn, so a banner the lane has
-                             since worked past is old news. The config dir is
-                             appended when a live lane claim names this window
-                             (last 40 non-empty pane lines follow)
-  EVENT question <lane>      a question/selection prompt below the last user
-                             turn (last 40 non-empty pane lines follow)
+                             a live harness shows its limit banner below the
+                             last user turn on its screen; pane tail follows
+  EVENT lane-asking <lane>   a question or selection prompt differs from the
+                             last one emitted for this lane; pane tail follows
   EVENT idle-after-return <lane>
-                             the harness has not exited and its pane sits at
-                             the composer (Claude Code `❯` or Codex `›` at
-                             column 0) with no work in flight (no interrupt
-                             hint, no background-shell hint, no streaming token
-                             counter) on two consecutive passes: the round is
-                             over and the lane is waiting on the overseer
-                             (last 40 non-empty pane lines follow)
-  EVENT heartbeat            --max-loops passes with no event (open PR list
-                             follows: number, head branch, title)
+                             the live harness sits idle on two passes; pane
+                             tail follows
+  EVENT heartbeat            --max-loops passes with no event; open PRs follow
 
-Every event is followed by the latest pr-watch attention lines when there are
-any (`pr-watch rc=N` header, one `<repo> <TAB> <line>` per reducer line), so
-the overseer sees the reducer's state across the fleet on each wake even when
-it is not the event.
+The latest pr-watch attention lines follow every event when any exist. Triage
+reads the live tracker list and rebuilds only acknowledged triage keys in the
+first repository's OVERSEE_WATCH_STATE_DIR baseline from kept or canceled
+verdicts. Lane prompts use pane and turn.
 
 Options:
   --interval SECS     seconds between passes (default 240)
   --max-loops N       passes before a heartbeat (default 25)
-  --since ISO8601     merged-at floor for `merged`, UTC with a `Z` suffix,
-                      e.g. 2026-08-15T12:00:00Z (default: none). Pass the
-                      fleet's start time on every run — the same value each
-                      time, never "now" — so a merge landing between two runs
-                      is still reported by the next one
-  --item ISSUE_ID     a live item (issue-N or PROJ-123); repeatable. `merged`
-                      fires only for these items' PRs; none given → the
-                      merged check is skipped with a stderr note
-  --repo OWNER/REPO   repository; repeatable, lowercased to one spelling
-                      (default: gh repo view). The review-gate reducer runs
-                      over every one, each with its own persisted baseline,
-                      and prefixes every line it reports with the repo it came
-                      from. `merged` and the heartbeat's open-PR list read the
-                      FIRST --repo, so name the repo holding the fleet's items
-                      first; past one repo a stderr note at start says so.
-                      Naming one repository twice is a usage error
+  --since ISO8601     UTC created/merged-at floor, with a Z suffix. Pass the
+                      fleet's fixed start time on every run, never "now"
+  --no-triage         run without the team triage check. Without it, --since
+                      REQUIRES the tracker CLI, workflow-state and LINEAR_TEAM,
+                      and a missing one exits 2 rather than dropping triage —
+                      a fleet with no tracker team passes this flag to keep
+                      --since for the merged check
+  --item ISSUE_ID     live item; repeatable. No values skips merged with a note
+  --repo OWNER/REPO   repository; repeatable and case-normalized. The reducer
+                      covers all; merged and heartbeat read the first
   LANE_WINDOW...      tmux window names to watch; requires $TMUX
 
 Exit codes:
   0  an EVENT line was printed
-  2  usage error, or a global failure: gh not authenticated, repo
-     unresolvable, PR listing failed, pr-watch failed with no per-PR lines,
-     the pr-watch state directory or file unusable, lanes given outside tmux.
-     A state file that cannot be written is judged after the event it would
-     have consumed is printed and before any baseline moves, so this status
-     can follow an EVENT line: no baseline advanced, the next run repeats it
+  2  usage or global failure: auth, repository, PR, tracker,
+     watch-state, or tmux-lane read failed. A state write can fail after its
+     event was printed. Pr-watch commits repository baselines in order, so
+     earlier repository baselines may already have advanced when a later
+     rename fails. Only baselines that did not advance repeat their events
 
-The pr-watch step WRITES to the repository: `--heal` dispatches the writer
-workflow on a gate-stale line, so the resolved credential needs actions:write
-and the workflow named by PR_WATCH_WRITER_WORKFLOW must exist in every --repo.
-Without either, that repo's gate-stale yields an `error` line reading `writer
-dispatch failed` instead of a heal. Whichever credential the auth ladder
-resolves needs that scope, the project GH_BOT_TOKEN it falls back to last too.
+When pr-watch.sh is installed, oversee-watch runs it with --heal on every pass.
+Gate-stale dispatches PR_WATCH_WRITER_WORKFLOW, so its credential requires
+actions:write. When pr-watch.sh is absent, the step is skipped with one stderr note.
 
 Environment:
-  OVERSEE_WATCH_PR_WATCH   path to pr-watch.sh (default: the review-gate
-                           skill's install under .agents/skills)
-  PR_WATCH_WRITER_WORKFLOW the workflow `--heal` dispatches (read by
-                           pr-watch.sh; default "Review gate writer")
-  OVERSEE_WATCH_STATE_DIR  directory holding the persisted pr-watch baselines,
-                           one file per repo + --since, rewritten after every
-                           pass, and open-terminal's lane claims
-                           under claims/ (default: PROJECT_ROOT/tmp/
-                           oversee-watch); a directory that cannot be created
-                           or written exits 2
+  ORCH_STATE_DIR              workflow-state directory; relative paths join
+                              the project root; absolute paths stay unchanged
+  OVERSEE_WATCH_PR_WATCH      path to pr-watch.sh
+  OVERSEE_WATCH_TRACKER       path to the Linear CLI
+  OVERSEE_WATCH_WORKFLOW_STATE path to workflow-state
+  PR_WATCH_WRITER_WORKFLOW    workflow dispatched by pr-watch --heal
+  OVERSEE_WATCH_STATE_DIR     one baseline file per repository — reducer,
+                              triage and lane-asking rows — plus claims/
 USAGE
 }
-
 die() { echo "oversee-watch: $*" >&2; exit 2; }
 need_val() { [[ $# -ge 2 && -n "${2:-}" ]] || die "$1 requires a value"; }
 
@@ -229,6 +100,7 @@ parse_argv() {
   INTERVAL=240
   MAX_LOOPS=25
   SINCE=""
+  NO_TRIAGE=0
   REPOS=()
   ITEMS=()
   LANES=()
@@ -241,6 +113,7 @@ parse_argv() {
       --max-loops=*) MAX_LOOPS="${1#--max-loops=}"; need_val --max-loops "$MAX_LOOPS"; shift ;;
       --since) need_val "$@"; SINCE="$2"; shift 2 ;;
       --since=*) SINCE="${1#--since=}"; need_val --since "$SINCE"; shift ;;
+      --no-triage) NO_TRIAGE=1; shift ;;
       --item) need_val "$@"; ITEMS+=("$2"); shift 2 ;;
       --item=*) need_val --item "${1#--item=}"; ITEMS+=("${1#--item=}"); shift ;;
       --repo) need_val "$@"; REPOS+=("$2"); shift 2 ;;
@@ -276,13 +149,61 @@ source "$SCRIPT_DIR/lib/lane-claims.sh"
 # shellcheck source=lib/pr-watch-pass.sh
 source "$SCRIPT_DIR/lib/pr-watch-pass.sh"
 PR_WATCH="${OVERSEE_WATCH_PR_WATCH:-$SKILLS_DIR/review-gate/scripts/pr-watch.sh}"
+TRACKER="${OVERSEE_WATCH_TRACKER:-$SKILLS_DIR/linear/scripts/linear.sh}"
+WORKFLOW_STATE="${OVERSEE_WATCH_WORKFLOW_STATE:-$SCRIPT_DIR/workflow-state}"
+WORKFLOW_STATE_DIR="${ORCH_STATE_DIR:-$PROJECT_ROOT/tmp}"
+case "$WORKFLOW_STATE_DIR" in
+  /*) ;;
+  *) WORKFLOW_STATE_DIR="$PROJECT_ROOT/$WORKFLOW_STATE_DIR" ;;
+esac
+WORKFLOW_STATE_ARGS=(--state-dir "$WORKFLOW_STATE_DIR")
 PW_STATE_DIR="${OVERSEE_WATCH_STATE_DIR:-$PROJECT_ROOT/tmp/oversee-watch}"
+
+# One state-file class, and only one: the per-repo reducer baseline. Triage
+# keys and lane-asking fingerprints are rows in the first repository's file,
+# never a file of their own. This makes the directory exist before any of them
+# is read. The live pane capture remains authoritative.
+watch_state_init() {
+  mkdir -p "$PW_STATE_DIR" \
+    || die "could not create the oversee-watch state directory $PW_STATE_DIR (set OVERSEE_WATCH_STATE_DIR)"
+  [[ -w "$PW_STATE_DIR" ]] \
+    || die "the oversee-watch state directory $PW_STATE_DIR is not writable (set OVERSEE_WATCH_STATE_DIR)"
+}
+
+# Lane-asking rows in the first repository's baseline, beside the reducer's
+# `<pr>\t<kind>` and triage's `triage\t<id>`:
+#   lane-asking<TAB><lane><TAB><fingerprint>
+# Each helper takes the whole baseline blob and returns the answer or the
+# rewritten blob, so a pass mutates a local and commits once.
+lane_asking_fingerprint() {
+  awk -F'\t' -v lane="$2" '$1 == "lane-asking" && NF == 3 && $2 == lane { print $3 }' <<<"$1"
+}
+
+lane_asking_clear() {
+  awk -F'\t' -v lane="$2" 'NF && !($1 == "lane-asking" && NF == 3 && $2 == lane)' <<<"$1"
+}
+
+lane_asking_set() {
+  local rest
+  rest="$(lane_asking_clear "$1" "$2")"
+  [[ -z "$rest" ]] || printf '%s\n' "$rest"
+  printf 'lane-asking\t%s\t%s\n' "$2" "$3"
+}
+
+# The same two-phase flush triage uses, on the same file: nothing is written
+# when the pass changed nothing, and the event has already printed.
+lane_asking_commit() {
+  [[ "$1" != "${PW_SEEN[0]}" ]] || return 0
+  pw_stage_state "$(pw_state_file "${REPOS[0]}")" "$1"
+  pw_commit_state "$(pw_state_file "${REPOS[0]}")"
+  PW_SEEN[0]="$1"
+}
 
 # Every pane predicate lives here, one line each, matched with `grep -E`
 # against pane_below_last_turn's slice — never the whole capture.
 # A dialog waiting on an answer: the selected numbered row, drawn with each
 # harness's marker, and Claude Code's question and key hints.
-QUESTION_RE='(❯|›) [0-9]+\. |Do you want to|Enter to select|Esc to cancel'
+LANE_ASKING_RE='(❯|›) [0-9]+\. |Do you want to|Enter to select|Esc to cancel'
 # The account is spent. Claude Code opens the banner with "You've hit your
 # <bucket> limit" / "You've reached your…" and points at /usage-credits; Codex
 # prints "Usage limit reached" and its out-of-credits wording. `.` stands in
@@ -333,7 +254,27 @@ to_epoch() {
 # way to know when the previous one stopped looking.
 SINCE_EPOCH=0
 if [[ -n "$SINCE" ]]; then
+  [[ "$SINCE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] \
+    || die "--since '$SINCE' must be a UTC timestamp ending in Z (YYYY-MM-DDTHH:MM:SSZ)"
   SINCE_EPOCH="$(to_epoch "$SINCE")" || die "--since '$SINCE' is not an ISO8601 timestamp (UTC, Z suffix)"
+fi
+
+TRIAGE_ENABLED=0
+# Triage fails CLOSED: oversee.md § 4 owes a verdict to every emitted team
+# item, so a broken install that silently dropped triage would drop every new
+# item with it. Each missing dependency is a usage error naming its remedy;
+# --no-triage is the one deliberate opt-out, for a fleet with no tracker team
+# that still wants --since for the merged check.
+if [[ -n "$SINCE" && "$NO_TRIAGE" -eq 0 ]]; then
+  [[ -x "$TRACKER" ]] \
+    || die "tracker CLI not found at $TRACKER; triage needs it (set OVERSEE_WATCH_TRACKER, or pass --no-triage to watch without triage)"
+  [[ -x "$WORKFLOW_STATE" ]] \
+    || die "workflow-state CLI not found at $WORKFLOW_STATE; triage needs it (set OVERSEE_WATCH_WORKFLOW_STATE, or pass --no-triage to watch without triage)"
+  [[ -n "${LINEAR_TEAM:-}" ]] \
+    || die "LINEAR_TEAM is unset; triage needs it (set LINEAR_TEAM, or pass --no-triage to watch without triage)"
+  TRIAGE_ENABLED=1
+elif [[ -n "$SINCE" ]]; then
+  echo "oversee-watch: --no-triage given; skipping the team triage check (pr-watch/merged/window/lane-asking checks still run)" >&2
 fi
 
 # The item's head branch is its id lowercased (worktree create's branch name);
@@ -346,6 +287,7 @@ done
 
 command -v gh >/dev/null 2>&1 || die "gh CLI not found on PATH"
 command -v jq >/dev/null 2>&1 || die "jq not found on PATH"
+command -v cksum >/dev/null 2>&1 || die "cksum not found on PATH"
 
 WORK_DIR="$(mktemp -d)"
 trap 'rm -rf "$WORK_DIR"' EXIT
@@ -394,11 +336,11 @@ REPO_OWNER="${REPO%%/*}"
 if [[ -x "$PR_WATCH" ]]; then
   :
 else
-  echo "oversee-watch: pr-watch.sh not found at $PR_WATCH; skipping the review-gate reducer (merged/window/question checks still run)" >&2
+  echo "oversee-watch: pr-watch.sh not found at $PR_WATCH; skipping the review-gate reducer (merged/triage/window/lane-asking checks still run)" >&2
   PR_WATCH=""
 fi
 if [[ -z "$ITEM_BRANCHES" ]]; then
-  echo "oversee-watch: no --item given; skipping the merged check (pr-watch/window/question checks still run)" >&2
+  echo "oversee-watch: no --item given; skipping the merged check (pr-watch/triage/window/lane-asking checks still run)" >&2
 fi
 if [[ ${#REPOS[@]} -gt 1 ]]; then
   # Only the checks this run actually performs: the two notes above may have
@@ -412,6 +354,7 @@ if [[ ${#REPOS[@]} -gt 1 ]]; then
   echo "oversee-watch: $repo_note" >&2
 fi
 
+watch_state_init
 pw_init_state
 
 check_merged() {
@@ -436,6 +379,66 @@ check_merged() {
   hits="${hits%$'\n'}"
   [[ -n "$hits" ]] || return 0
   printf '%s\n' "$hits"
+  pr_watch_context
+  exit 0
+}
+
+check_triage() {
+  [[ "$TRIAGE_ENABLED" -eq 1 ]] || return 0
+  local errf="$WORK_DIR/triage.err" now age days out ids verdicts pr_keys triage_keys="" seen id new_ids="" next rc=0
+  verdicts="$("$WORKFLOW_STATE" ${WORKFLOW_STATE_ARGS[@]+"${WORKFLOW_STATE_ARGS[@]}"} get oversee '.triaged // [] | map(select(.verdict == "kept" or .verdict == "canceled") | .issue) | .[]' 2>"$errf")" || rc=$?
+  [[ "$rc" -eq 0 ]] \
+    || die "could not read the fleet triage verdict log (rc=$rc): $(cat "$errf")"
+  verdicts="$(awk 'NF && !seen[$0]++' <<<"$verdicts")"
+  while IFS= read -r id; do
+    [[ -n "$id" ]] || continue
+    [[ "$id" =~ ^[A-Za-z0-9._-]+$ ]] \
+      || die "fleet triage verdict log returned an invalid issue id: '$id'"
+    [[ -z "$triage_keys" ]] || triage_keys+=$'\n'
+    triage_keys+="triage"$'\t'"$id"
+  done <<<"$verdicts"
+  pr_keys="$(awk -F'\t' '$1 != "triage" { print }' <<<"${PW_SEEN[0]}")"
+  if [[ -n "$pr_keys" && -n "$triage_keys" ]]; then
+    next="$pr_keys"$'\n'"$triage_keys"
+  else
+    next="$pr_keys$triage_keys"
+  fi
+  if [[ "$next" != "${PW_SEEN[0]}" ]]; then
+    pw_stage_state "$(pw_state_file "${REPOS[0]}")" "$next"
+    pw_commit_state "$(pw_state_file "${REPOS[0]}")"
+    PW_SEEN[0]="$next"
+  fi
+  now="$(date -u +%s)" || die "could not read the current UTC time for triage"
+  age=$((now - SINCE_EPOCH))
+  [[ "$age" -ge 0 ]] || age=0
+  # Linear's live list accepts whole-day windows. Round up, then apply the
+  # exact ISO floor below so the wider server query cannot mint an old event.
+  days=$((age / 86400 + 1))
+  out="$("$TRACKER" issues list --team "$LINEAR_TEAM" --created-since "${days}d" --max --format=safe 2>"$errf")" || rc=$?
+  [[ "$rc" -eq 0 ]] \
+    || die "tracker list failed for team $LINEAR_TEAM (rc=$rc): $(cat "$errf")"
+  ids="$(jq -r --argjson since "$SINCE_EPOCH" '
+    def created_epoch: sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601;
+    if type != "array" then error("tracker output is not an array") else . end
+    | [ .[]
+      | if ((.created_at? | type) == "string" and (.created_at | length) > 0)
+        then . else error("tracker item has no created_at") end
+      | select((.created_at | created_epoch) >= $since)
+      | if ((.id? | type) == "string" and (.id | test("^[A-Za-z0-9._-]+$")))
+        then .id else error("tracker item has no valid id") end ]
+    | unique[]
+  ' <<<"$out" 2>"$errf")" \
+    || die "could not parse tracker list output for team $LINEAR_TEAM: $(cat "$errf")"
+  seen="$(awk -F'\t' '$1 == "triage" && NF == 2 { print $2 }' <<<"${PW_SEEN[0]}")"
+  while IFS= read -r id; do
+    [[ -n "$id" ]] || continue
+    grep -qxF -- "$id" <<<"$seen" || new_ids+="$id"$'\n'
+  done <<<"$ids"
+  [[ -n "$new_ids" ]] || return 0
+  new_ids="${new_ids%$'\n'}"
+  while IFS= read -r id; do
+    echo "EVENT triage $id"
+  done <<<"$new_ids"
   pr_watch_context
   exit 0
 }
@@ -495,36 +498,89 @@ note_probe_unusable() {
 # becoming the boundary itself: that would empty the slice and turn
 # usage-limit into a silent no-op for the lane. Unrecognized fails toward a
 # stale banner, never toward silence.
-pane_below_last_turn() {
-  awk -v marker="$PANE_MARKER_RE" -v composer="$CLAUDE_COMPOSER_RE" -v codex="$CODEX_MARKER_RE" '
+pane_turn_slice() {
+  awk -v mode="$2" -v marker="$PANE_MARKER_RE" -v composer="$CLAUDE_COMPOSER_RE" -v codex="$CODEX_MARKER_RE" '
     { line[NR] = $0; if ($0 ~ marker) { prev = last; last = NR } }
     END {
       live = (last > 0 && (last == NR || line[last] ~ composer || line[last] ~ codex))
       turn = live ? prev : last
-      for (i = turn + 1; i <= NR; i++) print line[i]
+      first = mode == "before" ? 1 : turn + 1
+      final = mode == "before" ? turn : NR
+      for (i = first; i <= final; i++) print line[i]
     }
   ' <<<"$1"
 }
+
+pane_below_last_turn() { pane_turn_slice "$1" below; }
+pane_turn_identity() { pane_turn_slice "$1" before | cksum; }
 
 # Watch-list positions whose harness read as exited on the previous pass.
 LANE_SHELL_SEEN=""
 # Watch-list positions that sat at an idle harness prompt on the previous pass.
 LANE_IDLE_SEEN=""
 
-# The pass's snapshot of one lane: whether its harness has exited, and the
-# file holding its pane capture. Every check reads the same observation, keyed
-# on the lane's position in the watch list — a tmux window name can carry any
-# character, and two names that differ only outside a filename-safe set would
-# otherwise share one snapshot and classify each other's screens.
-lane_state() { awk -F'\t' -v i="$2" '$1 == i { print $2 }' <<<"$1"; }
+# LANE_OBS columns are watch-list position, ready/gone, pane pid, current
+# command, and server-plus-pane occurrence key. Capture bytes live in the file
+# for that position. Position, not a filename slug, keeps arbitrary tmux window
+# names from sharing one snapshot and classifying each other's screens.
+LANE_OBS=""
+lane_field() { awk -F'\t' -v i="$2" -v field="$3" '$1 == i { print $field }' <<<"$1"; }
+lane_state() { lane_field "$1" "$2" 2; }
 lane_pane_file() { printf '%s/pane.%s' "$WORK_DIR" "$1"; }
+
+# Build one immutable lane snapshot for the pass. The final capture path is
+# the success marker; a failed redirect leaves only a removed scratch file.
+observe_lanes() {
+  LANE_OBS=""
+  [[ ${#LANES[@]} -gt 0 ]] || return 0
+  local existing lane pane below key prefix prior obs pid cmd capture errf i=0 state="${PW_SEEN[0]}"
+  existing="$(tmux list-windows -F '#W' 2>&1)" || die "tmux list-windows failed: $existing"
+  for lane in "${LANES[@]}"; do
+    i=$((i + 1))
+    capture="$(lane_pane_file "$i")"
+    rm -f "$capture" "$capture.$$.tmp"
+    if ! grep -qxF -- "$lane" <<<"$existing"; then
+      LANE_OBS+="$i"$'\t'"gone"$'\t\t\t\n'
+      state="$(lane_asking_clear "$state" "$lane")"
+      continue
+    fi
+    errf="$WORK_DIR/lane-probe.$i.err"
+    obs="$(tmux display-message -p -t "$lane" '#{pane_pid} #{pane_current_command}' 2>"$errf")" \
+      || die "pane command probe failed for '$lane': $(cat "$errf")"
+    [[ "$obs" =~ ^[0-9]+[[:blank:]]+[^[:space:]] ]] \
+      || die "pane command probe returned a malformed result for '$lane': ${obs:-<empty>}"
+    key="$(tmux display-message -p -t "$lane" '#{pid} #{pane_id}' 2>"$errf")" \
+      || die "pane identity probe failed for '$lane': $(cat "$errf")"
+    [[ "$key" =~ ^[0-9]+[[:blank:]]+%[^[:space:]]+$ ]] \
+      || die "pane identity probe returned a malformed result for '$lane': ${key:-<empty>}"
+    if ! tmux capture-pane -t "$lane" -p >"$capture.$$.tmp" 2>"$errf"; then
+      rm -f "$capture.$$.tmp"
+      die "pane capture failed for '$lane': $(cat "$errf")"
+    fi
+    mv "$capture.$$.tmp" "$capture" || die "could not publish the pane capture behind '$lane'"
+    pid="${obs%%[[:blank:]]*}"
+    cmd="${obs#*[[:blank:]]}"
+    LANE_OBS+="$i"$'\t'"ready"$'\t'"$pid"$'\t'"$cmd"$'\t'"$key"$'\n'
+    pane="$(cat -- "$capture")"
+    below="$(pane_below_last_turn "$pane")"
+    prior="$(lane_asking_fingerprint "$state" "$lane")"
+    prefix="${key}|$(pane_turn_identity "$pane")|"
+    if ! grep -Eq -- "$LANE_ASKING_RE" <<<"$below" \
+       || [[ -n "$prior" && "$prior" != "$prefix"* ]]; then
+      state="$(lane_asking_clear "$state" "$lane")"
+    fi
+  done
+  lane_asking_commit "$state"
+}
 
 check_lanes() {
   [[ ${#LANES[@]} -gt 0 ]] || return 0
-  local existing lane pane obs cmd pid state probe i states="" shell_now="" idle_now="" claims="" claimed pane_key
-  existing="$(tmux list-windows -F '#W' 2>&1)" || die "tmux list-windows failed: $existing"
+  local lane pane below cmd pid state probe i states="" shell_now="" idle_now="" asking_now="" claims="" claimed pane_key
+  local asking_state="${PW_SEEN[0]}" next_state fingerprint prior turn_identity
+  i=0
   for lane in "${LANES[@]}"; do
-    if ! grep -qxF -- "$lane" <<<"$existing"; then
+    i=$((i + 1))
+    if [[ "$(lane_state "$LANE_OBS" "$i")" != ready ]]; then
       echo "EVENT window-gone $lane"
       pr_watch_context
       exit 0
@@ -536,19 +592,8 @@ check_lanes() {
   i=0
   for lane in "${LANES[@]}"; do
     i=$((i + 1))
-    if ! obs="$(tmux display-message -p -t "$lane" '#{pane_pid} #{pane_current_command}' 2>/dev/null)" \
-       || [[ ! "$obs" =~ ^[0-9]+[[:blank:]]+[^[:space:]] ]]; then
-      echo "EVENT window-gone $lane"
-      pr_watch_context
-      exit 0
-    fi
-    if ! tmux capture-pane -t "$lane" -p >"$(lane_pane_file "$i")" 2>/dev/null; then
-      echo "EVENT window-gone $lane"
-      pr_watch_context
-      exit 0
-    fi
-    pid="${obs%%[[:blank:]]*}"
-    cmd="${obs#*[[:blank:]]}"
+    pid="$(lane_field "$LANE_OBS" "$i" 3)"
+    cmd="$(lane_field "$LANE_OBS" "$i" 4)"
     state=live
     if is_bare_shell "$cmd"; then
       probe=0; pane_has_child "$pid" || probe=$?
@@ -579,6 +624,8 @@ check_lanes() {
         echo "EVENT lane-exited $lane"
         pane="$(cat -- "$(lane_pane_file "$i")")"
         [[ -z "$pane" ]] || pane_tail "$pane"
+        next_state="$(lane_asking_clear "$asking_state" "$lane")"
+        lane_asking_commit "$next_state"
         pr_watch_context
         exit 0
       fi
@@ -587,7 +634,7 @@ check_lanes() {
   LANE_SHELL_SEEN="$shell_now"
   # The harness is still running and the account is spent: every lane on that
   # account dies with it, so the config dir is the actionable part and a live
-  # claim is where it is recorded. Before `question` — a limit banner can sit
+  # claim is where it is recorded. Before `lane-asking` — a limit banner can sit
   # above a stale prompt, and the account is the news. One pass: a banner is
   # terminal for that account window, not a screen a poll can catch mid-draw.
   # Only below the last user turn: a banner the lane has since worked past is
@@ -605,7 +652,7 @@ check_lanes() {
       # unique only within a session: the account is resolved on the pane
       # actually captured here — `<server pid> <pane id>`, the same key the
       # claim's liveness uses — so no other lane can answer for it.
-      pane_key="$(tmux display-message -p -t "$lane" '#{pid} #{pane_id}' 2>/dev/null || true)"
+      pane_key="$(lane_field "$LANE_OBS" "$i" 5)"
       claimed="$(lane_claims_config_dir "$claims" "${pane_key%% *}" "${pane_key##* }")"
       if [[ -z "$claimed" && -n "$claims" ]]; then
         echo "oversee-watch: no live lane claim for the pane behind '$lane'; the usage-limit event names no account" >&2
@@ -617,20 +664,33 @@ check_lanes() {
     fi
   done
   # A pane keeps its last screen, so neither a stale prompt under a bare shell
-  # nor a dialog answered passes ago is a live question, and reporting either
-  # starves the events below it: lane-exited's second pass, idle-after-return.
+  # nor a dialog answered passes ago is a live question. A current prompt is
+  # keyed by its pane slice across watch invocations: emit it once, clear the
+  # key when it disappears, and emit again only when the prompt changes.
   i=0
   for lane in "${LANES[@]}"; do
     i=$((i + 1))
     if [[ "$(lane_state "$states" "$i")" == exited ]]; then continue; fi
     pane="$(cat -- "$(lane_pane_file "$i")")"
-    if grep -Eq -- "$QUESTION_RE" <<<"$(pane_below_last_turn "$pane")"; then
-      echo "EVENT question $lane"
+    below="$(pane_below_last_turn "$pane")"
+    if grep -Eq -- "$LANE_ASKING_RE" <<<"$below"; then
+      asking_now+="$i"$'\n'
+      pane_key="$(lane_field "$LANE_OBS" "$i" 5)"
+      turn_identity="$(pane_turn_identity "$pane")"
+      fingerprint="${pane_key}|${turn_identity}|$(printf '%s' "$below" | cksum)"
+      prior="$(lane_asking_fingerprint "$asking_state" "$lane")"
+      asking_state="$(lane_asking_set "$asking_state" "$lane" "$fingerprint")"
+      if [[ "$fingerprint" == "$prior" ]]; then continue; fi
+      echo "EVENT lane-asking $lane"
       pane_tail "$pane"
+      lane_asking_commit "$asking_state"
       pr_watch_context
       exit 0
+    else
+      asking_state="$(lane_asking_clear "$asking_state" "$lane")"
     fi
   done
+  lane_asking_commit "$asking_state"
   # The round is over and nobody is driving: the harness is up, at its input
   # prompt, with nothing in flight. Two consecutive passes, because the screen
   # between a finished tool call and the next one reads the same.
@@ -638,6 +698,7 @@ check_lanes() {
   for lane in "${LANES[@]}"; do
     i=$((i + 1))
     if [[ "$(lane_state "$states" "$i")" == exited ]]; then continue; fi
+    if grep -qxF -- "$i" <<<"$asking_now"; then continue; fi
     pane="$(cat -- "$(lane_pane_file "$i")")"
     if grep -Eq -- "$WORKING_RE" <<<"$(pane_below_last_turn "$pane")"; then continue; fi
     if ! grep -Eq -- "$PANE_MARKER_RE" <<<"$(pane_below_last_turn "$pane")"; then continue; fi
@@ -666,8 +727,10 @@ heartbeat() {
 loop=0
 while :; do
   loop=$((loop + 1))
+  observe_lanes
   check_pr_watch
   check_merged
+  check_triage
   check_lanes
   [[ "$loop" -lt "$MAX_LOOPS" ]] || heartbeat
   sleep "$INTERVAL"
