@@ -3,8 +3,9 @@
 #
 # oversee-watch reads GitHub (pr-watch, `gh pr list`), Linear, and the tmux
 # panes of the lane windows. oversee_watch.sh covers GitHub and process-wide
-# failures; oversee_watch_triage.sh covers the tracker; the two lane suites
-# cover pane behavior and prompt state. They share this sandbox.
+# failures; oversee_watch_triage.sh covers the tracker; the three lane suites
+# cover pane behavior, prompt state, and spent-account banners. They share this
+# sandbox.
 #
 # Sourced, never run: the runners glob tests/*.sh, so nothing here executes on
 # its own. Sourcing it sets the shell options, builds $TMP_ROOT and the stub
@@ -24,6 +25,12 @@ OVERSEE_TEST_REAL_DATE="$(command -v date)" \
   || { echo "oversee-watch harness: date not found before PATH shadowing" >&2; exit 1; }
 [[ -x "$OVERSEE_TEST_REAL_DATE" ]] \
   || { echo "oversee-watch harness: resolved date is not executable: $OVERSEE_TEST_REAL_DATE" >&2; exit 1; }
+
+# Byte-exact 120x40 captures of a live Codex 0.151.0 pane, recorded for
+# KEN-863. A Codex shape is asserted from one of these, never hand-written:
+# every predicate in that area that was reasoned instead of measured has been
+# wrong about the screen it claimed to describe.
+CODEX_PANES="$REPO_ROOT/skills/orch/tests/fixtures/oversee-watch"
 
 PASS=0
 FAIL=0
@@ -154,14 +161,20 @@ case "${1:-}" in
     [[ -f "$STUB_DIR/panes.txt" ]] && cat "$STUB_DIR/panes.txt"
     exit 0 ;;
   capture-pane)
-    lane=""
-    while [[ $# -gt 0 ]]; do [[ "$1" == "-t" ]] && lane="$2"; shift; done
+    lane=""; join=0
+    while [[ $# -gt 0 ]]; do [[ "$1" == "-t" ]] && lane="$2"; [[ "$1" == *J* && "$1" == -* ]] && join=1; shift; done
     n=0; [[ -f "$STUB_DIR/pane-$lane.calls" ]] && n="$(cat "$STUB_DIR/pane-$lane.calls")"
     n=$((n + 1)); printf '%s' "$n" > "$STUB_DIR/pane-$lane.calls"
     [[ -f "$STUB_DIR/capture-fail-$lane" ]] && { echo "capture failed: $lane" >&2; exit 1; }
     src="$STUB_DIR/pane-$lane.$n.txt"; [[ -f "$src" ]] || src="$STUB_DIR/pane-$lane.txt"
     [[ -f "$src" ]] || { echo "can't find window: $lane" >&2; exit 1; }
-    cat "$src"; exit 0 ;;
+    # width-<lane>.txt makes the pane narrow: the fixture holds the LOGICAL
+    # lines, and without -J they come back wrapped at that width, the way tmux
+    # returns a screen it drew. No width file is an unwrapped pane, so every
+    # other case is unaffected.
+    w=0; [[ -f "$STUB_DIR/width-$lane.txt" ]] && w="$(cat "$STUB_DIR/width-$lane.txt")"
+    if [[ "$w" -gt 0 && "$join" -eq 0 ]]; then fold -w "$w" -- "$src"; else cat "$src"; fi
+    exit 0 ;;
   display-message)
     # `-p -t <lane> '#{pid} #{pane_id}'` asks for the pane's liveness key.
     for a in "$@"; do
@@ -280,12 +293,36 @@ EOF
 
 # Current-time stub for lookback rounding. Timestamp parsing still reaches the
 # host date; now.epoch overrides only `date -u +%s`.
+#
+# date-non-english models a host whose LC_TIME is not English, which no runner
+# here can be asked to be: only C, POSIX and en_US are installed, and bash
+# warns to stderr rather than switching when told otherwise. On such a host
+# `%b`/`%a` render localized names while `date -d` still parses English ones
+# only, so any label written with one and read back with the other resolves to
+# nothing. The stub renders a localized name for those conversions and refuses
+# a `-d` operand carrying a name at all, which is what a round trip through
+# either would hit.
 cat > "$TMP_ROOT/bin/date" <<'EOF'
 #!/usr/bin/env bash
 set -uo pipefail
 if [[ "$*" == "-u +%s" && -f "$STUB_DIR/now.epoch" ]]; then
   cat "$STUB_DIR/now.epoch"
   exit 0
+fi
+if [[ -f "$STUB_DIR/date-non-english" ]]; then
+  for arg in "$@"; do
+    case "$arg" in
+      +*%[abAB]*) echo "Mär"; exit 0 ;;
+    esac
+  done
+  prev=""
+  for arg in "$@"; do
+    if [[ "$prev" == "-d" && "$arg" == *[A-Za-z]* && "$arg" != @* ]]; then
+      echo "date: invalid date '$arg'" >&2
+      exit 1
+    fi
+    prev="$arg"
+  done
 fi
 real="${OVERSEE_TEST_REAL_DATE:-}"
 if [[ ! -x "$real" ]]; then
