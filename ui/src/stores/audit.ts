@@ -14,11 +14,9 @@ import { auditRunner, type ItemActions, itemActions } from "./audit-items";
 interface AuditState extends ItemActions {
   views: AuditView[];
   auditing: boolean;
-  /** Why the last item action failed, or null. */
-  error: string | null;
-  /** How the last audit itself went. Kept apart from `error` above, which
-   *  item actions also write, so a failed remove or adopt never reads as a
-   *  machine that could not be checked. */
+  /** How the last audit went, and the only signal that the audit itself
+   *  failed — `audit-counts.ts` pairs it with a place's own unreadable view,
+   *  the other channel. An item action's refusal is neither of them. */
   read: ReadState;
   busy: boolean;
   /** The startup audit has already toasted its failure — suppresses repeat
@@ -37,9 +35,10 @@ export const useAuditStore = create<AuditState>((set, get) => {
   // The rule, in the one place that can hold it: a reading is kept only
   // when no command attempt started or ended while it ran. Reading every
   // scope takes seconds, a command writes throughout its own run, and it
-  // may have written whatever it went on to answer. No item action forces
-  // an audit of its own — the runner refreshes the scan alone — so nothing
-  // else would correct a reading that put an adopted or removed row back.
+  // may have written whatever it went on to answer. The read behind every
+  // item action forces an audit that corrects such a reading soon after —
+  // but it can fail, and nothing may show a reading that answers for a
+  // machine the command has since changed in the meantime.
   const attempts = invalidations();
   const run = auditRunner(set, get, attempts.moved);
 
@@ -74,11 +73,10 @@ export const useAuditStore = create<AuditState>((set, get) => {
           views: response.data,
           auditedAt: Date.now(),
           read: readOf(response),
-          error: null,
           backgroundFailureAnnounced: false,
         });
       } else {
-        set({ error: response.error, read: readOf(response) });
+        set({ read: readOf(response) });
         if (!get().backgroundFailureAnnounced) {
           toast.error(response.error);
           set({ backgroundFailureAnnounced: true });
@@ -101,7 +99,6 @@ export const useAuditStore = create<AuditState>((set, get) => {
     views: [],
     auditedAt: null,
     auditing: false,
-    error: null,
     read: READ_PENDING,
     busy: false,
     backgroundFailureAnnounced: false,

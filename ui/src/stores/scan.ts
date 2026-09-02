@@ -12,19 +12,21 @@ interface ScanState {
   lastScanAt: number | null;
   /** A background scan (startup, focus) has already toasted its failure —
    * suppresses repeat toasts on every silent retry until one succeeds. A
-   * user clicking "Scan again" always hears about it regardless. */
+   * press of "Scan again" re-opens it, so its window is said once. */
   backgroundFailureAnnounced: boolean;
   refresh: (opts?: { announce?: boolean }) => Promise<void>;
 }
 
-export const useScanStore = create<ScanState>((set, get) => ({
-  result: null,
-  scanning: false,
-  error: null,
-  lastScanAt: null,
-  backgroundFailureAnnounced: false,
-  refresh: async (opts) => {
-    if (get().scanning) return;
+export const useScanStore = create<ScanState>((set, get) => {
+  // The scan in flight, and the one re-read waiting behind it. These are the
+  // truth about what is running, not the `scanning` flag: the flag says what
+  // to draw, and a request arriving mid-scan has to know whether there is
+  // something real to wait for. The audit store keeps the same pair for the
+  // same reason.
+  let inFlight: Promise<void> | null = null;
+  let queued: Promise<void> | null = null;
+
+  const scan = async (opts?: { announce?: boolean }): Promise<void> => {
     set({ scanning: true });
     // The flag comes down however the call ends: a rejected call that left
     // it up would skip every later scan for the session.
@@ -50,5 +52,39 @@ export const useScanStore = create<ScanState>((set, get) => ({
     } finally {
       set({ scanning: false });
     }
-  },
-}));
+  };
+
+  const start = (opts?: { announce?: boolean }): Promise<void> => {
+    const running = scan(opts).finally(() => {
+      if (inFlight === running) inFlight = null;
+    });
+    inFlight = running;
+    return running;
+  };
+
+  return {
+    result: null,
+    scanning: false,
+    error: null,
+    lastScanAt: null,
+    backgroundFailureAnnounced: false,
+
+    // A scan already out cannot answer for what has happened since it began
+    // reading — which is the whole of what a write behind it needs read. So
+    // an overlapping request is not dropped, as it was: it waits on the one
+    // running and takes a re-read behind it. Exactly one waits, a second
+    // arrival joining that one rather than stacking identical whole-machine
+    // reads.
+    refresh: (opts) => {
+      if (!inFlight) return start(opts);
+      // A joining caller gets the slot's opts, not its own, so re-arm the
+      // flag the toast runs on: a press cannot join a read into silence.
+      if (opts?.announce) set({ backgroundFailureAnnounced: false });
+      queued ??= inFlight.then(() => {
+        queued = null;
+        return start(opts);
+      });
+      return queued;
+    },
+  };
+});
