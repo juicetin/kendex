@@ -24,6 +24,7 @@ import { scopeName } from "@/lib/labels";
 import { everyPlace } from "@/lib/scope";
 import { useMarketplacesStore } from "@/stores/marketplaces";
 import { useSettingsStore } from "@/stores/settings";
+import { projectsOf } from "@/stores/settings-projects";
 
 /** Subscribing points kendex at a marketplace: a repo shorthand, a git or
  * GitHub tree URL, a skills.sh package URL, or a local folder. Defaults to
@@ -40,7 +41,7 @@ export function SubscribeDialog({
 }) {
   const subscribe = useMarketplacesStore((s) => s.subscribe);
   const busy = useMarketplacesStore((s) => s.busy);
-  const projects = useSettingsStore((s) => s.settings?.projects ?? []);
+  const projects = useSettingsStore(projectsOf);
   const [reference, setReference] = useState(initialReference);
   const [name, setName] = useState("");
   const [where, setWhere] = useState("global");
