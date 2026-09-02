@@ -58,11 +58,8 @@ gh issue view [N] --json labels --jq '.labels[].name'
 
 Dev agents persist for the whole session — never shut one down here; only the caller's finalization step does.
 
-Before EVERY implementation delegation, including each group's delegation in bundled mode, run these four as separate tool calls:
+Before EVERY implementation delegation, including each group's delegation in bundled mode, run these three as separate tool calls:
 
-```bash
-.agents/skills/orch/scripts/worktree-claim --worktree [WORKTREE_PATH] --issue [ISSUE_ID]
-```
 ```bash
 .agents/skills/orch/scripts/workflow-state set-git-head [ISSUE_ID] pre_delegate_sha [WORKTREE_PATH]
 ```
@@ -73,7 +70,7 @@ Before EVERY implementation delegation, including each group's delegation in bun
 .agents/skills/orch/scripts/workflow-state new-round-id [ISSUE_ID] dev_round_id
 ```
 
-`worktree-claim` exit 75 aborts the delegation: another session holds this worktree (stderr names the holder) — coordinate with that owner, never re-run to take the tree. Exit 1: stop and report it. Embed its printed owner as `[WORKTREE_LEASE]` in the delegation's `Worktree Lease:` line, the round token as `[DEV_ROUND_ID]` in the `Round ID:` line, and arm the watchdog (backgrounded `dev-artifact-check --wait 600 …`) per [SKILL.md § Round Closure](../SKILL.md#round-closure). On Codex, resolve spawn parameters with `scripts/spawn-adapter spawn [AGENT_TYPE]`.
+Embed the round token as `[DEV_ROUND_ID]` in the delegation's `Round ID:` line and arm the watchdog (backgrounded `dev-artifact-check --wait 600 …`) per [SKILL.md § Round Closure](../SKILL.md#round-closure). On Codex, resolve spawn parameters with `scripts/spawn-adapter spawn [AGENT_TYPE]`.
 
 After each spawn, persist the session:
 
@@ -88,7 +85,6 @@ Follow workflow: .agents/skills/dev/workflows/dev-implement.md
 
 Issue: [ISSUE_ID]
 Worktree: [WORKTREE_PATH]
-Worktree Lease: [WORKTREE_LEASE]
 Round ID: [DEV_ROUND_ID]
 Artifact Key: [ISSUE_ID]
 Labels: [LABELS]
@@ -100,7 +96,7 @@ Labels: [LABELS]
 
 Group pending sub-issues by `agent:[TYPE]` label and order them per [SKILL.md § Coordination](../SKILL.md#coordination) sequencing. Process groups sequentially: delegate → wait → validate (§ 3) → collect handoff notes → next group.
 
-Between groups, read each completed sub-issue's comments for a `Handoff Notes` section and combine them into the next delegation. Re-run all four § 2 stamps immediately before each group's delegation.
+Between groups, read each completed sub-issue's comments for a `Handoff Notes` section and combine them into the next delegation. Re-run § 2's stamps immediately before each group's delegation.
 
 Fill `Worktree:` from `git -C "[DIR]" rev-parse --show-toplevel`.
 
@@ -114,7 +110,6 @@ Sub-Issues:
 ↳ [SUB_ISSUE_3]: [TITLE] | blocked by: [SUB_ISSUE_2]
 
 Worktree: [WORKTREE_PATH]
-Worktree Lease: [WORKTREE_LEASE]
 Round ID: [DEV_ROUND_ID]
 Artifact Key: [ISSUE_ID]
 Labels: [parent labels]
@@ -166,8 +161,6 @@ git -C "[WORKTREE_PATH]" status --porcelain
 | `wait` | pass | Do NOT re-run the implementation. Send ONE report-only nudge: *"re-run only your completion tail — write your dev-return artifact (`dev-return-write … --round-id [DEV_ROUND_ID]`) and re-report validate status, QA labels, and summary; do NOT re-run the implementation."* Accept only when a valid artifact for THIS round appears. |
 | `wait` | fail | **Not done.** Wait to the deadline, then escalate per [SKILL.md § Round Closure](../SKILL.md#round-closure). |
 | `retry` | any | An artifact for THIS round exists but fails a gate — the check's `reason` names it. A failing `validate` re-delegates fixing the validation; an identity/schema failure gets the report-only tail-rewrite nudge. Never accept, and never treat it as absent. |
-
-**Analysis rounds.** When THIS round was delegated as investigate-and-recommend, the receipt is `kind: analysis`: no `commit`, no `validate`, the recommendation in `summary`. B expects NO new commit and a clean worktree, with no exact-commit binding and no validate gate. On A `accept` + B pass, read the recommendation and decide the next step: delegate implementation as a fresh round, close with reasoning, or re-scope. A `kind` that does not match what was delegated → the `retry` row.
 
 Do not import the reviewer's re-delegate-on-invalid rule ([references/artifact-checks.md](../references/artifact-checks.md)).
 
