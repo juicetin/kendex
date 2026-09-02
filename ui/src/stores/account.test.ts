@@ -171,8 +171,8 @@ describe("a read that could not be made", () => {
     expect(useAccountStore.getState().readError).toBeNull();
   });
 
-  // typedError rethrows an Error the transport raised, so a bridge that
-  // throws never reaches the Result path at all.
+  // A bridge that throws rather than replying never reaches the Result
+  // path at all, and the record has to say so either way.
   it("records a bridge that threw the same as one that said no", async () => {
     vi.mocked(commands.accountStatus).mockRejectedValue(
       new Error("ipc channel closed"),
@@ -181,6 +181,23 @@ describe("a read that could not be made", () => {
     expect(useAccountStore.getState().readError).toContain(
       "ipc channel closed",
     );
+  });
+
+  // A transport failure folds to the message alone, so the command never ran
+  // and kendex.ai was never asked. That is a failure on this machine, not
+  // evidence the directory is away: the name already in hand must stay as it
+  // is rather than ageing into offline, which is what `unreachable` would do.
+  it("leaves a signed-in name standing when the transport folded", async () => {
+    useAccountStore.setState({
+      account: { kind: "signed-in", identity: ADA },
+    });
+    vi.mocked(commands.accountStatus).mockResolvedValue({
+      status: "error",
+      error: "the bridge is gone",
+    } as Awaited<ReturnType<typeof commands.accountStatus>>);
+    await load();
+    expect(account()).toEqual({ kind: "signed-in", identity: ADA });
+    expect(useAccountStore.getState().readError).toBe("the bridge is gone");
   });
 
   // The seam every reader passes through is what holds them to the answer

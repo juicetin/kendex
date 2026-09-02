@@ -3368,12 +3368,17 @@ export type ZoomState = {
 };
 
 /* Tauri Specta runtime */
-async function typedError<T, E>(result: Promise<T>): Promise<{ status: "ok"; data: T } | { status: "error"; error: E }> {
+async function typedError<T, E>(result: Promise<T>): Promise<{ status: "ok"; data: T } | { status: "error"; error: E | string }> {
     try {
         return { status: "ok", data: await result };
     } catch (e) {
-        if (e instanceof Error) throw e;
+        if (e instanceof Error) {
+            const message = e.message === "" ? "Something went wrong, but no reason was given" : e.message;
+            return { status: "error", error: message as any };
+        }
         return { status: "error", error: e as any };
     }
 }
+
+const _assertTypedErrorFollowsContract: <T, E>(result: Promise<T>) => Promise<any> = typedError;
 
