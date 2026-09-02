@@ -324,6 +324,7 @@ case "$excludes_state" in
     ;;
 esac
 EXCLUDE_PATTERNS=()
+CARVE_PATTERNS=()
 while IFS= read -r line; do
   [ -n "$line" ] || continue
   EXCLUDE_PATTERNS+=("${line%%"$TAB"*}")
@@ -343,23 +344,37 @@ if [ -f "$EXCLUDES_SOURCE" ]; then
     if [ "$pat" = "$line" ] || [ -z "$pat" ] || [ -z "$reason" ]; then
       config_error "$EXCLUDES_LABEL:$lineno: expected 'pattern<TAB>reason' (every exclusion carries its justification)"
     fi
-    EXCLUDE_PATTERNS+=("$pat")
+    # A `!` pattern CARVES its matches back into the measured set, the only
+    # way to govern hand-written source living inside an excluded render tree
+    # (README.md § Exclusion list). A row naming a path that begins with `!`
+    # escapes it as `\!foo`, which stays an exclusion.
+    case "$pat" in
+      "!"*)
+        carve="${pat#!}"
+        [ -n "$carve" ] \
+          || config_error "$EXCLUDES_LABEL:$lineno: '!' carves matching paths back into the measured set and needs a pattern after it"
+        CARVE_PATTERNS+=("$carve")
+        ;;
+      *) EXCLUDE_PATTERNS+=("$pat") ;;
+    esac
   done <"$EXCLUDES_SOURCE"
 fi
-glob_match() { # PATH PATTERN — 0 when the glob matches the whole path
-  local path="$1" pat="$2"
-  case "$path" in
-    $pat) return 0 ;;
-  esac
-  return 1
-}
-is_excluded() { # PATH — 0 when some exclusion glob matches the full path
-  local pat
-  [ "$1" != "$BASELINE_FILE" ] || return 0
-  for pat in ${EXCLUDE_PATTERNS[@]+"${EXCLUDE_PATTERNS[@]}"}; do
-    glob_match "$1" "$pat" && return 0
+glob_match() { # PATH PATTERN... — 0 when some pattern matches the whole path
+  local path="$1" pat
+  shift
+  for pat in "$@"; do
+    case "$path" in
+      $pat) return 0 ;;
+    esac
   done
   return 1
+}
+is_excluded() { # PATH — 0 when an exclusion glob matches and no `!` row carves it back
+  # The baseline is policy input and is matched ahead of both lists, so no `!`
+  # row pulls it into its own gate; only an excluded path can be carved back.
+  [ "$1" != "$BASELINE_FILE" ] || return 0
+  glob_match "$1" ${EXCLUDE_PATTERNS[@]+"${EXCLUDE_PATTERNS[@]}"} || return 1
+  ! glob_match "$1" ${CARVE_PATTERNS[@]+"${CARVE_PATTERNS[@]}"}
 }
 path_threshold() { # PATH
   local i=0 frozen="" shadowed="" skipped="" hit="" s

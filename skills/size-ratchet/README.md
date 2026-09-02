@@ -207,6 +207,24 @@ vendor/*	vendored third-party code
 src/gen/*.rs	generated bindings
 ```
 
+A pattern opening with `!` is a CARVE: it pulls its matches back into the
+measured set and beats every exclusion row whatever the order, so the list
+reads as policy rather than as a sequence. A tree wildcard is the only
+maintainable way to name a rendered install — enumerating its rendered files
+by hand is a defect generator — and a repo keeping hand-written source inside
+that tree, a skill declared `source = "in-place"`, otherwise has no way to
+say so:
+
+```
+.agents/*	kendex render, governed at its source
+!.agents/skills/my-skill/*	in-place skill: this tree IS the source
+```
+
+A bare `!` with no pattern after it is a config error. A row that must name a
+path literally beginning with `!` escapes it: `\!foo` never reaches the carve
+arm and matches that path. The baseline file is exempt
+ahead of the carve rows, so no `!` row pulls it into its own gate.
+
 ## Configuration
 
 | Key | Default | Meaning |

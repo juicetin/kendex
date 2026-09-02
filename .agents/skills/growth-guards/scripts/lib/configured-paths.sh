@@ -323,10 +323,14 @@ gg_policy_content() { # FILE — content on stdout; 1 = the commit has no such f
 
 # Shell glob matched against the full repo-relative path (`*` crosses `/`);
 # blank lines and `#` comments are ignored; a pattern without a reason is a
-# config error. A missing file is an empty list.
-gg_load_excludes() { # FILE — fills GG_EXCLUDE_PATTERNS
-  local file="$1" line lineno pat reason content status=0
+# config error. A missing file is an empty list. A `!` pattern CARVES its
+# matches back into the scanned set and beats every exclusion row whatever the
+# order (DEVELOPMENT.md § Excludes format). A row naming a path that begins
+# with `!` escapes it as `\!foo`, which stays an exclusion.
+gg_load_excludes() { # FILE — fills GG_EXCLUDE_PATTERNS and GG_EXCLUDE_CARVES
+  local file="$1" line lineno pat reason carve content status=0
   GG_EXCLUDE_PATTERNS=()
+  GG_EXCLUDE_CARVES=()
   # The read runs in a command substitution, so a gg_collection_error inside
   # it dies in that SUBSHELL and arrives here as a status. Only status 1 is
   # the answer "the commit has no such file" (an empty list); anything else
@@ -349,12 +353,21 @@ gg_load_excludes() { # FILE — fills GG_EXCLUDE_PATTERNS
     if [ "$pat" = "$line" ] || [ -z "$pat" ] || [ -z "$reason" ]; then
       gg_config_error "$(gg_shown "$file"):$lineno: expected 'pattern<TAB>reason' (every exclusion carries its justification)"
     fi
-    GG_EXCLUDE_PATTERNS+=("$pat")
+    case "$pat" in
+      "!"*)
+        carve="${pat#!}"
+        [ -n "$carve" ] \
+          || gg_config_error "$(gg_shown "$file"):$lineno: '!' carves matching paths back into the scanned set and needs a pattern after it"
+        GG_EXCLUDE_CARVES+=("$carve")
+        ;;
+      *) GG_EXCLUDE_PATTERNS+=("$pat") ;;
+    esac
   done <<<"$content"
 }
 
-gg_is_excluded() { # PATH — 0 when some exclusion glob matches the full path
-  # The loaded list, matched by the one spelling above. Guarded expansion: an
+gg_is_excluded() { # PATH — 0 when an exclusion glob matches and no `!` row carves it back
+  # The loaded lists, matched by the one spelling above. Guarded expansion: an
   # empty array is an unbound variable under Bash 3.2 with set -u.
-  gg_path_matches "$1" ${GG_EXCLUDE_PATTERNS[@]+"${GG_EXCLUDE_PATTERNS[@]}"}
+  gg_path_matches "$1" ${GG_EXCLUDE_PATTERNS[@]+"${GG_EXCLUDE_PATTERNS[@]}"} || return 1
+  ! gg_path_matches "$1" ${GG_EXCLUDE_CARVES[@]+"${GG_EXCLUDE_CARVES[@]}"}
 }

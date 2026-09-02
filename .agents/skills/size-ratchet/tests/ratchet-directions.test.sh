@@ -263,6 +263,98 @@ run_sr
   && ok "a baseline row for an excluded file is stale — excluded files leave the counted set" \
   || bad "a baseline row for an excluded file is stale" "rc=$RC out=$OUT"
 
+echo "=== a ! row carves a subtree back into the measured set ==="
+# A rendered install can only be named by a tree wildcard, and a repo that
+# keeps hand-written source inside that tree — a skill declared
+# `source = "in-place"` — needs a way to say so. Without it the coverage is
+# silently absent, which is the fail-open direction for a gate.
+new_repo carve
+mkfile .agents/skills/rendered/big.txt 50   # a real render: stays excluded
+mkfile .agents/skills/in-place/big.txt 50   # the source of record: carved back
+mkdir -p "$R/tools"
+printf '.agents/*\tkendex render, governed at its source\n' >"$R/tools/size-ratchet-excludes"
+git -C "$R" add -A
+
+# Control: the blanket row alone silences BOTH, which is the defect.
+run_sr
+[ "$RC" -eq 0 ] && ok "control: the blanket .agents/* row silences both trees" \
+  || bad "control: the blanket .agents/* row silences both trees" "rc=$RC out=$OUT"
+
+printf '.agents/*\tkendex render, governed at its source\n!.agents/skills/in-place/*\tin-place skill: this tree IS the source\n' >"$R/tools/size-ratchet-excludes"
+git -C "$R" add -A
+run_sr
+[ "$RC" -eq 1 ] && case "$OUT" in *".agents/skills/in-place/big.txt"*) true ;; *) false ;; esac \
+  && ok "the carved tree is measured again and its offender is named" \
+  || bad "the carved tree is measured again" "rc=$RC out=$OUT"
+case "$OUT" in
+  *".agents/skills/rendered/big.txt"*) bad "the carve must not widen past its own pattern" "$OUT" ;;
+  *) ok "the sibling render under the same blanket row stays excluded" ;;
+esac
+
+# Order is not policy: the carve wins whether it precedes or follows the row
+# it cuts into, so a list reads as a set of rules rather than as a sequence.
+printf '!.agents/skills/in-place/*\tin-place skill: this tree IS the source\n.agents/*\tkendex render, governed at its source\n' >"$R/tools/size-ratchet-excludes"
+git -C "$R" add -A
+run_sr
+[ "$RC" -eq 1 ] && case "$OUT" in *".agents/skills/in-place/big.txt"*) true ;; *) false ;; esac \
+  && ok "a carve above the row it cuts into carves just the same" \
+  || bad "a carve above the row it cuts into carves just the same" "rc=$RC out=$OUT"
+
+# A carve cannot pull the baseline into its own gate: the baseline is policy
+# input, and measuring it would make every row it gains a violation. Both runs
+# below share one baseline whose own 11 rows put it over this suite's
+# threshold of 10, so a baseline that reached the gate would fail as a new
+# offender — a shorter one would pass whether the exemption held or not. Every
+# row names a measured file over the threshold, so none reads as stale.
+for i in 1 2 3 4 5 6 7 8 9; do mkfile ".agents/skills/in-place/part$i.txt" 11; done
+{
+  printf '.agents/skills/in-place/big.txt\t50\n'
+  for i in 1 2 3 4 5 6 7 8 9; do printf '.agents/skills/in-place/part%s.txt\t11\n' "$i"; done
+  printf '.agents/skills/rendered/big.txt\t50\n'
+} >"$R/tools/size-ratchet-baseline.tsv"
+
+# No row here matches the baseline path, so the exemption is the only thing
+# keeping it out ahead of the EXCLUSION match: move the exemption behind that
+# match and the baseline is measured.
+printf '!*\tcarve everything back in\n' >"$R/tools/size-ratchet-excludes"
+git -C "$R" add -A
+run_sr
+[ "$RC" -eq 0 ] && case "$OUT" in *"tools/size-ratchet-baseline.tsv"*) false ;; *) true ;; esac \
+  && ok "the baseline stays exempt ahead of the exclusion match, at 11 rows over the threshold" \
+  || bad "the baseline stays exempt ahead of the exclusion match" "rc=$RC out=$OUT"
+
+# `tools/*` excludes both policy files, so the EXCLUDES FILE reaches the carve
+# list and the `!*` row pulls it back. The baseline never reaches that list,
+# because its exemption is read first, which is what this run pins.
+printf 'tools/*\tthe policy files themselves\n!*\tcarve everything back in\n' >"$R/tools/size-ratchet-excludes"
+git -C "$R" add -A
+run_sr
+[ "$RC" -eq 0 ] && case "$OUT" in *"tools/size-ratchet-baseline.tsv"*) false ;; *) true ;; esac \
+  && ok "the baseline stays exempt ahead of the carve match the excludes file reaches" \
+  || bad "the baseline stays exempt ahead of the carve match" "rc=$RC out=$OUT"
+
+# A bare '!' names nothing; silently keeping it would widen or narrow the
+# scanned set by a typo.
+printf '.agents/*\tkendex render\n!\ta carve with no pattern\n' >"$R/tools/size-ratchet-excludes"
+git -C "$R" add -A
+run_sr
+[ "$RC" -eq 2 ] && case "$OUT" in *":2: '!' carves"*) true ;; *) false ;; esac \
+  && ok "a bare ! row is a config error naming its line" \
+  || bad "a bare ! row is a config error naming its line" "rc=$RC out=$OUT"
+
+# `!` is escapable, which is the only way left to name a path that literally
+# begins with one: `\!name` opens with a backslash, so it never reaches the
+# carve arm, and the case matcher reads it as that literal path.
+new_repo bang
+mkfile '!bang.txt' 11
+mkdir -p "$R/tools"
+printf '\\!bang.txt\tan escaped literal bang path\n' >"$R/tools/size-ratchet-excludes"
+git -C "$R" add -A
+run_sr
+[ "$RC" -eq 0 ] && case "$OUT" in *"!bang.txt"*) false ;; *) true ;; esac \
+  && ok "an escaped row excludes the literal bang path rather than carving it" \
+  || bad "an escaped row excludes the literal bang path" "rc=$RC out=$OUT"
+
 echo "=== --baseline flag relocates the baseline ==="
 new_repo flagpath
 mkfile big.txt 15
