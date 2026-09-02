@@ -9,9 +9,10 @@
 // Two different things are scoped and page-wide. What the pending record
 // decides is which ROWS the landing may not be acted on from — an apply
 // moves what is installed in that scope and nowhere else. The write itself
-// raises the store's page-wide `busy` for as long as it and its reload
-// run, because that flag is what a check refuses on, and a write it did
-// not cover is a check running beside a commit its report predates.
+// raises the store's page-wide `busy` for as long as it, its reload and the
+// rescan behind it run, because that flag is what a check refuses on, and a
+// write it did not cover is a check running beside a commit its report
+// predates.
 import {
   commands,
   type ItemKind,
@@ -23,6 +24,7 @@ import {
   UPDATES_ONE_AT_A_TIME_NOTE,
 } from "@/lib/copy-updates";
 import type { ReadState } from "@/lib/read-state";
+import { rescanEverything } from "@/lib/rescan";
 import { sameScope } from "@/lib/scope";
 import { settled } from "@/lib/settled";
 import { saying } from "@/lib/undone";
@@ -166,13 +168,23 @@ export function followSwitch({
         // apply returns an error over a manifest that already moved. Putting
         // the switch back from the click's own row would show that as
         // settled and re-open every action against it.
-        //
-        // The scan and the audit are not re-read. Switching Follow back on
-        // moves installed bytes they both answer for, so both are left dated
-        // until something else asks — how the flip has always behaved, held
-        // by `update-follow.dom.test.tsx` as it is rather than as it ought
-        // to be.
         await get().reload();
+        // Then the scan and the audit, which the standing does not cover:
+        // the flip runs an apply, and an apply moves the installed bytes
+        // the scan lists and the audit scores.
+        //
+        // Asked whatever the write answered and whichever way the switch
+        // went. A refusal is no account of what is on disk — the write
+        // runs the leaving packages' uninstallers before the plan
+        // (`repo_effects::execute`), and an error over those leaves what
+        // they did to the repository standing. Nor is an answer that
+        // landed: `moved` covers the two states `moving` counts, `removed`
+        // the other destructive one, and a dropped rendering can answer
+        // with all three fields empty, so no predicate over the response
+        // is complete. A flip that turns out to have written nothing pays
+        // what every other write pays — the page held for a machine-wide
+        // scan and a forced audit — rather than a page left dated.
+        await rescanEverything();
       }
     });
   };
