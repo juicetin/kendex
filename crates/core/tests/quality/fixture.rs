@@ -32,14 +32,11 @@ pub fn skill(source: &Path, name: &str, body: &str) {
 
 #[allow(clippy::unwrap_used)]
 pub fn fixture() -> Fixture {
-    fixture_with_method("copy")
+    fixture_with("copy")
 }
 
-/// `method = "symlink"` installs read their content through the canonical
-/// tree — the path the gate hashes and the path the audit observes differ,
-/// which is exactly what the content hash must not care about.
 #[allow(clippy::unwrap_used)]
-pub fn fixture_with_method(method: &str) -> Fixture {
+fn fixture_with(method: &str) -> Fixture {
     let tmp = tempfile::tempdir().unwrap();
     // Canonical up front: macOS reaches its temp dirs through a symlink,
     // and the engine hands back canonical paths.

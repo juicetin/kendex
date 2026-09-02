@@ -60,9 +60,8 @@ function SafetyTab({
 const gh: ItemSafety = {
   kind: "skill",
   name: "gh",
-  harness: "claude",
+  targets: [{ harness: "claude", location: "" }],
   scope: GLOBAL,
-  location: "",
   findings: [
     {
       rule: "dangerous-commands",

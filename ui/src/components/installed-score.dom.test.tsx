@@ -37,9 +37,8 @@ const scored = (
 ): ItemSafety => ({
   kind: "skill",
   name: "gh",
-  harness: "claude",
+  targets: [{ harness: "claude", location: "" }],
   scope: GLOBAL,
-  location: "",
   findings,
   skipped: [],
   safety: { score, deductions: [] },
@@ -157,9 +156,15 @@ describe("which copies a row's score is of", () => {
   it("shows one whole reading, never a score from one and findings from another", () => {
     stage([
       view([
-        scored(100, [finding("low", "clean.md:1")], { harness: "claude" }),
-        scored(45, [finding("high")], { harness: "codex" }),
-        scored(45, [finding("high")], { harness: "pi" }),
+        scored(100, [finding("low", "clean.md:1")], {
+          targets: [{ harness: "claude", location: "" }],
+        }),
+        scored(45, [finding("high")], {
+          targets: [{ harness: "codex", location: "" }],
+        }),
+        scored(45, [finding("high")], {
+          targets: [{ harness: "pi", location: "" }],
+        }),
       ]),
     ]);
     mount(<Row />);

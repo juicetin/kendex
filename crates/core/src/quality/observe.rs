@@ -9,7 +9,10 @@
 //! scanner never visits), the input says so and every rule that would have
 //! read them reports itself not applicable.
 
+use std::fmt::{self, Write as _};
 use std::path::{Path, PathBuf};
+
+use sha2::{Digest as _, Sha256};
 
 use crate::model::{HarnessId, ItemKind, ObservedItem};
 use crate::source_read::{TREE_BOUND, TreeBound};
@@ -18,6 +21,34 @@ use super::{
     AuditInput, AuditResult, Content, McpEntry, PluginSources, TreeFile, UNREAD_MCP_ENTRY,
     UNREADABLE_PLUGIN,
 };
+
+struct HashWriter(Sha256);
+
+impl fmt::Write for HashWriter {
+    fn write_str(&mut self, text: &str) -> fmt::Result {
+        self.0.update(text.as_bytes());
+        Ok(())
+    }
+}
+
+impl AuditInput {
+    /// Name, harness and the top-level location field stay out. Values derived
+    /// from location remain in the identity when content carries them.
+    pub(crate) fn content_hash(&self) -> String {
+        let AuditInput {
+            kind,
+            name: _,
+            harness: _,
+            location: _,
+            content,
+        } = self;
+        let mut hash = HashWriter(Sha256::new());
+        hash.0.update([0]);
+        assert!(write!(hash, "{}|{content:?}", kind.name()).is_ok());
+        hash.0.update([0]);
+        crate::hash::hex(&hash.0.finalize())
+    }
+}
 
 /// One tree's in-memory files as audit input, in the order the observed
 /// walk uses. The plan-time pass reads its rendered bytes through this so
