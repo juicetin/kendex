@@ -300,6 +300,36 @@ fn a_deleted_pi_delegation_list_survives_the_fork() {
     );
 }
 
+/// A person can add a Pi allowlist override after tightening the installed file.
+#[test]
+#[allow(clippy::unwrap_used)]
+fn a_pi_allowlist_that_cannot_render_refuses_the_fork() {
+    let w = agent_world(
+        "\"pi\"",
+        "---\nname: rev\ndescription: agent rev\n---\nUpstream body.\n",
+        "",
+        "",
+    );
+    let file = rendered(&w, HarnessId::Pi, "rev");
+    edit_line(&file, "deny-tools:", "deny-tools: Bash,");
+    let manifest = format!(
+        "{}\n[agent-frontmatter.pi]\nrev = {{ allow-tools = [\"Read\"] }}\n",
+        manifest_text(&w)
+    );
+    fs::write(manifest::manifest_path(&w.env, &w.scope), manifest).unwrap();
+    let report = kendex_core::package::updates::updates(&w.env, &w.scope).unwrap();
+    let row = report
+        .rows
+        .iter()
+        .find(|row| row.kind == ItemKind::Agent && row.name == "rev")
+        .unwrap();
+    assert_eq!(row.forkable_harness, None, "{row:?}");
+    let refused = fork::fork(&w.env, &w.scope, ItemKind::Agent, "rev", HarnessId::Pi).unwrap_err();
+    assert!(refused.to_string().contains(
+        "the access settings its Pi renderer rejected: Pi cannot express a tool allowlist"
+    ));
+}
+
 /// A hook written into a Claude agent file gates tool use from inside that
 /// file. No override table holds one — a hook is a custom-hooks entry with
 /// a selector, not a field — so a hook the fork would not run again is a

@@ -7,8 +7,6 @@ use crate::env::Env;
 use crate::error::{CoreError, Result};
 use crate::model::{HarnessId, ItemKind, Scope};
 
-use super::skill_content_path;
-
 /// Whether a fork can take this kind at all, or why not. Only a skill and
 /// an agent are stored in the local source in a form the source parser
 /// reads back, so only those two have a fork path — and every question a
@@ -40,10 +38,8 @@ pub(crate) fn unsupported_kind(kind: ItemKind, name: &str) -> CoreError {
     }
 }
 
-/// Whether keeping an edit as a fork can capture this rendering: a skill's
-/// canonical tree always round-trips, an agent's only from the tools whose
-/// format the source parser reads back. The Updates page asks before it
-/// offers the action, so the answer is the same one `fork` enforces.
+/// Whether a harness rendering can be parsed as source form. This format check
+/// does not prove capture will succeed.
 pub fn forkable_harness(kind: ItemKind, harness: HarnessId) -> bool {
     match kind {
         ItemKind::Skill => true,
@@ -79,10 +75,8 @@ pub(super) fn ambiguous_skill_tree(tree: &std::path::Path) -> bool {
     tree.join("SKILL.md").exists() && tree.join("SKILL.md.disabled").exists()
 }
 
-/// Whether keeping this rendering's edit as a fork can succeed: the kind
-/// and tool allow it, and a skill's tree is unambiguous. The Updates page
-/// asks before it offers the action, so the answer is the one `fork`
-/// enforces.
+/// Full fork eligibility for Updates, using the read-only capture shared with
+/// `fork` so the page offers no action that direct capture would refuse.
 pub fn forkable_rendering(
     env: &Env,
     scope: &Scope,
@@ -90,8 +84,16 @@ pub fn forkable_rendering(
     name: &str,
     harness: HarnessId,
 ) -> bool {
-    forkable_harness(kind, harness)
-        && (kind != ItemKind::Skill
-            || skill_content_path(env, scope, name, harness)
-                .is_some_and(|tree| !ambiguous_skill_tree(&tree)))
+    let Ok(manifest) = crate::engine::ops::manifest_for_mutation(env, scope) else {
+        return false;
+    };
+    let Some(decl) = manifest.declared(kind).get(name) else {
+        return false;
+    };
+    if decl.source == crate::manifest::LOCAL_SOURCE_NAME
+        || decl.source == crate::manifest::INPLACE_SOURCE_NAME
+    {
+        return false;
+    }
+    super::capture_rendering(env, scope, kind, name, harness, &manifest, decl).is_ok()
 }
