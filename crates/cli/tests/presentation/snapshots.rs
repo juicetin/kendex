@@ -106,6 +106,12 @@ fn add() {
 
 /// The verdict closes the run, and the footnote about content nothing
 /// manages stands above it rather than after it.
+///
+/// A scope whose manifest asks for items and whose install record is not
+/// there closes the run non-zero. There is nothing to weigh a declaration
+/// against, so the run says which scope and where the record should be,
+/// and the count below it is of the lock entries this run read, which
+/// were none.
 #[test]
 fn verify() {
     expect(
@@ -121,7 +127,10 @@ fn verify() {
     );
     expect(
         shape(&[], &["verify", "--scope", "project"]),
-        vec!["nothing installed"],
+        vec![
+            "! <project>: no install record at <project>/.kendex-lock.json — this scope was not checked",
+            "nothing installed",
+        ],
     );
 }
 

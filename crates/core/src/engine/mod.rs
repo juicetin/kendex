@@ -62,7 +62,7 @@ pub(crate) use desired_agent::contributes_to_agent;
 pub use expansion::{NO_PER_PACKAGE_UPDATE, plans_per_package};
 pub use item_source::ItemSource;
 pub use observed::observed_rows;
-pub use planned::{PlannedDeclaration, planned_declarations};
+pub use planned::{PlannedDeclaration, planned_declarations, recorded_by_the_plan};
 pub use scoring::{ItemSafety, SafetyTarget};
 
 /// The conservative "cannot prove these bytes are our render" hold.
@@ -186,7 +186,7 @@ pub fn plan_scope(
     let set_changes = set_changes(lock, &new_lock);
     let kept = kept_members(lock, &new_lock, &options.uninstalled_bundles);
     let repo_effects_leaving = repo_effects::leaving(env, scope, lock, &new_lock)?;
-    plan_lock_write(env, scope, disk_lock, new_lock, &mut ops)?;
+    plan_lock_write(env, scope, declared, disk_lock, new_lock, &mut ops)?;
     scope_notes.extend(scope_wide(scope, &mut ops)?);
 
     let mut report = EngineReport {

@@ -11,11 +11,12 @@ use crate::env::Env;
 use crate::error::Result;
 use crate::lock::{BundleRev, Lock, SourceRev, lock_path};
 use crate::manifest::Manifest;
-use crate::model::Scope;
+use crate::model::{ItemKind, Scope};
 use crate::source::SourceState;
 
 use super::config_edits;
 use super::desired::DesiredState;
+use super::planned::recorded_by_the_plan;
 
 /// Whether a plan already persists the manifest. A caller about to insert
 /// its own save must know: a second write to the same file binds to bytes
@@ -165,30 +166,76 @@ pub(super) fn source_revisions(
     revisions
 }
 
+/// Whether the scope declares packages this pass derives no lock entry
+/// for, asked through [`recorded_by_the_plan`].
+///
+/// Their scope still needs the file. Edit detection and the sweep read an
+/// absent record as an empty one and cannot tell the two apart, so neither
+/// of them is the reason. What the file changes is that the verb stops
+/// reporting the scope up to date, that `verify` stops refusing a scope it
+/// has no record of, that `discover::project_root_from` finds the marker
+/// it prefers when it resolves a project root, and that something on disk
+/// states which build wrote the record.
+///
+/// A declaration switched off is still a declaration here. `enabled` is
+/// carried on the lock entry rather than deciding whether one exists —
+/// a disabled agent installs and stays tracked — so the flag never
+/// decides whether a scope keeps a record.
+fn declares_unrecorded_installs(manifest: &Manifest) -> bool {
+    ItemKind::ALL
+        .iter()
+        .any(|kind| !recorded_by_the_plan(*kind) && !manifest.declared(*kind).is_empty())
+}
+
 /// An old-version lock rewrites even when its entries are unchanged — the
 /// version bump is itself the change. So does a source that now resolves to
 /// another commit, once there are installations to reproduce: with nothing
-/// installed there is no record to keep, and no lock file is created for
-/// one.
+/// declared and nothing installed there is no record to keep, and no lock
+/// file is created for one.
+///
+/// A scope declaring packages this pass derives no entry for gets the file
+/// back whatever its entries come out as. A Pi extension derives no lock
+/// entry, so a scope declaring only those derives an empty record, which
+/// matches the empty one an absent file reads as: without this the plan is
+/// empty, the verb reports the scope up to date, and nothing lands to stop
+/// it saying so, to mark the project root, or to state which build wrote
+/// the record. That is the state the version floor leaves behind once a
+/// person moves an older lock aside.
+///
+/// An install this pass refused is not one of those. Its kind derives an
+/// entry and would be recorded; there is simply nothing to record yet, and
+/// the run closes on the conflict rather than on a write.
 pub(super) fn plan_lock_write(
     env: &Env,
     scope: &Scope,
+    manifest: &Manifest,
     lock: &Lock,
     new_lock: Lock,
     ops: &mut Vec<PlannedOp>,
 ) -> Result<()> {
-    if new_lock.entries == lock.entries
+    let unchanged = new_lock.entries == lock.entries
         && (new_lock.sources == lock.sources || new_lock.entries.is_empty())
         && (new_lock.bundles == lock.bundles || new_lock.entries.is_empty())
-        && (lock.version == crate::lock::LOCK_VERSION || lock.entries.is_empty())
-    {
+        && (lock.version == crate::lock::LOCK_VERSION || lock.entries.is_empty());
+    // Whether a file sits at the path is the one question left, and it is
+    // asked only where the answer can change what this does: reading it
+    // hashes the record, and a scope that has nothing to write and
+    // declares nothing the plan leaves unrecorded is done either way.
+    if unchanged && !declares_unrecorded_installs(manifest) {
         return Ok(());
     }
     let path = lock_path(env, scope);
+    // The same read the write below binds to. An absent lock and an empty
+    // one read alike by this point, and only the file still tells them
+    // apart.
+    let pre = Pre::observed(&path)?;
+    if unchanged && !pre.binds_nothing() {
+        return Ok(());
+    }
     ops.push(PlannedOp {
         description: "Update the install record".into(),
         op: Op::WriteLock {
-            pre: crate::apply::Pre::observed(&path)?,
+            pre,
             path,
             lock: Box::new(new_lock),
         },

@@ -72,11 +72,19 @@ fn held_by_requirer(
         .then(|| by.name.clone())
 }
 
-/// The full planned set — declared items plus derived members and
-/// dependencies — with the revision each one effectively reads. Held-ness
-/// derives from this graph: a pin that reaches an install through a bundle
-/// or a dependency parent is a hold on the member, and reading only the
-/// item's own `rev` would report a held package as unpinned drift.
+/// Every package this scope reads from a source — declared items plus the
+/// members and dependencies they derive, plus Pi extensions — with the
+/// revision each one effectively reads. Held-ness derives from this graph:
+/// a pin that reaches an install through a bundle or a dependency parent
+/// is a hold on the member, and reading only the item's own `rev` would
+/// report a held package as unpinned drift.
+///
+/// Plugins are not in it, though [`recorded_by_the_plan`] says one is
+/// recorded. Every row here carries an `ItemDecl` naming the source it
+/// came from, and a plugin has no source: it is a switch in a settings
+/// file, declared with an enabled flag and a harness. A caller that wants
+/// the declarations rather than the packages reads the plugin table
+/// itself.
 pub fn planned_declarations(
     env: &Env,
     scope: &Scope,
@@ -117,4 +125,30 @@ pub fn planned_declarations(
         });
     }
     out
+}
+
+/// Whether a scope plan derives a lock entry for this kind, and so whether
+/// the record can ever hold one.
+///
+/// [`expansion::plans_per_package`] plus `Plugin`: a plugin toggle is
+/// derived and recorded like any other install, and is still not something
+/// one package of can be brought current on its own. A Pi extension is the
+/// kind that answers no here — `kendex update-pi` compares installed bytes
+/// against the source and writes the package itself, so no pass derives an
+/// entry for one however many the manifest declares.
+///
+/// Exhaustive on purpose. `PLANNED_KINDS` is an array, so a match is the
+/// only thing that makes a kind added to the enum fail to compile until it
+/// is classified, and a kind whose plan participation moves is one whose
+/// scope would otherwise lose its record.
+pub fn recorded_by_the_plan(kind: ItemKind) -> bool {
+    match kind {
+        ItemKind::PiExtension => false,
+        ItemKind::Skill
+        | ItemKind::Agent
+        | ItemKind::Hook
+        | ItemKind::Command
+        | ItemKind::McpServer
+        | ItemKind::Plugin => true,
+    }
 }
