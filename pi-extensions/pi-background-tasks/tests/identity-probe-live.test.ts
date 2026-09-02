@@ -1,18 +1,22 @@
 // Live integration test for defaultReadProcessIdentity (kendex#15
 // round 5 reviewer-error BLOCK reproducer).
 //
-// Spawn `/bin/bash -lc "sleep 5"` and observe what the kernel reports:
-// bash exec(2)s the sleep binary in place, so /proc/<pid>/comm rotates
-// from "bash" to "sleep" while pid + starttime stay identical. The
-// identity check MUST treat these as the same process — otherwise the
+// Spawn `/bin/bash -c "exec sleep 5"`: bash execve(2)s the sleep binary
+// in place with no fork, so pid + starttime stay identical across the
+// exec while the process image changes underneath them. The identity
+// check MUST treat before and after as the same process — otherwise the
 // orphan watcher false-finalizes a live task on every restore.
 //
-// Requires: Linux /proc OR `ps -o lstart=,comm= -p <pid>` available.
-// Skips cleanly if the probe returns null (sandbox without /proc and
-// without ps).
+// Enforced on Linux only. There, a null from the probe against a pid
+// still present in /proc is a defect in the reader this suite gates, and
+// the case throws. Elsewhere a null logs a skip line and returns: the
+// portable `ps -o lstart=,comm= -p <pid>` path returns null for reader
+// defects too, and nothing here separates those from a host that cannot
+// probe at all, so this suite makes no promise off Linux.
 
 import { afterAll, describe, expect, test } from "bun:test";
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { defaultReadProcessIdentity, identityMatches } from "../extensions/snapshot.js";
 
 const children: number[] = [];
@@ -27,7 +31,7 @@ function sleep(ms: number): Promise<void> {
 }
 
 describe("defaultReadProcessIdentity live (bash exec drift)", () => {
-	test("bash -c 'exec sleep N': pid + startToken stable, comm drifts bash->sleep, identityMatches stays true", async () => {
+	test("bash -c 'exec sleep N': pid + startToken stable across the exec, identityMatches stays true whether or not comm rotated", async () => {
 		// `exec sleep N` replaces the bash process image in place
 		// (execve(2) with no fork), so the kernel reports the same pid
 		// + same start time but a new /proc/<pid>/comm. This is the
@@ -42,9 +46,21 @@ describe("defaultReadProcessIdentity live (bash exec drift)", () => {
 
 		const spawnIdentity = defaultReadProcessIdentity(pid);
 		if (spawnIdentity === null) {
-			// /proc + ps both unavailable in this environment; nothing
-			// meaningful to assert.
-			expect(true).toBe(true);
+			// A null is "the probe failed", not "this host cannot probe":
+			// defaultReadProcessIdentity also returns null on a malformed
+			// /proc/<pid>/stat, an absent starttime field, or a non-zero `ps`
+			// exit — regressions in the reader this case exists to gate. On
+			// Linux with the process still in /proc, the probe path is there,
+			// so a null is that defect and must fail rather than pass quietly.
+			if (process.platform === "linux" && existsSync(`/proc/${pid}`)) {
+				throw new Error(
+					`defaultReadProcessIdentity returned null for live pid ${pid} with /proc/${pid} present — the probe is broken, not the host`,
+				);
+			}
+			// No /proc and no working `ps`: nothing to observe. Say so, so a
+			// suite that has stopped exercising the reproducer is visible in
+			// the log instead of reading like a run that proved the fix.
+			console.log(`skip: no process-identity probe on ${process.platform} — the exec-drift reproducer did not run`);
 			return;
 		}
 
@@ -60,14 +76,10 @@ describe("defaultReadProcessIdentity live (bash exec drift)", () => {
 		// identityMatches MUST treat them as the same process, even if
 		// comm rotated bash -> sleep. comm is diagnostic-only.
 		expect(identityMatches(spawnIdentity, drifted)).toBe(true);
-		// We expect to observe the drift on this platform; if comm
-		// matches both reads (e.g. the kernel didn't rotate it before
-		// the first probe), the test still passes the identity check
-		// above so the bug is still gated.
-		if (spawnIdentity.comm === "bash" && drifted?.comm === "sleep") {
-			// Drift was observed; identity check survived it.
-			expect(true).toBe(true);
-		}
+		// comm may or may not have rotated by the time of the second
+		// read — the kernel does not promise when. Either way the
+		// identity check above is what gates the bug, so nothing here
+		// depends on observing the rotation.
 	});
 
 	test("identityMatches is false after the process actually exits", async () => {
