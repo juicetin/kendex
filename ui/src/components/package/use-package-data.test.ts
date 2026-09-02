@@ -137,11 +137,10 @@ describe("packageVersionActions", () => {
     expect(toast.info).toHaveBeenCalledWith(HELD_IN_CLAUDE);
   });
 
-  // A refused write is not a write that changed nothing. `package_set_rev`
-  // persists the revision through `set_rev_with` and only then runs the
-  // apply, so an apply that fails answers with an error over a manifest
-  // that already moved. A page that returned on the error would go on
-  // showing the version it read before the click as the settled one.
+  // A refused write is not a write that changed nothing — `lib/rescan.ts`'s
+  // header says what does and does not survive a failed apply. A page that
+  // returned on the error would go on showing the version it read before
+  // the click as the settled one.
   it("reads the package back when the write is refused", async () => {
     const reload = vi.fn();
     vi.mocked(commands.packageSetRev).mockResolvedValue({

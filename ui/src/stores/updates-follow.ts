@@ -163,27 +163,16 @@ export function followSwitch({
           ),
         });
         // Read again whichever way the write answered. An error is not proof
-        // that nothing changed: `package_set_rev` persists the revision
-        // through `set_rev_with` and only then runs the apply, so a failed
-        // apply returns an error over a manifest that already moved. Putting
-        // the switch back from the click's own row would show that as
-        // settled and re-open every action against it.
+        // that nothing changed — `lib/rescan.ts`'s header says what does and
+        // does not survive a failed apply — so where the switch sits is the
+        // engine's answer to give, not the click's: putting it back from the
+        // click's own row would show that as settled and re-open every
+        // action against it.
         await get().reload();
         // Then the scan and the audit, which the standing does not cover:
         // the flip runs an apply, and an apply moves the installed bytes
-        // the scan lists and the audit scores.
-        //
-        // Asked whatever the write answered and whichever way the switch
-        // went. A refusal is no account of what is on disk — the write
-        // runs the leaving packages' uninstallers before the plan
-        // (`repo_effects::execute`), and an error over those leaves what
-        // they did to the repository standing. Nor is an answer that
-        // landed: `moved` covers the two states `moving` counts, `removed`
-        // the other destructive one, and a dropped rendering can answer
-        // with all three fields empty, so no predicate over the response
-        // is complete. A flip that turns out to have written nothing pays
-        // what every other write pays — the page held for a machine-wide
-        // scan and a forced audit — rather than a page left dated.
+        // the scan lists and the audit scores. Asked whatever the write
+        // answered and whichever way the switch went, on that same rule.
         await rescanEverything();
       }
     });

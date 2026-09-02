@@ -23,6 +23,30 @@
 // same apply an update does, so the bytes both reads answer for move under
 // it — and calls this once its own standing has landed.
 //
+// The writes on the Updates page and the package page call this whatever
+// their write answered: `updates.ts`'s [`updateOne`] and [`updateRows`],
+// `updates-edits.ts`'s `run`, `updates-follow.ts`'s [`followSwitch`], and
+// `package-version-actions.ts`'s `afterChange`. The reasoning lives here
+// rather than at each of them.
+//
+// A refusal is no account of what is on disk. `repo_effects::execute` runs
+// the leaving packages' uninstallers before the plan, so an `Undo` error
+// comes back with what they did standing and the plan — manifest save
+// included — never run; a plan that does run and then fails rolls back
+// whole, `run_journaled` restoring every path it touched; and an error can
+// come back over a write that committed in full. The answer does not say
+// which happened.
+//
+// Nor is a success a complete account: `moved` covers the two states
+// `moving` counts, `removed` the other destructive one, and a dropped
+// rendering can answer with all three fields empty. So no predicate over
+// the response decides this, and a write that moved nothing pays one scan
+// and one forced audit rather than leaving a dated page.
+//
+// This speaks only for those five. The marketplace, source-toggle and
+// settings callers still return on the error before reaching here; whether
+// that is right is their own question.
+//
 // Adding a project, dropping one, or moving a harness's folder changes
 // which scopes the audit reads, and a scope with no view of its own counts
 // zero unmanaged items — which is how a project card ends up hiding the

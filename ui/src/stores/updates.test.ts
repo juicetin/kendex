@@ -426,6 +426,12 @@ describe("updates store", () => {
     expect(useProblemsStore.getState().dialog.open).toBe(true);
     expect(useProblemsStore.getState().dialog.message).toBe("ipc down");
     expect(toast.success).not.toHaveBeenCalled();
+    // The rejection arm reads the machine too, and it is the arm that
+    // accounts for least: the call never answered, so nothing says whether
+    // the apply ran. Left unstubbed, the scan and the audit land as failed
+    // reads, which is all this pins — that they were asked.
+    expect(commands.scanMachine).toHaveBeenCalled();
+    expect(commands.auditAll).toHaveBeenCalled();
   });
 
   it("surfaces a follow switch whose transport failed", async () => {
@@ -525,6 +531,54 @@ describe("updates store", () => {
     expect(useUpdatesStore.getState().read.status).toBe("failed");
     expect(useUpdatesStore.getState().read.error).toBe("overview wedged");
   });
+
+  /** The three reads a write's follow-up makes, all answering. */
+  const machineAnswers = () => {
+    vi.mocked(commands.scanMachine).mockResolvedValue({
+      status: "ok",
+      data: { harnesses: [], items: [], missingProjects: [], warnings: [] },
+    });
+    vi.mocked(commands.auditAll).mockResolvedValue({ status: "ok", data: [] });
+    vi.mocked(commands.updatesOverview).mockResolvedValue({
+      status: "ok",
+      data: { rows: [], warnings: [], unreadable: [], lastFetched: null },
+    });
+  };
+
+  // The machine reads are owed whichever way the apply answered, on
+  // `lib/rescan.ts`'s rule. Gated on the answer, Home's inventory and the
+  // audit scores went on reporting copies already taken off disk until
+  // something else forced a read. Both arms of the choice `applyRow` makes
+  // between the two single-package commands, since a held row moves its
+  // hold through the other one.
+  it.each([
+    ["a follower", row({}), commands.packageUpdate, "the apply stopped"],
+    [
+      "a held row",
+      row({ pinned: true }),
+      commands.packageSetRev,
+      "manifest busy",
+    ],
+  ])(
+    "reads the machine back when %s answers with an error",
+    async (_what, subject, command, error) => {
+      useProblemsStore.setState({
+        dialog: { open: false, title: "", steps: [], actions: [] },
+      });
+      machineAnswers();
+      vi.mocked(command).mockResolvedValue({ status: "error", error } as never);
+      useUpdatesStore.setState({ rows: [subject], read: READ_LANDED });
+
+      await useUpdatesStore.getState().updateOne(subject);
+
+      expect(command).toHaveBeenCalled();
+      expect(commands.scanMachine).toHaveBeenCalled();
+      expect(commands.auditAll).toHaveBeenCalled();
+      // The refusal is still the person's to see, and nothing claims a move.
+      expect(useProblemsStore.getState().dialog.message).toBe(error);
+      expect(toast.success).not.toHaveBeenCalled();
+    },
+  );
 
   // The backend can persist the preference and then fail building its
   // overview: the reconciling read lands what actually committed instead
