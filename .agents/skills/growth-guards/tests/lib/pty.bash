@@ -44,16 +44,58 @@ gg_pty_run() { # CAP_SECONDS SCRIPT_FILE
   # then stop the session starting. Passing the paths as values rather than
   # as syntax removes the question instead of answering it.
   cat >"$dir/session.sh" <<'SESSION'
-ps -o pgid= -p $$ >"$GG_PTY_SID_FILE" 2>/dev/null || true
+gg_pgid="$(ps -o pgid= -p $$ 2>/dev/null | tr -dc '0-9')"
+printf '%s\n' "$gg_pgid" >"$GG_PTY_SID_FILE"
+# The deadline the session holds over ITSELF. The poll loop below is the normal
+# cap, but a suite killed mid-run takes that loop with it, and `script` has
+# already setsid'd this session out of every group the suite's killer could
+# name — so with the cap living only on the far side, a body that never returns
+# outlives the run that started it. Two such keepalives from a dead session ran
+# for sixteen hours before they were killed by hand.
+#
+# The watchdog traps no signal, is bounded by one tick per second, and stands
+# down the moment the session it guards is gone, so it can neither become the
+# leak it exists to prevent nor signal a process group that was recycled after
+# this one ended. On a healthy run the caller's cap fires first.
+#
+# `kill -9 "-PGID"`, with no `--`. This runs under /bin/sh, which is dash on
+# every Debian-family host including the CI runner, and dash's kill builtin
+# takes the word after the signal as a pid: `--` becomes number('-'), it prints
+# `Illegal number: -`, exits 2 and reaps nothing. Measured in ubuntu:24.04. The
+# bare form is a process-group target in dash, bash 3.2.57 and bash 5 alike.
+# The caller-side kills below run in bash and keep their `--`.
+#
+# The marker beside the body file is what makes the kill provable: the caller's
+# cap leaves none, so a case that finds one knows the SESSION's deadline fired
+# rather than something upstream. It sits beside a path the caller chose, since
+# this scratch directory is the caller's to remove and it does not survive.
+gg_session=$$
+if [ -n "$gg_pgid" ]; then
+  (
+    i=0
+    while [ "$i" -lt "$GG_PTY_DEADLINE" ] && kill -0 "$gg_session" 2>/dev/null; do
+      sleep 1
+      i=$((i + 1))
+    done
+    if [ "$i" -ge "$GG_PTY_DEADLINE" ]; then
+      printf 'fired\n' >"$GG_PTY_BODY_FILE.watchdog"
+      kill -9 "-$gg_pgid"
+    fi
+  ) >/dev/null 2>&1 &
+fi
 echo GG-PTY-BEGIN
 bash "$GG_PTY_BODY_FILE"
 printf '%s\n' "$?" >"$GG_PTY_RC_FILE"
 SESSION
   cmd='/bin/sh "$GG_PTY_SESSION_FILE"'
   # Exported, not prefixed onto the spawn: the two grammars below would
-  # otherwise carry four assignments each. Every call overwrites them.
+  # otherwise carry five assignments each. Every call overwrites them. The
+  # self-deadline sits PAST the caller's cap, so the poll loop stays the normal
+  # path and still reports `capped`; the session's own watchdog is only what is
+  # left when there is no poll loop any more.
   export GG_PTY_SESSION_FILE="$dir/session.sh" GG_PTY_SID_FILE="$dir/sid" \
-    GG_PTY_BODY_FILE="$body" GG_PTY_RC_FILE="$dir/rc"
+    GG_PTY_BODY_FILE="$body" GG_PTY_RC_FILE="$dir/rc" \
+    GG_PTY_DEADLINE="$((cap + 5))"
   # The grammar is SELECTED, not probed: util-linux takes the command through
   # -e -c, BSD (macOS) after the typescript file. `set -m` gives the spawner a
   # process group of its own where the platform provides one, and </dev/null

@@ -207,6 +207,102 @@ orphan="$(cat "$ROOT/orphan.pid" 2>/dev/null || true)"
   && ok "control: and the cap left no process of it behind" \
   || bad "control: and the cap left no process of it behind" "pid $orphan is still running; state=$GG_PTY_STATE err=$GG_PTY_ERR"
 
+# A suite killed mid-run takes the poll loop above with it, and `script` has
+# already setsid'd the session out of every group that killer could name, so the
+# cap on this side stops existing. What is left is the deadline the session
+# holds over itself (KEN-1084). The body traps TERM away, so nothing short of
+# the SIGKILL that deadline sends can end it.
+cat >"$ROOT/abandon-runner.sh" <<'RUNNER'
+set -euo pipefail
+. "$1"
+gg_pty_run 2 "$2" || true
+RUNNER
+
+# abandon PTY_LIB CASE_FILE PIDFILE — run a case under PTY_LIB, kill the runner
+# once the session has a child to leave behind, and report what it left:
+# ABANDONED is that child's pid, ABANDONED_GROUP the session's own process
+# group. Cleanup reaps by the GROUP, not the pid: a run that timed out waiting
+# for the pidfile leaves ABANDONED empty, and that is exactly the run with no
+# child handle to reap by. gg_pty_run writes the group into `sid` under its own
+# scratch directory, so the runner gets a TMPDIR this function owns.
+abandon() {
+  local lib="$1" case_file="$2" pidfile="$3" runner i=0 scratch
+  scratch="$(mktemp -d "$ROOT/abandon.XXXXXX")"
+  ABANDONED=""
+  ABANDONED_GROUP=""
+  rm -f "$pidfile"
+  TMPDIR="$scratch" bash "$ROOT/abandon-runner.sh" "$lib" "$case_file" >/dev/null 2>&1 &
+  runner=$!
+  while [ "$i" -lt 60 ] && [ ! -s "$pidfile" ]; do
+    sleep 0.25
+    i=$((i + 1))
+  done
+  kill -9 "$runner" 2>/dev/null || true
+  wait "$runner" 2>/dev/null || true
+  ABANDONED="$(cat "$pidfile" 2>/dev/null || true)"
+  ABANDONED_GROUP="$(cat "$scratch"/gg-pty.*/sid 2>/dev/null | tr -dc '0-9' || true)"
+}
+
+# reap_group GROUP — bash, so `--` guards a group id that begins with `-`. The
+# session-side kill in pty.bash cannot use it and says why.
+reap_group() {
+  [ -n "${1:-}" ] || return 0
+  kill -9 -- "-$1" 2>/dev/null || true
+}
+
+# gone_within PID SECONDS
+gone_within() {
+  local i=0
+  while [ "$i" -lt "$2" ]; do
+    kill -0 "$1" 2>/dev/null || return 0
+    sleep 1
+    i=$((i + 1))
+  done
+  return 1
+}
+
+printf 'trap "" HUP TERM\necho STARTED\nsleep 300 &\necho "$!" >%q\nwait\n' \
+  "$ROOT/abandoned.pid" >"$ROOT/abandon-case.sh"
+rm -f "$ROOT/abandon-case.sh.watchdog"
+abandon "$TEST_DIR/lib/pty.bash" "$ROOT/abandon-case.sh" "$ROOT/abandoned.pid"
+real_group="$ABANDONED_GROUP"
+# The cap is 2 and the session's deadline sits five seconds past it; 20 is slack
+# for a loaded box, not a second budget.
+[ -n "$ABANDONED" ] && gone_within "$ABANDONED" 20 \
+  && ok "and the session ends itself once the run that started it is gone" \
+  || bad "and the session ends itself once the run that started it is gone" "pid $ABANDONED is still running"
+# WHICH kill ended it: a dead child is also what a collapsing spawner leaves.
+# The session-side kill runs under /bin/sh — dash on the CI runner, where a
+# mis-parsed argument reaps nothing in silence — and the marker is written by
+# that watchdog alone, so this line is the dash measurement.
+[ -f "$ROOT/abandon-case.sh.watchdog" ] \
+  && ok "and it was the session's own deadline that fired, not something upstream" \
+  || bad "and it was the session's own deadline that fired, not something upstream" "no watchdog marker: the in-session kill did not run (dash argument parsing?)"
+reap_group "$real_group"
+
+# The must-fail control: the same abandonment against a copy whose watchdog
+# never starts. Without it the session outlives the run, which is the leak.
+NO_DEADLINE="$ROOT/pty-no-deadline.bash"
+sed 's/if \[ -n "$gg_pgid" \]; then/if false; then/' "$TEST_DIR/lib/pty.bash" >"$NO_DEADLINE"
+cmp -s "$TEST_DIR/lib/pty.bash" "$NO_DEADLINE" \
+  && bad "control: the mutant really drops the session's own deadline" "the copy is byte-identical to pty.bash" \
+  || ok "control: the mutant really drops the session's own deadline"
+printf 'trap "" HUP TERM\necho STARTED\nsleep 300 &\necho "$!" >%q\nwait\n' \
+  "$ROOT/abandoned-mutant.pid" >"$ROOT/abandon-mutant-case.sh"
+abandon "$NO_DEADLINE" "$ROOT/abandon-mutant-case.sh" "$ROOT/abandoned-mutant.pid"
+mutant_group="$ABANDONED_GROUP"
+mutant_pid="$ABANDONED"
+# The leak this control creates is reaped BEFORE the assertion, by the group the
+# session recorded: reaping after would be skipped on any path reporting bad and
+# returning early. The pid is read once into a variable of its own, so a later
+# abandon cannot overwrite what is asserted.
+[ -n "$mutant_pid" ] && ! gone_within "$mutant_pid" 12 \
+  && mutant_survived=yes || mutant_survived=no
+reap_group "$mutant_group"
+[ "$mutant_survived" = yes ] \
+  && ok "control: without that deadline the abandoned session is still running" \
+  || bad "control: without that deadline the abandoned session is still running" "pid ${mutant_pid:-none} ended anyway, so the case above proves nothing"
+
 # The status is the SESSION's own, read from the file it wrote rather than
 # from the spawner, which reports on its own account.
 printf 'exit 7\n' >"$ROOT/status-case.sh"

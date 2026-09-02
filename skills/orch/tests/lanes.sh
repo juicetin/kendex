@@ -664,9 +664,7 @@ assert_contains "$noclaim_out" "Opened tmux window" "the laneless launch still o
 assert_eq "$(ls -1 "$OT_STATE/claims" 2>/dev/null | wc -l | tr -d '[:space:]')" "0" \
   "a launch with no --lane records no claim"
 
-# `--lane auto` over a batch: the claim each launch records must move the next
-# item off that account, or one invocation puts the whole fleet on one lane —
-# the failure the claims exist to prevent.
+# `--lane auto` over a batch: each recorded claim must move the next item off that lane.
 rm -rf "$OT_STATE"; rm -f "$OT_TMUX_PANES"
 run_ot_auto() { LANES_HOME="$H" ORCH_LANES_FETCH_CMD="$FETCHER" \
   GH_ISSUE_PATTERN='[A-Z]+-[0-9]+' TMUX=stub,1,0 OT_TMUX_LOG="$OT_TMUX_LOG" \
@@ -835,7 +833,7 @@ cat > "$OT_STUB_BIN/ghostty" <<'STUBEOF'
 #!/usr/bin/env bash
 exit 0
 STUBEOF
-chmod +x "$OT_STUB_BIN/ghostty"
+chmod +x "$OT_STUB_BIN/ghostty"; export TERMINAL=ghostty  # open_gui reads it first
 rm -rf "$OT_STATE"; rm -f "$OT_TMUX_PANES"
 set +e
 gui_out=$(run_ot_auto --ghostty --harness claude --lane auto --cmd "true" CC-10 CC-11 2>&1)
