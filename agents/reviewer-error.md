@@ -20,6 +20,8 @@ Error paths that quietly convert failure into success. For every changed error/f
 
 Fail-open paths, silent failures, error propagation, fallback behavior, wrong-cause diagnostics, observability gaps. Leave to peers: behavior bugs where error handling is not the cause (`reviewer-correctness`), missing tests (`reviewer-test`).
 
+A finding in a class `.agents/skills/orch/references/finding-disposition.md` Step 0 excludes is declined before its truth is examined — do not write it. For a symlink, `..`, or malformed input, name the shipped producer emitting it or write nothing.
+
 ## Fail-Open Catalogue
 
 Recurring shapes:
