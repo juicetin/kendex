@@ -275,14 +275,14 @@ if [ -f Cargo.toml ]; then
     done
   fi
   cargo fmt --check || say "cargo fmt --check failed"
-  cargo clippy --workspace --quiet -- -D warnings || say "clippy failed"
+  cargo clippy --workspace --all-targets --quiet -- -D warnings || say "clippy failed"
   cargo doc --no-deps --document-private-items --workspace --quiet || say "cargo doc failed"
   cargo test --workspace --quiet || say "tests failed"
 fi
 if [ -f ui/package.json ]; then
-  (cd ui && npx --no-install tsc --noEmit) || say "tsc failed"
-  (cd ui && npx --no-install biome check src) || say "biome failed"
-  (cd ui && npx --no-install vitest run --silent) || say "vitest failed"
+  npm run --prefix ui check:types || say "tsc failed"
+  npm run --prefix ui check:lint || say "biome failed"
+  npm run --prefix ui test -- --silent || say "vitest failed"
 fi
 
 exit $fail

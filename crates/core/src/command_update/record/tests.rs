@@ -147,6 +147,11 @@ fn a_run_acting_as_root_writes_no_record() {
     );
 }
 
+/// The shape both recorders share, so the table below names one type
+/// instead of spelling the signature inline.
+#[cfg(unix)]
+type Recorder = dyn Fn(&Env, &Path) -> Result<(), String>;
+
 /// The guard is wired to this process's own uid and not to a constant,
 /// on every entry that writes a record.
 ///
@@ -172,7 +177,7 @@ fn a_run_acting_as_root_writes_no_record() {
 #[cfg(unix)]
 fn every_public_write_follows_this_process_uid() {
     let privileged = rustix::process::geteuid().is_root();
-    let entries: [(&str, &dyn Fn(&Env, &Path) -> Result<(), String>); 2] = [
+    let entries: [(&str, &Recorder); 2] = [
         ("record_command", &record_command),
         ("record_first_run", &record_first_run),
     ];
