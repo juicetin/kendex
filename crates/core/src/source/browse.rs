@@ -131,6 +131,24 @@ pub fn packages(env: &Env, catalog: &Catalog) -> Result<Vec<AvailablePackage>> {
     Ok(out)
 }
 
+/// Every curated set this catalog declares, each with per-member installed
+/// state. What the marketplace page's Bundles tab lists: the catalog's own
+/// declaration, so a set none of whose members are offered still appears.
+///
+/// Sorted by name here rather than by each caller. A plain catalog holds its
+/// sets in a `BTreeMap` and is alphabetical already, but a plugin registry's
+/// are a list in `marketplace.json` file order, and one order for every
+/// consumer is the point of sorting in the read.
+pub fn bundles(env: &Env, catalog: &Catalog) -> Result<Vec<BundleDetail>> {
+    let browsed = open(env, catalog)?;
+    let mut out: Vec<BundleDetail> = super::bundles::offered(&browsed.sealed, &browsed.config)?
+        .iter()
+        .map(|found| detail(&browsed, found))
+        .collect();
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(out)
+}
+
 /// One curated set with per-member installed state.
 pub fn bundle(env: &Env, catalog: &Catalog, bundle_name: &str) -> Result<BundleDetail> {
     let browsed = open(env, catalog)?;
@@ -140,6 +158,12 @@ pub fn bundle(env: &Env, catalog: &Catalog, bundle_name: &str) -> Result<BundleD
             source_name: catalog.label().to_owned(),
         });
     };
+    Ok(detail(&browsed, &found))
+}
+
+/// A declared set joined against this scope: every member's state, and the
+/// installed/total pair derived from them.
+fn detail(browsed: &Browsed, found: &super::bundles::CatalogBundle) -> BundleDetail {
     let mut members = Vec::new();
     for member in &found.members {
         // A member the catalog names but no longer carries is a row, not a
@@ -169,16 +193,16 @@ pub fn bundle(env: &Env, catalog: &Catalog, bundle_name: &str) -> Result<BundleD
         .iter()
         .filter(|member| member.state == InstallState::Installed)
         .count();
-    Ok(BundleDetail {
+    BundleDetail {
         name: names::shown(&found.name),
         description: found.description.as_deref().map(names::shown),
-        version: found.version,
-        category: found.category,
+        version: found.version.clone(),
+        category: found.category.clone(),
         installed_members: installed.min(u32::MAX as usize) as u32,
         total_members: members.len().min(u32::MAX as usize) as u32,
         members,
-        collision: browsed.bundle_collision(bundle_name),
-    })
+        collision: browsed.bundle_collision(&found.name),
+    }
 }
 
 /// The description, summary and tags an item writes in its own header, read
