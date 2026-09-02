@@ -13,7 +13,7 @@
 - `scripts/lib/ci-run-correlation.sh` — Check-rollup run scoping, shared with orch `ci-wait`
 - `scripts/lib/verify-lib.sh` — Merge simulation and build/test detection for `pr-cross-check --verify`
 - `SKILL.md` — Agent-facing skill definition
-- `tests/` — Run any file directly; each is self-contained
+- `tests/` — One suite per file, self-contained; CI runs each as `bash <file>`
 
 ## Adding a Command
 
@@ -37,35 +37,44 @@ therefore reads the modules that could declare the file, on the diff's new
 side: `HEAD` for a `base...HEAD` diff, the index for `--staged`, the worktree
 for `--head` — tracked files only, so an untracked file never reclassifies a
 tracked change. Every `.rs` file in the candidate's own directory and its
-ancestor directories is scanned once, emitting candidate-agnostic route
-records that the per-candidate evaluator filters afterwards.
+ancestor directories is scanned once, emitting candidate-agnostic
+declaration records that the per-candidate evaluator filters afterwards.
 
-**Lexing.** Source is masked before matching: line-comment precedence, nested
-block comments, and the contents of string, raw-string, byte/C-string and
-char literals blanked, so quoted braces, `//` and `/*` cannot corrupt
-structure. Item matching runs on the mask and values are read from the
-original at the same offsets. A leading UTF-8 BOM and a crate shebang are
-first-line preambles, dropped ahead of the first item.
+**The form read.** A run of column-zero outer attributes followed by a
+column-zero `mod name;` — `pub`/`pub(...)` accepted, `#[path]` optional,
+`#[cfg(test)]` anywhere in the run:
 
-**Routes.** A route is a `mod` declaration or an `include!` of the target,
-each carrying its own attribute gate. Bare `mod name;` emits both legal forms
-(`name.rs` and `name/mod.rs`) and resolves in the declaring file's module
-directory — its own directory for `mod.rs`/`lib.rs`/`main.rs`, its directory
-plus its file stem otherwise. `#[path]` values and `include!` literals
-resolve in the containing file's directory, per the Rust reference. Targets
-are lexically normalized so equivalent spellings compare equal. `include!` is
-evaluated at the invocation site for every delimiter form, and only when its
-argument IS a direct string literal.
+```rust
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+#[path = "scan_fixtures.rs"]
+mod scan_fixtures;
+```
 
-**Skip regions.** Braced bodies — inline modules, `macro_rules!` definitions,
-macro invocations, and fn/impl/struct bodies — emit no records at all, and
-nested macro token trees are jumped over rather than scanned, so an
-`include!` that Rust never expands fabricates nothing.
+Any other line ends the run and drops the pending gate. Bare `mod name;`
+emits both legal forms (`name.rs` and `name/mod.rs`) and resolves in the
+declaring file's module directory — its own directory for
+`mod.rs`/`lib.rs`/`main.rs`, its directory plus its file stem otherwise. A
+`#[path]` value resolves in the containing file's directory, per the Rust
+reference. Targets are lexically normalized so equivalent spellings compare
+equal.
 
-**Verdict.** A candidate whose every found route is `#[cfg(test)]`-gated is
-test scope. Any ungated route, no route found, a `bin/` segment or
+**The scan is line-based**, with no comment or literal masking and no nesting
+state, and that cuts both ways.
+
+Column-zero text that is not a top-level item is read as one anyway: the pair
+written flush left inside a block comment, a raw string, a macro body, or an
+inline `mod` block emits a record. No file in the fleet is written that way.
+
+A declaration the scan cannot see — an `include!`, one indented inside a
+body, one spelled across lines — emits nothing, and a candidate whose every
+visible declaration is gated is test scope. So a file production-reachable
+only through one of those, while also carrying a `#[cfg(test)]`-gated
+declaration, still classifies as test. This is review-flag hygiene, not an
+adversarial control.
+
+**Verdict.** A candidate whose every found declaration is `#[cfg(test)]`-gated
+is test scope. Any ungated declaration, none found, a `bin/` segment or
 `lib.rs`/`main.rs` crate root, or a read failure — including a symlinked
 declaring module, whose blob is link text rather than source — keeps the
-file-local classification: every shape the scanner cannot resolve fails toward no
-record rather than a guessed one. The residual limits of this model are
-enumerated in the `git-diff-summary` header.
+file-local classification.
