@@ -340,9 +340,9 @@ uppercase issue keys (`fix(ABC-123): ...`) and issue numbers
 longer header is a body sentence on the line every log shows.
 
 **The changelog a commit owes.** When `GROWTH_GUARDS_CHANGELOG_REQUIRED_PATHS`
-(empty by default) names a glob some staged path matches, the commit must also
-add or modify a path under `GROWTH_GUARDS_CHANGELOG_PATHS` — the fragment
-scope changelog-entries judges, resolved by the same library — or carry
+(empty by default) names a glob a path the commit changes matches, the commit
+must also add or modify a path under `GROWTH_GUARDS_CHANGELOG_PATHS` — the
+fragment scope changelog-entries judges, resolved by the same library — or carry
 `[no-changelog]` in the header. Deleting a fragment is not writing one, so
 evidence is a path that comes out of the commit carrying content it did not
 carry at that path before: a blob where there was none, a blob that changed,
@@ -352,7 +352,7 @@ there was none), or the destination of a rename. A mode and a sha together
 are what identify a record; either alone lets a transition through. What that path became is changelog-entries'
 judgement, running beside this one.
 
-The staged list comes from `--raw`, the spelling `todo-ban` and
+The commit's file list comes from `--raw`, the spelling `todo-ban` and
 `byte-ceiling` already use, with rename detection pinned rather than
 inherited. A raw record carries the old and new mode and the old and new blob
 for every path, so what the commit did to a file is read off the record
@@ -361,6 +361,39 @@ source loses its content, the destination gains it — and a chmod is a touch
 and nothing else, because its blob did not move. A letter that says only
 "modified" cannot tell a rewrite from a permission bit, and a changelog
 requirement satisfied by one is a requirement satisfied by nothing.
+
+Both lists are read against the parent the commit will HAVE, HEAD ordinarily
+and HEAD's own parent for an amend. `--cached` alone shows only what was staged
+ON TOP of the commit an amend replaces, so a fragment already inside that
+commit read as no fragment at all and the lane refused a commit that satisfied
+it. git tells a `commit-msg` hook nothing about an amend, so the lane reads it
+off the argv of the `git commit` it descends from, in `/proc/<pid>/cmdline`,
+only when `GIT_INDEX_FILE` says this run is a hook git started and only from
+the nearest `git` ancestor, the command doing the committing.
+
+Some of those bytes are the committer's own, so `--amend` counts as the flag
+only where nothing could have been reaching for a value. A value-taking option
+consumes the NEXT argument and nothing further, so that one token decides it,
+read by SHAPE and not by content: dash-prefixed and not a no-value option means
+it swallowed the flag. The refusal covers an attached value and a bundle too,
+whatever the token holds — `--mess --amend`, `--message='a real message'
+--amend`, `-am --amend`, `--status --amend` — and the writer clears it with a
+fragment or `[no-changelog]`. Anything else never reached, so `git commit -m
+'msg' --amend` is the amend it is. `--no-amend` is read whatever stands before
+it, since a missed flag costs a refusal but a missed negation leaves a stale
+`--amend` standing; the bare `--` stops the scan.
+
+Nothing readable is nothing to widen on: a process already gone, no `git` in
+eight generations, or no `/proc` at all, which is every macOS host, where an
+amend is judged against the HEAD it replaces as before. `ps` is deliberately
+not the fallback, because it joins argv with spaces and a message merely
+CONTAINING `--amend` would excuse a commit. A rebase `reword` runs `git commit
+--amend --no-gpg-sign -e --allow-empty` as a child of the rebase and an `edit`
+stop spawns no commit at all, the committer amending at the stop; both are
+amends by this reading, so amending a commit that changes a required path and
+predates the rule needs `[no-changelog]`. A plain all-`pick` rebase and an
+autosquash fixup are unaffected: the sequencer commits those in-process, with
+no `git commit` ancestor to read.
 
 `GROWTH_GUARDS_CHANGELOG_RECORD` counts as that entry only under
 `GROWTH_GUARDS_CHANGELOG_COLLATE=1`, the same declaration the record scope
