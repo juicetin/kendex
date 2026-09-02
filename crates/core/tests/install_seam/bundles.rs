@@ -209,3 +209,150 @@ fn a_second_marketplaces_same_named_bundle_is_refused_naming_the_first() {
         && f.project.join(".claude/skills/docs").exists();
     assert!(members_installed, "the first bundle stays whole");
 }
+
+/// A set the catalog offers and can hand nothing over for is refused at the
+/// declaration. What a set installs derives at plan time, so declaring it
+/// would record the set, plan nothing, and report a successful install of no
+/// files — the shape a `skills = ["nope"]` list leaves behind.
+#[test]
+#[allow(clippy::unwrap_used)]
+fn a_set_whose_members_the_catalog_does_not_offer_is_refused() {
+    let f = world();
+    let catalog = f.home.join("catalog");
+    skill(&catalog, "dev");
+    write(
+        &catalog,
+        "kendex.toml",
+        "[bundles.ghost]\nskills = [\"nope\"]\n\n[bundles.starter]\nskills = [\"dev\"]\n",
+    );
+    manifest_with(&f, &[("cat", &catalog)], "");
+    let before = fs::read_to_string(f.project.join("kendex.toml")).unwrap();
+
+    let error = ops::add(&f.env, &f.scope, &request("ghost")).unwrap_err();
+    let said = error.to_string();
+    assert!(
+        matches!(error, CoreError::BundleInstallsNothing { ref name, .. } if name == "ghost"),
+        "{said}"
+    );
+    assert!(said.contains("nope"), "the member it cannot offer: {said}");
+    assert_eq!(
+        fs::read_to_string(f.project.join("kendex.toml")).unwrap(),
+        before,
+        "a refusal writes nothing"
+    );
+}
+
+/// The must-fail counterpart: the set beside it, whose member the catalog
+/// does offer, installs. The refusal is about what the catalog can hand over,
+/// not about sets.
+#[test]
+#[allow(clippy::unwrap_used)]
+fn a_set_whose_member_the_catalog_offers_installs() {
+    let f = world();
+    let catalog = starter_catalog(&f, "catalog");
+    manifest_with(&f, &[("cat", &catalog)], "");
+    add_and_apply(&f, &request("starter"));
+    assert!(f.project.join(".claude/skills/dev").exists());
+}
+
+/// One `add --bundle <name>` from the catalog these tests declare.
+fn request(name: &str) -> ops::AddRequest {
+    ops::AddRequest {
+        source: Some("cat".to_owned()),
+        bundles: vec![name.to_owned()],
+        no_auto_skills: true,
+        ..ops::AddRequest::default()
+    }
+}
+
+/// A catalog whose set stops reading keeps what it already installed — the
+/// member, and what that member requires. Both derive to nothing while the
+/// body is unreadable, and `kendex apply` sweeps what nothing derives, so a
+/// catalog-side edit would otherwise trash a consumer's files and tell them
+/// they were no longer wanted. The same holds when the control file cannot be
+/// opened at all: a symlink the sealed reader refuses to look through, whose
+/// error is dropped one layer up.
+#[test]
+#[allow(clippy::unwrap_used)]
+fn an_unreadable_set_keeps_its_member_and_what_that_member_requires() {
+    let f = world();
+    let catalog = f.home.join("catalog");
+    write(
+        &catalog,
+        "skills/dev/SKILL.md",
+        "---\nname: dev\ndescription: the dev skill\ndependencies:\n  required: [helper]\n---\nBody.\n",
+    );
+    skill(&catalog, "helper");
+    write(
+        &catalog,
+        "kendex.toml",
+        "[bundles.starter]\nskills = [\"dev\"]\n",
+    );
+    manifest_with(
+        &f,
+        &[("cat", &catalog)],
+        "[bundles.starter]\nsource = \"cat\"\n",
+    );
+    apply_now(&f);
+    let member = f.project.join(".claude/skills/dev");
+    let required = f.project.join(".claude/skills/helper");
+    assert!(member.exists() && required.exists(), "both install first");
+
+    write(
+        &catalog,
+        "kendex.toml",
+        "[bundles.starter]\nskills = [\"dev\"]\nversion = \"1.0\"\n",
+    );
+    sweep(&f);
+    assert!(member.exists(), "an unreadable set trashed its member");
+    assert!(required.exists(), "it trashed what that member requires");
+
+    fs::remove_file(catalog.join("kendex.toml")).unwrap();
+    std::os::unix::fs::symlink(f.home.join("away.toml"), catalog.join("kendex.toml")).unwrap();
+    sweep(&f);
+    assert!(
+        member.exists(),
+        "a catalog that would not open lost its member"
+    );
+}
+
+/// The must-fail counterpart: a catalog that reads still sweeps what its set
+/// stopped carrying, so the retention above is not "keep everything".
+#[test]
+#[allow(clippy::unwrap_used)]
+fn a_readable_catalog_sweeps_what_its_set_dropped() {
+    let f = world();
+    let catalog = starter_catalog(&f, "catalog");
+    manifest_with(
+        &f,
+        &[("cat", &catalog)],
+        "[bundles.starter]\nsource = \"cat\"\n",
+    );
+    apply_now(&f);
+    let member = f.project.join(".claude/skills/dev");
+    assert!(member.exists(), "the member installs first");
+
+    write(
+        &catalog,
+        "kendex.toml",
+        "[bundles.starter]\nskills = [\"docs\"]\n",
+    );
+    sweep(&f);
+    assert!(!member.exists(), "a set that reads kept what it dropped");
+}
+
+/// One `kendex apply` sweep of this scope, orphans and all.
+#[allow(clippy::unwrap_used)]
+fn sweep(f: &Fixture) {
+    let report = kendex_core::engine::plan_apply(
+        &f.env,
+        &f.scope,
+        &kendex_core::engine::PlanOptions {
+            remove_orphans: true,
+            removal_filter: None,
+            ..kendex_core::engine::PlanOptions::default()
+        },
+    )
+    .unwrap();
+    apply::execute(&f.env, &report.plan).unwrap();
+}

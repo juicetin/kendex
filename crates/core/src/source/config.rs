@@ -32,6 +32,10 @@ pub struct SourceConfig {
     /// The curated sets this catalog offers by name. Empty for a
     /// plugin-registry-shaped catalog, whose plugins are its sets.
     pub bundles: BTreeMap<String, CatalogBundle>,
+    /// The sets this catalog declares in a shape the reader will not read,
+    /// by name with the problem. Not offered, and a lookup for one of these
+    /// names refuses with the problem rather than answering "no such set".
+    pub unreadable_bundles: BTreeMap<String, String>,
     /// What the catalog says about itself in `[marketplace]`, capped.
     pub marketplace: Option<MarketplaceMeta>,
     /// Set when the source carries a plugin registry: its items live
@@ -58,6 +62,16 @@ impl SourceConfig {
                     .flat_map(|registry| registry.findings.iter()),
             )
             .chain(self.discovery.findings.iter())
+    }
+
+    /// Whether this reading answers with less than the catalog offers: an
+    /// unusable control file, or a set whose body will not read. Nothing
+    /// deciding a removal reads such a catalog as the whole truth — a sweep
+    /// that deletes files on a catalog-side typo fails in the wrong
+    /// direction, and holding an orphan whose sibling set reads fine is the
+    /// visible, recoverable cost of that.
+    pub fn hides_content(&self) -> bool {
+        self.mode == CatalogMode::Unusable || !self.unreadable_bundles.is_empty()
     }
 
     fn unusable(&mut self, file: &'static str, problem: String, fix: &str) {
@@ -199,7 +213,30 @@ fn read_tables(config: &mut SourceConfig, table: &toml::Table) {
             )),
         },
     }
-    config.bundles = bundles::declared(table);
+    // A set whose body will not read is dropped and reported, and everything
+    // else the catalog offers still installs. What it costs on the removal
+    // side is what `hides_content` above says.
+    let (readable, unreadable) = bundles::declared(table);
+    config.bundles = readable;
+    // A plugin-registry catalog's plugins are its sets and this table is
+    // dead weight nothing reads, so a body in it is reported and recorded
+    // nowhere: what is not in the map cannot be read as this source hiding
+    // content, or as a set an install would refuse.
+    let offers_them = config.plugin_registry.is_none();
+    for (name, problem) in unreadable {
+        let finding = CatalogFinding::new(
+            crate::manifest::MANIFEST_FILE,
+            problem.problem.clone(),
+            problem.fix,
+        );
+        match offers_them {
+            true => {
+                config.config_findings.push(finding.breaking());
+                config.unreadable_bundles.insert(name, problem.problem);
+            }
+            false => config.config_findings.push(finding),
+        }
+    }
     if let Some(mapping) = table.get("agent-skills").and_then(|t| t.as_table()) {
         for (agent, skills) in mapping {
             if let Some(list) = string_list(Some(skills)) {

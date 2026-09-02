@@ -212,3 +212,116 @@ fn a_safety_finding_is_reported_and_fails_nothing() {
     assert_eq!(report.failing(false), 0);
     assert_eq!(report.failing(true), 0, "advisory under --strict too");
 }
+
+/// A `[bundles.<name>]` body carrying a key this reader does not know is
+/// that set's breakage: a plain check fails on it, naming the set and the
+/// key, while the set beside it and every item the catalog offers are
+/// untouched. kendex's own four sets shipped this shape — a `members` list
+/// nothing read — and installed nothing with every check green.
+#[test]
+#[allow(clippy::unwrap_used)]
+fn a_body_key_the_reader_does_not_know_is_that_sets_breakage() {
+    let (_tmp, root) = repo();
+    skill_at(&root, "skills", "gh");
+    fs::write(
+        root.join("kendex.toml"),
+        "[bundles.starter]\nmembers = [\"skill/gh\"]\n\n[bundles.other]\nskills = [\"gh\"]\n",
+    )
+    .unwrap();
+    let sealed = SealedSource::open(&root).unwrap();
+    let report = check(&sealed, "repo").unwrap();
+    assert!(report.failing(false) >= 1, "the check passed it");
+    let finding = &report.catalog[0];
+    assert_eq!(finding.severity, "error", "{}", finding.message);
+    assert!(finding.message.contains("members"), "{}", finding.message);
+    assert!(
+        finding.message.contains("[bundles.starter]"),
+        "{}",
+        finding.message
+    );
+    for list in ["agents", "skills", "commands", "hooks", "mcp-servers"] {
+        assert!(finding.fix.contains(list), "{list}: {}", finding.fix);
+    }
+    let names: Vec<&str> = report.items.iter().map(|item| item.name.as_str()).collect();
+    assert_eq!(names, ["gh"], "the catalog stopped offering its item");
+    let config = kendex_core::source::source_config(&sealed, "repo").unwrap();
+    let sets: Vec<String> = kendex_core::source::bundles::offered(&sealed, &config)
+        .unwrap()
+        .iter()
+        .map(|set| set.name.clone())
+        .collect();
+    assert_eq!(sets, ["other"], "the set beside it went too");
+}
+
+/// The must-fail counterpart: the same catalog with its members under a list
+/// the reader reads is clean, under `--strict` too. Without it the control
+/// above would hold for a check that called every catalog broken.
+#[test]
+#[allow(clippy::unwrap_used)]
+fn a_bundle_written_in_the_shape_the_reader_reads_is_clean() {
+    let (_tmp, root) = repo();
+    skill_at(&root, "skills", "gh");
+    fs::write(
+        root.join("kendex.toml"),
+        "[bundles.starter]\ndescription = \"the basics\"\nskills = [\"gh\"]\n",
+    )
+    .unwrap();
+    let sealed = SealedSource::open(&root).unwrap();
+    let report = check(&sealed, "repo").unwrap();
+    assert_eq!(report.failing(true), 0, "{:?}", report.catalog);
+}
+
+/// A project's own kendex.toml is both manifest and catalog once `kendex
+/// init` writes the marker into it, so this reader meets the manifest's own
+/// `[bundles.<name>]` records. A record carries whatever `kendex add
+/// --bundle <set> --harness <tool>` wrote beside `source` — `harnesses`, and
+/// `method`, `rev` or `enabled` when set — and reading those as a set's own
+/// breakage would fail the project's check on its own install record and
+/// stop that source sweeping orphans, while the set it really offers is
+/// untouched.
+#[test]
+#[allow(clippy::unwrap_used)]
+fn a_projects_own_install_record_is_not_its_catalogs_breakage() {
+    let (_tmp, root) = repo();
+    skill_at(&root, "skills", "gh");
+    fs::write(
+        root.join("kendex.toml"),
+        "is_source_catalog = true\n\n[bundles.offered]\nskills = [\"gh\"]\n\n\
+         [bundles.installed]\nsource = \"cat\"\nharnesses = [\"claude\"]\n\
+         method = \"copy\"\nrev = \"9f2c\"\nenabled = false\n",
+    )
+    .unwrap();
+    let sealed = SealedSource::open(&root).unwrap();
+    let report = check(&sealed, "repo").unwrap();
+    assert_eq!(report.failing(false), 0, "{:?}", report.catalog);
+    let config = kendex_core::source::source_config(&sealed, "repo").unwrap();
+    assert!(
+        !config.hides_content(),
+        "the project stopped sweeping its own orphans"
+    );
+    let sets: Vec<String> = kendex_core::source::bundles::offered(&sealed, &config)
+        .unwrap()
+        .iter()
+        .map(|set| set.name.clone())
+        .collect();
+    assert_eq!(sets, ["offered"], "an install record is not a set on offer");
+}
+
+/// The must-fail counterpart: the same record with a member list beside its
+/// `source` is a set on offer written wrong, not a record, and the check
+/// fails on it. Without this the control above would hold for a reader that
+/// waved through every key a manifest record can carry, wherever it sat.
+#[test]
+#[allow(clippy::unwrap_used)]
+fn a_source_beside_a_member_list_is_still_that_sets_breakage() {
+    let (_tmp, root) = repo();
+    skill_at(&root, "skills", "gh");
+    fs::write(
+        root.join("kendex.toml"),
+        "is_source_catalog = true\n\n[bundles.installed]\nsource = \"cat\"\nskills = [\"gh\"]\n",
+    )
+    .unwrap();
+    let sealed = SealedSource::open(&root).unwrap();
+    let report = check(&sealed, "repo").unwrap();
+    assert!(report.failing(false) >= 1, "{:?}", report.catalog);
+}

@@ -599,7 +599,9 @@ lives in one capability table read by core and UI.
   effective options equal what the bundle derives (`add.rs`); a
   member the user shaped keeps its declaration, the preview saying why.
   `[bundles.<name>]` is keyed by bare name; a second marketplace's
-  same-named bundle is refused naming the first.
+  same-named bundle is refused naming the first, and a set whose members
+  the catalog offers none of is refused rather than declared: what a set
+  installs derives at plan time, so declaring it would install nothing.
 - **A plugin-registry-shaped catalog is recognized, never guessed.** A
   source is read one plugin deep (`plugins/<name>/{agents,commands,skills}`)
   exactly when it carries `.claude-plugin/marketplace.json`; a `plugins/`
@@ -747,7 +749,14 @@ lives in one capability table read by core and UI.
   both, a set switched on installs it switched on, anything else is a
   finding naming both. Authoring lives with the catalog — `[bundles.<name>]`
   in the source's own `kendex.toml`, or nothing for a plugin-registry-shaped
-  catalog — and a set's members are its own catalog's items.
+  catalog — and a set's members are its own catalog's items. A body carrying
+  a key this reader will not read — one that is neither `description` nor a
+  member list, or `source` beside members — drops that set alone and is
+  reported: a key it skipped is a member the set silently loses. The other
+  sets and every item still install, and on the removal side that catalog is
+  answering with less than it offers, so nothing derived from it is swept
+  until the body reads. A body carrying `source` and no member list is the
+  manifest's own record of an installed set, not a set on offer.
 - **A namespaced name is the identity; the separator is per tool.** Items
   from plugin-registry-shaped catalogs are `<plugin>/<item>` in manifest,
   lock and UI. The `/` never reaches disk: the halves are joined — `__` by

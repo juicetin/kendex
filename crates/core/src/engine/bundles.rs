@@ -187,8 +187,29 @@ fn installable(
     let Some((sealed, config, _)) = catalogs.get(&decl.source, decl.rev.as_deref(), state) else {
         return Vec::new();
     };
-    let Ok(offered) = crate::source::bundles::find(sealed, config, name) else {
-        return Vec::new();
+    // What the catalog says is wrong with itself, on this path too: a set is
+    // reached through here and never through the item pass, so without this
+    // a bundle-only manifest is told nothing its catalog reported.
+    super::catalog::notes(config, &decl.source, state);
+    let offered = match crate::source::bundles::find(sealed, config, name) {
+        Ok(offered) => offered,
+        // The set is installed and this pass cannot say what it holds. The
+        // catalog framing belongs to a catalog that would not read; a body
+        // that will not read is that set's own breakage, and its error says
+        // so. Either way the removal pass keeps what this could not account
+        // for.
+        Err(problem) => {
+            state.notes.push(match &problem {
+                crate::error::CoreError::UnreadableBundle { .. } => {
+                    format!("bundle {name}: {problem}")
+                }
+                _ => format!(
+                    "bundle {name}: the catalog '{}' could not be read — {problem}",
+                    decl.source
+                ),
+            });
+            return Vec::new();
+        }
     };
     let Some(bundle) = offered else {
         state.notes.push(format!(
