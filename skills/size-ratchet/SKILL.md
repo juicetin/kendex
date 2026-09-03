@@ -103,9 +103,6 @@ The baseline is policy input, not a measured file. A self row is stale and
 every rewrite removes it, so seed, update, and staged tightening converge in
 one run.
 
-**A threshold change requires a fragment sweep.** In either direction it
-strands the splits made under the previous number: a repo that loosens already
-holds those fragments, a repo that tightens is about to create them. A seam
-that fits only the old number is not evidence of a seam. A change of UNIT is
-a change of threshold too, since the number a path is judged against moves.
+**A threshold change requires a fragment sweep**, in either direction, and a
+change of UNIT is a change of threshold.
 [references/threshold-change.md](references/threshold-change.md).
