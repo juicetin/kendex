@@ -1,13 +1,13 @@
 {
   "schemaVersion": 2,
   "changeName": "add-claude-fable-5-1-bridge",
-  "approvedAt": "2026-09-03T04:36:16.053Z",
+  "approvedAt": "2026-09-03T05:40:11.000Z",
   "approvalSource": "pi-interactive",
   "approver": {
     "name": "Justin Ting",
     "email": "me@justint.ing"
   },
-  "artifactCommit": "1c6b24b685dbda9107d38198d91ae0e0844a55e2",
+  "artifactCommit": "6a105572b56604105bda5cc9fcf7102ba79c161b",
   "artifacts": [
     {
       "path": "openspec/changes/add-claude-fable-5-1-bridge/check-selection.json",
@@ -36,7 +36,7 @@
     },
     {
       "path": "openspec/changes/add-claude-fable-5-1-bridge/selection-review.json",
-      "sha256": "b2585cb44815fe84516d32d2a9b32d1289da95b65d826f998d08f04697b876f7",
+      "sha256": "3962760d3a1ccdd81f7a5a5e2fa5ebd7ba88958755d0f7964393fd36965e6a0f",
       "hashMode": "raw-v1"
     },
     {
