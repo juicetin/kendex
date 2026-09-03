@@ -11,21 +11,11 @@ import {
   packagePlaces,
 } from "@/lib/package-places";
 import { scopeKey } from "@/lib/scope";
-import { useProvenanceStore } from "@/stores/provenance";
+import { joinCurrent, useProvenanceStore } from "@/stores/provenance";
 import { useScanStore } from "@/stores/scan";
 import { useUpdatesStore } from "@/stores/updates";
 
 type Metas = Record<string, PackageMeta_Serialize | null>;
-
-/** What one pass over a package's places came back with: each place's own
- *  record, and whether the ownership join landed. Held together so a card
- *  never draws on one without the other. */
-interface Read {
-  metas: Metas;
-  /** The provenance read answered. False keeps every removal closed: the
-   *  rows on hand may predate an install or a take-over. */
-  joined: boolean;
-}
 
 /** Every place this package sits in, with its install date and its update
  *  standing.
@@ -41,7 +31,7 @@ export function usePackagePlaces(
   kind: ItemKind,
   name: string,
   scopes: Scope[],
-): { places: PackagePlace[]; loading: boolean } {
+): { places: PackagePlace[]; loading: boolean; removalHeld: boolean } {
   const rows = useUpdatesStore((s) => s.rows);
   // Read field by field rather than through one selector: `rowUnsettled`
   // takes the state, and a selector returning a fresh object or closure
@@ -55,12 +45,18 @@ export function usePackagePlaces(
   // refresh that failed leaves the previous rows standing, and a stale
   // snapshot would hide Remove on a package that was just installed.
   const provenance = useProvenanceStore((s) => s.rows);
+  // Whether those rows are a landed read's answer, read off the store
+  // rather than from this hook's own read: the tab's read joins whatever
+  // rescan is already out, so the answer arrives as store state, and the
+  // cards re-render on it. Latched from this call's own read, they would
+  // hold the first verdict until the package or its copies changed.
+  const joined = useProvenanceStore(joinCurrent);
   const reloadProvenance = useProvenanceStore((s) => s.reload);
   // What is actually installed in each place, harness by harness. The join
   // answers per harness too, so this is what says whether every one of a
   // place's copies is accounted for.
   const installed = useScanStore((s) => s.result?.items);
-  const [read, setRead] = useState<Read | null>(null);
+  const [metas, setMetas] = useState<Metas | null>(null);
   // The scan rebuilds the group on every read, so what is watched is which
   // places those are, not the array they arrived in.
   const subject = `${kind}|${name}|${scopes.map(scopeKey).join("|")}`;
@@ -77,7 +73,7 @@ export function usePackagePlaces(
     // already on screen rather than flashing the loading state over them.
     if (shown.current !== subject) {
       shown.current = subject;
-      setRead(null);
+      setMetas(null);
     }
     void Promise.all([
       // Both reads settle before any card draws: a card is its date and
@@ -102,8 +98,8 @@ export function usePackagePlaces(
           }
         }),
       ),
-    ]).then(([joined, pairs]) => {
-      if (!cancelled) setRead({ metas: Object.fromEntries(pairs), joined });
+    ]).then(([, pairs]) => {
+      if (!cancelled) setMetas(Object.fromEntries(pairs));
     });
     return () => {
       cancelled = true;
@@ -111,20 +107,25 @@ export function usePackagePlaces(
   }, [subject, commits, reloadProvenance]);
 
   return {
+    // Held while the ownership answer is being re-read or failed to read:
+    // the rows on hand may predate an install or a take-over, and Remove
+    // is the destructive control. Disabling it says the same thing as
+    // taking it away without moving the buttons under a reader's cursor.
+    removalHeld: !joined,
     places: packagePlaces(
       scopes,
       kind,
       name,
       rows,
-      read?.metas ?? {},
+      metas ?? {},
       { read: updatesRead, checking, reading, pendingFollows },
-      // A read that failed leaves the store's older rows in place, and
-      // those say nothing about who owns these copies now. Passing none
-      // holds the removal controls closed rather than deriving a
-      // destructive button from a snapshot that may have gone stale.
-      read?.joined ? provenance : [],
+      // The rows as they stand decide which cards carry a Remove at all:
+      // a read merely running does not withhold a control that exists,
+      // which is the rule `lib/updates-read-state.ts` states for its own
+      // surfaces. Whether that control may be PRESSED is `removalHeld`.
+      provenance,
       installed ?? [],
     ),
-    loading: read === null,
+    loading: metas === null,
   };
 }
