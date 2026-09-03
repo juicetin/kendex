@@ -1,17 +1,17 @@
 {
   "schemaVersion": 2,
   "changeName": "add-claude-fable-5-1-bridge",
-  "approvedAt": "2026-09-03T02:48:46Z",
+  "approvedAt": "2026-09-03T04:36:16.053Z",
   "approvalSource": "pi-interactive",
   "approver": {
     "name": "Justin Ting",
     "email": "me@justint.ing"
   },
-  "artifactCommit": "79db752624e9a5e729f5d99afa2710cf8e766975",
+  "artifactCommit": "1c6b24b685dbda9107d38198d91ae0e0844a55e2",
   "artifacts": [
     {
       "path": "openspec/changes/add-claude-fable-5-1-bridge/check-selection.json",
-      "sha256": "d9e3492bf8c64163c2158b4376cbbe002b5b839eea610070e066adf6462e83c7",
+      "sha256": "5086797c6452160fd6e65dec354345a8f70f8d4dea5079e5811efa7a9471ad43",
       "hashMode": "raw-v1"
     },
     {
@@ -21,7 +21,7 @@
     },
     {
       "path": "openspec/changes/add-claude-fable-5-1-bridge/impact.json",
-      "sha256": "7e070ca1d4ac4568b05712fe953a8e3b22dd3d4a3fa22183e672351d42e5d3a0",
+      "sha256": "1687eb27d988ac8653c68bc6597cffb95ca436d270a7f223718d98ef684e6961",
       "hashMode": "raw-v1"
     },
     {
@@ -31,17 +31,17 @@
     },
     {
       "path": "openspec/changes/add-claude-fable-5-1-bridge/quality-plan.md",
-      "sha256": "054198cc3f139eb59defb436f514df676b9c087e2d3a2347404bfeed840ae8cf",
+      "sha256": "3f06abfd51feb7048113b83958190c03a555df04c9db01eec287c746b1d8f758",
       "hashMode": "raw-v1"
     },
     {
       "path": "openspec/changes/add-claude-fable-5-1-bridge/selection-review.json",
-      "sha256": "efaea3921486957b958f42525963bc56cbc06990218d11c8810b6bb8f0541063",
+      "sha256": "b2585cb44815fe84516d32d2a9b32d1289da95b65d826f998d08f04697b876f7",
       "hashMode": "raw-v1"
     },
     {
       "path": "openspec/changes/add-claude-fable-5-1-bridge/selection-review.md",
-      "sha256": "d68aca0513001fa2810f05f484efb57bcbe33ea4dced47249b48304391d294b5",
+      "sha256": "b89c99d4f8e368a8984e72b702896b0595da990943cc45b58f3b41731f4e02e6",
       "hashMode": "raw-v1"
     },
     {
@@ -56,7 +56,7 @@
     },
     {
       "path": "openspec/changes/add-claude-fable-5-1-bridge/tasks.md",
-      "sha256": "4a2a50707e5cdef4573772fd513eba7601c88e29cc5d0912194597e4f77b9eef",
+      "sha256": "d326875a17439c4bf02baf2b80484eb4d2a69776f90c837b3bc06759f801b70f",
       "hashMode": "normalized-tasks-v1"
     }
   ],
