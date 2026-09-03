@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "changeName": "add-claude-fable-5-1-bridge",
+  "findings": [
+    {
+      "id": "missing-catalog-evidence-caught-by-review",
+      "kind": "review-correction",
+      "summary": "The first fresh Satisfaction Review rejected the change because task 1.4 had no catalog-validation evidence record. The parent added and validated the missing record before requesting this accepted review.",
+      "impact": "medium",
+      "evidence": [
+        {
+          "checkId": "catalog-validation",
+          "checkVersion": "1.0.0",
+          "state": "produced",
+          "uri": "evidence/catalog-validation.json",
+          "sha256": "cf5fca6f15890274c6a037c5dc6ab3a68b5613d09c74a70adfa302b253f97ddc",
+          "producer": "spec-led-v2 task owner",
+          "method": "check-lifecycle validator",
+          "gitIdentity": "diff:f747177acd4e8c6ff10cbad521c1bbaa9ee8c923d5b9d898bde13e95a8be8512",
+          "createdAt": "2026-09-03T04:55:45.556Z",
+          "freshnessHours": 24
+        }
+      ]
+    },
+    {
+      "id": "verifier-command-guidance-repaired",
+      "kind": "missing-guidance",
+      "summary": "The spec-led verifier guidance used an unsupported command shape. The confirmed correction was routed to the canonical harness-run-start skill and validated.",
+      "impact": "medium",
+      "evidence": [
+        {
+          "checkId": "skill-governance",
+          "checkVersion": "1.0.0",
+          "state": "produced",
+          "uri": "evidence/skill-governance.json",
+          "sha256": "7819b343b42757cb9ad273d66dccf9e5a97a34229a944a2ac2f6cd02a17d4c2b",
+          "producer": "spec-led-v2 task owner",
+          "method": "skill governance review",
+          "gitIdentity": "diff:f747177acd4e8c6ff10cbad521c1bbaa9ee8c923d5b9d898bde13e95a8be8512",
+          "createdAt": "2026-09-03T03:47:42Z",
+          "freshnessHours": 24
+        }
+      ]
+    }
+  ],
+  "proposedAmendments": [],
+  "skillCandidates": []
+}

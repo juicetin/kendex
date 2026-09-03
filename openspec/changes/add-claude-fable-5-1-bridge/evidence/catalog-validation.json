@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "changeName": "add-claude-fable-5-1-bridge",
+  "checkId": "catalog-validation",
+  "checkVersion": "1.0.0",
+  "recordedAt": "2026-09-03T04:55:45.556Z",
+  "status": "passed",
+  "command": "node scripts/spec-led-verify.mjs status --change add-claude-fable-5-1-bridge",
+  "exitCode": 0,
+  "catalogVersion": "1.0.0",
+  "overlays": [],
+  "selectedDispositionCount": 28,
+  "requiredDispositionCount": 25,
+  "notApplicableDispositionCount": 3,
+  "validatorResult": {
+    "ok": true,
+    "classification": "ready",
+    "repoRoot": "/data/repos/juicetin-kendex",
+    "change": "add-claude-fable-5-1-bridge",
+    "postImplementation": {
+      "complete": false,
+      "missing": [
+        "satisfaction-review.json",
+        "retrospective.json"
+      ]
+    }
+  }
+}

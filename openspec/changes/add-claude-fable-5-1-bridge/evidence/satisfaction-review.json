@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "changeName": "add-claude-fable-5-1-bridge",
+  "checkId": "satisfaction-review",
+  "checkVersion": "1.0.0",
+  "recordedAt": "2026-09-03T05:05:59.413Z",
+  "status": "passed",
+  "method": "fresh independent Satisfaction Review",
+  "reviewerRun": "d88e613f-d2c4-44b1-9418-5f391a9efea5",
+  "reviewerInstanceId": "721ed00f-ccd3-4102-b262-059dcfbbda2d",
+  "reviewerModel": "pi-claude/claude-fable-5",
+  "freshContext": true,
+  "readOnly": true,
+  "verdict": "accepted",
+  "decisionCount": 25,
+  "findings": [
+    {
+      "severity": "low",
+      "location": "openspec/changes/add-claude-fable-5-1-bridge/evidence/workflow-telemetry.json",
+      "reason": "The record uses the key \"outcome\" where every other evidence record uses \"status\", a naming inconsistency in an otherwise complete record.",
+      "exactCorrection": "No action required for this change. If the record is regenerated for any reason, rename \"outcome\" to \"status\" to match the other 24 evidence records."
+    },
+    {
+      "severity": "low",
+      "location": "openspec/changes/add-claude-fable-5-1-bridge/evidence/real-subscription-acceptance.json (implementationBaseCommit)",
+      "reason": "The live acceptance run (recorded 03:12:55Z) binds to base commit 1cde3e79, before the final normalizer-removal rebuild (build re-recorded 04:24:00Z at commit 1c6b24b6). The delta between those states is bundle whitespace-byte preservation only, the deterministic 554-test suite reran green afterward, and the final code review attested the tracked bundle matches a fresh build, so the live proof remains representative — but it does not literally exercise the final bundle bytes.",
+      "exactCorrection": "No action required for acceptance. If a stronger binding is wanted before fork delivery (tasks 7.1–7.2), rerun the disposable Pi startup check against the final installed bundle, which task 7.2 already requires."
+    }
+  ],
+  "satisfactionReview": "satisfaction-review.json",
+  "satisfactionReviewSha256": "67cd51dfec788eb89f497c4009b4b8fba1f85b9d0803d3b680903b829a2490fb",
+  "sourceReport": "satisfaction-review.md",
+  "sourceReportSha256": "204cb552f248285551025346c585715713efa09d4cfafa2f9c6faaa0623ff17d",
+  "gitIdentity": "diff:f747177acd4e8c6ff10cbad521c1bbaa9ee8c923d5b9d898bde13e95a8be8512",
+  "secretsIncluded": false
+}

@@ -1,0 +1,649 @@
+{
+  "schemaVersion": 1,
+  "changeName": "add-claude-fable-5-1-bridge",
+  "reviewedArtifacts": [
+    {
+      "path": "proposal.md",
+      "sha256": "4e8a3bc990f9d5062f54367c4cb84c0823534a8eb2893b3e49730467e6de2823"
+    },
+    {
+      "path": "design.md",
+      "sha256": "1794dfa3eea3e5c11469aa932af7029c0b5d7edf9cde3f6ab4ca7f4f78002e60"
+    },
+    {
+      "path": "impact.json",
+      "sha256": "1687eb27d988ac8653c68bc6597cffb95ca436d270a7f223718d98ef684e6961"
+    },
+    {
+      "path": "sequence.md",
+      "sha256": "9a673ea97209b776a3910b75d621f9cde6fd37ccbdaa959ca5106e9d90c51f91"
+    },
+    {
+      "path": "quality-plan.md",
+      "sha256": "3f06abfd51feb7048113b83958190c03a555df04c9db01eec287c746b1d8f758"
+    },
+    {
+      "path": "check-selection.json",
+      "sha256": "5086797c6452160fd6e65dec354345a8f70f8d4dea5079e5811efa7a9471ad43"
+    },
+    {
+      "path": "selection-review.json",
+      "sha256": "b2585cb44815fe84516d32d2a9b32d1289da95b65d826f998d08f04697b876f7"
+    },
+    {
+      "path": "selection-review.md",
+      "sha256": "b89c99d4f8e368a8984e72b702896b0595da990943cc45b58f3b41731f4e02e6"
+    },
+    {
+      "path": "specs/pi-claude-fable-5-1/spec.md",
+      "sha256": "eeceae02e897062a8ba491b4b42395f60e7076679e4bb6895765cd6e76e0ad44"
+    },
+    {
+      "path": "evidence/catalog-validation.json",
+      "sha256": "cf5fca6f15890274c6a037c5dc6ab3a68b5613d09c74a70adfa302b253f97ddc"
+    },
+    {
+      "path": "evidence/baseline-tests.json",
+      "sha256": "5642dd0ba01faecb703be75590ebec7d47149a60cf32fdb08fb3ef45f4e7e03c"
+    },
+    {
+      "path": "evidence/typecheck.json",
+      "sha256": "962dd6257b60841d21f049440470d13fe6db411a2bda614cc274639463a3bc40"
+    },
+    {
+      "path": "evidence/build.json",
+      "sha256": "99c3e839401f53957a1d8cab752c1d96ef7009be256f95b94b23b64b6b741a50"
+    },
+    {
+      "path": "evidence/openspec-validation.json",
+      "sha256": "7bdcc7b4b7591148515f9c3d7129316fbc21ff3b389cfe349d4cd20a14a678ca"
+    },
+    {
+      "path": "evidence/dependency-review.json",
+      "sha256": "31d2ce39693774ad58d77df3e479efed0f72be11aa9012b49b4e76212bb5af35"
+    },
+    {
+      "path": "evidence/test-first.json",
+      "sha256": "b23f65e7393ee9f7739f1302d759cf1ac9aa2d6370daecf2c6895927246e34b1"
+    },
+    {
+      "path": "evidence/selection-review.json",
+      "sha256": "557efb16999f747a0ab81b9fe3a915bc3da82a5b1ac0ea3355093f387e6af5bf"
+    },
+    {
+      "path": "evidence/code-review.json",
+      "sha256": "75119a788e3b4691ecedb263edb552c8879a3cb2589effe1032672ffb69b6be0"
+    },
+    {
+      "path": "evidence/auth-review.json",
+      "sha256": "f3db463d3e5d3c0220468a3692b4aae95cb6bc1afbae9dc7ff69e4f6b7146ef9"
+    },
+    {
+      "path": "evidence/security-scan.json",
+      "sha256": "40fc3be7e07cf4a0d221009ef166a220cf976a0b452dbe991863a1d0be2d5873"
+    },
+    {
+      "path": "evidence/quality-attribute-scenarios.json",
+      "sha256": "eae6da1a7bfc397d768d103e510cd292a4fe513be03554be686d8a52aeba33a4"
+    },
+    {
+      "path": "evidence/product-observability.json",
+      "sha256": "02d6fc22f77e56f51bd0bbbdf439109d71565f78dc00432df48430ae5cb4ce08"
+    },
+    {
+      "path": "evidence/structured-logging.json",
+      "sha256": "2b823b2e734991ad69f7f0c21e8666c8d3b9f396f4d5c4a55fefb4f616e36587"
+    },
+    {
+      "path": "evidence/bounded-profiling.json",
+      "sha256": "0302ed2101703bd80736969be6a6aa0d95ca39f8875cafd31a8632a012e44c2f"
+    },
+    {
+      "path": "evidence/workflow-telemetry.json",
+      "sha256": "cc8bafc072c1c8e6f9341ca68cecc0deb6c9ffb4c69b8a0c63971523721bd184"
+    },
+    {
+      "path": "evidence/skill-evaluation.json",
+      "sha256": "3035e5c6bd9c82b6bd8bafb04026ade2dcc43ddcbc28d1054d7ee11019d50e54"
+    },
+    {
+      "path": "evidence/code-simplification.json",
+      "sha256": "85b960eb66f92df92bcb9704c33f88bdf0a4c799588f79030ce8509d28e6a237"
+    },
+    {
+      "path": "evidence/maintainability-review.json",
+      "sha256": "f478d6b290cca1cfeb53ccb7237e1aafa51f4c1489da622487936c7560bc242e"
+    },
+    {
+      "path": "evidence/fallow.json",
+      "sha256": "a1a2c9a61fd416854ffd0a7ce0bdc192db50782f2aa290f84d4e9f4cd73c12c6"
+    },
+    {
+      "path": "evidence/documentation-sync.json",
+      "sha256": "0e618f8f55b9453be57cd01a335ef258eb66c256165f5d8f6ae0a48a4a0dec93"
+    },
+    {
+      "path": "evidence/package-verification.json",
+      "sha256": "3c21d96f74683fe4d7387db7c7d88e400a366b255458a8bb476eb6ee1b3212d3"
+    },
+    {
+      "path": "evidence/skill-governance.json",
+      "sha256": "7819b343b42757cb9ad273d66dccf9e5a97a34229a944a2ac2f6cd02a17d4c2b"
+    },
+    {
+      "path": "evidence/real-subscription-acceptance.json",
+      "sha256": "48a27139339a13dc140b32ad8a48ae48d6e222e782f3af0cb8133eacc85f76be"
+    },
+    {
+      "path": "evidence/guard.json",
+      "sha256": "356e00a17d8a1d2a159708d08ddc450438219c6a53c9c773560d0564523dec79"
+    }
+  ],
+  "reviewer": {
+    "authorInstanceId": "01a064e5-b1b4-7908-b292-28a1f5eba6bc",
+    "reviewerInstanceId": "721ed00f-ccd3-4102-b262-059dcfbbda2d",
+    "model": "pi-claude/claude-fable-5",
+    "authorModel": "openai-codex/gpt-5.6-sol",
+    "differentModelAvailable": true,
+    "freshContext": true,
+    "role": "review-only",
+    "toolPolicy": "read-only",
+    "personaSwap": false
+  },
+  "reviewedAt": "2026-09-03T05:05:59.413Z",
+  "sourceReport": "satisfaction-review.md",
+  "sourceReportSha256": "204cb552f248285551025346c585715713efa09d4cfafa2f9c6faaa0623ff17d",
+  "gitIdentity": "diff:f747177acd4e8c6ff10cbad521c1bbaa9ee8c923d5b9d898bde13e95a8be8512",
+  "verdict": "accepted",
+  "decisions": [
+    {
+      "kind": "satisfied",
+      "checkId": "catalog-validation",
+      "checkVersion": "1.0.0",
+      "evidence": [
+        {
+          "checkId": "catalog-validation",
+          "checkVersion": "1.0.0",
+          "state": "produced",
+          "uri": "evidence/catalog-validation.json",
+          "sha256": "cf5fca6f15890274c6a037c5dc6ab3a68b5613d09c74a70adfa302b253f97ddc",
+          "producer": "spec-led-v2 task owner",
+          "method": "check-lifecycle validator",
+          "gitIdentity": "diff:f747177acd4e8c6ff10cbad521c1bbaa9ee8c923d5b9d898bde13e95a8be8512",
+          "createdAt": "2026-09-03T04:55:45.556Z",
+          "freshnessHours": 24
+        }
+      ]
+    },
+    {
+      "kind": "satisfied",
+      "checkId": "baseline-tests",
+      "checkVersion": "1.0.0",
+      "evidence": [
+        {
+          "checkId": "baseline-tests",
+          "checkVersion": "1.0.0",
+          "state": "produced",
+          "uri": "evidence/baseline-tests.json",
+          "sha256": "5642dd0ba01faecb703be75590ebec7d47149a60cf32fdb08fb3ef45f4e7e03c",
+          "producer": "spec-led-v2 task owner",
+          "method": "pnpm test",
+          "gitIdentity": "diff:f747177acd4e8c6ff10cbad521c1bbaa9ee8c923d5b9d898bde13e95a8be8512",
+          "createdAt": "2026-09-03T03:12:55Z",
+          "freshnessHours": 24
+        }
+      ]
+    },
+    {
+      "kind": "satisfied",
+      "checkId": "typecheck",
+      "checkVersion": "1.0.0",
+      "evidence": [
+        {
+          "checkId": "typecheck",
+          "checkVersion": "1.0.0",
+          "state": "produced",
+          "uri": "evidence/typecheck.json",
+          "sha256": "962dd6257b60841d21f049440470d13fe6db411a2bda614cc274639463a3bc40",
+          "producer": "spec-led-v2 task owner",
+          "method": "pnpm typecheck",
+          "gitIdentity": "diff:f747177acd4e8c6ff10cbad521c1bbaa9ee8c923d5b9d898bde13e95a8be8512",
+          "createdAt": "2026-09-03T03:12:55Z",
+          "freshnessHours": 24
+        }
+      ]
+    },
+    {
+      "kind": "satisfied",
+      "checkId": "build",
+      "checkVersion": "1.0.0",
+      "evidence": [
+        {
+          "checkId": "build",
+          "checkVersion": "1.0.0",
+          "state": "produced",
+          "uri": "evidence/build.json",
+          "sha256": "99c3e839401f53957a1d8cab752c1d96ef7009be256f95b94b23b64b6b741a50",
+          "producer": "spec-led-v2 task owner",
+          "method": "pnpm build",
+          "gitIdentity": "diff:f747177acd4e8c6ff10cbad521c1bbaa9ee8c923d5b9d898bde13e95a8be8512",
+          "createdAt": "2026-09-03T04:24:00Z",
+          "freshnessHours": 24
+        }
+      ]
+    },
+    {
+      "kind": "satisfied",
+      "checkId": "openspec-validation",
+      "checkVersion": "1.0.0",
+      "evidence": [
+        {
+          "checkId": "openspec-validation",
+          "checkVersion": "1.0.0",
+          "state": "produced",
+          "uri": "evidence/openspec-validation.json",
+          "sha256": "7bdcc7b4b7591148515f9c3d7129316fbc21ff3b389cfe349d4cd20a14a678ca",
+          "producer": "spec-led-v2 task owner",
+          "method": "openspec validate --all --strict",
+          "gitIdentity": "diff:f747177acd4e8c6ff10cbad521c1bbaa9ee8c923d5b9d898bde13e95a8be8512",
+          "createdAt": "2026-09-03T03:47:42Z",
+          "freshnessHours": 24
+        }
+      ]
+    },
+    {
+      "kind": "satisfied",
+      "checkId": "dependency-review",
+      "checkVersion": "1.0.0",
+      "evidence": [
+        {
+          "checkId": "dependency-review",
+          "checkVersion": "1.0.0",
+          "state": "produced",
+          "uri": "evidence/dependency-review.json",
+          "sha256": "31d2ce39693774ad58d77df3e479efed0f72be11aa9012b49b4e76212bb5af35",
+          "producer": "spec-led-v2 task owner",
+          "method": "dependency-survey",
+          "gitIdentity": "diff:f747177acd4e8c6ff10cbad521c1bbaa9ee8c923d5b9d898bde13e95a8be8512",
+          "createdAt": "2026-09-03T03:12:55Z",
+          "freshnessHours": 24
+        }
+      ]
+    },
+    {
+      "kind": "satisfied",
+      "checkId": "test-first",
+      "checkVersion": "1.0.0",
+      "evidence": [
+        {
+          "checkId": "test-first",
+          "checkVersion": "1.0.0",
+          "state": "produced",
+          "uri": "evidence/test-first.json",
+          "sha256": "b23f65e7393ee9f7739f1302d759cf1ac9aa2d6370daecf2c6895927246e34b1",
+          "producer": "spec-led-v2 task owner",
+          "method": "tdd-enforcement",
+          "gitIdentity": "diff:f747177acd4e8c6ff10cbad521c1bbaa9ee8c923d5b9d898bde13e95a8be8512",
+          "createdAt": "2026-09-03T03:12:55Z",
+          "freshnessHours": 24
+        }
+      ]
+    },
+    {
+      "kind": "satisfied",
+      "checkId": "selection-review",
+      "checkVersion": "1.0.0",
+      "evidence": [
+        {
+          "checkId": "selection-review",
+          "checkVersion": "1.0.0",
+          "state": "produced",
+          "uri": "evidence/selection-review.json",
+          "sha256": "557efb16999f747a0ab81b9fe3a915bc3da82a5b1ac0ea3355093f387e6af5bf",
+          "producer": "spec-led-v2 task owner",
+          "method": "selection-review",
+          "gitIdentity": "diff:f747177acd4e8c6ff10cbad521c1bbaa9ee8c923d5b9d898bde13e95a8be8512",
+          "createdAt": "2026-09-03T04:33:51Z",
+          "freshnessHours": 24
+        }
+      ]
+    },
+    {
+      "kind": "satisfied",
+      "checkId": "satisfaction-review",
+      "checkVersion": "1.0.0",
+      "evidence": [
+        {
+          "checkId": "satisfaction-review",
+          "checkVersion": "1.0.0",
+          "state": "produced",
+          "uri": "satisfaction-review.md",
+          "sha256": "204cb552f248285551025346c585715713efa09d4cfafa2f9c6faaa0623ff17d",
+          "producer": "fresh Fable 5 Satisfaction reviewer",
+          "method": "satisfaction-review",
+          "gitIdentity": "diff:f747177acd4e8c6ff10cbad521c1bbaa9ee8c923d5b9d898bde13e95a8be8512",
+          "createdAt": "2026-09-03T05:05:59.413Z",
+          "freshnessHours": 24
+        }
+      ]
+    },
+    {
+      "kind": "satisfied",
+      "checkId": "code-review",
+      "checkVersion": "1.0.0",
+      "evidence": [
+        {
+          "checkId": "code-review",
+          "checkVersion": "1.0.0",
+          "state": "produced",
+          "uri": "evidence/code-review.json",
+          "sha256": "75119a788e3b4691ecedb263edb552c8879a3cb2589effe1032672ffb69b6be0",
+          "producer": "spec-led-v2 task owner",
+          "method": "code-review",
+          "gitIdentity": "diff:f747177acd4e8c6ff10cbad521c1bbaa9ee8c923d5b9d898bde13e95a8be8512",
+          "createdAt": "2026-09-03T04:30:40Z",
+          "freshnessHours": 24
+        }
+      ]
+    },
+    {
+      "kind": "satisfied",
+      "checkId": "auth-review",
+      "checkVersion": "1.0.0",
+      "evidence": [
+        {
+          "checkId": "auth-review",
+          "checkVersion": "1.0.0",
+          "state": "produced",
+          "uri": "evidence/auth-review.json",
+          "sha256": "f3db463d3e5d3c0220468a3692b4aae95cb6bc1afbae9dc7ff69e4f6b7146ef9",
+          "producer": "spec-led-v2 task owner",
+          "method": "auth-check",
+          "gitIdentity": "diff:f747177acd4e8c6ff10cbad521c1bbaa9ee8c923d5b9d898bde13e95a8be8512",
+          "createdAt": "2026-09-03T03:47:42Z",
+          "freshnessHours": 24
+        }
+      ]
+    },
+    {
+      "kind": "satisfied",
+      "checkId": "security-scan",
+      "checkVersion": "1.0.0",
+      "evidence": [
+        {
+          "checkId": "security-scan",
+          "checkVersion": "1.0.0",
+          "state": "produced",
+          "uri": "evidence/security-scan.json",
+          "sha256": "40fc3be7e07cf4a0d221009ef166a220cf976a0b452dbe991863a1d0be2d5873",
+          "producer": "spec-led-v2 task owner",
+          "method": "security-scan",
+          "gitIdentity": "diff:f747177acd4e8c6ff10cbad521c1bbaa9ee8c923d5b9d898bde13e95a8be8512",
+          "createdAt": "2026-09-03T03:58:51Z",
+          "freshnessHours": 24
+        }
+      ]
+    },
+    {
+      "kind": "satisfied",
+      "checkId": "quality-attribute-scenarios",
+      "checkVersion": "1.0.0",
+      "evidence": [
+        {
+          "checkId": "quality-attribute-scenarios",
+          "checkVersion": "1.0.0",
+          "state": "produced",
+          "uri": "evidence/quality-attribute-scenarios.json",
+          "sha256": "eae6da1a7bfc397d768d103e510cd292a4fe513be03554be686d8a52aeba33a4",
+          "producer": "spec-led-v2 task owner",
+          "method": "focused scenario tests",
+          "gitIdentity": "diff:f747177acd4e8c6ff10cbad521c1bbaa9ee8c923d5b9d898bde13e95a8be8512",
+          "createdAt": "2026-09-03T03:12:55Z",
+          "freshnessHours": 24
+        }
+      ]
+    },
+    {
+      "kind": "satisfied",
+      "checkId": "product-observability",
+      "checkVersion": "1.0.0",
+      "evidence": [
+        {
+          "checkId": "product-observability",
+          "checkVersion": "1.0.0",
+          "state": "produced",
+          "uri": "evidence/product-observability.json",
+          "sha256": "02d6fc22f77e56f51bd0bbbdf439109d71565f78dc00432df48430ae5cb4ce08",
+          "producer": "spec-led-v2 task owner",
+          "method": "observability contract review",
+          "gitIdentity": "diff:f747177acd4e8c6ff10cbad521c1bbaa9ee8c923d5b9d898bde13e95a8be8512",
+          "createdAt": "2026-09-03T03:47:42Z",
+          "freshnessHours": 24
+        }
+      ]
+    },
+    {
+      "kind": "satisfied",
+      "checkId": "structured-logging",
+      "checkVersion": "1.0.0",
+      "evidence": [
+        {
+          "checkId": "structured-logging",
+          "checkVersion": "1.0.0",
+          "state": "produced",
+          "uri": "evidence/structured-logging.json",
+          "sha256": "2b823b2e734991ad69f7f0c21e8666c8d3b9f396f4d5c4a55fefb4f616e36587",
+          "producer": "spec-led-v2 task owner",
+          "method": "logging contract review",
+          "gitIdentity": "diff:f747177acd4e8c6ff10cbad521c1bbaa9ee8c923d5b9d898bde13e95a8be8512",
+          "createdAt": "2026-09-03T03:47:42Z",
+          "freshnessHours": 24
+        }
+      ]
+    },
+    {
+      "kind": "satisfied",
+      "checkId": "bounded-profiling",
+      "checkVersion": "1.0.0",
+      "evidence": [
+        {
+          "checkId": "bounded-profiling",
+          "checkVersion": "1.0.0",
+          "state": "produced",
+          "uri": "evidence/bounded-profiling.json",
+          "sha256": "0302ed2101703bd80736969be6a6aa0d95ca39f8875cafd31a8632a012e44c2f",
+          "producer": "spec-led-v2 task owner",
+          "method": "bounded profiling session",
+          "gitIdentity": "diff:f747177acd4e8c6ff10cbad521c1bbaa9ee8c923d5b9d898bde13e95a8be8512",
+          "createdAt": "2026-09-03T03:12:55Z",
+          "freshnessHours": 24
+        }
+      ]
+    },
+    {
+      "kind": "satisfied",
+      "checkId": "workflow-telemetry",
+      "checkVersion": "1.0.0",
+      "evidence": [
+        {
+          "checkId": "workflow-telemetry",
+          "checkVersion": "1.0.0",
+          "state": "produced",
+          "uri": "evidence/workflow-telemetry.json",
+          "sha256": "cc8bafc072c1c8e6f9341ca68cecc0deb6c9ffb4c69b8a0c63971523721bd184",
+          "producer": "spec-led-v2 task owner",
+          "method": "workflow telemetry record",
+          "gitIdentity": "diff:f747177acd4e8c6ff10cbad521c1bbaa9ee8c923d5b9d898bde13e95a8be8512",
+          "createdAt": "2026-09-03T04:30:40Z",
+          "freshnessHours": 24
+        }
+      ]
+    },
+    {
+      "kind": "satisfied",
+      "checkId": "skill-evaluation",
+      "checkVersion": "1.0.0",
+      "evidence": [
+        {
+          "checkId": "skill-evaluation",
+          "checkVersion": "1.0.0",
+          "state": "produced",
+          "uri": "evidence/skill-evaluation.json",
+          "sha256": "3035e5c6bd9c82b6bd8bafb04026ade2dcc43ddcbc28d1054d7ee11019d50e54",
+          "producer": "spec-led-v2 task owner",
+          "method": "skill evaluation",
+          "gitIdentity": "diff:f747177acd4e8c6ff10cbad521c1bbaa9ee8c923d5b9d898bde13e95a8be8512",
+          "createdAt": "2026-09-03T03:47:42Z",
+          "freshnessHours": 24
+        }
+      ]
+    },
+    {
+      "kind": "satisfied",
+      "checkId": "code-simplification",
+      "checkVersion": "1.0.0",
+      "evidence": [
+        {
+          "checkId": "code-simplification",
+          "checkVersion": "1.0.0",
+          "state": "produced",
+          "uri": "evidence/code-simplification.json",
+          "sha256": "85b960eb66f92df92bcb9704c33f88bdf0a4c799588f79030ce8509d28e6a237",
+          "producer": "spec-led-v2 task owner",
+          "method": "code-simplifier",
+          "gitIdentity": "diff:f747177acd4e8c6ff10cbad521c1bbaa9ee8c923d5b9d898bde13e95a8be8512",
+          "createdAt": "2026-09-03T03:47:42Z",
+          "freshnessHours": 24
+        }
+      ]
+    },
+    {
+      "kind": "satisfied",
+      "checkId": "maintainability-review",
+      "checkVersion": "1.0.0",
+      "evidence": [
+        {
+          "checkId": "maintainability-review",
+          "checkVersion": "1.0.0",
+          "state": "produced",
+          "uri": "evidence/maintainability-review.json",
+          "sha256": "f478d6b290cca1cfeb53ccb7237e1aafa51f4c1489da622487936c7560bc242e",
+          "producer": "spec-led-v2 task owner",
+          "method": "strict-maintainability-review",
+          "gitIdentity": "diff:f747177acd4e8c6ff10cbad521c1bbaa9ee8c923d5b9d898bde13e95a8be8512",
+          "createdAt": "2026-09-03T04:25:00Z",
+          "freshnessHours": 24
+        }
+      ]
+    },
+    {
+      "kind": "satisfied",
+      "checkId": "fallow",
+      "checkVersion": "1.0.0",
+      "evidence": [
+        {
+          "checkId": "fallow",
+          "checkVersion": "1.0.0",
+          "state": "produced",
+          "uri": "evidence/fallow.json",
+          "sha256": "a1a2c9a61fd416854ffd0a7ce0bdc192db50782f2aa290f84d4e9f4cd73c12c6",
+          "producer": "spec-led-v2 task owner",
+          "method": "fallow-check",
+          "gitIdentity": "diff:f747177acd4e8c6ff10cbad521c1bbaa9ee8c923d5b9d898bde13e95a8be8512",
+          "createdAt": "2026-09-03T03:47:42Z",
+          "freshnessHours": 24
+        }
+      ]
+    },
+    {
+      "kind": "satisfied",
+      "checkId": "documentation-sync",
+      "checkVersion": "1.0.0",
+      "evidence": [
+        {
+          "checkId": "documentation-sync",
+          "checkVersion": "1.0.0",
+          "state": "produced",
+          "uri": "evidence/documentation-sync.json",
+          "sha256": "0e618f8f55b9453be57cd01a335ef258eb66c256165f5d8f6ae0a48a4a0dec93",
+          "producer": "spec-led-v2 task owner",
+          "method": "documentation and diff inspection",
+          "gitIdentity": "diff:f747177acd4e8c6ff10cbad521c1bbaa9ee8c923d5b9d898bde13e95a8be8512",
+          "createdAt": "2026-09-03T03:47:42Z",
+          "freshnessHours": 24
+        }
+      ]
+    },
+    {
+      "kind": "satisfied",
+      "checkId": "package-verification",
+      "checkVersion": "1.0.0",
+      "evidence": [
+        {
+          "checkId": "package-verification",
+          "checkVersion": "1.0.0",
+          "state": "produced",
+          "uri": "evidence/package-verification.json",
+          "sha256": "3c21d96f74683fe4d7387db7c7d88e400a366b255458a8bb476eb6ee1b3212d3",
+          "producer": "spec-led-v2 task owner",
+          "method": "npm pack --dry-run",
+          "gitIdentity": "diff:f747177acd4e8c6ff10cbad521c1bbaa9ee8c923d5b9d898bde13e95a8be8512",
+          "createdAt": "2026-09-03T03:47:42Z",
+          "freshnessHours": 24
+        }
+      ]
+    },
+    {
+      "kind": "satisfied",
+      "checkId": "retrospective",
+      "checkVersion": "1.0.0",
+      "evidence": [
+        {
+          "checkId": "retrospective",
+          "checkVersion": "1.0.0",
+          "state": "produced",
+          "uri": "satisfaction-review.md",
+          "sha256": "204cb552f248285551025346c585715713efa09d4cfafa2f9c6faaa0623ff17d",
+          "producer": "fresh Fable 5 Satisfaction reviewer",
+          "method": "retrospective",
+          "gitIdentity": "diff:f747177acd4e8c6ff10cbad521c1bbaa9ee8c923d5b9d898bde13e95a8be8512",
+          "createdAt": "2026-09-03T05:05:59.413Z",
+          "freshnessHours": 24
+        }
+      ]
+    },
+    {
+      "kind": "satisfied",
+      "checkId": "skill-governance",
+      "checkVersion": "1.0.0",
+      "evidence": [
+        {
+          "checkId": "skill-governance",
+          "checkVersion": "1.0.0",
+          "state": "produced",
+          "uri": "evidence/skill-governance.json",
+          "sha256": "7819b343b42757cb9ad273d66dccf9e5a97a34229a944a2ac2f6cd02a17d4c2b",
+          "producer": "spec-led-v2 task owner",
+          "method": "skill governance review",
+          "gitIdentity": "diff:f747177acd4e8c6ff10cbad521c1bbaa9ee8c923d5b9d898bde13e95a8be8512",
+          "createdAt": "2026-09-03T03:47:42Z",
+          "freshnessHours": 24
+        }
+      ]
+    }
+  ],
+  "findings": [
+    {
+      "severity": "low",
+      "location": "openspec/changes/add-claude-fable-5-1-bridge/evidence/workflow-telemetry.json",
+      "reason": "The record uses the key \"outcome\" where every other evidence record uses \"status\", a naming inconsistency in an otherwise complete record.",
+      "exactCorrection": "No action required for this change. If the record is regenerated for any reason, rename \"outcome\" to \"status\" to match the other 24 evidence records."
+    },
+    {
+      "severity": "low",
+      "location": "openspec/changes/add-claude-fable-5-1-bridge/evidence/real-subscription-acceptance.json (implementationBaseCommit)",
+      "reason": "The live acceptance run (recorded 03:12:55Z) binds to base commit 1cde3e79, before the final normalizer-removal rebuild (build re-recorded 04:24:00Z at commit 1c6b24b6). The delta between those states is bundle whitespace-byte preservation only, the deterministic 554-test suite reran green afterward, and the final code review attested the tracked bundle matches a fresh build, so the live proof remains representative — but it does not literally exercise the final bundle bytes.",
+      "exactCorrection": "No action required for acceptance. If a stronger binding is wanted before fork delivery (tasks 7.1–7.2), rerun the disposable Pi startup check against the final installed bundle, which task 7.2 already requires."
+    }
+  ]
+}
