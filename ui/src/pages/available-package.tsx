@@ -21,6 +21,7 @@ import { recordsUnreadable } from "@/lib/install-state";
 import { kindIcon } from "@/lib/kind-icon";
 import { kindLabel, packageDisplayName } from "@/lib/labels";
 import { PAGE_BODY, WIDE_CONTENT_WIDTH } from "@/lib/layout";
+import { sameScope } from "@/lib/scope";
 import { useOrderedRead } from "@/lib/use-ordered-read";
 import { cn } from "@/lib/utils";
 import { catalogKey, useMarketplacesStore } from "@/stores/marketplaces";
@@ -55,16 +56,24 @@ function AvailablePackage({ availableRef }: { availableRef: AvailableRef }) {
     optional: [],
   });
 
+  const scope = catalog.by === "subscription" ? catalog.scope : null;
+  // One redirect judgment, feeding the address, the read and the install
+  // alike. Not object identity: the picker builds a fresh Scope from
+  // everyPlace, so coming back to the place already being browsed would
+  // read as a redirect into it and re-address the page for nothing.
+  const redirected =
+    destination && scope && !sameScope(destination, scope) ? destination : null;
+
   // Null until the catalog is ready: a repository's first fetch holds the
-  // store's lock, and a read racing it would be refused. The destination is
+  // store's lock, and a read racing it would be refused. The redirect is
   // part of the address: a dependency's state — already installed there,
   // or kept removed there — is a fact about the scope the install lands
   // in, so choosing another place is a different read.
   const address = ready
-    ? `${catalogKey(catalog)}::${kind}::${name}::${destination ? scopeLabel(destination) : ""}`
+    ? `${catalogKey(catalog)}::${kind}::${name}::${redirected ? scopeLabel(redirected) : ""}`
     : null;
   const read = useOrderedRead<PackageView>(address, () =>
-    commands.marketplacePackagePreview(catalog, kind, name, destination),
+    commands.marketplacePackagePreview(catalog, kind, name, redirected),
   );
   const view = read.status === "ok" ? read.data : null;
   const error = read.status === "error" ? read.error : null;
@@ -80,7 +89,7 @@ function AvailablePackage({ availableRef }: { availableRef: AvailableRef }) {
     setChosen(address === null ? null : { at: address, file });
 
   const Icon = kindIcon(kind);
-  const scope = catalog.by === "subscription" ? catalog.scope : null;
+  // The place named on screen.
   const target = destination ?? scope;
   // Matched by scope and name both — two scopes can subscribe the same
   // alias to different repositories.
@@ -99,10 +108,11 @@ function AvailablePackage({ availableRef }: { availableRef: AvailableRef }) {
   const repo = row?.repo ?? row?.path ?? summary?.provenance ?? null;
   const shownError = reachError ?? error;
   // Every Packages row opens this page, "Not known" ones included. The
-  // engine answered unknown because it could not read this scope's lock,
-  // and an install would meet the same record, so the page says why in
-  // place of the button rather than letting a raw engine error stand in
-  // for the reason.
+  // engine answered unknown because it could not read the lock of the place
+  // this install would land in — the destination when one is picked, which
+  // is the scope the engine mutates — and the install would meet that same
+  // record, so the page says why in place of the button rather than letting
+  // a raw engine error stand in for the reason.
   const recordsUnknown = view !== null && recordsUnreadable(view.preview.state);
 
   const doInstall = () => {
@@ -112,7 +122,7 @@ function AvailablePackage({ availableRef }: { availableRef: AvailableRef }) {
       scope,
       source,
       items: [{ kind, name }],
-      destination: target !== scope ? target : null,
+      destination: redirected,
       delivery: choice,
     }).then((ok) => {
       // Installed, the same page carries on in its installed mode — the
@@ -195,8 +205,8 @@ function AvailablePackage({ availableRef }: { availableRef: AvailableRef }) {
                   {shownError}
                 </p>
               ) : null}
-              {recordsUnknown && scope ? (
-                <RecordsUnreadableNote scope={scope} />
+              {recordsUnknown && target ? (
+                <RecordsUnreadableNote scope={target} />
               ) : null}
               {/* The reading comes before the package's own words about
                   itself: the header already says what this is, and this is

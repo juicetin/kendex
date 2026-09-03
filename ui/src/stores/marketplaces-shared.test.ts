@@ -47,7 +47,7 @@ describe("catalog addressing", () => {
 
   it("keeps a set named like a read off that read's key", () => {
     const catalog = subscription({ scope: "global" }, "kendex");
-    expect(bundleKey(catalog, "packages")).not.toBe(
+    expect(bundleKey(catalog, "packages", null)).not.toBe(
       readErrorKey(catalogKey(catalog), "packages"),
     );
   });
