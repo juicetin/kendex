@@ -45,12 +45,12 @@
 - [x] 6.3 Run a final fresh-context code review after deterministic checks and fix blocking findings. check:code-review
 - [x] 6.4 Confirm no bridge Agent Skill behavior changed and route the confirmed verifier guidance gap through the skill feedback process. check:skill-evaluation check:skill-governance
 - [x] 6.5 Record command duration, retries, review yield, unavailable cost fields, and waiver count. check:workflow-telemetry
-- [ ] 6.6 Obtain a fresh independent Satisfaction Review over the final diff, specifications, and evidence. check:satisfaction-review
-- [ ] 6.7 Create and validate the typed retrospective after Satisfaction Review. check:retrospective
+- [x] 6.6 Obtain a fresh independent Satisfaction Review over the final diff, specifications, and evidence. check:satisfaction-review
+- [x] 6.7 Create and validate the typed retrospective after Satisfaction Review. check:retrospective
 
 ## 7. Fork delivery and global startup
 
-- [ ] 7.1 Commit validated work, push only to `https://github.com/juicetin/kendex`, and do not open an upstream pull request.
-- [ ] 7.2 Install the committed package globally, start a disposable Pi process with normal extensions, require its exact marker within 30 seconds, and roll back the global install if the gate fails.
+- [x] 7.1 Commit validated work, push only to `https://github.com/juicetin/kendex`, and do not open an upstream pull request.
+- [x] 7.2 Install the committed package globally, start a disposable Pi process with normal extensions, require its exact marker within 30 seconds, and roll back the global install if the gate fails.
 
 check:selection-review is satisfied by the accepted `selection-review.json` that authorizes this task plan. check:api-contract, check:ui-evidence, and check:mutation-testing are not applicable as recorded in `check-selection.json`.

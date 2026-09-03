@@ -28,7 +28,7 @@
     },
     {
       "path": "selection-review.json",
-      "sha256": "b2585cb44815fe84516d32d2a9b32d1289da95b65d826f998d08f04697b876f7"
+      "sha256": "3962760d3a1ccdd81f7a5a5e2fa5ebd7ba88958755d0f7964393fd36965e6a0f"
     },
     {
       "path": "selection-review.md",
@@ -68,7 +68,7 @@
     },
     {
       "path": "evidence/selection-review.json",
-      "sha256": "557efb16999f747a0ab81b9fe3a915bc3da82a5b1ac0ea3355093f387e6af5bf"
+      "sha256": "96d8cd5de31301f2fa93bf74202443d19987f93cad30e96f7c0123b3b4279349"
     },
     {
       "path": "evidence/code-review.json",
@@ -299,7 +299,7 @@
           "checkVersion": "1.0.0",
           "state": "produced",
           "uri": "evidence/selection-review.json",
-          "sha256": "557efb16999f747a0ab81b9fe3a915bc3da82a5b1ac0ea3355093f387e6af5bf",
+          "sha256": "96d8cd5de31301f2fa93bf74202443d19987f93cad30e96f7c0123b3b4279349",
           "producer": "spec-led-v2 task owner",
           "method": "selection-review",
           "gitIdentity": "diff:f747177acd4e8c6ff10cbad521c1bbaa9ee8c923d5b9d898bde13e95a8be8512",

@@ -41,6 +41,26 @@
           "freshnessHours": 24
         }
       ]
+    },
+    {
+      "id": "separate-fable-acceptance-from-startup-gate",
+      "kind": "retry",
+      "summary": "The first global validation used one 30-second limit for Fable inference and Pi startup. The final run gave Fable a 180-second safety limit, then used a separate fast-model process for the required 30-second normal-extension startup gate.",
+      "impact": "medium",
+      "evidence": [
+        {
+          "checkId": "package-verification",
+          "checkVersion": "1.0.0",
+          "state": "produced",
+          "uri": "evidence/global-install-startup.json",
+          "sha256": "e8566b74631e5ceea44dd50d170d46cd0f8a9ecc93c0e2c590e53532f9acca32",
+          "producer": "spec-led-v2 task owner",
+          "method": "installed package acceptance and disposable fresh-start gate",
+          "gitIdentity": "c3c75f5977349ea8bbfa81c52bd1ed380a5db5e3",
+          "createdAt": "2026-09-03T05:26:42.156Z",
+          "freshnessHours": 24
+        }
+      ]
     }
   ],
   "proposedAmendments": [],
