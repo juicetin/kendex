@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "changeName": "add-claude-fable-5-1-bridge",
+  "checkId": "baseline-tests",
+  "checkVersion": "1.0.0",
+  "recordedAt": "2026-09-03T03:12:55Z",
+  "status": "passed",
+  "catalogMethod": "pnpm test",
+  "executedMethod": "npm run test:ci --prefix pi-extensions/pi-claude-bridge",
+  "methodResolution": "The pinned catalog method is package-manager-generic. The executable repository method is the npm command selected in quality-plan.md.",
+  "exitCode": 0,
+  "tests": 554,
+  "suites": 117,
+  "passed": 554,
+  "failed": 0,
+  "cancelled": 0,
+  "skipped": 0,
+  "todo": 0,
+  "durationMs": 11861.43958,
+  "rerunAfterDependencyAuditFix": true,
+  "secretsIncluded": false
+}

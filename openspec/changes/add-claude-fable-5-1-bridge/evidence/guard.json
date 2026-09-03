@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "changeName": "add-claude-fable-5-1-bridge",
+  "recordType": "repository-guard",
+  "recordedAt": "2026-09-03T03:47:42Z",
+  "status": "partial",
+  "command": "tools/guard",
+  "exitCode": 1,
+  "taskOwnedChecks": {
+    "bash32Lint": "passed: 443 shell files clean",
+    "gitDiffCheck": "passed"
+  },
+  "environmentAndInheritedFailures": [
+    "rustup is unavailable",
+    "system dbus-1 development metadata is unavailable",
+    "system rustc 1.85.0 is below the repository's pinned 1.96.1 toolchain",
+    "ui/node_modules is absent, so tsc and vitest are unavailable",
+    "Biome reports four pre-existing formatting failures outside the task-owned diff"
+  ],
+  "taskOwnedFindings": []
+}

@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "changeName": "add-claude-fable-5-1-bridge",
+  "checkId": "maintainability-review",
+  "checkVersion": "1.0.0",
+  "recordedAt": "2026-09-03T04:25:00Z",
+  "status": "passed-with-dispositions",
+  "method": "strict-maintainability-review",
+  "reviewerRun": "be4cc228",
+  "sourceReport": "tmp/fable-5-1-acceptance/reviews/maintainability.md (gitignored source; findings reproduced below)",
+  "verdict": "pass",
+  "mediumFindings": [
+    {
+      "id": "bundle-whitespace-normalizer",
+      "location": "pi-extensions/pi-claude-bridge/scripts/normalize-bundle.mjs",
+      "disposition": "fixed",
+      "resolution": "Removed the bundle normalizer and its test. The build now preserves raw esbuild output, including template-literal bytes. .gitattributes disables Git's blank-at-eol warning only for pi-extensions/pi-claude-bridge/bundle/*.js.",
+      "validation": [
+        "npm run build --prefix pi-extensions/pi-claude-bridge passed",
+        "git check-attr reports whitespace=-blank-at-eol only for the generated bridge bundle files",
+        "git diff --check 1cde3e79 passed"
+      ]
+    },
+    {
+      "id": "thinking-producer-versus-consumer",
+      "location": "pi-extensions/pi-claude-bridge/src/session-persistence.ts and src/convert.ts",
+      "disposition": "bounded-residual",
+      "reason": "The approved requirement keys rebuild filtering to the selected consuming model and explicitly keeps other-model rebuild behavior unchanged. A producer-keyed filter would change approved behavior and requires a separate spec delta.",
+      "notFixed": true,
+      "residualRisk": "After a model switch away from Fable 5.1, a later rebuild for another model can replay thinking blocks produced by Fable 5.1. This path is not claimed fixed or live-validated by this change."
+    }
+  ],
+  "minorFindings": [
+    "Executable version inspection remains uncached but stayed within the approved 500 ms p95 threshold.",
+    "Executable candidate enumeration remains duplicated between the general and Fable 5.1 paths.",
+    "The no-candidate diagnostic uses a bundled-executable sentinel.",
+    "The installed-bundle unit check depends on the platform optional package."
+  ],
+  "blockingFindings": [],
+  "secretsIncluded": false
+}

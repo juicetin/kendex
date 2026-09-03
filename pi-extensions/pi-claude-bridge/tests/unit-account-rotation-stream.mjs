@@ -661,6 +661,26 @@ describe("managed account stream rotation", () => {
 		assert.ok(textEvents(events).includes("opus-after-fable"));
 	});
 
+	it("routes exact Fable 5.1 through the managed account and one-million-token request", async () => {
+		const observed = observedState();
+		const fableModel = { ...model, id: "claude-fable-5-1", name: "Claude Fable 5.1" };
+		globalThis[CLAUDE_ACCOUNT_ROUTER_SYMBOL] = makeRouter(observed);
+		let queryOptions;
+		__testSetSdkQueryFactory((input) => {
+			queryOptions = input.options;
+			return fakeSdkQuery([
+				{ type: "system", subtype: "init", session_id: "fable-5-1-session" },
+				{ type: "result", subtype: "success", result: "fable-5-1-first" },
+			], "a", observed);
+		});
+
+		await collect(streamClaudeAgentSdk(fableModel, context, { sessionId: "fable-5-1-ready" }));
+		assert.equal(observed.acquires[0].modelId, "claude-fable-5-1");
+		assert.equal(queryOptions.model, "claude-fable-5-1[1m]");
+		assert.equal(queryOptions.fallbackModel, undefined);
+		assert.equal(queryOptions.env.CLAUDE_CONFIG_DIR, "/profiles/a");
+	});
+
 	it("does not let SDK model fallback skip another managed Fable account", async () => {
 		const observed = observedState();
 		const fableModel = { ...model, id: "claude-fable-5", name: "Claude Fable 5" };

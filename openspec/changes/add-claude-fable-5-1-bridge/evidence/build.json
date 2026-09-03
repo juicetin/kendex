@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "changeName": "add-claude-fable-5-1-bridge",
+  "checkId": "build",
+  "checkVersion": "1.0.0",
+  "recordedAt": "2026-09-03T04:24:00Z",
+  "status": "passed",
+  "catalogMethod": "pnpm build",
+  "executedMethod": "npm run build --prefix pi-extensions/pi-claude-bridge",
+  "methodResolution": "The pinned catalog method is package-manager-generic. The executable repository method is the npm command selected in quality-plan.md.",
+  "exitCode": 0,
+  "outputs": [
+    "pi-extensions/pi-claude-bridge/bundle/index.js",
+    "pi-extensions/pi-claude-bridge/bundle/connector-inventory.js"
+  ],
+  "exportsChanged": false,
+  "templateLiteralBytesPreserved": true,
+  "whitespacePolicy": "The build writes raw esbuild output. Git's blank-at-eol warning is disabled only for pi-extensions/pi-claude-bridge/bundle/*.js because trailing spaces can be template-literal data.",
+  "secretsIncluded": false
+}

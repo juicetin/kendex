@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "changeName": "add-claude-fable-5-1-bridge",
+  "recordedAt": "2026-09-03T03:12:55Z",
+  "status": "passed",
+  "commandMode": "Pi JSON non-interactive conversation with the task-owned bridge bundle",
+  "requestedModel": "pi-claude/claude-fable-5-1",
+  "servedModel": "claude-fable-5-1",
+  "servedModelEvidence": {
+    "source": "assistant message model projected from Claude stream_event message_start.message.model",
+    "rawOutput": "tmp/fable-5-1-acceptance/raw.jsonl (gitignored, not committed)",
+    "selfIdentificationUsed": false
+  },
+  "route": {
+    "profile": "default existing Claude login profile",
+    "loggedIn": true,
+    "authMethod": "claude.ai",
+    "apiProvider": "firstParty",
+    "subscriptionType": "team",
+    "redactedAccountHash": "42003f97e1a5",
+    "creditsEnabledOrPurchased": false
+  },
+  "toolLoop": {
+    "toolName": "read",
+    "toolCallId": "toolu_01ExHcX7r24cB4BqaaEHTfu1",
+    "toolResultId": "toolu_01ExHcX7r24cB4BqaaEHTfu1",
+    "toolResultIsError": false,
+    "expectedFixtureValue": "FABLE_5_1_FIXTURE_7Q3M9K",
+    "finalResponseMatchedFixture": true
+  },
+  "exitCode": 0,
+  "stderrLines": 0,
+  "implementationBaseCommit": "1cde3e7993a53ef9933e6cc9e58ea14f3fabc144",
+  "secretsIncluded": false
+}

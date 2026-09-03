@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "changeName": "add-claude-fable-5-1-bridge",
+  "checkId": "skill-evaluation",
+  "checkVersion": "1.0.0",
+  "recordedAt": "2026-09-03T03:47:42Z",
+  "status": "passed",
+  "bridgeAgentSkillChanged": false,
+  "confirmedGap": "harness-run-start required the verifier status command but did not give its argument shape",
+  "resolution": "Updated the canonical user-managed harness-run-start skill with the verified node scripts/spec-led-verify.mjs status --cwd <repo> --change <name> syntax.",
+  "validation": "validate_skill.py passed",
+  "startupGateRequired": true
+}

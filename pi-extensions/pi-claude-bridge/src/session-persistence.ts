@@ -6,6 +6,7 @@ import { resolve as pathResolve } from "path";
 import { extensionApi, getSharedSession, reportSyntheticToolResultRepair, safeNotify, setSharedSession, type SessionState } from "./bridge-state.js";
 import { displayPath } from "./config.js";
 import { convertPiMessages } from "./convert.js";
+import { FABLE_5_1_MODEL_ID } from "./models.js";
 import { DEBUG, DEBUG_LOG_PATH, debug, diagDump } from "./debug.js";
 import { verifyWrittenSession as _verifyWrittenSession } from "./session-verify.js";
 import {
@@ -309,8 +310,11 @@ function convertAndImportMessages(
 	messages: Context["messages"],
 	customToolNameToSdk?: Map<string, string>,
 	cwd?: string,
+	modelId?: string,
 ): void {
-	const { anthropicMessages, sanitizedIds } = convertPiMessages(messages, customToolNameToSdk);
+	const { anthropicMessages, sanitizedIds } = convertPiMessages(messages, customToolNameToSdk, {
+		omitThinking: modelId === FABLE_5_1_MODEL_ID,
+	});
 
 	debug(`convertAndImportMessages: ${messages.length} pi msgs → ${anthropicMessages.length} anthropic msgs`);
 	debug(`convertAndImportMessages: imported roles:`, anthropicMessages.map((m, i) => {
@@ -620,7 +624,7 @@ export function syncSharedSession(
 		...(preserveId ? { sessionId: previousSessionId } : {}),
 		...(modelId ? { model: modelId } : {}),
 	});
-	convertAndImportMessages(session, priorMessages, customToolNameToSdk, cwd);
+	convertAndImportMessages(session, priorMessages, customToolNameToSdk, cwd, modelId);
 	session.save();
 	verifyWrittenSession(session.jsonlPath, session.sessionId, session.messages.length, cwd, claudeDir);
 	setSharedSession({

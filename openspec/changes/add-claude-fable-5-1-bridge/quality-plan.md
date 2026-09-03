@@ -2,6 +2,8 @@
 
 ## Baseline commands
 
+The catalog's `pnpm` method labels are package-manager-generic. This npm package uses the repository commands below, and each produced evidence record preserves both names.
+
 Run from the repository root and store each command result under `evidence/`:
 
 - `npm run typecheck --prefix pi-extensions/pi-claude-bridge`
@@ -24,7 +26,7 @@ A final fresh-context code review is required after deterministic checks pass. F
 | Auth review | yes | The new model passes through existing subscription-profile selection, credential scoping, usage limits, and account rotation, which are authentication and authorization boundaries. | `auth-check` | `evidence/auth-review.json` |
 | Security scan | yes | The new model passes through existing subscription-profile selection, credential scoping, usage limits, and account rotation, which are authentication and authorization boundaries. | `security-scan` plus `npm audit --omit=dev --prefix pi-extensions/pi-claude-bridge` | `evidence/security-scan.json` |
 | HTTP API contract | no | The change adds no HTTP endpoint, wire protocol, or OpenAPI contract. | n/a | `impact.json` and changed-path inspection |
-| UI visual and accessibility evidence | no | The Pi model picker consumes provider metadata; no kendex React or Tauri screen changes. | n/a | `impact.json` and changed-path inspection |
+| UI visual and accessibility evidence | no | The Pi model picker reads provider metadata; no kendex React or Tauri screen changes. | n/a | `impact.json` and changed-path inspection |
 | Code simplification | yes | Model routing, executable selection, and session filtering change control flow in several TypeScript modules. | `code-simplifier` after passing focused tests | `evidence/code-simplification.json` |
 | Fallow | yes | The change modifies TypeScript module boundaries and a package dependency, so changed-code dependency and structure findings require review. | `fallow-check` | `evidence/fallow.json` |
 

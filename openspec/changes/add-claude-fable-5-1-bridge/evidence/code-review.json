@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "changeName": "add-claude-fable-5-1-bridge",
+  "checkId": "code-review",
+  "checkVersion": "1.0.0",
+  "recordedAt": "2026-09-03T04:30:40Z",
+  "status": "passed",
+  "method": "code-review",
+  "reviewerRun": "a9d1780c-f031-422b-ab6e-b8543fb27fee",
+  "reviewerModel": "pi-claude/claude-fable-5",
+  "freshContext": true,
+  "readOnly": true,
+  "verdict": "pass",
+  "blockingFindings": [],
+  "validated": [
+    "The full task-owned diff from 1cde3e79 matches the approved requirements.",
+    "The tracked bundles match a fresh esbuild build byte for byte.",
+    "The removed normalizer no longer mutates template-literal bytes.",
+    "The whitespace=-blank-at-eol attribute is limited to pi-extensions/pi-claude-bridge/bundle/*.js.",
+    "npm run typecheck passed and npm run test:unit passed 554 of 554 tests.",
+    "git diff --check and strict OpenSpec validation passed."
+  ],
+  "residualRisks": [
+    "The thinking filter remains keyed to the consuming model. A producer-keyed policy would change the approved other-model behavior and needs a separate spec delta; this change does not claim it fixed.",
+    "Executable version inspection remains uncached but met the approved 500 ms p95 bound.",
+    "The installed-bundle unit check depends on the platform optional SDK package."
+  ],
+  "secretsIncluded": false
+}

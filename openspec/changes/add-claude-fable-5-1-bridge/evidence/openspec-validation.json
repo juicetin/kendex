@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "changeName": "add-claude-fable-5-1-bridge",
+  "checkId": "openspec-validation",
+  "checkVersion": "1.0.0",
+  "recordedAt": "2026-09-03T03:47:42Z",
+  "status": "passed",
+  "commands": [
+    {"command": "openspec validate add-claude-fable-5-1-bridge --strict", "exitCode": 0},
+    {"command": "openspec validate --all --strict", "exitCode": 0, "passed": 1, "failed": 0}
+  ]
+}

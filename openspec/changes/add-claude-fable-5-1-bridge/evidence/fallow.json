@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "changeName": "add-claude-fable-5-1-bridge",
+  "checkId": "fallow",
+  "checkVersion": "1.0.0",
+  "recordedAt": "2026-09-03T03:47:42Z",
+  "status": "passed",
+  "command": "npx --yes fallow@3.22.0 --changed-since HEAD --format json --summary",
+  "exitCode": 0,
+  "introducedFindings": [],
+  "inheritedFindings": [
+    "src/convert.ts: PI_TO_SDK_TOOL_NAME unused export",
+    "src/convert.ts: sanitizeToolId unused export; imported by tests/unit-import.mjs"
+  ],
+  "summary": {
+    "unusedFiles": 0,
+    "unusedDependencies": 0,
+    "unresolvedImports": 0,
+    "cycles": 0,
+    "boundaryViolations": 0
+  }
+}

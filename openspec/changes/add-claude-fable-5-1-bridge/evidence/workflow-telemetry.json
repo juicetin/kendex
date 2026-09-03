@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "changeName": "add-claude-fable-5-1-bridge",
+  "checkId": "workflow-telemetry",
+  "checkVersion": "1.0.0",
+  "recordedAt": "2026-09-03T04:30:40Z",
+  "outcome": "passed",
+  "durationMs": 7832332,
+  "commandDurationsMs": {
+    "latestBuild": 197,
+    "latestUnitSuite": 11252.743276,
+    "executableSelectionP95": 199.655093,
+    "latestTypecheck": null,
+    "latestOpenSpecValidation": null
+  },
+  "retries": {
+    "deterministicReruns": 3,
+    "reasons": [
+      "reran after the dependency audit correction",
+      "reran after replacing the unsafe bundle whitespace normalizer",
+      "reran after final review and evidence updates"
+    ]
+  },
+  "reviewYield": {
+    "maintainability": "found one task-owned defect and one bounded out-of-scope residual",
+    "correctness": "confirmed with no blocking finding",
+    "securityAuth": "confirmed one changed-line scanner result as a false positive",
+    "selectionRefresh": "accepted with no blocking finding",
+    "initialSatisfaction": "found five missing planned evidence records"
+  },
+  "unavailableCostFields": {
+    "costUsd": "The reviewer and command runners did not expose cost data.",
+    "inputTokens": "The reviewer and command runners did not expose aggregate input-token data.",
+    "outputTokens": "The reviewer and command runners did not expose aggregate output-token data."
+  },
+  "waiverCount": 0,
+  "waiverRecorded": false,
+  "secretsIncluded": false
+}

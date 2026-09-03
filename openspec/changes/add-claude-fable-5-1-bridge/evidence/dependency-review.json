@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "changeName": "add-claude-fable-5-1-bridge",
+  "checkId": "dependency-review",
+  "checkVersion": "1.0.0",
+  "recordedAt": "2026-09-03T03:12:55Z",
+  "status": "passed",
+  "reviewedDependency": "@anthropic-ai/claude-agent-sdk",
+  "fromVersion": "0.3.220",
+  "toVersion": "0.3.259",
+  "currentOfficialVersion": "0.3.259",
+  "repository": "https://github.com/anthropics/claude-agent-sdk-typescript",
+  "license": "unchanged; package metadata says SEE LICENSE IN README.md",
+  "officialDocumentation": "https://code.claude.com/docs/en/agent-sdk/quickstart",
+  "fit": "The official SDK normally bundles a native Claude Code binary and supports options.pathToClaudeCodeExecutable. Version 0.3.259 bundles Claude Code 2.1.259, above the required 2.1.255 minimum.",
+  "lockfileImpact": "The direct SDK and its eight platform-specific optional packages moved from 0.3.220 to 0.3.259. Security remediation also moved pre-existing fast-uri 3.1.5 to 3.1.7 and qs 6.15.3 to 6.16.0 within their existing ranges.",
+  "newDirectDependencies": [],
+  "customGenericImplementation": false,
+  "validation": {
+    "npmCi": "passed",
+    "typecheck": "passed",
+    "testCi": "554 passed, 0 failed",
+    "productionAudit": "0 vulnerabilities"
+  },
+  "blockingFindings": [],
+  "secretsIncluded": false
+}

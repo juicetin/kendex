@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "changeName": "add-claude-fable-5-1-bridge",
+  "checkId": "skill-governance",
+  "checkVersion": "1.0.0",
+  "recordedAt": "2026-09-03T03:47:42Z",
+  "status": "passed",
+  "ownership": "user-managed global skill",
+  "canonicalSkill": "/home/justin/.pi/agent/skills/workflow/harness-run-start/SKILL.md",
+  "mutationMethod": "skill_manage patch",
+  "validation": "canonical skill validator passed",
+  "repositorySkillFilesChanged": []
+}

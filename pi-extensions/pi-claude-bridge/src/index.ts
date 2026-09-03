@@ -37,7 +37,7 @@ export {
 export { connectorCachePath, connectorCacheScopeKey, readCachedConnectors, scopeKeyFor, writeCachedConnectors } from "./connector-cache.js";
 export { connectorServersSnapshot, primeConnectorServers } from "./connector-runtime.js";
 import { debug, diagDump, makeCliDebugOptions, moduleInstanceId } from "./debug.js";
-import { preflightClaudeExecutable, resolveClaudeExecutable } from "./claude-executable.js";
+import { preflightClaudeExecutable, resolveBundledClaudeExecutable, resolveClaudeExecutableForModel } from "./claude-executable.js";
 import { appendIntegrityEntry, argKeys, deleteSharedSessionLane, extensionApi, getSharedSession, markSessionForRebuild, recordStartedLane, reportToolResultMismatch, safeNotify, safeToolCallSummary, setExtensionApi, setPiUI, setSharedSession, takeStartedLane, type SessionState } from "./bridge-state.js";
 import { connectorsEnabledFor, isChildExecutedTool } from "./connectors.js";
 import { primeConnectorServers } from "./connector-runtime.js";
@@ -71,7 +71,7 @@ import { currentRequestLaneId, runInRequestLane } from "./request-lane.js";
 export { probeClaudeAccountProfile } from "./account-host.js";
 export { __testSetSdkQueryFactory } from "./sdk-query.js";
 export { resolveConfiguredEffort } from "./query-options.js";
-export { classifyClaudeExecutableBytes, preflightClaudeExecutable, resolveClaudeExecutable, spawnClaudeCodeWithDiagnostics, wrapClaudeSpawnErrorForSdk, type ClaudeExecutableFileType, type ClaudeExecutablePreflightResult } from "./claude-executable.js";
+export { classifyClaudeExecutableBytes, FABLE_5_1_MIN_CLAUDE_CODE_VERSION, preflightClaudeExecutable, resolveBundledClaudeExecutable, resolveClaudeExecutable, resolveClaudeExecutableForModel, spawnClaudeCodeWithDiagnostics, wrapClaudeSpawnErrorForSdk, type ClaudeExecutableFileType, type ClaudeExecutablePreflightResult } from "./claude-executable.js";
 export { __testGetBridgeIntegrityState, __testSetBridgeIntegrityState, INTEGRITY_CUSTOM_TYPE, appendIntegrityEntry, reportToolResultMismatch } from "./bridge-state.js";
 export { CONNECTOR_CALL_CUSTOM_TYPE, connectorResultByteSize, flushConnectorCallAudit, recordConnectorCallResult, setConnectorCallAuditSink, type ConnectorCallAuditData, type ConnectorCallAuditSink, type ConnectorCallOutcome } from "./connector-audit.js";
 export { CLAUDE_AI_CONNECTOR_TOOL_PATTERNS, connectorMcpServers, connectorDeclarationsDisabled, CLAUDE_BRIDGE_TOOL_ISOLATION, CONNECTOR_DISCOVERY_TOOLS, CONNECTOR_WRITE_TOOLS, DISALLOWED_BUILTIN_TOOLS, connectorBuiltinAllowlistHook, connectorQueryOptions, connectorWriteDenyHook, connectorWriteModeFor, connectorWriteModeFromEnv, connectorsEnabledFor, connectorsEnabledFromEnv, denyAllToolsHook, isAllowlistedConnectorSessionTool, isChildExecutedTool, isChildInternalTool, isConnectorTool, isConnectorWriteTool, settingSourcesForQuery, toolIsolationForQuery } from "./connectors.js";
@@ -866,7 +866,12 @@ function streamClaudeAgentSdkInLane(model: Model<any>, context: Context, options
 	// session file is still intact.
 	const bridgeConfig = loadConfig(cwd);
 	const providerSettings = bridgeConfig.provider ?? {};
-	const claudeExecutable = resolveClaudeExecutable(providerSettings.pathToClaudeCodeExecutable);
+	const claudeExecutable = resolveClaudeExecutableForModel({
+		modelId: queryModel.id,
+		cwd,
+		configured: providerSettings.pathToClaudeCodeExecutable,
+		bundled: resolveBundledClaudeExecutable(),
+	});
 	const claudeExecutablePreflight = claudeExecutable ? preflightClaudeExecutable(claudeExecutable, cwd) : undefined;
 
 	const accountScope = accountSessionScope(account);

@@ -1,0 +1,62 @@
+{
+  "schemaVersion": 1,
+  "changeName": "add-claude-fable-5-1-bridge",
+  "checkId": "quality-attribute-scenarios",
+  "checkVersion": "1.0.0",
+  "recordedAt": "2026-09-03T03:12:55Z",
+  "status": "passed",
+  "method": "Focused scenario tests",
+  "completedScenarios": [
+    {
+      "name": "model and executable selection",
+      "tests": 22,
+      "passed": 22,
+      "failed": 0,
+      "covers": [
+        "exact Fable 5.1 selection and request naming",
+        "Fable 5 retention",
+        "configured, bundled, PATH, missing, unreadable, unparseable, and too-old executable candidates"
+      ]
+    },
+    {
+      "name": "conversion and session synchronization",
+      "tests": 51,
+      "passed": 51,
+      "failed": 0,
+      "covers": [
+        "Fable 5.1 rebuild omits signed thinking",
+        "text and paired tool records survive rebuild",
+        "Fable 5 preserves signed thinking",
+        "ordinary resume and foreign-conversation behavior remains green"
+      ]
+    },
+    {
+      "name": "full deterministic regression suite",
+      "tests": 554,
+      "passed": 554,
+      "failed": 0,
+      "command": "npm run test:ci --prefix pi-extensions/pi-claude-bridge"
+    },
+    {
+      "name": "real Team subscription route and Pi tool loop",
+      "requestedModel": "pi-claude/claude-fable-5-1",
+      "transportServedModel": "claude-fable-5-1",
+      "subscriptionType": "team",
+      "toolName": "read",
+      "toolCallMatchedResult": true,
+      "finalResponseMatchedFixture": true,
+      "exitCode": 0,
+      "evidence": "evidence/real-subscription-acceptance.json"
+    },
+    {
+      "name": "executable-selection performance",
+      "runs": 10,
+      "p95Ms": 199.655093,
+      "thresholdMs": 500,
+      "passed": true,
+      "evidence": "evidence/bounded-profiling.json"
+    }
+  ],
+  "pendingScenarios": [],
+  "secretsIncluded": false
+}

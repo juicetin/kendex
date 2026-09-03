@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "changeName": "add-claude-fable-5-1-bridge",
+  "checkId": "code-simplification",
+  "checkVersion": "1.0.0",
+  "recordedAt": "2026-09-03T03:47:42Z",
+  "status": "passed",
+  "scope": "task-owned model, executable selection, query options, rebuild filtering, and bundle normalization changes",
+  "baseline": "npm run test:ci --prefix pi-extensions/pi-claude-bridge: 554 passed, 0 failed",
+  "simplifications": "No changes needed; helpers each isolate one tested boundary and no task-created dead code or redundant abstraction was found.",
+  "validation": "npm run test:ci --prefix pi-extensions/pi-claude-bridge: 554 passed, 0 failed",
+  "residualRisk": []
+}

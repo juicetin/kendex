@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "changeName": "add-claude-fable-5-1-bridge",
+  "checkId": "test-first",
+  "checkVersion": "1.0.0",
+  "recordedAt": "2026-09-03T03:12:55Z",
+  "status": "passed",
+  "method": "Focused red-green tests run with node --import tsx --test from pi-extensions/pi-claude-bridge",
+  "red": [
+    {
+      "scope": "model catalog and exact request name",
+      "result": "failed as expected",
+      "evidence": "tests/unit-models.mjs exited 1 because src/models.js did not export FABLE_5_1_MODEL_ID"
+    },
+    {
+      "scope": "Fable 5.1 executable compatibility",
+      "result": "failed as expected",
+      "evidence": "tests/unit-fable-executable.mjs exited 1 because src/index.ts did not export FABLE_5_1_MIN_CLAUDE_CODE_VERSION"
+    },
+    {
+      "scope": "model-specific session rebuild",
+      "result": "failed as expected",
+      "evidence": "tests/unit-sync-shared-session.mjs reported the Fable 5.1 thinking-removal assertion failing before the model-aware conversion was implemented"
+    }
+  ],
+  "green": [
+    {
+      "scope": "model and executable selection",
+      "tests": 22,
+      "passed": 22,
+      "failed": 0
+    },
+    {
+      "scope": "conversion and session synchronization",
+      "tests": 51,
+      "passed": 51,
+      "failed": 0
+    }
+  ],
+  "secretsIncluded": false
+}

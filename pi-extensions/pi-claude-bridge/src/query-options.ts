@@ -12,7 +12,7 @@ import { connectorQueryOptions, connectorWriteModeFor, connectorsEnabledFor, set
 import { connectorServersSnapshot } from "./connector-runtime.js";
 import { PROVIDER_ID } from "./convert.js";
 import { makeCliDebugOptions } from "./debug.js";
-import { FABLE_MODEL_ID, fallbackModelForPrimaryModel } from "./models.js";
+import { FABLE_5_1_MODEL_ID, FABLE_MODEL_ID, claudeCodeModelId, fallbackModelForPrimaryModel } from "./models.js";
 import { buildPromptContextAppend } from "./prompt-context.js";
 import { extractSkillsBlock } from "./skills.js";
 
@@ -124,7 +124,8 @@ export function buildClaudeQueryOptions(input: BuildClaudeQueryOptionsInput): Bu
 	// silently skip accounts whose Fable quota is still available. Once the
 	// router explicitly selects Opus, its normal Opus→4.8 safety fallback is
 	// back on.
-	const fallbackModel = account && requestedModel.id === FABLE_MODEL_ID && queryModel.id === requestedModel.id
+	const managedFable = requestedModel.id === FABLE_5_1_MODEL_ID || requestedModel.id === FABLE_MODEL_ID;
+	const fallbackModel = account && managedFable && queryModel.id === requestedModel.id
 		? undefined
 		: fallbackModelForPrimaryModel(queryModel.id);
 
@@ -147,7 +148,7 @@ export function buildClaudeQueryOptions(input: BuildClaudeQueryOptionsInput): Bu
 	};
 	const queryOptions: NonNullable<Parameters<typeof query>[0]["options"]> = {
 		cwd,
-		model: queryModel.id,
+		model: claudeCodeModelId(queryModel.id),
 		env: childEnv,
 		...connectorQueryOptions(enableCloudMcp, connectorWriteMode),
 		permissionMode: "bypassPermissions",

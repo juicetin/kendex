@@ -27,7 +27,7 @@
     },
     "ui": {
       "affected": false,
-      "notAffectedReason": "The Pi model picker consumes provider metadata; no kendex React or Tauri screen changes."
+      "notAffectedReason": "The Pi model picker reads provider metadata; no kendex React or Tauri screen changes."
     },
     "meaningfulBehavior": {
       "affected": true,

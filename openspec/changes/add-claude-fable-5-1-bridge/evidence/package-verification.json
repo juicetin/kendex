@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "changeName": "add-claude-fable-5-1-bridge",
+  "checkId": "package-verification",
+  "checkVersion": "1.0.0",
+  "recordedAt": "2026-09-03T03:47:42Z",
+  "status": "passed",
+  "command": "cd pi-extensions/pi-claude-bridge && npm pack --dry-run --json",
+  "exitCode": 0,
+  "package": "@vanillagreen/pi-claude-bridge@4.0.0",
+  "sizeBytes": 1008652,
+  "unpackedSizeBytes": 3296562,
+  "files": 43,
+  "requiredFilesPresent": [
+    "bundle/index.js",
+    "bundle/connector-inventory.js",
+    "package.json"
+  ],
+  "exportsChanged": false
+}

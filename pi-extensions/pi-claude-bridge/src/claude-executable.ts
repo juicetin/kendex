@@ -1,12 +1,14 @@
 import { type SpawnOptions, type SpawnedProcess } from "@anthropic-ai/claude-agent-sdk";
-import { spawn as spawnProcess } from "child_process";
+import { spawn as spawnProcess, spawnSync } from "child_process";
 import { accessSync, constants as fsConstants, readFileSync, realpathSync, statSync } from "fs";
-import { delimiter, join } from "path";
+import { createRequire } from "module";
+import { delimiter, dirname, join } from "path";
 import { isolatedFromEnv } from "./config.js";
+import { FABLE_5_1_MODEL_ID } from "./models.js";
 import { DEBUG, debug } from "./debug.js";
 
-function executableFromPath(name: string): string | undefined {
-	const paths = (process.env.PATH ?? "").split(delimiter).filter(Boolean);
+function executableFromPath(name: string, pathEnv = process.env.PATH ?? ""): string | undefined {
+	const paths = pathEnv.split(delimiter).filter(Boolean);
 	for (const dir of paths) {
 		const candidate = join(dir, name);
 		try {
@@ -27,6 +29,91 @@ export function resolveClaudeExecutable(configured?: string): string | undefined
 	// default, which ships inside the host bundle.
 	if (isolatedFromEnv()) return undefined;
 	return executableFromPath("claude") ?? executableFromPath("claude-code");
+}
+
+export const FABLE_5_1_MIN_CLAUDE_CODE_VERSION = "2.1.255";
+
+function runtimeLibc(): "glibc" | "musl" | undefined {
+	if (process.platform !== "linux") return undefined;
+	const report = process.report?.getReport() as { header?: { glibcVersionRuntime?: string } } | undefined;
+	return report?.header?.glibcVersionRuntime ? "glibc" : "musl";
+}
+
+/** Resolve the native CLI package that the Agent SDK would select for this host. */
+export function resolveBundledClaudeExecutable(): string | undefined {
+	const libc = runtimeLibc();
+	const suffix = libc === "musl" ? "-musl" : "";
+	const packageName = `@anthropic-ai/claude-agent-sdk-${process.platform}-${process.arch}${suffix}`;
+	try {
+		const packageJson = createRequire(import.meta.url).resolve(`${packageName}/package.json`);
+		return join(dirname(packageJson), process.platform === "win32" ? "claude.exe" : "claude");
+	} catch {
+		return undefined;
+	}
+}
+
+interface ClaudeExecutableResolutionInput {
+	modelId: string;
+	cwd: string;
+	configured?: string;
+	bundled?: string;
+	pathEnv?: string;
+}
+
+function semverTuple(value: string): [number, number, number] | undefined {
+	const match = /(?:^|\s)(\d+)\.(\d+)\.(\d+)(?=\s|$)/.exec(value);
+	return match ? [Number(match[1]), Number(match[2]), Number(match[3])] : undefined;
+}
+
+function versionAtLeast(actual: [number, number, number], minimum: [number, number, number]): boolean {
+	for (let i = 0; i < actual.length; i++) {
+		if (actual[i] !== minimum[i]) return actual[i] > minimum[i];
+	}
+	return true;
+}
+
+function inspectClaudeVersion(path: string, cwd: string): { version?: string; reason?: string } {
+	try {
+		preflightClaudeExecutable(path, cwd);
+	} catch (error) {
+		const code = (error as NodeJS.ErrnoException).code;
+		return { reason: code === "ENOENT" ? "missing" : code === "EACCES" ? "not executable" : `unusable (${code ?? "unknown"})` };
+	}
+	const result = spawnSync(path, ["--version"], { cwd, encoding: "utf8", timeout: 2_000, maxBuffer: 16_384 });
+	if (result.error) {
+		const code = (result.error as NodeJS.ErrnoException).code;
+		return { reason: `version check failed (${code ?? result.error.name})` };
+	}
+	if (result.status !== 0) return { reason: `version check exited ${result.status ?? "without status"}` };
+	const parsed = semverTuple(`${result.stdout}\n${result.stderr}`);
+	return parsed ? { version: parsed.join(".") } : { reason: "unparseable version" };
+}
+
+/** Select a runtime compatible with Fable 5.1 before session synchronization. */
+export function resolveClaudeExecutableForModel(input: ClaudeExecutableResolutionInput): string | undefined {
+	if (input.modelId !== FABLE_5_1_MODEL_ID) return resolveClaudeExecutable(input.configured);
+	const configured = input.configured?.trim();
+	const paths = configured
+		? [configured]
+		: [
+			input.bundled,
+			...(isolatedFromEnv() ? [] : [
+				executableFromPath("claude", input.pathEnv),
+				executableFromPath("claude-code", input.pathEnv),
+			]),
+		].filter((path): path is string => Boolean(path));
+	const candidates = paths.length > 0 ? [...new Set(paths)] : [input.bundled ?? "SDK bundled executable"];
+	const minimum = semverTuple(FABLE_5_1_MIN_CLAUDE_CODE_VERSION)!;
+	const observed: string[] = [];
+	for (const path of candidates) {
+		const result = inspectClaudeVersion(path, input.cwd);
+		if (result.version && versionAtLeast(semverTuple(result.version)!, minimum)) return path;
+		observed.push(`${path}: ${result.version ?? result.reason}`);
+	}
+	throw new Error(
+		`Claude Fable 5.1 requires Claude Code ${FABLE_5_1_MIN_CLAUDE_CODE_VERSION} or newer before session synchronization. ` +
+		`Detected candidates: ${observed.join("; ")}. Configure provider.pathToClaudeCodeExecutable with a compatible executable.`,
+	);
 }
 
 export type ClaudeExecutableFileType = "elf" | "mach-o" | "pe" | "shebang-script" | "empty" | "unknown";

@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "changeName": "add-claude-fable-5-1-bridge",
+  "checkId": "auth-review",
+  "checkVersion": "1.0.0",
+  "recordedAt": "2026-09-03T03:47:42Z",
+  "status": "passed",
+  "scope": [
+    "profile selection",
+    "credential scope",
+    "model allowance rotation",
+    "no-credit-purchase boundary"
+  ],
+  "evidence": [
+    "Fable 5.1 uses the existing account router and catalog ID for allowance selection before request-ID conversion.",
+    "subscriberProfileEnv clears direct billing credentials and selects only the routed profile config directory.",
+    "managed Fable routing rotates current account allowance before model fallback.",
+    "The bridge has no credit-enable or purchase action; real acceptance used an existing Team profile and records creditsEnabledOrPurchased=false."
+  ],
+  "denialAndBoundaryTests": [
+    "subscriberProfileEnv selects CLAUDE_CONFIG_DIR without inheriting API billing credentials",
+    "Extra Usage rejection rotates accounts",
+    "Fable 5.1 incompatible configured executable fails without fallback"
+  ],
+  "blockingFindings": []
+}
