@@ -1,0 +1,68 @@
+{
+  "schemaVersion": 1,
+  "changeName": "add-claude-fable-5-1-bridge",
+  "reviewedArtifacts": [
+    {
+      "path": "proposal.md",
+      "sha256": "4e8a3bc990f9d5062f54367c4cb84c0823534a8eb2893b3e49730467e6de2823"
+    },
+    {
+      "path": "specs/pi-claude-fable-5-1/spec.md",
+      "sha256": "eeceae02e897062a8ba491b4b42395f60e7076679e4bb6895765cd6e76e0ad44"
+    },
+    {
+      "path": "design.md",
+      "sha256": "1794dfa3eea3e5c11469aa932af7029c0b5d7edf9cde3f6ab4ca7f4f78002e60"
+    },
+    {
+      "path": "impact.json",
+      "sha256": "7e070ca1d4ac4568b05712fe953a8e3b22dd3d4a3fa22183e672351d42e5d3a0"
+    },
+    {
+      "path": "sequence.md",
+      "sha256": "9a673ea97209b776a3910b75d621f9cde6fd37ccbdaa959ca5106e9d90c51f91"
+    },
+    {
+      "path": "check-selection.json",
+      "sha256": "d9e3492bf8c64163c2158b4376cbbe002b5b839eea610070e066adf6462e83c7"
+    },
+    {
+      "path": "quality-plan.md",
+      "sha256": "054198cc3f139eb59defb436f514df676b9c087e2d3a2347404bfeed840ae8cf"
+    },
+    {
+      "path": "tasks.md",
+      "sha256": "21aeb4dcebe45a01ffecdf45350724c0d2f907c5cb741678c9dbfb15a9c53c63"
+    }
+  ],
+  "reviewer": {
+    "authorInstanceId": "01a064e5-b1b4-7908-b292-28a1f5eba6bc",
+    "reviewerInstanceId": "35bf3cba-1c29-4616-b269-9a3904a63408",
+    "model": "pi-claude/claude-fable-5",
+    "authorModel": "openai-codex/gpt-5.6-sol",
+    "differentModelAvailable": true,
+    "freshContext": true,
+    "role": "review-only",
+    "toolPolicy": "read-only",
+    "personaSwap": false
+  },
+  "reviewedAt": "2026-09-03T02:45:50Z",
+  "sourceReport": "selection-review.md",
+  "sourceReportSha256": "d68aca0513001fa2810f05f484efb57bcbe33ea4dced47249b48304391d294b5",
+  "verdict": "accepted",
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "check-selection.json baseline-tests/typecheck/build dispositions and quality-plan.md Complete catalog disposition rendering",
+      "reason": "The Catalog requires generic pnpm method strings while this npm package uses executable npm commands in the quality plan and tasks; literal method equality could block produced evidence.",
+      "exactCorrection": "Record produced evidence under the quality plan npm commands and, if Satisfaction Review enforces literal method equality, add a sanctioned repository overlay before that review."
+    },
+    {
+      "severity": "low",
+      "checkId": "ui-evidence",
+      "location": "impact.json quality.ui and check-selection.json ui-evidence reason",
+      "reason": "The semantically identical not-applicable reason uses consumes in one artifact and reads in the other.",
+      "exactCorrection": "Use identical not-applicable reason text if either artifact is revised before implementation approval."
+    }
+  ]
+}

@@ -1,36 +1,81 @@
 {
   "hooks": {
-    "PreToolUse": [
+    "PostCompact": [
       {
-        "matcher": "Bash",
         "hooks": [
           {
-            "type": "command",
-            "command": "bash \"$(git rev-parse --show-toplevel)/.codex/hooks/block-bare-cd.sh\""
-          },
-          {
-            "type": "command",
-            "command": "bash \"$(git rev-parse --show-toplevel)/.codex/hooks/pre-commit-check.sh\"",
-            "timeout": 60
-          },
-          {
-            "type": "command",
-            "command": "bash \"$(git rev-parse --show-toplevel)/.codex/hooks/block-repo-copy.sh\""
-          },
-          {
-            "type": "command",
-            "command": "bash \"$(git rev-parse --show-toplevel)/.codex/hooks/block-unsafe-rm.sh\""
+            "command": "bd codex-hook PostCompact",
+            "statusMessage": "Scheduling Beads context refresh",
+            "type": "command"
           }
-        ]
+        ],
+        "matcher": "manual|auto"
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "command": "bd codex-hook PreCompact",
+            "statusMessage": "Checking Beads context",
+            "type": "command"
+          }
+        ],
+        "matcher": "manual|auto"
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "bash \"$(git rev-parse --show-toplevel)/.codex/hooks/block-bare-cd.sh\"",
+            "type": "command"
+          },
+          {
+            "command": "bash \"$(git rev-parse --show-toplevel)/.codex/hooks/pre-commit-check.sh\"",
+            "timeout": 60,
+            "type": "command"
+          },
+          {
+            "command": "bash \"$(git rev-parse --show-toplevel)/.codex/hooks/block-repo-copy.sh\"",
+            "type": "command"
+          },
+          {
+            "command": "bash \"$(git rev-parse --show-toplevel)/.codex/hooks/block-unsafe-rm.sh\"",
+            "type": "command"
+          }
+        ],
+        "matcher": "Bash"
       }
     ],
     "SessionStart": [
       {
         "hooks": [
           {
-            "type": "command",
             "command": "bash \"$(git rev-parse --show-toplevel)/.codex/hooks/session-drift-check.sh\"",
-            "timeout": 30
+            "timeout": 30,
+            "type": "command"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "command": "bd codex-hook SessionStart",
+            "statusMessage": "Loading Beads context",
+            "type": "command"
+          }
+        ],
+        "matcher": "startup|resume|clear"
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "command": "bd codex-hook UserPromptSubmit",
+            "statusMessage": "Refreshing Beads context",
+            "type": "command"
           }
         ]
       }

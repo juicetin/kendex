@@ -1,0 +1,600 @@
+{
+  "schemaVersion": 1,
+  "changeName": "add-claude-fable-5-1-bridge",
+  "catalogVersion": "1.0.0",
+  "overlays": [],
+  "selectedFrom": [
+    {
+      "path": "proposal.md",
+      "sha256": "4e8a3bc990f9d5062f54367c4cb84c0823534a8eb2893b3e49730467e6de2823"
+    },
+    {
+      "path": "specs/pi-claude-fable-5-1/spec.md",
+      "sha256": "eeceae02e897062a8ba491b4b42395f60e7076679e4bb6895765cd6e76e0ad44"
+    },
+    {
+      "path": "design.md",
+      "sha256": "1794dfa3eea3e5c11469aa932af7029c0b5d7edf9cde3f6ab4ca7f4f78002e60"
+    },
+    {
+      "path": "impact.json",
+      "sha256": "7e070ca1d4ac4568b05712fe953a8e3b22dd3d4a3fa22183e672351d42e5d3a0"
+    },
+    {
+      "path": "sequence.md",
+      "sha256": "9a673ea97209b776a3910b75d621f9cde6fd37ccbdaa959ca5106e9d90c51f91"
+    }
+  ],
+  "changeShape": "provider-model-and-runtime-compatibility",
+  "riskLevel": "high",
+  "dispositions": [
+    {
+      "kind": "required",
+      "checkId": "catalog-validation",
+      "checkVersion": "1.0.0",
+      "method": {
+        "kind": "manual",
+        "value": "check-lifecycle validator"
+      },
+      "plannedEvidence": [
+        {
+          "checkId": "catalog-validation",
+          "checkVersion": "1.0.0",
+          "state": "planned",
+          "uri": "evidence/catalog-validation.json",
+          "producer": "assigned implementation or review owner",
+          "method": "check-lifecycle validator",
+          "gitIdentity": "working-tree",
+          "createdAt": "2026-09-03T02:32:23.551Z",
+          "freshnessHours": 24
+        }
+      ]
+    },
+    {
+      "kind": "required",
+      "checkId": "baseline-tests",
+      "checkVersion": "1.0.0",
+      "method": {
+        "kind": "command",
+        "value": "pnpm test"
+      },
+      "plannedEvidence": [
+        {
+          "checkId": "baseline-tests",
+          "checkVersion": "1.0.0",
+          "state": "planned",
+          "uri": "evidence/baseline-tests.json",
+          "producer": "assigned implementation or review owner",
+          "method": "pnpm test",
+          "gitIdentity": "working-tree",
+          "createdAt": "2026-09-03T02:32:23.551Z",
+          "freshnessHours": 24
+        }
+      ]
+    },
+    {
+      "kind": "required",
+      "checkId": "typecheck",
+      "checkVersion": "1.0.0",
+      "method": {
+        "kind": "command",
+        "value": "pnpm typecheck"
+      },
+      "plannedEvidence": [
+        {
+          "checkId": "typecheck",
+          "checkVersion": "1.0.0",
+          "state": "planned",
+          "uri": "evidence/typecheck.json",
+          "producer": "assigned implementation or review owner",
+          "method": "pnpm typecheck",
+          "gitIdentity": "working-tree",
+          "createdAt": "2026-09-03T02:32:23.551Z",
+          "freshnessHours": 24
+        }
+      ]
+    },
+    {
+      "kind": "required",
+      "checkId": "build",
+      "checkVersion": "1.0.0",
+      "method": {
+        "kind": "command",
+        "value": "pnpm build"
+      },
+      "plannedEvidence": [
+        {
+          "checkId": "build",
+          "checkVersion": "1.0.0",
+          "state": "planned",
+          "uri": "evidence/build.json",
+          "producer": "assigned implementation or review owner",
+          "method": "pnpm build",
+          "gitIdentity": "working-tree",
+          "createdAt": "2026-09-03T02:32:23.551Z",
+          "freshnessHours": 24
+        }
+      ]
+    },
+    {
+      "kind": "required",
+      "checkId": "openspec-validation",
+      "checkVersion": "1.0.0",
+      "method": {
+        "kind": "command",
+        "value": "openspec validate --all --strict"
+      },
+      "plannedEvidence": [
+        {
+          "checkId": "openspec-validation",
+          "checkVersion": "1.0.0",
+          "state": "planned",
+          "uri": "evidence/openspec-validation.json",
+          "producer": "assigned implementation or review owner",
+          "method": "openspec validate --all --strict",
+          "gitIdentity": "working-tree",
+          "createdAt": "2026-09-03T02:32:23.551Z",
+          "freshnessHours": 24
+        }
+      ]
+    },
+    {
+      "kind": "required",
+      "checkId": "dependency-review",
+      "checkVersion": "1.0.0",
+      "method": {
+        "kind": "skill",
+        "value": "dependency-survey"
+      },
+      "plannedEvidence": [
+        {
+          "checkId": "dependency-review",
+          "checkVersion": "1.0.0",
+          "state": "planned",
+          "uri": "evidence/dependency-review.json",
+          "producer": "assigned implementation or review owner",
+          "method": "dependency-survey",
+          "gitIdentity": "working-tree",
+          "createdAt": "2026-09-03T02:32:23.551Z",
+          "freshnessHours": 24
+        }
+      ]
+    },
+    {
+      "kind": "required",
+      "checkId": "test-first",
+      "checkVersion": "1.0.0",
+      "method": {
+        "kind": "skill",
+        "value": "tdd-enforcement"
+      },
+      "plannedEvidence": [
+        {
+          "checkId": "test-first",
+          "checkVersion": "1.0.0",
+          "state": "planned",
+          "uri": "evidence/test-first.json",
+          "producer": "assigned implementation or review owner",
+          "method": "tdd-enforcement",
+          "gitIdentity": "working-tree",
+          "createdAt": "2026-09-03T02:32:23.551Z",
+          "freshnessHours": 24
+        }
+      ]
+    },
+    {
+      "kind": "required",
+      "checkId": "selection-review",
+      "checkVersion": "1.0.0",
+      "method": {
+        "kind": "review",
+        "value": "selection-review"
+      },
+      "plannedEvidence": [
+        {
+          "checkId": "selection-review",
+          "checkVersion": "1.0.0",
+          "state": "planned",
+          "uri": "evidence/selection-review.json",
+          "producer": "assigned implementation or review owner",
+          "method": "selection-review",
+          "gitIdentity": "working-tree",
+          "createdAt": "2026-09-03T02:32:23.551Z",
+          "freshnessHours": 24
+        }
+      ]
+    },
+    {
+      "kind": "required",
+      "checkId": "satisfaction-review",
+      "checkVersion": "1.0.0",
+      "method": {
+        "kind": "review",
+        "value": "satisfaction-review"
+      },
+      "plannedEvidence": [
+        {
+          "checkId": "satisfaction-review",
+          "checkVersion": "1.0.0",
+          "state": "planned",
+          "uri": "evidence/satisfaction-review.json",
+          "producer": "assigned implementation or review owner",
+          "method": "satisfaction-review",
+          "gitIdentity": "working-tree",
+          "createdAt": "2026-09-03T02:32:23.551Z",
+          "freshnessHours": 24
+        }
+      ]
+    },
+    {
+      "kind": "required",
+      "checkId": "code-review",
+      "checkVersion": "1.0.0",
+      "method": {
+        "kind": "skill",
+        "value": "code-review"
+      },
+      "plannedEvidence": [
+        {
+          "checkId": "code-review",
+          "checkVersion": "1.0.0",
+          "state": "planned",
+          "uri": "evidence/code-review.json",
+          "producer": "assigned implementation or review owner",
+          "method": "code-review",
+          "gitIdentity": "working-tree",
+          "createdAt": "2026-09-03T02:32:23.551Z",
+          "freshnessHours": 24
+        }
+      ]
+    },
+    {
+      "kind": "required",
+      "checkId": "auth-review",
+      "checkVersion": "1.0.0",
+      "method": {
+        "kind": "skill",
+        "value": "auth-check"
+      },
+      "plannedEvidence": [
+        {
+          "checkId": "auth-review",
+          "checkVersion": "1.0.0",
+          "state": "planned",
+          "uri": "evidence/auth-review.json",
+          "producer": "assigned implementation or review owner",
+          "method": "auth-check",
+          "gitIdentity": "working-tree",
+          "createdAt": "2026-09-03T02:32:23.551Z",
+          "freshnessHours": 24
+        }
+      ]
+    },
+    {
+      "kind": "required",
+      "checkId": "security-scan",
+      "checkVersion": "1.0.0",
+      "method": {
+        "kind": "skill",
+        "value": "security-scan"
+      },
+      "plannedEvidence": [
+        {
+          "checkId": "security-scan",
+          "checkVersion": "1.0.0",
+          "state": "planned",
+          "uri": "evidence/security-scan.json",
+          "producer": "assigned implementation or review owner",
+          "method": "security-scan",
+          "gitIdentity": "working-tree",
+          "createdAt": "2026-09-03T02:32:23.551Z",
+          "freshnessHours": 24
+        }
+      ]
+    },
+    {
+      "kind": "not-applicable",
+      "checkId": "api-contract",
+      "checkVersion": "1.0.0",
+      "reason": "The change adds no HTTP endpoint, wire protocol, or OpenAPI contract."
+    },
+    {
+      "kind": "not-applicable",
+      "checkId": "ui-evidence",
+      "checkVersion": "1.0.0",
+      "reason": "The Pi model picker reads provider metadata; no kendex React or Tauri screen changes."
+    },
+    {
+      "kind": "required",
+      "checkId": "quality-attribute-scenarios",
+      "checkVersion": "1.0.0",
+      "method": {
+        "kind": "command",
+        "value": "focused scenario tests"
+      },
+      "plannedEvidence": [
+        {
+          "checkId": "quality-attribute-scenarios",
+          "checkVersion": "1.0.0",
+          "state": "planned",
+          "uri": "evidence/quality-attribute-scenarios.json",
+          "producer": "assigned implementation or review owner",
+          "method": "focused scenario tests",
+          "gitIdentity": "working-tree",
+          "createdAt": "2026-09-03T02:32:23.551Z",
+          "freshnessHours": 24
+        }
+      ]
+    },
+    {
+      "kind": "required",
+      "checkId": "product-observability",
+      "checkVersion": "1.0.0",
+      "method": {
+        "kind": "review",
+        "value": "observability contract review"
+      },
+      "plannedEvidence": [
+        {
+          "checkId": "product-observability",
+          "checkVersion": "1.0.0",
+          "state": "planned",
+          "uri": "evidence/product-observability.json",
+          "producer": "assigned implementation or review owner",
+          "method": "observability contract review",
+          "gitIdentity": "working-tree",
+          "createdAt": "2026-09-03T02:32:23.551Z",
+          "freshnessHours": 24
+        }
+      ]
+    },
+    {
+      "kind": "required",
+      "checkId": "structured-logging",
+      "checkVersion": "1.0.0",
+      "method": {
+        "kind": "review",
+        "value": "logging contract review"
+      },
+      "plannedEvidence": [
+        {
+          "checkId": "structured-logging",
+          "checkVersion": "1.0.0",
+          "state": "planned",
+          "uri": "evidence/structured-logging.json",
+          "producer": "assigned implementation or review owner",
+          "method": "logging contract review",
+          "gitIdentity": "working-tree",
+          "createdAt": "2026-09-03T02:32:23.551Z",
+          "freshnessHours": 24
+        }
+      ]
+    },
+    {
+      "kind": "required",
+      "checkId": "bounded-profiling",
+      "checkVersion": "1.0.0",
+      "method": {
+        "kind": "manual",
+        "value": "bounded profiling session"
+      },
+      "plannedEvidence": [
+        {
+          "checkId": "bounded-profiling",
+          "checkVersion": "1.0.0",
+          "state": "planned",
+          "uri": "evidence/bounded-profiling.json",
+          "producer": "assigned implementation or review owner",
+          "method": "bounded profiling session",
+          "gitIdentity": "working-tree",
+          "createdAt": "2026-09-03T02:32:23.551Z",
+          "freshnessHours": 24
+        }
+      ]
+    },
+    {
+      "kind": "required",
+      "checkId": "workflow-telemetry",
+      "checkVersion": "1.0.0",
+      "method": {
+        "kind": "manual",
+        "value": "workflow telemetry record"
+      },
+      "plannedEvidence": [
+        {
+          "checkId": "workflow-telemetry",
+          "checkVersion": "1.0.0",
+          "state": "planned",
+          "uri": "evidence/workflow-telemetry.json",
+          "producer": "assigned implementation or review owner",
+          "method": "workflow telemetry record",
+          "gitIdentity": "working-tree",
+          "createdAt": "2026-09-03T02:32:23.551Z",
+          "freshnessHours": 24
+        }
+      ]
+    },
+    {
+      "kind": "required",
+      "checkId": "skill-evaluation",
+      "checkVersion": "1.0.0",
+      "method": {
+        "kind": "review",
+        "value": "skill evaluation"
+      },
+      "plannedEvidence": [
+        {
+          "checkId": "skill-evaluation",
+          "checkVersion": "1.0.0",
+          "state": "planned",
+          "uri": "evidence/skill-evaluation.json",
+          "producer": "assigned implementation or review owner",
+          "method": "skill evaluation",
+          "gitIdentity": "working-tree",
+          "createdAt": "2026-09-03T02:32:23.551Z",
+          "freshnessHours": 24
+        }
+      ]
+    },
+    {
+      "kind": "required",
+      "checkId": "code-simplification",
+      "checkVersion": "1.0.0",
+      "method": {
+        "kind": "skill",
+        "value": "code-simplifier"
+      },
+      "plannedEvidence": [
+        {
+          "checkId": "code-simplification",
+          "checkVersion": "1.0.0",
+          "state": "planned",
+          "uri": "evidence/code-simplification.json",
+          "producer": "assigned implementation or review owner",
+          "method": "code-simplifier",
+          "gitIdentity": "working-tree",
+          "createdAt": "2026-09-03T02:32:23.551Z",
+          "freshnessHours": 24
+        }
+      ]
+    },
+    {
+      "kind": "required",
+      "checkId": "maintainability-review",
+      "checkVersion": "1.0.0",
+      "method": {
+        "kind": "skill",
+        "value": "strict-maintainability-review"
+      },
+      "plannedEvidence": [
+        {
+          "checkId": "maintainability-review",
+          "checkVersion": "1.0.0",
+          "state": "planned",
+          "uri": "evidence/maintainability-review.json",
+          "producer": "assigned implementation or review owner",
+          "method": "strict-maintainability-review",
+          "gitIdentity": "working-tree",
+          "createdAt": "2026-09-03T02:32:23.551Z",
+          "freshnessHours": 24
+        }
+      ]
+    },
+    {
+      "kind": "required",
+      "checkId": "fallow",
+      "checkVersion": "1.0.0",
+      "method": {
+        "kind": "skill",
+        "value": "fallow-check"
+      },
+      "plannedEvidence": [
+        {
+          "checkId": "fallow",
+          "checkVersion": "1.0.0",
+          "state": "planned",
+          "uri": "evidence/fallow.json",
+          "producer": "assigned implementation or review owner",
+          "method": "fallow-check",
+          "gitIdentity": "working-tree",
+          "createdAt": "2026-09-03T02:32:23.551Z",
+          "freshnessHours": 24
+        }
+      ]
+    },
+    {
+      "kind": "not-applicable",
+      "checkId": "mutation-testing",
+      "checkVersion": "1.0.0",
+      "reason": "The user did not approve a bounded mutation-testing scope, runtime budget, fast test command, or evidence threshold."
+    },
+    {
+      "kind": "required",
+      "checkId": "documentation-sync",
+      "checkVersion": "1.0.0",
+      "method": {
+        "kind": "review",
+        "value": "documentation and diff inspection"
+      },
+      "plannedEvidence": [
+        {
+          "checkId": "documentation-sync",
+          "checkVersion": "1.0.0",
+          "state": "planned",
+          "uri": "evidence/documentation-sync.json",
+          "producer": "assigned implementation or review owner",
+          "method": "documentation and diff inspection",
+          "gitIdentity": "working-tree",
+          "createdAt": "2026-09-03T02:32:23.551Z",
+          "freshnessHours": 24
+        }
+      ]
+    },
+    {
+      "kind": "required",
+      "checkId": "package-verification",
+      "checkVersion": "1.0.0",
+      "method": {
+        "kind": "command",
+        "value": "npm pack --dry-run"
+      },
+      "plannedEvidence": [
+        {
+          "checkId": "package-verification",
+          "checkVersion": "1.0.0",
+          "state": "planned",
+          "uri": "evidence/package-verification.json",
+          "producer": "assigned implementation or review owner",
+          "method": "npm pack --dry-run",
+          "gitIdentity": "working-tree",
+          "createdAt": "2026-09-03T02:32:23.551Z",
+          "freshnessHours": 24
+        }
+      ]
+    },
+    {
+      "kind": "required",
+      "checkId": "retrospective",
+      "checkVersion": "1.0.0",
+      "method": {
+        "kind": "manual",
+        "value": "retrospective"
+      },
+      "plannedEvidence": [
+        {
+          "checkId": "retrospective",
+          "checkVersion": "1.0.0",
+          "state": "planned",
+          "uri": "evidence/retrospective.json",
+          "producer": "assigned implementation or review owner",
+          "method": "retrospective",
+          "gitIdentity": "working-tree",
+          "createdAt": "2026-09-03T02:32:23.551Z",
+          "freshnessHours": 24
+        }
+      ]
+    },
+    {
+      "kind": "required",
+      "checkId": "skill-governance",
+      "checkVersion": "1.0.0",
+      "method": {
+        "kind": "review",
+        "value": "skill governance review"
+      },
+      "plannedEvidence": [
+        {
+          "checkId": "skill-governance",
+          "checkVersion": "1.0.0",
+          "state": "planned",
+          "uri": "evidence/skill-governance.json",
+          "producer": "assigned implementation or review owner",
+          "method": "skill governance review",
+          "gitIdentity": "working-tree",
+          "createdAt": "2026-09-03T02:32:23.551Z",
+          "freshnessHours": 24
+        }
+      ]
+    }
+  ]
+}

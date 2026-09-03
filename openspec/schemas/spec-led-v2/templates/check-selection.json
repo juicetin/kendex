@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "changeName": "replace-with-change-name",
+  "catalogVersion": "1.0.0",
+  "overlays": [],
+  "selectedFrom": [],
+  "changeShape": "replace-with-change-shape",
+  "riskLevel": "replace-with-risk-level",
+  "dispositions": []
+}

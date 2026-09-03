@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "verifier": "scripts/spec-led-verify.mjs",
+  "planningRoots": [
+    "openspec/",
+    "docs/architecture/",
+    "docs/design/",
+    ".beads/",
+    ".spec-led/"
+  ],
+  "receiptRoot": ".spec-led/readiness/",
+  "exemptionPath": ".spec-led/exemption.json",
+  "openSpecSchema": "spec-led-v2",
+  "baselineCommands": [
+    "npm run typecheck --prefix pi-extensions/pi-claude-bridge",
+    "npm run test:ci --prefix pi-extensions/pi-claude-bridge",
+    "tools/guard"
+  ]
+}

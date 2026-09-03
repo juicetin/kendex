@@ -32,3 +32,9 @@ docs/*-local.md
 # Python bytecode caches, written beside any script this repo runs with python3
 __pycache__/
 *.pyc
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
+.beads/proxieddb/
