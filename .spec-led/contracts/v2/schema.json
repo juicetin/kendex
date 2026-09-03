@@ -1,0 +1,504 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://juicetin.dev/pi-harness/spec-led/contracts/v2/schema.json",
+  "title": "Spec-led advisory readiness contracts version 2",
+  "$defs": {
+    "gitSha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "approver": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "email"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "email": {
+          "type": "string",
+          "minLength": 3
+        }
+      }
+    },
+    "config": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "verifier",
+        "planningRoots",
+        "receiptRoot",
+        "exemptionPath",
+        "openSpecSchema",
+        "baselineCommands"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "const": 1
+        },
+        "verifier": {
+          "type": "string",
+          "minLength": 1
+        },
+        "planningRoots": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "receiptRoot": {
+          "type": "string",
+          "minLength": 1
+        },
+        "exemptionPath": {
+          "type": "string",
+          "minLength": 1
+        },
+        "openSpecSchema": {
+          "const": "spec-led-v2"
+        },
+        "baselineCommands": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "impactArea": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "affected",
+            "reasons",
+            "diagram"
+          ],
+          "properties": {
+            "affected": {
+              "const": true
+            },
+            "reasons": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "diagram": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "affected",
+            "notAffectedReason"
+          ],
+          "properties": {
+            "affected": {
+              "const": false
+            },
+            "notAffectedReason": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        }
+      ]
+    },
+    "qualityImpact": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "affected",
+            "reason"
+          ],
+          "properties": {
+            "affected": {
+              "const": true
+            },
+            "reason": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "affected",
+            "notAffectedReason"
+          ],
+          "properties": {
+            "affected": {
+              "const": false
+            },
+            "notAffectedReason": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        }
+      ]
+    },
+    "impact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "architecture",
+        "sequence",
+        "quality"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "const": 1
+        },
+        "architecture": {
+          "$ref": "#/$defs/impactArea"
+        },
+        "sequence": {
+          "$ref": "#/$defs/impactArea"
+        },
+        "quality": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "dependencies",
+            "securityOrAuth",
+            "httpApi",
+            "ui",
+            "meaningfulBehavior",
+            "fallow",
+            "mutationTesting"
+          ],
+          "properties": {
+            "dependencies": {
+              "$ref": "#/$defs/qualityImpact"
+            },
+            "securityOrAuth": {
+              "$ref": "#/$defs/qualityImpact"
+            },
+            "httpApi": {
+              "$ref": "#/$defs/qualityImpact"
+            },
+            "ui": {
+              "$ref": "#/$defs/qualityImpact"
+            },
+            "meaningfulBehavior": {
+              "$ref": "#/$defs/qualityImpact"
+            },
+            "fallow": {
+              "$ref": "#/$defs/qualityImpact"
+            },
+            "mutationTesting": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "optedIn",
+                    "notApplicableReason"
+                  ],
+                  "properties": {
+                    "optedIn": {
+                      "const": false
+                    },
+                    "notApplicableReason": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  }
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "optedIn",
+                    "approvalRef",
+                    "scope",
+                    "runtimeBudget",
+                    "fastTestCommand",
+                    "evidenceThreshold"
+                  ],
+                  "properties": {
+                    "optedIn": {
+                      "const": true
+                    },
+                    "approvalRef": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "scope": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "runtimeBudget": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "fastTestCommand": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "evidenceThreshold": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    "artifactHash": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "sha256",
+        "hashMode"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "hashMode": {
+          "enum": [
+            "raw-v1",
+            "normalized-tasks-v1"
+          ]
+        }
+      }
+    },
+    "readinessReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "changeName",
+        "approvedAt",
+        "approvalSource",
+        "approver",
+        "artifactCommit",
+        "artifacts",
+        "taskHashNormalizationVersion",
+        "catalogVersion",
+        "overlayVersions"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "const": 2
+        },
+        "changeName": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+        },
+        "approvedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "approvalSource": {
+          "const": "pi-interactive"
+        },
+        "approver": {
+          "$ref": "#/$defs/approver"
+        },
+        "artifactCommit": {
+          "$ref": "#/$defs/gitSha"
+        },
+        "artifacts": {
+          "type": "array",
+          "minItems": 8,
+          "items": {
+            "$ref": "#/$defs/artifactHash"
+          },
+          "allOf": [
+            {
+              "contains": {
+                "type": "object",
+                "required": [
+                  "path",
+                  "hashMode"
+                ],
+                "properties": {
+                  "path": {
+                    "pattern": "(^|/)tasks\\.md$"
+                  },
+                  "hashMode": {
+                    "const": "normalized-tasks-v1"
+                  }
+                }
+              },
+              "minContains": 1,
+              "maxContains": 1
+            },
+            {
+              "contains": {
+                "type": "object",
+                "required": [
+                  "path"
+                ],
+                "properties": {
+                  "path": {
+                    "pattern": "(^|/)check-selection\\.json$"
+                  }
+                }
+              },
+              "minContains": 1,
+              "maxContains": 1
+            },
+            {
+              "contains": {
+                "type": "object",
+                "required": [
+                  "path"
+                ],
+                "properties": {
+                  "path": {
+                    "pattern": "(^|/)selection-review\\.json$"
+                  }
+                }
+              },
+              "minContains": 1,
+              "maxContains": 1
+            }
+          ]
+        },
+        "taskHashNormalizationVersion": {
+          "const": 1
+        },
+        "catalogVersion": {
+          "type": "string",
+          "pattern": "^\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?$"
+        },
+        "overlayVersions": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "version"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+              },
+              "version": {
+                "type": "string",
+                "pattern": "^\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?$"
+              }
+            }
+          }
+        }
+      }
+    },
+    "exemption": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "confirmedAt",
+        "confirmationSource",
+        "approver",
+        "reason"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "const": 1
+        },
+        "confirmedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "confirmationSource": {
+          "const": "pi-interactive"
+        },
+        "approver": {
+          "$ref": "#/$defs/approver"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "initialAdoption": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "mode",
+        "baseRefTip",
+        "mergeBase",
+        "head",
+        "baseRefTipConfigured",
+        "mergeBaseConfigured",
+        "headHasConfig",
+        "headHasCommittedReceipt"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "const": 1
+        },
+        "mode": {
+          "const": "initial-adoption-v1"
+        },
+        "baseRefTip": {
+          "$ref": "#/$defs/gitSha"
+        },
+        "mergeBase": {
+          "$ref": "#/$defs/gitSha"
+        },
+        "head": {
+          "$ref": "#/$defs/gitSha"
+        },
+        "baseRefTipConfigured": {
+          "const": false
+        },
+        "mergeBaseConfigured": {
+          "const": false
+        },
+        "headHasConfig": {
+          "const": true
+        },
+        "headHasCommittedReceipt": {
+          "const": true
+        }
+      }
+    }
+  }
+}

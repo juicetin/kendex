@@ -1,0 +1,1154 @@
+{
+  "schemaVersion": 1,
+  "catalogVersion": "1.0.0",
+  "checks": [
+    {
+      "id": "catalog-validation",
+      "version": "1.0.0",
+      "family": "baseline",
+      "purpose": "Validate the pinned catalog and complete selection",
+      "applicability": {
+        "rule": "Required for every repository mutation.",
+        "impactKeys": [],
+        "changeShapes": [
+          "all"
+        ],
+        "riskLevels": [
+          "all"
+        ]
+      },
+      "requiredEvidence": [
+        {
+          "kind": "document",
+          "description": "Validate the pinned catalog and complete selection evidence."
+        }
+      ],
+      "method": {
+        "kind": "manual",
+        "value": "check-lifecycle validator"
+      },
+      "costTier": "standard",
+      "blockingPolicy": "task-required",
+      "waiverPolicy": {
+        "allowed": false,
+        "humanApprovalRequired": true,
+        "replacementEvidenceRequired": true
+      },
+      "instrumentationExpectation": {
+        "productObservability": false,
+        "workflowTelemetry": true,
+        "qualityAttributeScenarioIds": []
+      },
+      "owner": "pi-harness",
+      "supersedes": []
+    },
+    {
+      "id": "baseline-tests",
+      "version": "1.0.0",
+      "family": "baseline",
+      "purpose": "Run repository tests",
+      "applicability": {
+        "rule": "Required for every repository mutation.",
+        "impactKeys": [],
+        "changeShapes": [
+          "all"
+        ],
+        "riskLevels": [
+          "all"
+        ]
+      },
+      "requiredEvidence": [
+        {
+          "kind": "command",
+          "description": "Run repository tests evidence."
+        }
+      ],
+      "method": {
+        "kind": "command",
+        "value": "pnpm test"
+      },
+      "costTier": "standard",
+      "blockingPolicy": "task-required",
+      "waiverPolicy": {
+        "allowed": true,
+        "humanApprovalRequired": true,
+        "replacementEvidenceRequired": true
+      },
+      "instrumentationExpectation": {
+        "productObservability": false,
+        "workflowTelemetry": true,
+        "qualityAttributeScenarioIds": []
+      },
+      "owner": "pi-harness",
+      "supersedes": []
+    },
+    {
+      "id": "typecheck",
+      "version": "1.0.0",
+      "family": "baseline",
+      "purpose": "Run static type checking",
+      "applicability": {
+        "rule": "Required for every repository mutation.",
+        "impactKeys": [],
+        "changeShapes": [
+          "all"
+        ],
+        "riskLevels": [
+          "all"
+        ]
+      },
+      "requiredEvidence": [
+        {
+          "kind": "command",
+          "description": "Run static type checking evidence."
+        }
+      ],
+      "method": {
+        "kind": "command",
+        "value": "pnpm typecheck"
+      },
+      "costTier": "standard",
+      "blockingPolicy": "task-required",
+      "waiverPolicy": {
+        "allowed": true,
+        "humanApprovalRequired": true,
+        "replacementEvidenceRequired": true
+      },
+      "instrumentationExpectation": {
+        "productObservability": false,
+        "workflowTelemetry": true,
+        "qualityAttributeScenarioIds": []
+      },
+      "owner": "pi-harness",
+      "supersedes": []
+    },
+    {
+      "id": "build",
+      "version": "1.0.0",
+      "family": "baseline",
+      "purpose": "Build shipped package assets",
+      "applicability": {
+        "rule": "Required for every repository mutation.",
+        "impactKeys": [],
+        "changeShapes": [
+          "all"
+        ],
+        "riskLevels": [
+          "all"
+        ]
+      },
+      "requiredEvidence": [
+        {
+          "kind": "command",
+          "description": "Build shipped package assets evidence."
+        }
+      ],
+      "method": {
+        "kind": "command",
+        "value": "pnpm build"
+      },
+      "costTier": "standard",
+      "blockingPolicy": "task-required",
+      "waiverPolicy": {
+        "allowed": true,
+        "humanApprovalRequired": true,
+        "replacementEvidenceRequired": true
+      },
+      "instrumentationExpectation": {
+        "productObservability": false,
+        "workflowTelemetry": true,
+        "qualityAttributeScenarioIds": []
+      },
+      "owner": "pi-harness",
+      "supersedes": []
+    },
+    {
+      "id": "openspec-validation",
+      "version": "1.0.0",
+      "family": "baseline",
+      "purpose": "Validate OpenSpec contracts",
+      "applicability": {
+        "rule": "Required for every repository mutation.",
+        "impactKeys": [],
+        "changeShapes": [
+          "all"
+        ],
+        "riskLevels": [
+          "all"
+        ]
+      },
+      "requiredEvidence": [
+        {
+          "kind": "command",
+          "description": "Validate OpenSpec contracts evidence."
+        }
+      ],
+      "method": {
+        "kind": "command",
+        "value": "openspec validate --all --strict"
+      },
+      "costTier": "standard",
+      "blockingPolicy": "task-required",
+      "waiverPolicy": {
+        "allowed": true,
+        "humanApprovalRequired": true,
+        "replacementEvidenceRequired": true
+      },
+      "instrumentationExpectation": {
+        "productObservability": false,
+        "workflowTelemetry": true,
+        "qualityAttributeScenarioIds": []
+      },
+      "owner": "pi-harness",
+      "supersedes": []
+    },
+    {
+      "id": "dependency-review",
+      "version": "1.0.0",
+      "family": "dependency",
+      "purpose": "Review dependency fit and risk",
+      "applicability": {
+        "rule": "Required when dependencies is affected.",
+        "impactKeys": [
+          "dependencies"
+        ],
+        "changeShapes": [
+          "all"
+        ],
+        "riskLevels": [
+          "all"
+        ]
+      },
+      "requiredEvidence": [
+        {
+          "kind": "review",
+          "description": "Review dependency fit and risk evidence."
+        }
+      ],
+      "method": {
+        "kind": "skill",
+        "value": "dependency-survey"
+      },
+      "costTier": "standard",
+      "blockingPolicy": "task-required",
+      "waiverPolicy": {
+        "allowed": true,
+        "humanApprovalRequired": true,
+        "replacementEvidenceRequired": true
+      },
+      "instrumentationExpectation": {
+        "productObservability": false,
+        "workflowTelemetry": true,
+        "qualityAttributeScenarioIds": []
+      },
+      "owner": "pi-harness",
+      "supersedes": []
+    },
+    {
+      "id": "test-first",
+      "version": "1.0.0",
+      "family": "test",
+      "purpose": "Record red-green evidence for meaningful behavior",
+      "applicability": {
+        "rule": "Required when meaningfulBehavior is affected.",
+        "impactKeys": [
+          "meaningfulBehavior"
+        ],
+        "changeShapes": [
+          "all"
+        ],
+        "riskLevels": [
+          "all"
+        ]
+      },
+      "requiredEvidence": [
+        {
+          "kind": "review",
+          "description": "Record red-green evidence for meaningful behavior evidence."
+        }
+      ],
+      "method": {
+        "kind": "skill",
+        "value": "tdd-enforcement"
+      },
+      "costTier": "standard",
+      "blockingPolicy": "task-required",
+      "waiverPolicy": {
+        "allowed": false,
+        "humanApprovalRequired": true,
+        "replacementEvidenceRequired": true
+      },
+      "instrumentationExpectation": {
+        "productObservability": false,
+        "workflowTelemetry": true,
+        "qualityAttributeScenarioIds": []
+      },
+      "owner": "pi-harness",
+      "supersedes": []
+    },
+    {
+      "id": "selection-review",
+      "version": "1.0.0",
+      "family": "review",
+      "purpose": "Independently review the complete Check Selection",
+      "applicability": {
+        "rule": "Required for every repository mutation.",
+        "impactKeys": [],
+        "changeShapes": [
+          "all"
+        ],
+        "riskLevels": [
+          "all"
+        ]
+      },
+      "requiredEvidence": [
+        {
+          "kind": "review",
+          "description": "Independently review the complete Check Selection evidence."
+        }
+      ],
+      "method": {
+        "kind": "review",
+        "value": "selection-review"
+      },
+      "costTier": "standard",
+      "blockingPolicy": "task-required",
+      "waiverPolicy": {
+        "allowed": false,
+        "humanApprovalRequired": true,
+        "replacementEvidenceRequired": true
+      },
+      "instrumentationExpectation": {
+        "productObservability": false,
+        "workflowTelemetry": true,
+        "qualityAttributeScenarioIds": []
+      },
+      "owner": "pi-harness",
+      "supersedes": []
+    },
+    {
+      "id": "satisfaction-review",
+      "version": "1.0.0",
+      "family": "review",
+      "purpose": "Independently judge evidence and approved intent",
+      "applicability": {
+        "rule": "Required for every repository mutation.",
+        "impactKeys": [],
+        "changeShapes": [
+          "all"
+        ],
+        "riskLevels": [
+          "all"
+        ]
+      },
+      "requiredEvidence": [
+        {
+          "kind": "review",
+          "description": "Independently judge evidence and approved intent evidence."
+        }
+      ],
+      "method": {
+        "kind": "review",
+        "value": "satisfaction-review"
+      },
+      "costTier": "expensive",
+      "blockingPolicy": "task-required",
+      "waiverPolicy": {
+        "allowed": false,
+        "humanApprovalRequired": true,
+        "replacementEvidenceRequired": true
+      },
+      "instrumentationExpectation": {
+        "productObservability": false,
+        "workflowTelemetry": true,
+        "qualityAttributeScenarioIds": []
+      },
+      "owner": "pi-harness",
+      "supersedes": []
+    },
+    {
+      "id": "code-review",
+      "version": "1.0.0",
+      "family": "review",
+      "purpose": "Review the final task-owned diff after deterministic checks",
+      "applicability": {
+        "rule": "Required for every repository mutation.",
+        "impactKeys": [],
+        "changeShapes": [
+          "all"
+        ],
+        "riskLevels": [
+          "all"
+        ]
+      },
+      "requiredEvidence": [
+        {
+          "kind": "review",
+          "description": "Review the final task-owned diff after deterministic checks evidence."
+        }
+      ],
+      "method": {
+        "kind": "skill",
+        "value": "code-review"
+      },
+      "costTier": "standard",
+      "blockingPolicy": "task-required",
+      "waiverPolicy": {
+        "allowed": false,
+        "humanApprovalRequired": true,
+        "replacementEvidenceRequired": true
+      },
+      "instrumentationExpectation": {
+        "productObservability": false,
+        "workflowTelemetry": true,
+        "qualityAttributeScenarioIds": []
+      },
+      "owner": "pi-harness",
+      "supersedes": []
+    },
+    {
+      "id": "auth-review",
+      "version": "1.0.0",
+      "family": "auth",
+      "purpose": "Review authentication and authorization boundaries",
+      "applicability": {
+        "rule": "Required when securityOrAuth is affected.",
+        "impactKeys": [
+          "securityOrAuth"
+        ],
+        "changeShapes": [
+          "all"
+        ],
+        "riskLevels": [
+          "all"
+        ]
+      },
+      "requiredEvidence": [
+        {
+          "kind": "review",
+          "description": "Review authentication and authorization boundaries evidence."
+        }
+      ],
+      "method": {
+        "kind": "skill",
+        "value": "auth-check"
+      },
+      "costTier": "standard",
+      "blockingPolicy": "task-required",
+      "waiverPolicy": {
+        "allowed": true,
+        "humanApprovalRequired": true,
+        "replacementEvidenceRequired": true
+      },
+      "instrumentationExpectation": {
+        "productObservability": false,
+        "workflowTelemetry": true,
+        "qualityAttributeScenarioIds": []
+      },
+      "owner": "pi-harness",
+      "supersedes": []
+    },
+    {
+      "id": "security-scan",
+      "version": "1.0.0",
+      "family": "security",
+      "purpose": "Run deterministic security scans",
+      "applicability": {
+        "rule": "Required when securityOrAuth is affected.",
+        "impactKeys": [
+          "securityOrAuth"
+        ],
+        "changeShapes": [
+          "all"
+        ],
+        "riskLevels": [
+          "all"
+        ]
+      },
+      "requiredEvidence": [
+        {
+          "kind": "review",
+          "description": "Run deterministic security scans evidence."
+        }
+      ],
+      "method": {
+        "kind": "skill",
+        "value": "security-scan"
+      },
+      "costTier": "standard",
+      "blockingPolicy": "task-required",
+      "waiverPolicy": {
+        "allowed": true,
+        "humanApprovalRequired": true,
+        "replacementEvidenceRequired": true
+      },
+      "instrumentationExpectation": {
+        "productObservability": false,
+        "workflowTelemetry": true,
+        "qualityAttributeScenarioIds": []
+      },
+      "owner": "pi-harness",
+      "supersedes": []
+    },
+    {
+      "id": "api-contract",
+      "version": "1.0.0",
+      "family": "api",
+      "purpose": "Validate the authoritative HTTP API contract",
+      "applicability": {
+        "rule": "Required when httpApi is affected.",
+        "impactKeys": [
+          "httpApi"
+        ],
+        "changeShapes": [
+          "all"
+        ],
+        "riskLevels": [
+          "all"
+        ]
+      },
+      "requiredEvidence": [
+        {
+          "kind": "review",
+          "description": "Validate the authoritative HTTP API contract evidence."
+        }
+      ],
+      "method": {
+        "kind": "skill",
+        "value": "api-spec"
+      },
+      "costTier": "standard",
+      "blockingPolicy": "task-required",
+      "waiverPolicy": {
+        "allowed": true,
+        "humanApprovalRequired": true,
+        "replacementEvidenceRequired": true
+      },
+      "instrumentationExpectation": {
+        "productObservability": false,
+        "workflowTelemetry": true,
+        "qualityAttributeScenarioIds": []
+      },
+      "owner": "pi-harness",
+      "supersedes": []
+    },
+    {
+      "id": "ui-evidence",
+      "version": "1.0.0",
+      "family": "ui",
+      "purpose": "Capture visual and accessibility evidence",
+      "applicability": {
+        "rule": "Required when ui is affected.",
+        "impactKeys": [
+          "ui"
+        ],
+        "changeShapes": [
+          "all"
+        ],
+        "riskLevels": [
+          "all"
+        ]
+      },
+      "requiredEvidence": [
+        {
+          "kind": "visual",
+          "description": "Capture visual and accessibility evidence evidence."
+        }
+      ],
+      "method": {
+        "kind": "skill",
+        "value": "ui-evidence"
+      },
+      "costTier": "standard",
+      "blockingPolicy": "task-required",
+      "waiverPolicy": {
+        "allowed": true,
+        "humanApprovalRequired": true,
+        "replacementEvidenceRequired": true
+      },
+      "instrumentationExpectation": {
+        "productObservability": false,
+        "workflowTelemetry": true,
+        "qualityAttributeScenarioIds": []
+      },
+      "owner": "pi-harness",
+      "supersedes": []
+    },
+    {
+      "id": "quality-attribute-scenarios",
+      "version": "1.0.0",
+      "family": "quality-attribute",
+      "purpose": "Validate measurable quality attribute scenarios",
+      "applicability": {
+        "rule": "Required when meaningfulBehavior is affected.",
+        "impactKeys": [
+          "meaningfulBehavior"
+        ],
+        "changeShapes": [
+          "all"
+        ],
+        "riskLevels": [
+          "all"
+        ]
+      },
+      "requiredEvidence": [
+        {
+          "kind": "document",
+          "description": "Validate measurable quality attribute scenarios evidence."
+        }
+      ],
+      "method": {
+        "kind": "command",
+        "value": "focused scenario tests"
+      },
+      "costTier": "standard",
+      "blockingPolicy": "task-required",
+      "waiverPolicy": {
+        "allowed": true,
+        "humanApprovalRequired": true,
+        "replacementEvidenceRequired": true
+      },
+      "instrumentationExpectation": {
+        "productObservability": false,
+        "workflowTelemetry": true,
+        "qualityAttributeScenarioIds": []
+      },
+      "owner": "pi-harness",
+      "supersedes": []
+    },
+    {
+      "id": "product-observability",
+      "version": "1.0.0",
+      "family": "observability",
+      "purpose": "Validate affected product instrumentation boundaries",
+      "applicability": {
+        "rule": "Required when meaningfulBehavior is affected.",
+        "impactKeys": [
+          "meaningfulBehavior"
+        ],
+        "changeShapes": [
+          "all"
+        ],
+        "riskLevels": [
+          "all"
+        ]
+      },
+      "requiredEvidence": [
+        {
+          "kind": "review",
+          "description": "Validate affected product instrumentation boundaries evidence."
+        }
+      ],
+      "method": {
+        "kind": "review",
+        "value": "observability contract review"
+      },
+      "costTier": "standard",
+      "blockingPolicy": "task-required",
+      "waiverPolicy": {
+        "allowed": true,
+        "humanApprovalRequired": true,
+        "replacementEvidenceRequired": true
+      },
+      "instrumentationExpectation": {
+        "productObservability": true,
+        "workflowTelemetry": true,
+        "qualityAttributeScenarioIds": []
+      },
+      "owner": "pi-harness",
+      "supersedes": []
+    },
+    {
+      "id": "structured-logging",
+      "version": "1.0.0",
+      "family": "observability",
+      "purpose": "Validate structured allowlisted log fields",
+      "applicability": {
+        "rule": "Required when securityOrAuth is affected.",
+        "impactKeys": [
+          "securityOrAuth"
+        ],
+        "changeShapes": [
+          "all"
+        ],
+        "riskLevels": [
+          "all"
+        ]
+      },
+      "requiredEvidence": [
+        {
+          "kind": "review",
+          "description": "Validate structured allowlisted log fields evidence."
+        }
+      ],
+      "method": {
+        "kind": "review",
+        "value": "logging contract review"
+      },
+      "costTier": "standard",
+      "blockingPolicy": "task-required",
+      "waiverPolicy": {
+        "allowed": true,
+        "humanApprovalRequired": true,
+        "replacementEvidenceRequired": true
+      },
+      "instrumentationExpectation": {
+        "productObservability": true,
+        "workflowTelemetry": true,
+        "qualityAttributeScenarioIds": []
+      },
+      "owner": "pi-harness",
+      "supersedes": []
+    },
+    {
+      "id": "bounded-profiling",
+      "version": "1.0.0",
+      "family": "performance",
+      "purpose": "Validate bounded profiling evidence when selected",
+      "applicability": {
+        "rule": "Required when meaningfulBehavior is affected.",
+        "impactKeys": [
+          "meaningfulBehavior"
+        ],
+        "changeShapes": [
+          "all"
+        ],
+        "riskLevels": [
+          "all"
+        ]
+      },
+      "requiredEvidence": [
+        {
+          "kind": "profile",
+          "description": "Validate bounded profiling evidence when selected evidence."
+        }
+      ],
+      "method": {
+        "kind": "manual",
+        "value": "bounded profiling session"
+      },
+      "costTier": "expensive",
+      "blockingPolicy": "task-required",
+      "waiverPolicy": {
+        "allowed": true,
+        "humanApprovalRequired": true,
+        "replacementEvidenceRequired": true
+      },
+      "instrumentationExpectation": {
+        "productObservability": true,
+        "workflowTelemetry": true,
+        "qualityAttributeScenarioIds": []
+      },
+      "owner": "pi-harness",
+      "supersedes": []
+    },
+    {
+      "id": "workflow-telemetry",
+      "version": "1.0.0",
+      "family": "observability",
+      "purpose": "Record quality-process duration, cost, retries, yield, and waivers",
+      "applicability": {
+        "rule": "Required for every repository mutation.",
+        "impactKeys": [],
+        "changeShapes": [
+          "all"
+        ],
+        "riskLevels": [
+          "all"
+        ]
+      },
+      "requiredEvidence": [
+        {
+          "kind": "document",
+          "description": "Record quality-process duration, cost, retries, yield, and waivers evidence."
+        }
+      ],
+      "method": {
+        "kind": "manual",
+        "value": "workflow telemetry record"
+      },
+      "costTier": "standard",
+      "blockingPolicy": "task-required",
+      "waiverPolicy": {
+        "allowed": false,
+        "humanApprovalRequired": true,
+        "replacementEvidenceRequired": true
+      },
+      "instrumentationExpectation": {
+        "productObservability": false,
+        "workflowTelemetry": true,
+        "qualityAttributeScenarioIds": []
+      },
+      "owner": "pi-harness",
+      "supersedes": []
+    },
+    {
+      "id": "skill-evaluation",
+      "version": "1.0.0",
+      "family": "skill",
+      "purpose": "Evaluate changed skill triggers and behavior",
+      "applicability": {
+        "rule": "Required for every repository mutation.",
+        "impactKeys": [],
+        "changeShapes": [
+          "all"
+        ],
+        "riskLevels": [
+          "all"
+        ]
+      },
+      "requiredEvidence": [
+        {
+          "kind": "review",
+          "description": "Evaluate changed skill triggers and behavior evidence."
+        }
+      ],
+      "method": {
+        "kind": "review",
+        "value": "skill evaluation"
+      },
+      "costTier": "standard",
+      "blockingPolicy": "task-required",
+      "waiverPolicy": {
+        "allowed": true,
+        "humanApprovalRequired": true,
+        "replacementEvidenceRequired": true
+      },
+      "instrumentationExpectation": {
+        "productObservability": false,
+        "workflowTelemetry": true,
+        "qualityAttributeScenarioIds": []
+      },
+      "owner": "pi-harness",
+      "supersedes": []
+    },
+    {
+      "id": "code-simplification",
+      "version": "1.0.0",
+      "family": "maintainability",
+      "purpose": "Simplify task-owned code without behavior change",
+      "applicability": {
+        "rule": "Required when meaningfulBehavior is affected.",
+        "impactKeys": [
+          "meaningfulBehavior"
+        ],
+        "changeShapes": [
+          "all"
+        ],
+        "riskLevels": [
+          "all"
+        ]
+      },
+      "requiredEvidence": [
+        {
+          "kind": "review",
+          "description": "Simplify task-owned code without behavior change evidence."
+        }
+      ],
+      "method": {
+        "kind": "skill",
+        "value": "code-simplifier"
+      },
+      "costTier": "standard",
+      "blockingPolicy": "task-required",
+      "waiverPolicy": {
+        "allowed": true,
+        "humanApprovalRequired": true,
+        "replacementEvidenceRequired": true
+      },
+      "instrumentationExpectation": {
+        "productObservability": false,
+        "workflowTelemetry": true,
+        "qualityAttributeScenarioIds": []
+      },
+      "owner": "pi-harness",
+      "supersedes": []
+    },
+    {
+      "id": "maintainability-review",
+      "version": "1.0.0",
+      "family": "maintainability",
+      "purpose": "Review cohesion and avoid duplicate lifecycle logic",
+      "applicability": {
+        "rule": "Required when meaningfulBehavior is affected.",
+        "impactKeys": [
+          "meaningfulBehavior"
+        ],
+        "changeShapes": [
+          "all"
+        ],
+        "riskLevels": [
+          "all"
+        ]
+      },
+      "requiredEvidence": [
+        {
+          "kind": "review",
+          "description": "Review cohesion and avoid duplicate lifecycle logic evidence."
+        }
+      ],
+      "method": {
+        "kind": "skill",
+        "value": "strict-maintainability-review"
+      },
+      "costTier": "standard",
+      "blockingPolicy": "task-required",
+      "waiverPolicy": {
+        "allowed": true,
+        "humanApprovalRequired": true,
+        "replacementEvidenceRequired": true
+      },
+      "instrumentationExpectation": {
+        "productObservability": false,
+        "workflowTelemetry": true,
+        "qualityAttributeScenarioIds": []
+      },
+      "owner": "pi-harness",
+      "supersedes": []
+    },
+    {
+      "id": "fallow",
+      "version": "1.0.0",
+      "family": "fallow",
+      "purpose": "Audit changed code for dependency and structure findings",
+      "applicability": {
+        "rule": "Required when fallow is affected.",
+        "impactKeys": [
+          "fallow"
+        ],
+        "changeShapes": [
+          "all"
+        ],
+        "riskLevels": [
+          "all"
+        ]
+      },
+      "requiredEvidence": [
+        {
+          "kind": "review",
+          "description": "Audit changed code for dependency and structure findings evidence."
+        }
+      ],
+      "method": {
+        "kind": "skill",
+        "value": "fallow-check"
+      },
+      "costTier": "standard",
+      "blockingPolicy": "task-required",
+      "waiverPolicy": {
+        "allowed": true,
+        "humanApprovalRequired": true,
+        "replacementEvidenceRequired": true
+      },
+      "instrumentationExpectation": {
+        "productObservability": false,
+        "workflowTelemetry": true,
+        "qualityAttributeScenarioIds": []
+      },
+      "owner": "pi-harness",
+      "supersedes": []
+    },
+    {
+      "id": "mutation-testing",
+      "version": "1.0.0",
+      "family": "test",
+      "purpose": "Run bounded mutation testing only after direct human opt-in",
+      "applicability": {
+        "rule": "Required when mutationTesting is affected.",
+        "impactKeys": [
+          "mutationTesting"
+        ],
+        "changeShapes": [
+          "all"
+        ],
+        "riskLevels": [
+          "all"
+        ]
+      },
+      "requiredEvidence": [
+        {
+          "kind": "review",
+          "description": "Run bounded mutation testing only after direct human opt-in evidence."
+        }
+      ],
+      "method": {
+        "kind": "skill",
+        "value": "mutation-testing"
+      },
+      "costTier": "expensive",
+      "blockingPolicy": "task-required",
+      "waiverPolicy": {
+        "allowed": false,
+        "humanApprovalRequired": true,
+        "replacementEvidenceRequired": true
+      },
+      "instrumentationExpectation": {
+        "productObservability": false,
+        "workflowTelemetry": true,
+        "qualityAttributeScenarioIds": []
+      },
+      "owner": "pi-harness",
+      "supersedes": []
+    },
+    {
+      "id": "documentation-sync",
+      "version": "1.0.0",
+      "family": "documentation",
+      "purpose": "Synchronize every affected active artifact",
+      "applicability": {
+        "rule": "Required for every repository mutation.",
+        "impactKeys": [],
+        "changeShapes": [
+          "all"
+        ],
+        "riskLevels": [
+          "all"
+        ]
+      },
+      "requiredEvidence": [
+        {
+          "kind": "document",
+          "description": "Synchronize every affected active artifact evidence."
+        }
+      ],
+      "method": {
+        "kind": "review",
+        "value": "documentation and diff inspection"
+      },
+      "costTier": "standard",
+      "blockingPolicy": "task-required",
+      "waiverPolicy": {
+        "allowed": false,
+        "humanApprovalRequired": true,
+        "replacementEvidenceRequired": true
+      },
+      "instrumentationExpectation": {
+        "productObservability": false,
+        "workflowTelemetry": true,
+        "qualityAttributeScenarioIds": []
+      },
+      "owner": "pi-harness",
+      "supersedes": []
+    },
+    {
+      "id": "package-verification",
+      "version": "1.0.0",
+      "family": "package",
+      "purpose": "Verify shipped package contents",
+      "applicability": {
+        "rule": "Required for every repository mutation.",
+        "impactKeys": [],
+        "changeShapes": [
+          "all"
+        ],
+        "riskLevels": [
+          "all"
+        ]
+      },
+      "requiredEvidence": [
+        {
+          "kind": "command",
+          "description": "Verify shipped package contents evidence."
+        }
+      ],
+      "method": {
+        "kind": "command",
+        "value": "npm pack --dry-run"
+      },
+      "costTier": "standard",
+      "blockingPolicy": "task-required",
+      "waiverPolicy": {
+        "allowed": true,
+        "humanApprovalRequired": true,
+        "replacementEvidenceRequired": true
+      },
+      "instrumentationExpectation": {
+        "productObservability": false,
+        "workflowTelemetry": true,
+        "qualityAttributeScenarioIds": []
+      },
+      "owner": "pi-harness",
+      "supersedes": []
+    },
+    {
+      "id": "retrospective",
+      "version": "1.0.0",
+      "family": "retrospective",
+      "purpose": "Produce the typed post-review retrospective",
+      "applicability": {
+        "rule": "Required for every repository mutation.",
+        "impactKeys": [],
+        "changeShapes": [
+          "all"
+        ],
+        "riskLevels": [
+          "all"
+        ]
+      },
+      "requiredEvidence": [
+        {
+          "kind": "document",
+          "description": "Produce the typed post-review retrospective evidence."
+        }
+      ],
+      "method": {
+        "kind": "manual",
+        "value": "retrospective"
+      },
+      "costTier": "standard",
+      "blockingPolicy": "task-required",
+      "waiverPolicy": {
+        "allowed": false,
+        "humanApprovalRequired": true,
+        "replacementEvidenceRequired": true
+      },
+      "instrumentationExpectation": {
+        "productObservability": false,
+        "workflowTelemetry": true,
+        "qualityAttributeScenarioIds": []
+      },
+      "owner": "pi-harness",
+      "supersedes": []
+    },
+    {
+      "id": "skill-governance",
+      "version": "1.0.0",
+      "family": "skill",
+      "purpose": "Validate Skill Index search, candidate threshold, evaluation, and human approval",
+      "applicability": {
+        "rule": "Required for every repository mutation.",
+        "impactKeys": [],
+        "changeShapes": [
+          "all"
+        ],
+        "riskLevels": [
+          "all"
+        ]
+      },
+      "requiredEvidence": [
+        {
+          "kind": "review",
+          "description": "Validate Skill Index search, candidate threshold, evaluation, and human approval evidence."
+        }
+      ],
+      "method": {
+        "kind": "review",
+        "value": "skill governance review"
+      },
+      "costTier": "standard",
+      "blockingPolicy": "task-required",
+      "waiverPolicy": {
+        "allowed": false,
+        "humanApprovalRequired": true,
+        "replacementEvidenceRequired": true
+      },
+      "instrumentationExpectation": {
+        "productObservability": false,
+        "workflowTelemetry": true,
+        "qualityAttributeScenarioIds": []
+      },
+      "owner": "pi-harness",
+      "supersedes": []
+    }
+  ]
+}

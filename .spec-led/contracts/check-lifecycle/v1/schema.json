@@ -1,0 +1,2776 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://juicetin.dev/pi-harness/check-lifecycle/v1/schema.json",
+  "schemaVersion": 1,
+  "$defs": {
+    "ActivationCompatibility": {
+      "type": "object",
+      "properties": {
+        "schemaVersion": {
+          "type": "number",
+          "const": 1
+        },
+        "active": {
+          "type": "boolean"
+        },
+        "openSpecSchemaVersion": {
+          "type": "string",
+          "pattern": "^\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?$"
+        },
+        "catalogVersion": {
+          "type": "string",
+          "pattern": "^\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?$"
+        },
+        "checkSelectionVersion": {
+          "type": "string",
+          "pattern": "^\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?$"
+        },
+        "selectionReviewVersion": {
+          "type": "string",
+          "pattern": "^\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?$"
+        },
+        "satisfactionReviewVersion": {
+          "type": "string",
+          "pattern": "^\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?$"
+        },
+        "retrospectiveVersion": {
+          "type": "string",
+          "pattern": "^\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?$"
+        },
+        "components": {
+          "minItems": 8,
+          "maxItems": 8,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "catalog",
+              "check-selection",
+              "selection-review",
+              "satisfaction-review",
+              "retrospective",
+              "spec-led-v2",
+              "lifecycle-skills",
+              "package-assets"
+            ]
+          }
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "active",
+        "openSpecSchemaVersion",
+        "catalogVersion",
+        "checkSelectionVersion",
+        "selectionReviewVersion",
+        "satisfactionReviewVersion",
+        "retrospectiveVersion",
+        "components"
+      ],
+      "additionalProperties": false
+    },
+    "CheckCatalog": {
+      "type": "object",
+      "properties": {
+        "schemaVersion": {
+          "type": "number",
+          "const": 1
+        },
+        "catalogVersion": {
+          "type": "string",
+          "pattern": "^\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?$"
+        },
+        "checks": {
+          "minItems": 1,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*$"
+              },
+              "version": {
+                "type": "string",
+                "pattern": "^\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?$"
+              },
+              "family": {
+                "type": "string",
+                "minLength": 1
+              },
+              "purpose": {
+                "type": "string",
+                "minLength": 1
+              },
+              "applicability": {
+                "type": "object",
+                "properties": {
+                  "rule": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "impactKeys": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "changeShapes": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "riskLevels": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  }
+                },
+                "required": [
+                  "rule",
+                  "impactKeys",
+                  "changeShapes",
+                  "riskLevels"
+                ],
+                "additionalProperties": false
+              },
+              "requiredEvidence": {
+                "minItems": 1,
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "command",
+                        "review",
+                        "document",
+                        "visual",
+                        "profile",
+                        "operational"
+                      ]
+                    },
+                    "description": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "freshnessHours": {
+                      "type": "number",
+                      "exclusiveMinimum": 0
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "description"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "method": {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "command",
+                      "skill",
+                      "review",
+                      "manual",
+                      "post-release"
+                    ]
+                  },
+                  "value": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "kind",
+                  "value"
+                ],
+                "additionalProperties": false
+              },
+              "costTier": {
+                "type": "string",
+                "enum": [
+                  "cheap",
+                  "standard",
+                  "expensive",
+                  "post-release"
+                ]
+              },
+              "blockingPolicy": {
+                "type": "string",
+                "enum": [
+                  "task-required",
+                  "tracked-post-release"
+                ]
+              },
+              "waiverPolicy": {
+                "type": "object",
+                "properties": {
+                  "allowed": {
+                    "type": "boolean"
+                  },
+                  "humanApprovalRequired": {
+                    "type": "boolean",
+                    "const": true
+                  },
+                  "replacementEvidenceRequired": {
+                    "type": "boolean",
+                    "const": true
+                  }
+                },
+                "required": [
+                  "allowed",
+                  "humanApprovalRequired",
+                  "replacementEvidenceRequired"
+                ],
+                "additionalProperties": false
+              },
+              "instrumentationExpectation": {
+                "type": "object",
+                "properties": {
+                  "productObservability": {
+                    "type": "boolean"
+                  },
+                  "workflowTelemetry": {
+                    "type": "boolean"
+                  },
+                  "qualityAttributeScenarioIds": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*$"
+                    }
+                  }
+                },
+                "required": [
+                  "productObservability",
+                  "workflowTelemetry",
+                  "qualityAttributeScenarioIds"
+                ],
+                "additionalProperties": false
+              },
+              "owner": {
+                "type": "string",
+                "minLength": 1
+              },
+              "supersedes": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*$"
+                }
+              },
+              "supersededBy": {
+                "type": "string",
+                "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*$"
+              }
+            },
+            "required": [
+              "id",
+              "version",
+              "family",
+              "purpose",
+              "applicability",
+              "requiredEvidence",
+              "method",
+              "costTier",
+              "blockingPolicy",
+              "waiverPolicy",
+              "instrumentationExpectation",
+              "owner",
+              "supersedes"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "catalogVersion",
+        "checks"
+      ],
+      "additionalProperties": false
+    },
+    "CheckSelection": {
+      "type": "object",
+      "properties": {
+        "schemaVersion": {
+          "type": "number",
+          "const": 1
+        },
+        "changeName": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*$"
+        },
+        "catalogVersion": {
+          "type": "string",
+          "pattern": "^\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?$"
+        },
+        "overlays": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*$"
+              },
+              "version": {
+                "type": "string",
+                "pattern": "^\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?$"
+              }
+            },
+            "required": [
+              "id",
+              "version"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "selectedFrom": {
+          "minItems": 1,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string",
+                "minLength": 1
+              },
+              "sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            },
+            "required": [
+              "path",
+              "sha256"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "changeShape": {
+          "type": "string",
+          "minLength": 1
+        },
+        "riskLevel": {
+          "type": "string",
+          "minLength": 1
+        },
+        "dispositions": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "required"
+                  },
+                  "checkId": {
+                    "type": "string",
+                    "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*$"
+                  },
+                  "checkVersion": {
+                    "type": "string",
+                    "pattern": "^\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?$"
+                  },
+                  "method": {
+                    "type": "object",
+                    "properties": {
+                      "kind": {
+                        "type": "string",
+                        "enum": [
+                          "command",
+                          "skill",
+                          "review",
+                          "manual",
+                          "post-release"
+                        ]
+                      },
+                      "value": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "value"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "plannedEvidence": {
+                    "minItems": 1,
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "checkId": {
+                          "type": "string",
+                          "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*$"
+                        },
+                        "checkVersion": {
+                          "type": "string",
+                          "pattern": "^\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?$"
+                        },
+                        "state": {
+                          "type": "string",
+                          "enum": [
+                            "planned",
+                            "produced"
+                          ]
+                        },
+                        "uri": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "sha256": {
+                          "type": "string",
+                          "pattern": "^[0-9a-f]{64}$"
+                        },
+                        "producer": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "method": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "gitIdentity": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "createdAt": {
+                          "type": "string",
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                        },
+                        "freshnessHours": {
+                          "type": "number",
+                          "exclusiveMinimum": 0
+                        }
+                      },
+                      "required": [
+                        "checkId",
+                        "checkVersion",
+                        "state",
+                        "uri",
+                        "producer",
+                        "method",
+                        "gitIdentity",
+                        "createdAt",
+                        "freshnessHours"
+                      ],
+                      "additionalProperties": false
+                    }
+                  }
+                },
+                "required": [
+                  "kind",
+                  "checkId",
+                  "checkVersion",
+                  "method",
+                  "plannedEvidence"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "not-applicable"
+                  },
+                  "checkId": {
+                    "type": "string",
+                    "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*$"
+                  },
+                  "checkVersion": {
+                    "type": "string",
+                    "pattern": "^\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?$"
+                  },
+                  "reason": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "kind",
+                  "checkId",
+                  "checkVersion",
+                  "reason"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "human-waived"
+                  },
+                  "checkId": {
+                    "type": "string",
+                    "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*$"
+                  },
+                  "checkVersion": {
+                    "type": "string",
+                    "pattern": "^\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?$"
+                  },
+                  "approval": {
+                    "type": "object",
+                    "properties": {
+                      "name": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "email": {
+                        "type": "string",
+                        "format": "email",
+                        "pattern": "^(?!\\.)(?!.*\\.\\.)([A-Za-z0-9_'+\\-\\.]*)[A-Za-z0-9_+-]@([A-Za-z0-9][A-Za-z0-9\\-]*\\.)+[A-Za-z]{2,}$"
+                      },
+                      "approvedAt": {
+                        "type": "string",
+                        "format": "date-time",
+                        "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                      },
+                      "source": {
+                        "type": "string",
+                        "const": "pi-interactive"
+                      }
+                    },
+                    "required": [
+                      "name",
+                      "email",
+                      "approvedAt",
+                      "source"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "rationale": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "replacementEvidence": {
+                    "minItems": 1,
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "checkId": {
+                          "type": "string",
+                          "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*$"
+                        },
+                        "checkVersion": {
+                          "type": "string",
+                          "pattern": "^\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?$"
+                        },
+                        "state": {
+                          "type": "string",
+                          "enum": [
+                            "planned",
+                            "produced"
+                          ]
+                        },
+                        "uri": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "sha256": {
+                          "type": "string",
+                          "pattern": "^[0-9a-f]{64}$"
+                        },
+                        "producer": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "method": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "gitIdentity": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "createdAt": {
+                          "type": "string",
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                        },
+                        "freshnessHours": {
+                          "type": "number",
+                          "exclusiveMinimum": 0
+                        }
+                      },
+                      "required": [
+                        "checkId",
+                        "checkVersion",
+                        "state",
+                        "uri",
+                        "producer",
+                        "method",
+                        "gitIdentity",
+                        "createdAt",
+                        "freshnessHours"
+                      ],
+                      "additionalProperties": false
+                    }
+                  }
+                },
+                "required": [
+                  "kind",
+                  "checkId",
+                  "checkVersion",
+                  "approval",
+                  "rationale",
+                  "replacementEvidence"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          }
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "changeName",
+        "catalogVersion",
+        "overlays",
+        "selectedFrom",
+        "changeShape",
+        "riskLevel",
+        "dispositions"
+      ],
+      "additionalProperties": false
+    },
+    "ChangeLifecycleContext": {
+      "type": "object",
+      "properties": {
+        "origin": {
+          "type": "string",
+          "enum": [
+            "predecessor",
+            "catalog"
+          ]
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "in-flight",
+            "completed",
+            "abandoned"
+          ]
+        },
+        "pinnedCatalogVersion": {
+          "type": "string",
+          "pattern": "^\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?$"
+        },
+        "reopenedByHuman": {
+          "type": "boolean"
+        },
+        "newMutation": {
+          "type": "boolean"
+        },
+        "hasCurrentSelection": {
+          "type": "boolean"
+        },
+        "hasAcceptedSelectionReview": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "origin",
+        "state",
+        "reopenedByHuman",
+        "newMutation",
+        "hasCurrentSelection",
+        "hasAcceptedSelectionReview"
+      ],
+      "additionalProperties": false
+    },
+    "EvidenceReference": {
+      "type": "object",
+      "properties": {
+        "checkId": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*$"
+        },
+        "checkVersion": {
+          "type": "string",
+          "pattern": "^\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?$"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "planned",
+            "produced"
+          ]
+        },
+        "uri": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "producer": {
+          "type": "string",
+          "minLength": 1
+        },
+        "method": {
+          "type": "string",
+          "minLength": 1
+        },
+        "gitIdentity": {
+          "type": "string",
+          "minLength": 1
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+        },
+        "freshnessHours": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        }
+      },
+      "required": [
+        "checkId",
+        "checkVersion",
+        "state",
+        "uri",
+        "producer",
+        "method",
+        "gitIdentity",
+        "createdAt",
+        "freshnessHours"
+      ],
+      "additionalProperties": false
+    },
+    "ProductObservability": {
+      "type": "object",
+      "properties": {
+        "schemaVersion": {
+          "type": "number",
+          "const": 1
+        },
+        "boundaries": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "system",
+                  "external",
+                  "database",
+                  "queue",
+                  "domain"
+                ]
+              },
+              "spanName": {
+                "type": "string",
+                "minLength": 1
+              },
+              "allowlistedAttributes": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "correlationFields": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "qualityAttributeScenarioIds": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*$"
+                }
+              }
+            },
+            "required": [
+              "name",
+              "kind",
+              "spanName",
+              "allowlistedAttributes",
+              "correlationFields",
+              "qualityAttributeScenarioIds"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "logFieldsByLevel": {
+          "type": "object",
+          "properties": {
+            "info": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "debug": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "trace": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "required": [
+            "info",
+            "debug",
+            "trace"
+          ],
+          "additionalProperties": false
+        },
+        "profiling": {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": [
+                "sampled",
+                "on-demand"
+              ]
+            },
+            "scope": {
+              "type": "string",
+              "minLength": 1
+            },
+            "durationSeconds": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "overheadPercent": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 100
+            },
+            "sensitiveDataControls": {
+              "minItems": 1,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "retention": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "mode",
+            "scope",
+            "durationSeconds",
+            "overheadPercent",
+            "sensitiveDataControls",
+            "retention"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "boundaries",
+        "logFieldsByLevel",
+        "profiling"
+      ],
+      "additionalProperties": false
+    },
+    "QualityAttributeScenario": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*$"
+        },
+        "stimulus": {
+          "type": "string",
+          "minLength": 1
+        },
+        "context": {
+          "type": "string",
+          "minLength": 1
+        },
+        "response": {
+          "type": "string",
+          "minLength": 1
+        },
+        "threshold": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\d"
+        }
+      },
+      "required": [
+        "id",
+        "stimulus",
+        "context",
+        "response",
+        "threshold"
+      ],
+      "additionalProperties": false
+    },
+    "RepositoryOverlay": {
+      "type": "object",
+      "properties": {
+        "schemaVersion": {
+          "type": "number",
+          "const": 1
+        },
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*$"
+        },
+        "version": {
+          "type": "string",
+          "pattern": "^\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?$"
+        },
+        "baseCatalogVersion": {
+          "type": "string",
+          "pattern": "^\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?$"
+        },
+        "additions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*$"
+              },
+              "version": {
+                "type": "string",
+                "pattern": "^\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?$"
+              },
+              "family": {
+                "type": "string",
+                "minLength": 1
+              },
+              "purpose": {
+                "type": "string",
+                "minLength": 1
+              },
+              "applicability": {
+                "type": "object",
+                "properties": {
+                  "rule": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "impactKeys": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "changeShapes": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "riskLevels": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  }
+                },
+                "required": [
+                  "rule",
+                  "impactKeys",
+                  "changeShapes",
+                  "riskLevels"
+                ],
+                "additionalProperties": false
+              },
+              "requiredEvidence": {
+                "minItems": 1,
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "command",
+                        "review",
+                        "document",
+                        "visual",
+                        "profile",
+                        "operational"
+                      ]
+                    },
+                    "description": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "freshnessHours": {
+                      "type": "number",
+                      "exclusiveMinimum": 0
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "description"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "method": {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "command",
+                      "skill",
+                      "review",
+                      "manual",
+                      "post-release"
+                    ]
+                  },
+                  "value": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "kind",
+                  "value"
+                ],
+                "additionalProperties": false
+              },
+              "costTier": {
+                "type": "string",
+                "enum": [
+                  "cheap",
+                  "standard",
+                  "expensive",
+                  "post-release"
+                ]
+              },
+              "blockingPolicy": {
+                "type": "string",
+                "enum": [
+                  "task-required",
+                  "tracked-post-release"
+                ]
+              },
+              "waiverPolicy": {
+                "type": "object",
+                "properties": {
+                  "allowed": {
+                    "type": "boolean"
+                  },
+                  "humanApprovalRequired": {
+                    "type": "boolean",
+                    "const": true
+                  },
+                  "replacementEvidenceRequired": {
+                    "type": "boolean",
+                    "const": true
+                  }
+                },
+                "required": [
+                  "allowed",
+                  "humanApprovalRequired",
+                  "replacementEvidenceRequired"
+                ],
+                "additionalProperties": false
+              },
+              "instrumentationExpectation": {
+                "type": "object",
+                "properties": {
+                  "productObservability": {
+                    "type": "boolean"
+                  },
+                  "workflowTelemetry": {
+                    "type": "boolean"
+                  },
+                  "qualityAttributeScenarioIds": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*$"
+                    }
+                  }
+                },
+                "required": [
+                  "productObservability",
+                  "workflowTelemetry",
+                  "qualityAttributeScenarioIds"
+                ],
+                "additionalProperties": false
+              },
+              "owner": {
+                "type": "string",
+                "minLength": 1
+              },
+              "supersedes": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*$"
+                }
+              },
+              "supersededBy": {
+                "type": "string",
+                "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*$"
+              }
+            },
+            "required": [
+              "id",
+              "version",
+              "family",
+              "purpose",
+              "applicability",
+              "requiredEvidence",
+              "method",
+              "costTier",
+              "blockingPolicy",
+              "waiverPolicy",
+              "instrumentationExpectation",
+              "owner",
+              "supersedes"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "strengthenings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "checkId": {
+                "type": "string",
+                "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*$"
+              },
+              "additionalImpactKeys": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "additionalChangeShapes": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "additionalRiskLevels": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "additionalEvidence": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "command",
+                        "review",
+                        "document",
+                        "visual",
+                        "profile",
+                        "operational"
+                      ]
+                    },
+                    "description": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "freshnessHours": {
+                      "type": "number",
+                      "exclusiveMinimum": 0
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "description"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "blockingPolicy": {
+                "type": "string",
+                "const": "task-required"
+              },
+              "waiverAllowed": {
+                "type": "boolean",
+                "const": false
+              },
+              "instrumentationExpectation": {
+                "type": "object",
+                "properties": {
+                  "productObservability": {
+                    "type": "boolean",
+                    "const": true
+                  },
+                  "workflowTelemetry": {
+                    "type": "boolean",
+                    "const": true
+                  },
+                  "qualityAttributeScenarioIds": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*$"
+                    }
+                  }
+                },
+                "required": [
+                  "qualityAttributeScenarioIds"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "checkId",
+              "additionalImpactKeys",
+              "additionalChangeShapes",
+              "additionalRiskLevels",
+              "additionalEvidence"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "id",
+        "version",
+        "baseCatalogVersion",
+        "additions",
+        "strengthenings"
+      ],
+      "additionalProperties": false
+    },
+    "Retrospective": {
+      "type": "object",
+      "properties": {
+        "schemaVersion": {
+          "type": "number",
+          "const": 1
+        },
+        "changeName": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*$"
+        },
+        "findings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*$"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "check-outcome",
+                  "retry",
+                  "waiver",
+                  "review-correction",
+                  "human-intervention",
+                  "unverified-claim",
+                  "missing-guidance",
+                  "avoidable-cost"
+                ]
+              },
+              "summary": {
+                "type": "string",
+                "minLength": 1
+              },
+              "impact": {
+                "type": "string",
+                "enum": [
+                  "low",
+                  "medium",
+                  "high"
+                ]
+              },
+              "evidence": {
+                "minItems": 1,
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "checkId": {
+                      "type": "string",
+                      "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*$"
+                    },
+                    "checkVersion": {
+                      "type": "string",
+                      "pattern": "^\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?$"
+                    },
+                    "state": {
+                      "type": "string",
+                      "enum": [
+                        "planned",
+                        "produced"
+                      ]
+                    },
+                    "uri": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "sha256": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    },
+                    "producer": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "method": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "gitIdentity": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "createdAt": {
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                    },
+                    "freshnessHours": {
+                      "type": "number",
+                      "exclusiveMinimum": 0
+                    }
+                  },
+                  "required": [
+                    "checkId",
+                    "checkVersion",
+                    "state",
+                    "uri",
+                    "producer",
+                    "method",
+                    "gitIdentity",
+                    "createdAt",
+                    "freshnessHours"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "required": [
+              "id",
+              "kind",
+              "summary",
+              "impact",
+              "evidence"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "proposedAmendments": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*$"
+              },
+              "target": {
+                "type": "string",
+                "minLength": 1
+              },
+              "owner": {
+                "type": "string",
+                "minLength": 1
+              },
+              "evidence": {
+                "minItems": 1,
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "checkId": {
+                      "type": "string",
+                      "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*$"
+                    },
+                    "checkVersion": {
+                      "type": "string",
+                      "pattern": "^\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?$"
+                    },
+                    "state": {
+                      "type": "string",
+                      "enum": [
+                        "planned",
+                        "produced"
+                      ]
+                    },
+                    "uri": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "sha256": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    },
+                    "producer": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "method": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "gitIdentity": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "createdAt": {
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                    },
+                    "freshnessHours": {
+                      "type": "number",
+                      "exclusiveMinimum": 0
+                    }
+                  },
+                  "required": [
+                    "checkId",
+                    "checkVersion",
+                    "state",
+                    "uri",
+                    "producer",
+                    "method",
+                    "gitIdentity",
+                    "createdAt",
+                    "freshnessHours"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "expectedEffect": {
+                "type": "string",
+                "minLength": 1
+              },
+              "validationMethod": {
+                "type": "string",
+                "minLength": 1
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "confirmed-repair",
+                  "new-behavior"
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "target",
+              "owner",
+              "evidence",
+              "expectedEffect",
+              "validationMethod",
+              "kind"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "skillCandidates": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*$"
+              },
+              "problemKey": {
+                "type": "string",
+                "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*$"
+              },
+              "occurrences": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              },
+              "highImpact": {
+                "type": "boolean"
+              },
+              "existingSkillBroken": {
+                "type": "boolean"
+              },
+              "evidence": {
+                "minItems": 1,
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "checkId": {
+                      "type": "string",
+                      "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*$"
+                    },
+                    "checkVersion": {
+                      "type": "string",
+                      "pattern": "^\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?$"
+                    },
+                    "state": {
+                      "type": "string",
+                      "enum": [
+                        "planned",
+                        "produced"
+                      ]
+                    },
+                    "uri": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "sha256": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    },
+                    "producer": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "method": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "gitIdentity": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "createdAt": {
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                    },
+                    "freshnessHours": {
+                      "type": "number",
+                      "exclusiveMinimum": 0
+                    }
+                  },
+                  "required": [
+                    "checkId",
+                    "checkVersion",
+                    "state",
+                    "uri",
+                    "producer",
+                    "method",
+                    "gitIdentity",
+                    "createdAt",
+                    "freshnessHours"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "impact": {
+                "type": "string",
+                "enum": [
+                  "low",
+                  "medium",
+                  "high"
+                ]
+              },
+              "proposedOwner": {
+                "type": "string",
+                "minLength": 1
+              },
+              "trigger": {
+                "type": "string",
+                "minLength": 1
+              },
+              "evaluationPlan": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "id",
+              "problemKey",
+              "occurrences",
+              "highImpact",
+              "existingSkillBroken",
+              "evidence",
+              "impact",
+              "proposedOwner",
+              "trigger",
+              "evaluationPlan"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "noFindingReason": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "changeName",
+        "findings",
+        "proposedAmendments",
+        "skillCandidates"
+      ],
+      "additionalProperties": false
+    },
+    "SatisfactionReview": {
+      "type": "object",
+      "properties": {
+        "schemaVersion": {
+          "type": "number",
+          "const": 1
+        },
+        "changeName": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*$"
+        },
+        "reviewedArtifacts": {
+          "minItems": 1,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string",
+                "minLength": 1
+              },
+              "sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            },
+            "required": [
+              "path",
+              "sha256"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "reviewer": {
+          "type": "object",
+          "properties": {
+            "authorInstanceId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "reviewerInstanceId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "model": {
+              "type": "string",
+              "minLength": 1
+            },
+            "authorModel": {
+              "type": "string",
+              "minLength": 1
+            },
+            "differentModelAvailable": {
+              "type": "boolean"
+            },
+            "sameModelReason": {
+              "type": "string",
+              "minLength": 1
+            },
+            "freshContext": {
+              "type": "boolean",
+              "const": true
+            },
+            "role": {
+              "type": "string",
+              "const": "review-only"
+            },
+            "toolPolicy": {
+              "type": "string",
+              "const": "read-only"
+            },
+            "personaSwap": {
+              "type": "boolean",
+              "const": false
+            }
+          },
+          "required": [
+            "authorInstanceId",
+            "reviewerInstanceId",
+            "model",
+            "authorModel",
+            "differentModelAvailable",
+            "freshContext",
+            "role",
+            "toolPolicy",
+            "personaSwap"
+          ],
+          "additionalProperties": false
+        },
+        "reviewedAt": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+        },
+        "sourceReport": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sourceReportSha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "gitIdentity": {
+          "type": "string",
+          "pattern": "^(?:[0-9a-f]{40}|diff:[0-9a-f]{64})$"
+        },
+        "verdict": {
+          "type": "string",
+          "enum": [
+            "accepted",
+            "rejected"
+          ]
+        },
+        "decisions": {
+          "minItems": 1,
+          "type": "array",
+          "items": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "satisfied"
+                  },
+                  "checkId": {
+                    "type": "string",
+                    "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*$"
+                  },
+                  "checkVersion": {
+                    "type": "string",
+                    "pattern": "^\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?$"
+                  },
+                  "evidence": {
+                    "minItems": 1,
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "checkId": {
+                          "type": "string",
+                          "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*$"
+                        },
+                        "checkVersion": {
+                          "type": "string",
+                          "pattern": "^\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?$"
+                        },
+                        "state": {
+                          "type": "string",
+                          "enum": [
+                            "planned",
+                            "produced"
+                          ]
+                        },
+                        "uri": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "sha256": {
+                          "type": "string",
+                          "pattern": "^[0-9a-f]{64}$"
+                        },
+                        "producer": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "method": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "gitIdentity": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "createdAt": {
+                          "type": "string",
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                        },
+                        "freshnessHours": {
+                          "type": "number",
+                          "exclusiveMinimum": 0
+                        }
+                      },
+                      "required": [
+                        "checkId",
+                        "checkVersion",
+                        "state",
+                        "uri",
+                        "producer",
+                        "method",
+                        "gitIdentity",
+                        "createdAt",
+                        "freshnessHours"
+                      ],
+                      "additionalProperties": false
+                    }
+                  }
+                },
+                "required": [
+                  "kind",
+                  "checkId",
+                  "checkVersion",
+                  "evidence"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "rejected"
+                  },
+                  "checkId": {
+                    "type": "string",
+                    "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*$"
+                  },
+                  "checkVersion": {
+                    "type": "string",
+                    "pattern": "^\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?$"
+                  },
+                  "evidence": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "checkId": {
+                          "type": "string",
+                          "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*$"
+                        },
+                        "checkVersion": {
+                          "type": "string",
+                          "pattern": "^\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?$"
+                        },
+                        "state": {
+                          "type": "string",
+                          "enum": [
+                            "planned",
+                            "produced"
+                          ]
+                        },
+                        "uri": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "sha256": {
+                          "type": "string",
+                          "pattern": "^[0-9a-f]{64}$"
+                        },
+                        "producer": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "method": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "gitIdentity": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "createdAt": {
+                          "type": "string",
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                        },
+                        "freshnessHours": {
+                          "type": "number",
+                          "exclusiveMinimum": 0
+                        }
+                      },
+                      "required": [
+                        "checkId",
+                        "checkVersion",
+                        "state",
+                        "uri",
+                        "producer",
+                        "method",
+                        "gitIdentity",
+                        "createdAt",
+                        "freshnessHours"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "reason": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "exactCorrection": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "kind",
+                  "checkId",
+                  "checkVersion",
+                  "evidence",
+                  "reason",
+                  "exactCorrection"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "post-release"
+                  },
+                  "checkId": {
+                    "type": "string",
+                    "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*$"
+                  },
+                  "checkVersion": {
+                    "type": "string",
+                    "pattern": "^\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?$"
+                  },
+                  "owner": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "environment": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "trigger": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "threshold": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "evidenceDestination": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "bead": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "supportingEvidence": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "checkId": {
+                          "type": "string",
+                          "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*$"
+                        },
+                        "checkVersion": {
+                          "type": "string",
+                          "pattern": "^\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?$"
+                        },
+                        "state": {
+                          "type": "string",
+                          "enum": [
+                            "planned",
+                            "produced"
+                          ]
+                        },
+                        "uri": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "sha256": {
+                          "type": "string",
+                          "pattern": "^[0-9a-f]{64}$"
+                        },
+                        "producer": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "method": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "gitIdentity": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "createdAt": {
+                          "type": "string",
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                        },
+                        "freshnessHours": {
+                          "type": "number",
+                          "exclusiveMinimum": 0
+                        }
+                      },
+                      "required": [
+                        "checkId",
+                        "checkVersion",
+                        "state",
+                        "uri",
+                        "producer",
+                        "method",
+                        "gitIdentity",
+                        "createdAt",
+                        "freshnessHours"
+                      ],
+                      "additionalProperties": false
+                    }
+                  }
+                },
+                "required": [
+                  "kind",
+                  "checkId",
+                  "checkVersion",
+                  "owner",
+                  "environment",
+                  "trigger",
+                  "threshold",
+                  "evidenceDestination",
+                  "bead",
+                  "supportingEvidence"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          }
+        },
+        "findings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "severity": {
+                "type": "string",
+                "enum": [
+                  "critical",
+                  "high",
+                  "medium",
+                  "low",
+                  "info"
+                ]
+              },
+              "checkId": {
+                "type": "string",
+                "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*$"
+              },
+              "location": {
+                "type": "string",
+                "minLength": 1
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1
+              },
+              "exactCorrection": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "severity",
+              "location",
+              "reason",
+              "exactCorrection"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "changeName",
+        "reviewedArtifacts",
+        "reviewer",
+        "reviewedAt",
+        "sourceReport",
+        "sourceReportSha256",
+        "gitIdentity",
+        "verdict",
+        "decisions",
+        "findings"
+      ],
+      "additionalProperties": false
+    },
+    "SelectionReview": {
+      "type": "object",
+      "properties": {
+        "schemaVersion": {
+          "type": "number",
+          "const": 1
+        },
+        "changeName": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*$"
+        },
+        "reviewedArtifacts": {
+          "minItems": 1,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string",
+                "minLength": 1
+              },
+              "sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            },
+            "required": [
+              "path",
+              "sha256"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "reviewer": {
+          "type": "object",
+          "properties": {
+            "authorInstanceId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "reviewerInstanceId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "model": {
+              "type": "string",
+              "minLength": 1
+            },
+            "authorModel": {
+              "type": "string",
+              "minLength": 1
+            },
+            "differentModelAvailable": {
+              "type": "boolean"
+            },
+            "sameModelReason": {
+              "type": "string",
+              "minLength": 1
+            },
+            "freshContext": {
+              "type": "boolean",
+              "const": true
+            },
+            "role": {
+              "type": "string",
+              "const": "review-only"
+            },
+            "toolPolicy": {
+              "type": "string",
+              "const": "read-only"
+            },
+            "personaSwap": {
+              "type": "boolean",
+              "const": false
+            }
+          },
+          "required": [
+            "authorInstanceId",
+            "reviewerInstanceId",
+            "model",
+            "authorModel",
+            "differentModelAvailable",
+            "freshContext",
+            "role",
+            "toolPolicy",
+            "personaSwap"
+          ],
+          "additionalProperties": false
+        },
+        "reviewedAt": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+        },
+        "sourceReport": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sourceReportSha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "verdict": {
+          "type": "string",
+          "enum": [
+            "accepted",
+            "rejected"
+          ]
+        },
+        "findings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "severity": {
+                "type": "string",
+                "enum": [
+                  "critical",
+                  "high",
+                  "medium",
+                  "low",
+                  "info"
+                ]
+              },
+              "checkId": {
+                "type": "string",
+                "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*$"
+              },
+              "location": {
+                "type": "string",
+                "minLength": 1
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1
+              },
+              "exactCorrection": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "severity",
+              "location",
+              "reason",
+              "exactCorrection"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "changeName",
+        "reviewedArtifacts",
+        "reviewer",
+        "reviewedAt",
+        "sourceReport",
+        "sourceReportSha256",
+        "verdict",
+        "findings"
+      ],
+      "additionalProperties": false
+    },
+    "SkillApproval": {
+      "type": "object",
+      "properties": {
+        "schemaVersion": {
+          "type": "number",
+          "const": 1
+        },
+        "candidateId": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*$"
+        },
+        "approval": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string",
+              "minLength": 1
+            },
+            "email": {
+              "type": "string",
+              "format": "email",
+              "pattern": "^(?!\\.)(?!.*\\.\\.)([A-Za-z0-9_'+\\-\\.]*)[A-Za-z0-9_+-]@([A-Za-z0-9][A-Za-z0-9\\-]*\\.)+[A-Za-z]{2,}$"
+            },
+            "approvedAt": {
+              "type": "string",
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+            },
+            "source": {
+              "type": "string",
+              "const": "pi-interactive"
+            }
+          },
+          "required": [
+            "name",
+            "email",
+            "approvedAt",
+            "source"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "candidateId",
+        "approval"
+      ],
+      "additionalProperties": false
+    },
+    "SkillEvaluation": {
+      "type": "object",
+      "properties": {
+        "schemaVersion": {
+          "type": "number",
+          "const": 1
+        },
+        "candidateId": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*$"
+        },
+        "evaluatorInstanceId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "evaluatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+        },
+        "triggerCases": {
+          "type": "object",
+          "properties": {
+            "passed": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "total": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "passed",
+            "total"
+          ],
+          "additionalProperties": false
+        },
+        "requiredBehaviorCases": {
+          "type": "object",
+          "properties": {
+            "passed": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "total": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "passed",
+            "total"
+          ],
+          "additionalProperties": false
+        },
+        "forbiddenBehaviorCases": {
+          "type": "object",
+          "properties": {
+            "passed": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "total": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "passed",
+            "total"
+          ],
+          "additionalProperties": false
+        },
+        "outcome": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "number"
+            },
+            "threshold": {
+              "type": "number"
+            },
+            "comparison": {
+              "type": "string",
+              "enum": [
+                "at-least",
+                "at-most"
+              ]
+            },
+            "unit": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "value",
+            "threshold",
+            "comparison",
+            "unit"
+          ],
+          "additionalProperties": false
+        },
+        "cost": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "number"
+            },
+            "threshold": {
+              "type": "number"
+            },
+            "comparison": {
+              "type": "string",
+              "enum": [
+                "at-least",
+                "at-most"
+              ]
+            },
+            "unit": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "value",
+            "threshold",
+            "comparison",
+            "unit"
+          ],
+          "additionalProperties": false
+        },
+        "automatedApproval": {
+          "type": "boolean",
+          "const": false
+        },
+        "verdict": {
+          "type": "string",
+          "enum": [
+            "passed",
+            "failed"
+          ]
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "candidateId",
+        "evaluatorInstanceId",
+        "evaluatedAt",
+        "triggerCases",
+        "requiredBehaviorCases",
+        "forbiddenBehaviorCases",
+        "outcome",
+        "cost",
+        "automatedApproval",
+        "verdict"
+      ],
+      "additionalProperties": false
+    },
+    "SkillIndex": {
+      "type": "object",
+      "properties": {
+        "schemaVersion": {
+          "type": "number",
+          "const": 1
+        },
+        "generatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+        },
+        "sources": {
+          "minItems": 1,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "entries": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string",
+                "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*$"
+              },
+              "description": {
+                "type": "string",
+                "minLength": 1
+              },
+              "source": {
+                "type": "string",
+                "minLength": 1
+              },
+              "owner": {
+                "type": "string",
+                "minLength": 1
+              },
+              "umbrella": {
+                "type": "boolean"
+              },
+              "skillFileLines": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              },
+              "referenceDepth": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "formatValid": {
+                "type": "boolean"
+              },
+              "formatErrors": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "contentSha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            },
+            "required": [
+              "name",
+              "description",
+              "source",
+              "owner",
+              "umbrella",
+              "skillFileLines",
+              "referenceDepth",
+              "formatValid",
+              "formatErrors",
+              "contentSha256"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "generatedAt",
+        "sources",
+        "entries"
+      ],
+      "additionalProperties": false
+    },
+    "ThresholdBreach": {
+      "type": "object",
+      "properties": {
+        "changeName": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*$"
+        },
+        "scenarioId": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*$"
+        },
+        "threshold": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\d"
+        },
+        "observed": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\d"
+        },
+        "evidence": {
+          "type": "object",
+          "properties": {
+            "checkId": {
+              "type": "string",
+              "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*$"
+            },
+            "checkVersion": {
+              "type": "string",
+              "pattern": "^\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?$"
+            },
+            "state": {
+              "type": "string",
+              "enum": [
+                "planned",
+                "produced"
+              ]
+            },
+            "uri": {
+              "type": "string",
+              "minLength": 1
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "producer": {
+              "type": "string",
+              "minLength": 1
+            },
+            "method": {
+              "type": "string",
+              "minLength": 1
+            },
+            "gitIdentity": {
+              "type": "string",
+              "minLength": 1
+            },
+            "createdAt": {
+              "type": "string",
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+            },
+            "freshnessHours": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            }
+          },
+          "required": [
+            "checkId",
+            "checkVersion",
+            "state",
+            "uri",
+            "producer",
+            "method",
+            "gitIdentity",
+            "createdAt",
+            "freshnessHours"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "changeName",
+        "scenarioId",
+        "threshold",
+        "observed",
+        "evidence"
+      ],
+      "additionalProperties": false
+    },
+    "WorkflowTelemetry": {
+      "type": "object",
+      "properties": {
+        "schemaVersion": {
+          "type": "number",
+          "const": 1
+        },
+        "changeName": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*$"
+        },
+        "checkId": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*$"
+        },
+        "checkVersion": {
+          "type": "string",
+          "pattern": "^\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?$"
+        },
+        "durationMs": {
+          "type": "number",
+          "minimum": 0
+        },
+        "cost": {
+          "type": "number",
+          "minimum": 0
+        },
+        "retries": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "outcome": {
+          "type": "string",
+          "enum": [
+            "passed",
+            "failed",
+            "waived",
+            "post-release"
+          ]
+        },
+        "yield": {
+          "type": "string",
+          "enum": [
+            "found-defect",
+            "confirmed",
+            "no-finding",
+            "false-positive"
+          ]
+        },
+        "waiverRecorded": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "changeName",
+        "checkId",
+        "checkVersion",
+        "durationMs",
+        "retries",
+        "outcome",
+        "yield",
+        "waiverRecorded"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

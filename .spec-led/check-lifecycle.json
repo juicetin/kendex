@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "active": true,
+  "openSpecSchemaVersion": "2.0.0",
+  "catalogVersion": "1.0.0",
+  "checkSelectionVersion": "1.0.0",
+  "selectionReviewVersion": "1.0.0",
+  "satisfactionReviewVersion": "1.0.0",
+  "retrospectiveVersion": "1.0.0",
+  "components": [
+    "catalog",
+    "check-selection",
+    "selection-review",
+    "satisfaction-review",
+    "retrospective",
+    "spec-led-v2",
+    "lifecycle-skills",
+    "package-assets"
+  ]
+}

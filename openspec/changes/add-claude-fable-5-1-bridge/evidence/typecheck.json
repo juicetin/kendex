@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "changeName": "add-claude-fable-5-1-bridge",
+  "checkId": "typecheck",
+  "checkVersion": "1.0.0",
+  "recordedAt": "2026-09-03T03:12:55Z",
+  "status": "passed",
+  "catalogMethod": "pnpm typecheck",
+  "executedMethod": "npm run typecheck --prefix pi-extensions/pi-claude-bridge",
+  "methodResolution": "The pinned catalog method is package-manager-generic. The executable repository method is the npm command selected in quality-plan.md.",
+  "exitCode": 0,
+  "secretsIncluded": false
+}

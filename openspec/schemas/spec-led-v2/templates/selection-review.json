@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "changeName": "replace-with-change-name",
+  "reviewedArtifacts": [],
+  "reviewer": {
+    "authorInstanceId": "replace-with-author-instance",
+    "reviewerInstanceId": "replace-with-reviewer-instance",
+    "model": "replace-with-reviewer-model",
+    "authorModel": "replace-with-author-model",
+    "differentModelAvailable": true,
+    "freshContext": true,
+    "role": "review-only",
+    "toolPolicy": "read-only",
+    "personaSwap": false
+  },
+  "reviewedAt": "replace-with-ISO-timestamp",
+  "sourceReport": "replace-with-source-report",
+  "sourceReportSha256": "replace-with-64-character-SHA-256",
+  "verdict": "rejected",
+  "findings": []
+}

@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "changeName": "add-claude-fable-5-1-bridge",
+  "checkId": "structured-logging",
+  "checkVersion": "1.0.0",
+  "recordedAt": "2026-09-03T03:47:42Z",
+  "status": "passed",
+  "reviewedFields": [
+    "requestedModel",
+    "queryModel",
+    "servedModel",
+    "fallbackModel",
+    "candidate path",
+    "candidate version or failure reason",
+    "minimum version",
+    "redacted account hash",
+    "tool call and result IDs"
+  ],
+  "excludedFields": [
+    "access tokens",
+    "authorization headers",
+    "credential file contents",
+    "raw subscription secrets"
+  ],
+  "secretPatternScanMatches": 0,
+  "blockingFindings": []
+}

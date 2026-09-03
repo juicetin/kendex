@@ -1,0 +1,66 @@
+{
+  "schemaVersion": 2,
+  "changeName": "add-claude-fable-5-1-bridge",
+  "approvedAt": "2026-09-03T05:40:11.000Z",
+  "approvalSource": "pi-interactive",
+  "approver": {
+    "name": "Justin Ting",
+    "email": "me@justint.ing"
+  },
+  "artifactCommit": "6a105572b56604105bda5cc9fcf7102ba79c161b",
+  "artifacts": [
+    {
+      "path": "openspec/changes/add-claude-fable-5-1-bridge/check-selection.json",
+      "sha256": "5086797c6452160fd6e65dec354345a8f70f8d4dea5079e5811efa7a9471ad43",
+      "hashMode": "raw-v1"
+    },
+    {
+      "path": "openspec/changes/add-claude-fable-5-1-bridge/design.md",
+      "sha256": "1794dfa3eea3e5c11469aa932af7029c0b5d7edf9cde3f6ab4ca7f4f78002e60",
+      "hashMode": "raw-v1"
+    },
+    {
+      "path": "openspec/changes/add-claude-fable-5-1-bridge/impact.json",
+      "sha256": "1687eb27d988ac8653c68bc6597cffb95ca436d270a7f223718d98ef684e6961",
+      "hashMode": "raw-v1"
+    },
+    {
+      "path": "openspec/changes/add-claude-fable-5-1-bridge/proposal.md",
+      "sha256": "4e8a3bc990f9d5062f54367c4cb84c0823534a8eb2893b3e49730467e6de2823",
+      "hashMode": "raw-v1"
+    },
+    {
+      "path": "openspec/changes/add-claude-fable-5-1-bridge/quality-plan.md",
+      "sha256": "3f06abfd51feb7048113b83958190c03a555df04c9db01eec287c746b1d8f758",
+      "hashMode": "raw-v1"
+    },
+    {
+      "path": "openspec/changes/add-claude-fable-5-1-bridge/selection-review.json",
+      "sha256": "3962760d3a1ccdd81f7a5a5e2fa5ebd7ba88958755d0f7964393fd36965e6a0f",
+      "hashMode": "raw-v1"
+    },
+    {
+      "path": "openspec/changes/add-claude-fable-5-1-bridge/selection-review.md",
+      "sha256": "b89c99d4f8e368a8984e72b702896b0595da990943cc45b58f3b41731f4e02e6",
+      "hashMode": "raw-v1"
+    },
+    {
+      "path": "openspec/changes/add-claude-fable-5-1-bridge/sequence.md",
+      "sha256": "9a673ea97209b776a3910b75d621f9cde6fd37ccbdaa959ca5106e9d90c51f91",
+      "hashMode": "raw-v1"
+    },
+    {
+      "path": "openspec/changes/add-claude-fable-5-1-bridge/specs/pi-claude-fable-5-1/spec.md",
+      "sha256": "eeceae02e897062a8ba491b4b42395f60e7076679e4bb6895765cd6e76e0ad44",
+      "hashMode": "raw-v1"
+    },
+    {
+      "path": "openspec/changes/add-claude-fable-5-1-bridge/tasks.md",
+      "sha256": "d326875a17439c4bf02baf2b80484eb4d2a69776f90c837b3bc06759f801b70f",
+      "hashMode": "normalized-tasks-v1"
+    }
+  ],
+  "taskHashNormalizationVersion": 1,
+  "catalogVersion": "1.0.0",
+  "overlayVersions": []
+}

@@ -1,0 +1,83 @@
+{
+  "schemaVersion": 1,
+  "changeName": "add-claude-fable-5-1-bridge",
+  "recordType": "global-package-install-and-startup",
+  "recordedAt": "2026-09-03T05:54:07.130Z",
+  "status": "passed",
+  "git": {
+    "committedHead": "35da34ed0d05a1638858ebaae1e8e5a33c8ead77",
+    "origin": "git@github.com:juicetin/kendex.git",
+    "remoteBranch": "feat/claude-fable-5-1-bridge",
+    "remoteBranchHead": "35da34ed0d05a1638858ebaae1e8e5a33c8ead77"
+  },
+  "install": {
+    "package": "@vanillagreen/pi-claude-bridge@4.0.0",
+    "source": {
+      "type": "local-path",
+      "installCommand": "pi install /data/repos/juicetin-kendex/pi-extensions/pi-claude-bridge",
+      "configuredValue": "../../../../data/repos/juicetin-kendex/pi-extensions/pi-claude-bridge",
+      "resolvedPath": "/data/repos/juicetin-kendex/pi-extensions/pi-claude-bridge",
+      "soleBridgeSource": true,
+      "upstreamNpmSourceAbsent": true
+    },
+    "bundleMatchesCommittedHead": true,
+    "committedFileSha256": {
+      "package.json": "b99db7602baf84dc15e4b8332adacc89102054850e8a758aacadb838a32a3899",
+      "bundle/index.js": "b82f290c0858794e5fdef0448403130fd1fe8f23725d0206763b5f43eaababef",
+      "bundle/connector-inventory.js": "f0c5b4e9e03ad8c31f3323d18dad80bafa7e0f732751f3741887ab8d5bf14b60"
+    },
+    "sdkResolution": {
+      "origin": "/data/repos/juicetin-kendex/pi-extensions/pi-claude-bridge/package.json",
+      "method": "createRequire(bridge package.json).resolve(@anthropic-ai/claude-agent-sdk), then read adjacent package.json with fs",
+      "resolvedEntry": "/data/repos/juicetin-kendex/pi-extensions/pi-claude-bridge/node_modules/@anthropic-ai/claude-agent-sdk/sdk.mjs",
+      "version": "0.3.259",
+      "minimumVersion": "0.3.259",
+      "minimumSatisfied": true,
+      "optionalPackage": "@anthropic-ai/claude-agent-sdk-linux-x64@0.3.259"
+    },
+    "modelCatalog": {
+      "command": "pi --offline --list-models pi-claude",
+      "fable51Present": true,
+      "contextWindow": 1000000,
+      "maxOutputTokens": 128000
+    },
+    "unrelatedGlobalNpmTreeChecked": false
+  },
+  "fableAcceptance": {
+    "status": "passed",
+    "provider": "pi-claude",
+    "servedModel": "claude-fable-5-1",
+    "tool": "read",
+    "toolCallResultMatched": true,
+    "fixtureMatched": true,
+    "exactMarker": "PI_FABLE_5_1_LOCAL_SOURCE_ACCEPTANCE_OK",
+    "agentSettled": true,
+    "durationMs": 30324,
+    "safetyLimitSeconds": 180,
+    "terminatedAfterSettledEvidence": true,
+    "cleanupExitCode": 143
+  },
+  "freshStartupGate": {
+    "status": "passed",
+    "freshDisposableProcess": true,
+    "normalExtensionsEnabled": true,
+    "model": "openai-codex/gpt-5.6-sol",
+    "thinking": "minimal",
+    "exactMarker": "PI_FABLE_5_1_LOCAL_SOURCE_STARTUP_OK",
+    "durationMs": 22714,
+    "limitSeconds": 30,
+    "terminatedAfterMarker": true,
+    "cleanupExitCode": 143
+  },
+  "localEvidenceSha256": {
+    "settings-validation.json": "e0c58a3c0ceeb8364ade68e53cd9d40c6c1829add18629bc34731e95a5eecbf4",
+    "install-resolution.json": "65e00833b190317361e75e272488b8d55e4cb5dfcc2621d871251945cc49d604",
+    "model-list.txt": "6db4d28756d8b00116348674a86862d6c303994222da885f8adaedf88e3b7b81",
+    "fable-acceptance.json": "b9e4b295965f37d5d35e58accae6a2faeca45557f6caa4d272290e020c3dba3c",
+    "fable-acceptance.jsonl": "5beaaed0b2f8a99e5f2645e070cb34fcdf989c59825ed708ef0ccbe4b1e17622",
+    "startup.json": "04baaa4047ac6295594a214fa122f5c71ca97d271225a64bb19585c96a3501cd",
+    "startup.stdout": "cf51f58b565350c1f0b4290c57dff5e56c138b9b50aec5dd4a0e45ac0d470317"
+  },
+  "rollbackRequired": false,
+  "secretsIncluded": false
+}

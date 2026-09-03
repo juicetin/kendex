@@ -1,18 +1,26 @@
 // Canonical selection + display order for the model picker.
 // Extracted from index.ts so tests can import without activating the extension.
 
+export const FABLE_5_1_MODEL_ID = "claude-fable-5-1";
 export const FABLE_MODEL_ID = "claude-fable-5";
-// Opus 4.8 is both a selectable model and the safety-fallback target for the two
-// primaries whose classifiers can decline a turn (Fable 5, Opus 5).
+// Opus 4.8 is both a selectable model and the safety-fallback target for the
+// primaries whose classifiers can decline a turn (Fable 5.1, Fable 5, Opus 5).
 export const FABLE_FALLBACK_MODEL_ID = "claude-opus-4-8";
 export const OPUS_5_MODEL_ID = "claude-opus-5";
 export const SONNET_5_MODEL_ID = "claude-sonnet-5";
 
 export function fallbackModelForPrimaryModel(modelId: string): string | undefined {
-	return modelId === FABLE_MODEL_ID || modelId === OPUS_5_MODEL_ID ? FABLE_FALLBACK_MODEL_ID : undefined;
+	return modelId === FABLE_5_1_MODEL_ID || modelId === FABLE_MODEL_ID || modelId === OPUS_5_MODEL_ID
+		? FABLE_FALLBACK_MODEL_ID
+		: undefined;
+}
+
+export function claudeCodeModelId(modelId: string): string {
+	return modelId === FABLE_5_1_MODEL_ID ? `${modelId}[1m]` : modelId;
 }
 
 export const MODEL_IDS_IN_ORDER = [
+	FABLE_5_1_MODEL_ID,
 	FABLE_MODEL_ID,
 	OPUS_5_MODEL_ID,
 	FABLE_FALLBACK_MODEL_ID,
@@ -34,6 +42,15 @@ type BridgeModelMetadata = {
 };
 
 const FALLBACK_MODELS: Record<string, BridgeModelMetadata> = {
+	[FABLE_5_1_MODEL_ID]: {
+		id: FABLE_5_1_MODEL_ID,
+		name: "Claude Fable 5.1",
+		reasoning: true,
+		thinkingLevelMap: { xhigh: "xhigh", max: "max" },
+		input: ["text", "image"],
+		contextWindow: 1000000,
+		maxTokens: 128000,
+	},
 	[FABLE_MODEL_ID]: {
 		id: FABLE_MODEL_ID,
 		name: "Claude Fable 5",

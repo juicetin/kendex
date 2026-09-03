@@ -126,6 +126,7 @@ function hasToolUse(msg: PiMessage): boolean {
 export function convertPiMessages(
 	messages: PiMessage[],
 	customToolNameToSdk?: Map<string, string>,
+	options: { omitThinking?: boolean } = {},
 ): { anthropicMessages: SessionMessage[]; sanitizedIds: Map<string, string> } {
 	const anthropicMessages = [];
 	const sanitizedIds = new Map();
@@ -154,7 +155,7 @@ export function convertPiMessages(
 			for (const block of content) {
 				if (block.type === "text" && block.text) {
 					blocks.push({ type: "text", text: block.text });
-				} else if (block.type === "thinking") {
+				} else if (block.type === "thinking" && !options.omitThinking) {
 					const sig = block.thinkingSignature;
 					const isAnthropicProvider = msg.provider === PROVIDER_ID || msg.api === "anthropic";
 					if (isAnthropicProvider && sig) {

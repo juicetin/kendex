@@ -18,3 +18,7 @@
 *.icns binary
 *.ttf binary
 *.mp4 binary
+
+# Esbuild preserves dependency template-literal content in this generated artifact.
+# Trailing spaces here can be data, so Git must not treat them as source defects.
+pi-extensions/pi-claude-bridge/bundle/*.js whitespace=-blank-at-eol

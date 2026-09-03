@@ -92,6 +92,12 @@ The companion owns profile metadata, utilization ranking, and cooldown persisten
 
 The reciprocal `kendex.pi.claude-bridge.account-host.v1` service exposes a local `/usage` probe for account-management commands. Both symbols carry `version: 1`; incompatible future shapes must use a new symbol/version instead of mutating this contract in place.
 
+## Fable 5.1 runtime and rebuild boundary
+
+`models.ts` keeps the Pi catalog ID `claude-fable-5-1` separate from the Claude Code request `claude-fable-5-1[1m]`. The account router always receives the catalog ID. `claude-executable.ts` requires Claude Code 2.1.255 or newer for that exact model: an explicit path is authoritative; without one, the Agent SDK bundle is checked before allowed `PATH` candidates. This check runs before `syncSharedSession`, whose rebuild path can replace a persisted Claude session.
+
+A Fable 5.1 rebuild omits signed thinking blocks because their signatures bind to the previous conversation prefix. `convertPiMessages` preserves its existing behavior for every other model, and the Fable 5.1 path still imports text, tool calls, and paired tool results.
+
 ## Provider registration — native pi ≥0.81 provider API (adopted in 2.0)
 
 Since 2.0 the bridge registers a native `Provider` object (`native-provider.ts`) via

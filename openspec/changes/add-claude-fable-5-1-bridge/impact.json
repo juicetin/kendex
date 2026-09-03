@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "architecture": {
+    "affected": false,
+    "notAffectedReason": "The provider, account-router, connector, session, and Pi tool-ownership boundaries remain unchanged; the change extends behavior inside existing bridge components."
+  },
+  "sequence": {
+    "affected": true,
+    "reasons": [
+      "Fable 5.1 adds executable-version selection before session synchronization.",
+      "Fable 5.1 rebuilds omit prior thinking blocks before Claude Code resumes."
+    ],
+    "diagram": "sequence.md"
+  },
+  "quality": {
+    "dependencies": {
+      "affected": true,
+      "reason": "The existing Claude Agent SDK dependency and lockfile must move to a release that bundles a Claude Code runtime compatible with Fable 5.1."
+    },
+    "securityOrAuth": {
+      "affected": true,
+      "reason": "The new model passes through existing subscription-profile selection, credential scoping, usage limits, and account rotation, which are authentication and authorization boundaries."
+    },
+    "httpApi": {
+      "affected": false,
+      "notAffectedReason": "The change adds no HTTP endpoint, wire protocol, or OpenAPI contract."
+    },
+    "ui": {
+      "affected": false,
+      "notAffectedReason": "The Pi model picker reads provider metadata; no kendex React or Tauri screen changes."
+    },
+    "meaningfulBehavior": {
+      "affected": true,
+      "reason": "The bridge gains a selectable model, runtime rejection behavior, model-specific history filtering, and real routing acceptance criteria."
+    },
+    "fallow": {
+      "affected": true,
+      "reason": "The change modifies TypeScript module boundaries and a package dependency, so changed-code dependency and structure findings require review."
+    },
+    "mutationTesting": {
+      "optedIn": false,
+      "notApplicableReason": "The user did not approve a bounded mutation-testing scope, runtime budget, fast test command, or evidence threshold."
+    }
+  }
+}

@@ -1,0 +1,54 @@
+{
+  "schemaVersion": 1,
+  "changeName": "add-claude-fable-5-1-bridge",
+  "reviewedArtifacts": [
+    {
+      "path": "proposal.md",
+      "sha256": "4e8a3bc990f9d5062f54367c4cb84c0823534a8eb2893b3e49730467e6de2823"
+    },
+    {
+      "path": "specs/pi-claude-fable-5-1/spec.md",
+      "sha256": "eeceae02e897062a8ba491b4b42395f60e7076679e4bb6895765cd6e76e0ad44"
+    },
+    {
+      "path": "design.md",
+      "sha256": "1794dfa3eea3e5c11469aa932af7029c0b5d7edf9cde3f6ab4ca7f4f78002e60"
+    },
+    {
+      "path": "impact.json",
+      "sha256": "1687eb27d988ac8653c68bc6597cffb95ca436d270a7f223718d98ef684e6961"
+    },
+    {
+      "path": "sequence.md",
+      "sha256": "9a673ea97209b776a3910b75d621f9cde6fd37ccbdaa959ca5106e9d90c51f91"
+    },
+    {
+      "path": "check-selection.json",
+      "sha256": "5086797c6452160fd6e65dec354345a8f70f8d4dea5079e5811efa7a9471ad43"
+    },
+    {
+      "path": "quality-plan.md",
+      "sha256": "3f06abfd51feb7048113b83958190c03a555df04c9db01eec287c746b1d8f758"
+    },
+    {
+      "path": "tasks.md",
+      "sha256": "5df705cad32364868e57635a628852a92f52a1f93dc24ba6613ad2b4e35c15c9"
+    }
+  ],
+  "reviewer": {
+    "authorInstanceId": "01a064e5-b1b4-7908-b292-28a1f5eba6bc",
+    "reviewerInstanceId": "65f5afb7-3e3b-4866-87e1-7ab322be66b7",
+    "model": "pi-claude/claude-fable-5",
+    "authorModel": "openai-codex/gpt-5.6-sol",
+    "differentModelAvailable": true,
+    "freshContext": true,
+    "role": "review-only",
+    "toolPolicy": "read-only",
+    "personaSwap": false
+  },
+  "reviewedAt": "2026-09-03T04:33:51Z",
+  "sourceReport": "selection-review.md",
+  "sourceReportSha256": "b89c99d4f8e368a8984e72b702896b0595da990943cc45b58f3b41731f4e02e6",
+  "verdict": "accepted",
+  "findings": []
+}

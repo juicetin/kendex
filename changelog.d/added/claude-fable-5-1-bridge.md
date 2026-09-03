@@ -1,0 +1,1 @@
+- Pi Claude adds Fable 5.1 with compatible runtime selection and safe session rebuilds.

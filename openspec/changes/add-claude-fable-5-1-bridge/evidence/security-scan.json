@@ -1,0 +1,245 @@
+{
+  "schemaVersion": 1,
+  "changeName": "add-claude-fable-5-1-bridge",
+  "checkId": "security-scan",
+  "checkVersion": "1.0.0",
+  "recordedAt": "2026-09-03T03:58:51Z",
+  "status": "passed",
+  "scans": [
+    {
+      "tool": "npm audit",
+      "scope": "production dependencies",
+      "exitCode": 0,
+      "vulnerabilities": 0
+    },
+    {
+      "tool": "OSV-Scanner 2.4.0",
+      "scope": "package-lock.json",
+      "exitCode": 0,
+      "vulnerabilities": 0
+    },
+    {
+      "tool": "TruffleHog 3.95.9",
+      "scope": "task source, tests, docs, and OpenSpec artifacts",
+      "exitCode": 0,
+      "verifiedOrUnknownSecrets": 0
+    },
+    {
+      "tool": "Semgrep 1.168.0",
+      "scope": "bridge source",
+      "exitCode": 1,
+      "findings": 20,
+      "changedLineFindings": 1,
+      "inheritedFindings": 19
+    }
+  ],
+  "semgrepTriageMethod": "Compared every result start line with zero-context added-line ranges from git diff for pi-extensions/pi-claude-bridge/src.",
+  "semgrepFindings": [
+    {
+      "ordinal": 1,
+      "rule": "javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal",
+      "severity": "WARNING",
+      "path": "pi-extensions/pi-claude-bridge/src/agents-md.ts",
+      "line": 36,
+      "changedLine": false,
+      "disposition": "inherited-out-of-scope",
+      "rationale": "The finding is not on an added or modified line in this change. It was present at HEAD before this task and is not a task-owned regression."
+    },
+    {
+      "ordinal": 2,
+      "rule": "javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal",
+      "severity": "WARNING",
+      "path": "pi-extensions/pi-claude-bridge/src/agents-md.ts",
+      "line": 72,
+      "changedLine": false,
+      "disposition": "inherited-out-of-scope",
+      "rationale": "The finding is not on an added or modified line in this change. It was present at HEAD before this task and is not a task-owned regression."
+    },
+    {
+      "ordinal": 3,
+      "rule": "javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal",
+      "severity": "WARNING",
+      "path": "pi-extensions/pi-claude-bridge/src/auth-presence.ts",
+      "line": 63,
+      "changedLine": false,
+      "disposition": "inherited-out-of-scope",
+      "rationale": "The finding is not on an added or modified line in this change. It was present at HEAD before this task and is not a task-owned regression."
+    },
+    {
+      "ordinal": 4,
+      "rule": "javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal",
+      "severity": "WARNING",
+      "path": "pi-extensions/pi-claude-bridge/src/auth-presence.ts",
+      "line": 107,
+      "changedLine": false,
+      "disposition": "inherited-out-of-scope",
+      "rationale": "The finding is not on an added or modified line in this change. It was present at HEAD before this task and is not a task-owned regression."
+    },
+    {
+      "ordinal": 5,
+      "rule": "javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal",
+      "severity": "WARNING",
+      "path": "pi-extensions/pi-claude-bridge/src/claude-executable.ts",
+      "line": 13,
+      "changedLine": false,
+      "disposition": "inherited-out-of-scope",
+      "rationale": "The finding is not on an added or modified line in this change. It was present at HEAD before this task and is not a task-owned regression."
+    },
+    {
+      "ordinal": 6,
+      "rule": "javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal",
+      "severity": "WARNING",
+      "path": "pi-extensions/pi-claude-bridge/src/claude-executable.ts",
+      "line": 13,
+      "changedLine": false,
+      "disposition": "inherited-out-of-scope",
+      "rationale": "The finding is not on an added or modified line in this change. It was present at HEAD before this task and is not a task-owned regression."
+    },
+    {
+      "ordinal": 7,
+      "rule": "javascript.lang.security.detect-child-process.detect-child-process",
+      "severity": "ERROR",
+      "path": "pi-extensions/pi-claude-bridge/src/claude-executable.ts",
+      "line": 82,
+      "changedLine": true,
+      "disposition": "false-positive",
+      "rationale": "spawnSync receives a selected local executable and the fixed argument array [\"--version\"]. Node shell mode is not enabled. preflightClaudeExecutable first requires an executable regular file and resolves it. No string is interpreted by a shell."
+    },
+    {
+      "ordinal": 8,
+      "rule": "javascript.lang.security.detect-child-process.detect-child-process",
+      "severity": "ERROR",
+      "path": "pi-extensions/pi-claude-bridge/src/claude-executable.ts",
+      "line": 316,
+      "changedLine": false,
+      "disposition": "inherited-out-of-scope",
+      "rationale": "The finding is not on an added or modified line in this change. It was present at HEAD before this task and is not a task-owned regression."
+    },
+    {
+      "ordinal": 9,
+      "rule": "javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal",
+      "severity": "WARNING",
+      "path": "pi-extensions/pi-claude-bridge/src/config.ts",
+      "line": 94,
+      "changedLine": false,
+      "disposition": "inherited-out-of-scope",
+      "rationale": "The finding is not on an added or modified line in this change. It was present at HEAD before this task and is not a task-owned regression."
+    },
+    {
+      "ordinal": 10,
+      "rule": "javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal",
+      "severity": "WARNING",
+      "path": "pi-extensions/pi-claude-bridge/src/config.ts",
+      "line": 145,
+      "changedLine": false,
+      "disposition": "inherited-out-of-scope",
+      "rationale": "The finding is not on an added or modified line in this change. It was present at HEAD before this task and is not a task-owned regression."
+    },
+    {
+      "ordinal": 11,
+      "rule": "javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal",
+      "severity": "WARNING",
+      "path": "pi-extensions/pi-claude-bridge/src/config.ts",
+      "line": 147,
+      "changedLine": false,
+      "disposition": "inherited-out-of-scope",
+      "rationale": "The finding is not on an added or modified line in this change. It was present at HEAD before this task and is not a task-owned regression."
+    },
+    {
+      "ordinal": 12,
+      "rule": "javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal",
+      "severity": "WARNING",
+      "path": "pi-extensions/pi-claude-bridge/src/config.ts",
+      "line": 149,
+      "changedLine": false,
+      "disposition": "inherited-out-of-scope",
+      "rationale": "The finding is not on an added or modified line in this change. It was present at HEAD before this task and is not a task-owned regression."
+    },
+    {
+      "ordinal": 13,
+      "rule": "javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal",
+      "severity": "WARNING",
+      "path": "pi-extensions/pi-claude-bridge/src/config.ts",
+      "line": 149,
+      "changedLine": false,
+      "disposition": "inherited-out-of-scope",
+      "rationale": "The finding is not on an added or modified line in this change. It was present at HEAD before this task and is not a task-owned regression."
+    },
+    {
+      "ordinal": 14,
+      "rule": "javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal",
+      "severity": "WARNING",
+      "path": "pi-extensions/pi-claude-bridge/src/config.ts",
+      "line": 149,
+      "changedLine": false,
+      "disposition": "inherited-out-of-scope",
+      "rationale": "The finding is not on an added or modified line in this change. It was present at HEAD before this task and is not a task-owned regression."
+    },
+    {
+      "ordinal": 15,
+      "rule": "javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal",
+      "severity": "WARNING",
+      "path": "pi-extensions/pi-claude-bridge/src/config.ts",
+      "line": 151,
+      "changedLine": false,
+      "disposition": "inherited-out-of-scope",
+      "rationale": "The finding is not on an added or modified line in this change. It was present at HEAD before this task and is not a task-owned regression."
+    },
+    {
+      "ordinal": 16,
+      "rule": "javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal",
+      "severity": "WARNING",
+      "path": "pi-extensions/pi-claude-bridge/src/config.ts",
+      "line": 397,
+      "changedLine": false,
+      "disposition": "inherited-out-of-scope",
+      "rationale": "The finding is not on an added or modified line in this change. It was present at HEAD before this task and is not a task-owned regression."
+    },
+    {
+      "ordinal": 17,
+      "rule": "javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal",
+      "severity": "WARNING",
+      "path": "pi-extensions/pi-claude-bridge/src/debug.ts",
+      "line": 108,
+      "changedLine": false,
+      "disposition": "inherited-out-of-scope",
+      "rationale": "The finding is not on an added or modified line in this change. It was present at HEAD before this task and is not a task-owned regression."
+    },
+    {
+      "ordinal": 18,
+      "rule": "javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal",
+      "severity": "WARNING",
+      "path": "pi-extensions/pi-claude-bridge/src/prompt-context.ts",
+      "line": 32,
+      "changedLine": false,
+      "disposition": "inherited-out-of-scope",
+      "rationale": "The finding is not on an added or modified line in this change. It was present at HEAD before this task and is not a task-owned regression."
+    },
+    {
+      "ordinal": 19,
+      "rule": "javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal",
+      "severity": "WARNING",
+      "path": "pi-extensions/pi-claude-bridge/src/prompt-context.ts",
+      "line": 34,
+      "changedLine": false,
+      "disposition": "inherited-out-of-scope",
+      "rationale": "The finding is not on an added or modified line in this change. It was present at HEAD before this task and is not a task-owned regression."
+    },
+    {
+      "ordinal": 20,
+      "rule": "javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal",
+      "severity": "WARNING",
+      "path": "pi-extensions/pi-claude-bridge/src/session-persistence.ts",
+      "line": 153,
+      "changedLine": false,
+      "disposition": "inherited-out-of-scope",
+      "rationale": "The finding is not on an added or modified line in this change. It was present at HEAD before this task and is not a task-owned regression."
+    }
+  ],
+  "summary": {
+    "confirmedTaskOwnedIssues": 0,
+    "falsePositives": 1,
+    "inheritedOutOfScope": 19
+  },
+  "blockingFindings": []
+}

@@ -11,7 +11,7 @@ Forked from [`elidickinson/pi-claude-bridge`](https://github.com/elidickinson/pi
 
 ## Highlights
 
-- `pi-claude/claude-fable-5`, Opus 5, Opus 4.8, Opus 4.7, Opus 4.6, Sonnet 5, Sonnet 4.6, and Haiku in `/model`. `/model opus` selects Opus 5; older Opus releases stay selectable by full ID.
+- `pi-claude/claude-fable-5-1`, Fable 5, Opus 5, Opus 4.8, Opus 4.7, Opus 4.6, Sonnet 5, Sonnet 4.6, and Haiku in `/model`. Fable 5.1 appears first; older releases stay selectable by full ID.
 - Pi tool calls run on Pi; Claude Code handles reasoning.
 - Tool-use turns block until Pi-delivered tool results reach Claude Code, including persistent subagent panes.
 - Parallel conversations and subagents keep independent request, abort, tool-loop, and Claude-session state.
@@ -66,7 +66,7 @@ Open `/extensions:settings`; settings appear under the **Pi Claude** tab. Projec
 | Claude Code | Model effort overrides | JSON object mapping model IDs to Claude Code efforts, e.g. `{"claude-opus-4-8":"max"}`. Per-model entries beat the global force setting. |
 | Claude Code | Claude executable path | Explicit `claude` binary path; empty auto-detects. |
 
-Pi 0.80.6 and newer expose native `max` thinking. Fable 5, Opus 5, and Sonnet 5 bridge metadata forward both `xhigh` and `max`; the generic bridge fallback also maps `max` directly. **Force Claude effort** and **Model effort overrides** remain available when one bridge model needs a different fixed effort — for example `{"claude-opus-4-8":"max"}` to force only Opus 4.8. Keys may be bare model IDs (`claude-opus-4-8`), `pi-claude/<id>`, or `*` for all bridge models. Values are `low`, `medium`, `high`, `xhigh`, or `max`.
+Pi 0.80.6 and newer expose native `max` thinking. Fable 5.1, Fable 5, Opus 5, and Sonnet 5 bridge metadata forward both `xhigh` and `max`; the generic bridge fallback also maps `max` directly. **Force Claude effort** and **Model effort overrides** remain available when one bridge model needs a different fixed effort — for example `{"claude-opus-4-8":"max"}` to force only Opus 4.8. Keys may be bare model IDs (`claude-opus-4-8`), `pi-claude/<id>`, or `*` for all bridge models. Values are `low`, `medium`, `high`, `xhigh`, or `max`.
 
 ### Connectors
 
@@ -93,9 +93,11 @@ For both, the env var wins over config. `connectorWriteMode` only matters when c
 
 Connectors mode also makes the child Claude Code resolve its filesystem settings (with them off, the child runs fully isolated). Only **user-scope** settings are loaded; project/local scope (a checkout's `.claude/settings.json`) is deliberately excluded. Setting `provider.settingSources` in bridge config still overrides this verbatim, but listing `"project"`/`"local"` there reopens that surface — only do it for checkouts you trust.
 
-### Fable 5 and Opus 5 caveat
+### Fable and Opus caveat
 
-The bridge registers `pi-claude/claude-fable-5`, `pi-claude/claude-opus-5`, `pi-claude/claude-sonnet-5`, and `pi-claude/claude-opus-4-8` even when Pi's Anthropic model registry has not shipped those entries yet. Fable 5 and Opus 5 both run classifiers that can decline a turn, so for each of them the bridge asks Claude Code to use Opus 4.8 as the availability fallback and preserves Claude Code's content-safety fallback events so Pi labels rerouted turns as Opus 4.8. Content-safety fallback still depends on Claude Code's own Fable 5 support; use Claude Code 2.1.170 or newer, and set `ANTHROPIC_DEFAULT_FABLE_MODEL` / `ANTHROPIC_DEFAULT_OPUS_MODEL` yourself when routing provider-specific model IDs through Bedrock, Vertex, or Foundry.
+The bridge registers Fable 5.1, Fable 5, Opus 5, Sonnet 5, and Opus 4.8 even when Pi's Anthropic model registry has not shipped those entries. Fable 5.1 uses `claude-fable-5-1[1m]` and requires Claude Code 2.1.255 or newer. The bridge checks an explicit executable first; otherwise it checks the Agent SDK bundle, then `claude` and `claude-code` on `PATH`. It fails before rebuilding a session if none qualifies. In isolated mode it never searches `PATH`.
+
+Fable 5.1, Fable 5, and Opus 5 can use Opus 4.8 as their content-safety fallback. With managed subscription profiles, the bridge rotates through model allowance before changing models and labels a rerouted turn with the model reported by Claude Code. Set `ANTHROPIC_DEFAULT_FABLE_MODEL` / `ANTHROPIC_DEFAULT_OPUS_MODEL` yourself when routing provider-specific model IDs through Bedrock, Vertex, or Foundry.
 
 ## Multiple subscription profiles
 

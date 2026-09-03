@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "changeName": "add-claude-fable-5-1-bridge",
+  "checkId": "documentation-sync",
+  "checkVersion": "1.0.0",
+  "recordedAt": "2026-09-03T03:47:42Z",
+  "status": "passed",
+  "updated": [
+    "pi-extensions/pi-claude-bridge/README.md",
+    "pi-extensions/pi-claude-bridge/DEVELOPMENT.md",
+    "changelog.d/added/claude-fable-5-1-bridge.md"
+  ],
+  "unchanged": [
+    "docs/ARCHITECTURE.md remains accurate because the provider bridge boundary and system topology did not change",
+    "pi-extensions/pi-claude-bridge/CHANGELOG.md is release history; the active consumer entry is the changelog.d fragment"
+  ]
+}

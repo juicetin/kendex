@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "changeName": "add-claude-fable-5-1-bridge",
+  "checkId": "product-observability",
+  "checkVersion": "1.0.0",
+  "recordedAt": "2026-09-03T03:47:42Z",
+  "status": "passed",
+  "observedBoundaries": {
+    "requestedRoute": "provider debug record carries catalog and query model IDs",
+    "compatibilityFailure": "one pre-session error lists candidate paths, observed versions or reason, minimum version, and corrective setting",
+    "servedModel": "assistant output model is updated from Claude message_start transport metadata and fallback events"
+  },
+  "acceptanceBinding": "real-subscription-acceptance.json records transport-derived claude-fable-5-1, the matching Pi tool call/result, and a redacted route identity",
+  "blockingFindings": []
+}

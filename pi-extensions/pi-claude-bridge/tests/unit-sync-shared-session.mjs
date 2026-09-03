@@ -17,7 +17,9 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { openSession } from "cc-session-io";
 import { conversationFingerprint, syncSharedSession } from "../src/session-persistence.js";
+import { FABLE_5_1_MODEL_ID, FABLE_MODEL_ID } from "../src/models.js";
 import { __testGetBridgeIntegrityState, setSharedSession } from "../src/bridge-state.js";
 
 const user = (text) => ({ role: "user", content: text });
@@ -101,6 +103,51 @@ describe("syncSharedSession clean start", () => {
 		assert.equal(result.sessionId, null);
 		assert.equal(result.promptStart, 0);
 		assert.deepEqual(promptContents(messages, result.promptStart), ["hello"]);
+	});
+});
+
+describe("syncSharedSession Fable 5.1 rebuild", () => {
+	const history = [
+		user("open"),
+		{
+			role: "assistant",
+			provider: "pi-claude",
+			api: "anthropic",
+			model: FABLE_5_1_MODEL_ID,
+			content: [
+				{ type: "thinking", thinking: "prefix-bound", thinkingSignature: "signed" },
+				{ type: "text", text: "I will read it." },
+				{ type: "toolCall", id: "call-1", name: "read", arguments: { path: "fixture.txt" } },
+			],
+		},
+		{ role: "toolResult", toolCallId: "call-1", toolName: "read", content: "fixture-value", isError: false },
+		user("continue"),
+	];
+
+	function rebuiltBlocks(modelId) {
+		return withTempClaudeDir((claudeDir) => {
+			const cwd = mkdtempSync(join(tmpdir(), "bridge-sync-cwd-"));
+			try {
+				const result = syncSharedSession(history, cwd, undefined, modelId);
+				const session = openSession({ sessionId: result.sessionId, projectPath: cwd, claudeDir });
+				return session.messages.flatMap((record) => Array.isArray(record.message.content) ? record.message.content : []);
+			} finally {
+				rmSync(cwd, { recursive: true, force: true });
+			}
+		});
+	}
+
+	it("omits signed thinking while preserving text and a paired tool call/result", () => {
+		const blocks = rebuiltBlocks(FABLE_5_1_MODEL_ID);
+		assert.equal(blocks.some((block) => block.type === "thinking"), false);
+		assert.ok(blocks.some((block) => block.type === "text" && block.text === "I will read it."));
+		assert.ok(blocks.some((block) => block.type === "tool_use" && block.id === "call-1"));
+		assert.ok(blocks.some((block) => block.type === "tool_result" && block.tool_use_id === "call-1" && block.content === "fixture-value"));
+	});
+
+	it("preserves signed thinking for Fable 5 rebuilds", () => {
+		const blocks = rebuiltBlocks(FABLE_MODEL_ID);
+		assert.ok(blocks.some((block) => block.type === "thinking" && block.signature === "signed"));
 	});
 });
 

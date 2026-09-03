@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "changeName": "add-claude-fable-5-1-bridge",
+  "checkId": "selection-review",
+  "checkVersion": "1.0.0",
+  "recordedAt": "2026-09-03T04:33:51Z",
+  "status": "passed",
+  "method": "selection-review",
+  "verdict": "accepted",
+  "reviewerInstanceId": "65f5afb7-3e3b-4866-87e1-7ab322be66b7",
+  "reviewerModel": "pi-claude/claude-fable-5",
+  "freshContext": true,
+  "readOnly": true,
+  "selectionReview": "selection-review.json",
+  "selectionReviewSha256": "3962760d3a1ccdd81f7a5a5e2fa5ebd7ba88958755d0f7964393fd36965e6a0f",
+  "sourceReport": "selection-review.md",
+  "sourceReportSha256": "b89c99d4f8e368a8984e72b702896b0595da990943cc45b58f3b41731f4e02e6",
+  "findings": [],
+  "secretsIncluded": false
+}

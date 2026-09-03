@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "changeName": "add-claude-fable-5-1-bridge",
+  "checkId": "bounded-profiling",
+  "checkVersion": "1.0.0",
+  "recordedAt": "2026-09-03T03:12:55Z",
+  "status": "passed",
+  "scope": "Ten sequential Fable 5.1 SDK-bundled executable compatibility selections",
+  "runs": 10,
+  "durationsMs": [
+    192.682875,
+    198.793338,
+    154.347256,
+    196.923814,
+    153.351421,
+    194.66268,
+    155.586964,
+    199.655093,
+    132.683196,
+    191.991243
+  ],
+  "p95Ms": 199.655093,
+  "thresholdMs": 500,
+  "passed": true,
+  "note": "The profiling process exited successfully and wrote tmp/fable-5-1-acceptance/profile.json. A following display command used the wrong relative path and exited 1; it did not affect the measurements.",
+  "secretsIncluded": false
+}
